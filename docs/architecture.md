@@ -40,6 +40,8 @@ The installed service packages API, engine, poller and scheduler in one process 
 
 `ReviewProvider` has GitHub, GitLab and optional Arcadia implementations, plus a visibly labeled persistent demo implementation. It does not know which agent runtime is used. `AgentRuntime` receives scoped tools and never needs platform tokens. SQLite contains no provider credentials. Arcadia uses existing corporate tools and leased shared-store mounts; it pins both full revisions and the native diff ID. Browser access and Telegram publication confirmations use separate scoped, expiring credentials.
 
+The terminal client uses Ink/React with a separate `ConsoleModel`. It owns only display state, task/role drafts and abortable HTTP reads/writes. Changing selections fences late responses; closing the client aborts its network requests and restores terminal modes without sending a task cancellation. The original line-oriented client remains available through `--plain`. Workflow and publication authority stay in the existing server engine.
+
 ## State machine
 
 ```mermaid

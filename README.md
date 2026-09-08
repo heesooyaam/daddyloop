@@ -18,9 +18,9 @@
 
 ## Всё начинается с `reviewctl`
 
-Одна команда открывает интерактивную консоль. Выбери задачу, переключись между автором и ревьюером и напиши сообщение обычным текстом.
+Одна команда открывает полноценный интерфейс в терминале: задачи слева, переписка справа, поле ввода снизу. Есть меню команд, оформление Markdown, индикатор работы и раздельные черновики для каждой задачи и роли.
 
-![Настоящая CLI-сессия: вопрос ревьюеру, его ответ и переключение на автора](docs/media/cli-chat.png)
+![Полноэкранный терминал Reviewloop: задачи, разговор с ревьюером и многострочный ввод](docs/media/cli-chat.png)
 
 ```text
 /use <id-prefix>       выбрать задачу
@@ -31,13 +31,19 @@
 ```
 
 <details>
-<summary><b>Посмотреть стартовый экран и все команды CLI</b></summary>
+<summary><b>Меню команд, светлая тема и компактное окно</b></summary>
 
-![Стартовый экран reviewctl и встроенная справка /help](docs/media/cli.png)
+![Меню команд при вводе /](docs/media/cli-menu.png)
+
+![Светлая тема терминального интерфейса](docs/media/cli-light.png)
+
+![Компактный интерфейс в окне 80 × 24](docs/media/cli-compact.png)
 
 Есть и отдельные команды для скриптов: `reviewctl list`, `reviewctl chat`, `reviewctl publish`, `reviewctl pause`, `reviewctl resume` и `reviewctl logs <id> --follow`. Полные примеры — в [руководстве](docs/getting-started.md#cli).
 
 </details>
+
+**Tab** переключает роль, **Ctrl+T** открывает задачи, **PgUp/PgDn** прокручивают переписку, **Ctrl+J** добавляет строку. Вставленный текст отправляется только после Enter. Светлая тема: `reviewctl --theme light`. Старый режим: `reviewctl --plain`. [Все клавиши и команды →](docs/terminal.md)
 
 <a id="demo"></a>
 
@@ -85,7 +91,7 @@
 Выполни на хосте, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.2.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.3.0/install.sh | bash
 ```
 
 **Linux x64 / ARM64 · systemd · curl и tar.** В архиве уже есть Node 24, Codex CLI, GitHub CLI и сайт. Установщик проверит контрольную сумму и настроит постоянный сервис; для системных действий может понадобиться sudo. `reviewctl` появится в `~/.local/bin`.
@@ -179,9 +185,9 @@ reviewctl attach https://a.yandex-team.ru/review/11111111 \
 
 ## Проверки и документация
 
-**v0.2 — prerelease.** Проверены 74 теста, браузерные сценарии, установка на x64/ARM64 и работа сервиса после настоящего разрыва SSH. Чтение Arcanum PR и CI проверено на живом сервисе. Полный цикл публикации и push на реальных провайдерах ещё требует отдельной проверки; Telegram и внешний доступ с телефона — настройки аккаунтов владельца.
+**v0.3 — prerelease.** Проверены 88 тестов, браузерные сценарии, установка на x64/ARM64 и работа сервиса после настоящего разрыва SSH. Чтение Arcanum PR и CI проверено на живом сервисе. Полный цикл публикации и push на реальных провайдерах ещё требует отдельной проверки; Telegram и внешний доступ с телефона — настройки аккаунтов владельца.
 
-[CI](https://github.com/heesooyaam/reviewloop/actions/workflows/ci.yml) · [Релиз](https://github.com/heesooyaam/reviewloop/releases/tag/v0.2.0) · [Отчёт о ревью](docs/review-v0.2.md)
+[CI](https://github.com/heesooyaam/reviewloop/actions/workflows/ci.yml) · [Релиз](https://github.com/heesooyaam/reviewloop/releases/tag/v0.3.0) · [Ревью терминального интерфейса](docs/review-v0.3.md)
 
 | Документ                                 | Что внутри                                                         |
 | ---------------------------------------- | ------------------------------------------------------------------ |
