@@ -18,7 +18,7 @@ Scope: the v0.2 single-host service, CLI, installer, device access, Telegram, ca
 ## Evidence
 
 - 74 unit/contract tests cover publication identity, stale generation fencing, provider fixtures, Telegram pairing/replays/changed-draft confirmation, device sessions, cleanup ownership and service interruption. Type checking, formatting and production builds pass.
-- Browser workflows exercise the full demo loop, plan approval and mobile layout. A separate HTTPS phone context stays usable after the laptop context closes; unapproved origins are rejected.
+- Three browser workflows exercise the full demo loop, mobile layout and HTTPS device access. A separate phone context stays usable after the laptop context closes; unapproved origins are rejected. The plan-approval gate and immutable approved Markdown are covered by engine tests.
 - A real temporary loopback SSH login was terminated while a demo task was queued. The managed service PID stayed unchanged and the task reached awaiting_publication after disconnect. The temporary SSH daemon and keys were removed; no global SSH configuration changed.
 - The actual host system service runs as the ordinary user in its own cgroup with an 8 GiB memory limit. The actual Tailscale userspace daemon starts under its separate managed unit with a 512 MiB limit and reaches the account-login step.
 - The built Linux x64 archive passes the real installer through a loopback mirror: fresh installation, paths containing spaces, bundled CLI execution, idempotent reinstall, preserved state, bad-checksum rejection and unrelated-command preservation. Tagged release builds repeat this test on both architectures.
