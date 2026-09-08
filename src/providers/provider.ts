@@ -27,7 +27,7 @@ export interface ReviewProvider {
   publish(ref: PRRef, review: ReviewHandle): Promise<void>;
 }
 export const tag = (marker: string) => `<!-- ${marker} -->`;
-export function parsePR(url: string, provider?: 'github' | 'gitlab'): PRRef {
+export function parsePR(url: string, provider?: 'github' | 'gitlab' | 'arcadia'): PRRef {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -47,6 +47,20 @@ export function parsePR(url: string, provider?: 'github' | 'gitlab'): PRRef {
       'Use a clean HTTPS PR URL without credentials, port, query or fragment',
       400,
     );
+  const arc =
+    parsed.hostname === 'a.yandex-team.ru'
+      ? parsed.pathname.match(/^(?:\/review\/|\/arc\/[^?#]+\/pull\/)([1-9]\d*)\/?$/)
+      : null;
+  if (arc)
+    return {
+      provider: 'arcadia',
+      host: parsed.hostname,
+      repo: 'arcadia',
+      number: Number(arc[1]),
+      url: `https://a.yandex-team.ru/review/${arc[1]}`,
+    };
+  if (provider === 'arcadia')
+    throw new AppError('invalid_url', 'Use an a.yandex-team.ru review URL', 400);
   const github = parsed.pathname.match(/^\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)\/?$/);
   const gitlab = parsed.pathname.match(/^\/(.+)\/-\/merge_requests\/([1-9]\d*)\/?$/);
   const kind = provider ?? (github ? 'github' : 'gitlab');

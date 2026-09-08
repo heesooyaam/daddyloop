@@ -16,6 +16,12 @@ import { Workspaces } from '../runtime/workspaces.js';
 import { Worker } from '../runtime/worker.js';
 import { CodexRuntime } from '../runtime/codex.js';
 import { DemoRuntime } from '../runtime/demo.js';
+import { loadConfig, validateServerUrl, type Config } from '../ops/config.js';
+import { Access, allowedRequest } from './access.js';
+import { VERSION } from '../version.js';
+import { Telegram } from '../integrations/telegram.js';
+import { homedir } from 'node:os';
+import { CacheManager } from '../ops/cache.js';
 
 const policySchema = z
   .object({
@@ -30,7 +36,7 @@ const policySchema = z
 const createSchema = z
   .object({
     url: z.string().url(),
-    provider: z.enum(['github', 'gitlab']).optional(),
+    provider: z.enum(['github', 'gitlab', 'arcadia']).optional(),
     repoPath: z.string().min(1),
     requirements: z.string().trim().min(1).max(100000),
     title: z.string().max(200).optional(),
@@ -41,6 +47,9 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  config?: Config;
+  telegramFactory?: typeof Telegram.create;
+  publicOrigin?: string;
   dataDir: string;
   demo?: boolean;
   startWorker?: boolean;
@@ -53,18 +62,22 @@ export interface ServerOptions {
   minMemoryGiB?: number;
 }
 export async function buildApp(options: ServerOptions) {
+  const config = options.config ?? loadConfig();
+  const publicOrigin = options.publicOrigin ?? config.publicOrigin;
+  if (publicOrigin) validateServerUrl(publicOrigin, true);
   const dataDir = resolve(options.dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const store = options.store ?? new Store(join(dataDir, 'reviewloop.sqlite'));
   const engine = new Engine(store, options.provider ?? providers(store));
+  const cache = new CacheManager(engine, dataDir, config.cache);
   const workspaces = new Workspaces(dataDir);
   const getResources =
     options.resourceCheck ??
     (() =>
       resources(dataDir, {
-        minDiskGiB: options.minDiskGiB ?? 10,
-        maxDiskPercent: options.maxDiskPercent ?? 95,
-        minMemoryGiB: options.minMemoryGiB ?? 2,
+        minDiskGiB: options.minDiskGiB ?? config.resources.minDiskGiB,
+        maxDiskPercent: options.maxDiskPercent ?? config.resources.maxDiskPercent,
+        minMemoryGiB: options.minMemoryGiB ?? config.resources.minMemoryGiB,
       }));
   const worker = new Worker(
     engine,
@@ -76,7 +89,12 @@ export async function buildApp(options: ServerOptions) {
     new DemoRuntime(),
     getResources,
   );
+  if (config.cache.auto) worker.autoCleanup = () => cache.prune(true);
   const token = options.token ?? accessToken(dataDir);
+  const access = new Access(store, token);
+  let telegram: Telegram | undefined;
+  const telegramController = new AbortController();
+  let telegramStartup: Promise<void> = Promise.resolve();
   const app = Fastify({
     logger: false,
     bodyLimit: 200000,
@@ -101,37 +119,23 @@ export async function buildApp(options: ServerOptions) {
   });
   app.addHook('onRequest', async (request, reply) => {
     const origin = request.headers.origin;
-    if (origin && origin !== `${request.protocol}://${request.headers.host}`)
+    if (!allowedRequest(request.headers.host, origin, publicOrigin))
       return reply.code(403).send({
         error: {
           code: 'origin_rejected',
           message: 'Cross-origin control requests are disabled',
         },
       });
-    let hostname: string;
-    try {
-      hostname = new URL(`http://${request.headers.host}`).hostname;
-    } catch {
-      return reply.code(400).send({
-        error: { code: 'host_invalid', message: 'Invalid Host header' },
-      });
-    }
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(hostname))
-      return reply.code(403).send({
-        error: {
-          code: 'host_rejected',
-          message: 'Use localhost or an SSH tunnel to access Reviewloop',
-        },
-      });
     if (
       !request.url.startsWith('/api/') ||
       request.url === '/api/health' ||
-      request.url === '/api/session'
+      request.url === '/api/session' ||
+      request.url === '/api/session/pair'
     )
       return;
     const bearer = request.headers.authorization?.replace(/^Bearer /i, '');
     const supplied = bearer ?? request.cookies.reviewloop_session ?? '';
-    if (!safeEqual(supplied, token))
+    if (!access.validate(supplied))
       return reply.code(401).send({
         error: {
           code: 'unauthorized',
@@ -162,7 +166,7 @@ export async function buildApp(options: ServerOptions) {
     if (_request.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
     return payload;
   });
-  app.get('/api/health', async () => ({ ok: true, version: '0.1.0' }));
+  app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
   app.post('/api/session', async (request, reply) => {
     const input = z
       .object({ token: z.string().min(1).max(256) })
@@ -170,13 +174,87 @@ export async function buildApp(options: ServerOptions) {
       .parse(request.body);
     if (!safeEqual(input.token, token))
       throw new AppError('unauthorized', 'Incorrect access token', 401);
-    reply.setCookie('reviewloop_session', token, {
+    const device = access.createDevice('Browser');
+    reply.setCookie('reviewloop_session', device.token, {
       httpOnly: true,
       sameSite: 'strict',
       path: '/',
-      maxAge: 60 * 60 * 24 * 7,
+      maxAge: 90 * 86400,
+      secure:
+        !!publicOrigin &&
+        (request.headers.origin === publicOrigin ||
+          request.headers.host === new URL(publicOrigin).host),
     });
     return { ok: true };
+  });
+  app.post('/api/session/pair', async (request, reply) => {
+    const { code } = z
+      .object({ code: z.string().min(20).max(100) })
+      .strict()
+      .parse(request.body);
+    const device = access.consume(code);
+    reply.setCookie('reviewloop_session', device.token, {
+      httpOnly: true,
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 90 * 86400,
+      secure: !!publicOrigin,
+    });
+    return { ok: true, deviceId: device.id };
+  });
+  app.post('/api/pairings', async (request) => {
+    const { name } = z
+      .object({
+        name: z.string().min(1).max(80).default('Device'),
+        kind: z.literal('web').default('web'),
+      })
+      .strict()
+      .parse(request.body);
+    if (!publicOrigin)
+      throw new AppError(
+        'public_origin_required',
+        'Configure a permanent HTTPS address with reviewctl web before pairing your phone',
+        422,
+      );
+    return access.pairing(name, publicOrigin);
+  });
+  app.get('/api/devices', async () => access.devices());
+  app.get('/api/cache', async () => cache.prune(false));
+  app.post('/api/cache/prune', async (request) => {
+    const { apply } = z
+      .object({ apply: z.boolean().default(false) })
+      .strict()
+      .parse(request.body);
+    return cache.prune(apply);
+  });
+  app.post<{ Params: { id: string } }>('/api/tasks/:id/arcadia/release', async (request) => {
+    const { role } = z
+      .object({ role: z.enum(['author', 'reviewer']) })
+      .strict()
+      .parse(request.body);
+    return engine.lock(request.params.id, async () => {
+      const task = store.getTask(request.params.id);
+      if (task.state !== 'complete' || store.busy(task.id))
+        throw new AppError('task_active', 'Finish the task before releasing its workspace');
+      const result = await workspaces.releaseArc(task, role);
+      store.saveTask(task);
+      store.event(task.id, 'arcadia.lease_released', result);
+      return result;
+    });
+  });
+  app.post('/api/telegram/pair', async () => {
+    if (!telegram)
+      throw new AppError('telegram_not_configured', 'Run reviewctl telegram setup first', 422);
+    return telegram.pair();
+  });
+  app.post('/api/telegram/unpair', async () => {
+    if (!telegram)
+      throw new AppError('telegram_not_configured', 'Run reviewctl telegram setup first', 422);
+    return telegram.unpair();
+  });
+  app.post<{ Params: { id: string } }>('/api/devices/:id/revoke', async (request) => {
+    access.revoke(request.params.id);
+    return { revoked: true };
   });
   app.get('/api/status', async () => {
     const connection = (name: 'github' | 'gitlab') => {
@@ -188,7 +266,12 @@ export async function buildApp(options: ServerOptions) {
       }
     };
     return {
-      version: '0.1.0',
+      version: VERSION,
+      publicOrigin: publicOrigin ?? null,
+      telegram: telegram?.status() ?? {
+        configured: false,
+        error: store.setting('telegram.error') ?? null,
+      },
       demoEnabled: !!options.demo,
       resources: getResources(),
       connections: {
@@ -201,11 +284,12 @@ export async function buildApp(options: ServerOptions) {
   app.get('/api/tasks', async () => store.tasks());
   app.post('/api/tasks', async (request, reply) => {
     const input = createSchema.parse(request.body);
-    const repoPath = await workspaces.validate(input.repoPath);
+    const ref = parsePR(input.url, input.provider);
+    const repoPath = await workspaces.validate(input.repoPath, ref.provider);
     const task = await engine.create({
       ...input,
       repoPath,
-      ref: parsePR(input.url, input.provider),
+      ref,
     });
     reply.code(201);
     return task;
@@ -368,6 +452,29 @@ export async function buildApp(options: ServerOptions) {
   app.addHook('preClose', async () => {
     for (const stop of eventStreams) stop();
     await worker.stop();
+    telegramController.abort();
+    await telegramStartup;
+    await telegram?.stop();
+  });
+  app.addHook('onReady', async () => {
+    if (options.startWorker !== false && config.telegram.enabled) {
+      telegramStartup = (options.telegramFactory ?? Telegram.create)(
+        engine,
+        config.telegram.tokenFile ?? join(homedir(), '.tokens/reviewloop-telegram'),
+        publicOrigin,
+        telegramController.signal,
+      )
+        .then((instance) => {
+          if (telegramController.signal.aborted) return;
+          telegram = instance;
+          store.setSetting('telegram.error', null);
+          telegram.start();
+        })
+        .catch((error) => {
+          if (!telegramController.signal.aborted)
+            store.setSetting('telegram.error', redact(String(error)));
+        });
+    }
   });
   if (options.startWorker !== false) worker.start();
   return { app, engine, worker, store };

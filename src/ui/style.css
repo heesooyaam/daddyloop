@@ -11,6 +11,23 @@
   text-rendering: optimizeLegibility;
   font-size: 13px;
 }
+.pair-link {
+  margin: 18px 0;
+  padding: 12px;
+  border: 1px solid #dce5df;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.pair-link button {
+  margin-top: 12px;
+}
+.device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0;
+}
 * {
   box-sizing: border-box;
 }

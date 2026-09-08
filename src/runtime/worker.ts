@@ -15,6 +15,8 @@ export class Worker {
   private stopped = false;
   private lastPoll = 0;
   private tickDone: Promise<void> = Promise.resolve();
+  private lastCleanup = 0;
+  autoCleanup?: () => Promise<unknown>;
   constructor(
     readonly engine: Engine,
     private workspaces: Workspaces,
@@ -45,6 +47,25 @@ export class Worker {
     });
     try {
       const store = this.engine.store;
+      const resources = this.resourceCheck();
+      if (!resources.ok && this.active.size) {
+        for (const id of this.active.keys())
+          await this.engine.interruptTask(
+            id,
+            `${resources.reasons.join('; ')}. Existing work was preserved.`,
+            'resource.pause',
+          );
+      }
+      if (
+        !resources.ok &&
+        resources.reasons.some((r) => r.includes('Disk')) &&
+        this.autoCleanup &&
+        !this.active.size &&
+        Date.now() - this.lastCleanup > 300000
+      ) {
+        this.lastCleanup = Date.now();
+        await this.autoCleanup();
+      }
       if (Date.now() - this.lastPoll > this.pollMs) {
         this.lastPoll = Date.now();
         for (const task of store.tasks())
@@ -142,6 +163,8 @@ export class Worker {
               body: '# Session generation guard\nCapture generation on dispatch and reject stale callbacks. Add a regression test for session replacement.',
             },
           ];
+        else if (task.ref.provider === 'arcadia')
+          task.planDocuments = await this.workspaces.arcPlanDocuments(task, cwd);
         else {
           const paths = (
             await git(
@@ -170,9 +193,9 @@ export class Worker {
               );
             task.planDocuments.push({ path, body });
           }
-          if (!task.planDocuments.length)
-            throw new Error('A plan PR must contain changed Markdown documents.');
         }
+        if (!task.planDocuments?.length)
+          throw new Error('A plan PR must contain changed Markdown documents.');
       }
       const prepared = task;
       task = store.getTask(job.taskId);
@@ -182,6 +205,7 @@ export class Worker {
       task.authorBaseHead = prepared.authorBaseHead;
       task.reviewerWorktree = prepared.reviewerWorktree;
       task.planDocuments = prepared.planDocuments;
+      task.arcWorkspaces = prepared.arcWorkspaces;
       store.saveTask(task);
       if (job.kind === 'fix') {
         const actual = await this.engine.provider(task.ref).getReview(task.ref, task.review!);
@@ -262,6 +286,12 @@ export class Worker {
   async stop() {
     this.stopped = true;
     clearInterval(this.timer);
+    for (const id of this.active.keys())
+      await this.engine.interruptTask(
+        id,
+        'The service stopped during this run. Inspect the saved work and resume or retry.',
+        'service.interrupted',
+      );
     for (const abort of this.active.values()) abort.abort();
     await this.tickDone;
     await Promise.allSettled([...this.pendingRuns]);

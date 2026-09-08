@@ -6,6 +6,7 @@ import {
   defaultPolicy,
   now,
   sameRevision,
+  revisionOf,
   type Task,
   type PRRef,
   type State,
@@ -80,7 +81,7 @@ export class Engine {
       createdAt: now(),
       updatedAt: now(),
       pr,
-      revision: { head: pr.head, base: pr.base, start: pr.start },
+      revision: revisionOf(pr),
       authorThreadId: input.authorThreadId,
       planTaskId: input.planTaskId,
     };
@@ -155,7 +156,7 @@ export class Engine {
         task.round++;
       }
       task.pr = pr;
-      task.revision = { head: pr.head, base: pr.base, start: pr.start };
+      task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
       task.reviewFinished = false;
       this.store.transaction(() => {
@@ -182,7 +183,7 @@ export class Engine {
     task.checksWaivedAt = undefined;
     task.reviewFinished = false;
     task.pr = pr;
-    task.revision = pr ? { head: pr.head, base: pr.base, start: pr.start } : undefined;
+    task.revision = pr ? revisionOf(pr) : undefined;
     this.store.event(task.id, 'revision.changed', {
       revision: task.revision,
       generation: task.generation,
@@ -567,7 +568,12 @@ export class Engine {
   }
   recoverInterruptedJobs() {
     for (const job of this.store.jobs())
-      if (job.status === 'running') {
+      if (
+        job.status === 'running' ||
+        (job.status === 'cancelled' &&
+          job.generation === this.store.getTask(job.taskId).generation &&
+          ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
+      ) {
         job.status = 'failed';
         job.error =
           'Server restarted during this run. Its external effects must be reconciled before retry.';
@@ -580,6 +586,22 @@ export class Engine {
         this.state(task, 'needs_input', job.error);
         this.store.event(task.id, 'job.interrupted', {}, job.id);
       }
+  }
+  async interruptTask(id: string, reason: string, source: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (task.state === 'paused' || !this.store.busy(id)) return;
+      const reviewerActive = this.store
+        .jobs(id)
+        .some((j) => j.role === 'reviewer' && j.status === 'running');
+      task.resumeState = task.state;
+      task.generation++;
+      if (reviewerActive) task.reviewFinished = false;
+      this.store.cancelJobs(id);
+      this.onCancel(id);
+      this.state(task, 'needs_input', reason);
+      this.store.event(id, source, { reason });
+    });
   }
   failJob(job: Job, error: unknown) {
     const task = this.store.getTask(job.taskId);

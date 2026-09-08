@@ -9,37 +9,25 @@ import { resources } from './core/resources.js';
 import { ProviderHttp } from './providers/http.js';
 import { CodexConnection } from './runtime/protocol.js';
 import { git } from './runtime/workspaces.js';
+import { loadConfig, defaultDataDir } from './ops/config.js';
+import { api as callApi } from './ops/client.js';
+import { registerOperations } from './ops/commands.js';
+import { consoleUI } from './ops/console.js';
+import { VERSION } from './version.js';
 
 const program = new Command()
   .name('reviewctl')
-  .description('Persistent author/reviewer workflow for GitHub and GitLab')
-  .version('0.1.0')
-  .option(
-    '--data-dir <path>',
-    'local state directory',
-    process.env.REVIEWLOOP_DATA_DIR ?? '.reviewloop',
-  )
+  .description('Persistent author/reviewer workflow for GitHub, GitLab and Arcadia')
+  .version(VERSION)
+  .option('--data-dir <path>', 'local state directory', defaultDataDir())
   .option(
     '--url <url>',
     'Reviewloop backend URL',
-    process.env.REVIEWLOOP_URL ?? 'http://127.0.0.1:4317',
+    process.env.REVIEWLOOP_URL ?? loadConfig().serverUrl,
   );
 const dataDir = () => resolve(program.opts().dataDir);
 async function api(path: string, body?: unknown) {
-  const token = readFileSync(join(dataDir(), 'access-token'), 'utf8').trim();
-  const response = await fetch(program.opts().url + '/api' + path, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(120000),
-    redirect: 'error',
-  });
-  const result = (await response.json()) as { error?: { message: string } };
-  if (!response.ok) throw new Error(result.error?.message ?? `HTTP ${response.status}`);
-  return result;
+  return callApi(path, body, { dataDir: dataDir(), url: program.opts().url });
 }
 const print = (value: unknown): void => {
   process.stdout.write(JSON.stringify(value, null, 2) + '\n');
@@ -47,11 +35,23 @@ const print = (value: unknown): void => {
 program
   .command('serve')
   .description('Run the local backend, worker and web panel')
-  .option('--port <port>', 'loopback port', '4317')
+  .option('--port <port>', 'loopback port', String(loadConfig().port))
   .option('--demo', 'enable explicitly labeled demo tasks', false)
-  .option('--min-disk-gib <size>', 'stop starting jobs below this disk space', '10')
-  .option('--max-disk-percent <percent>', 'stop starting jobs at this usage', '95')
-  .option('--min-memory-gib <size>', 'stop starting jobs below available RAM', '2')
+  .option(
+    '--min-disk-gib <size>',
+    'stop starting jobs below this disk space',
+    String(loadConfig().resources.minDiskGiB),
+  )
+  .option(
+    '--max-disk-percent <percent>',
+    'stop starting jobs at this usage',
+    String(loadConfig().resources.maxDiskPercent),
+  )
+  .option(
+    '--min-memory-gib <size>',
+    'stop starting jobs below available RAM',
+    String(loadConfig().resources.minMemoryGiB),
+  )
   .action(async (options) => {
     const dir = dataDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -349,7 +349,12 @@ program
       }
     }
   });
-program.parseAsync().catch((error) => {
+registerOperations(program);
+const main =
+  process.argv.length === 2
+    ? consoleUI(<T>(path: string, body?: unknown) => callApi<T>(path, body))
+    : program.parseAsync();
+main.catch((error) => {
   process.stderr.write(redact(String(error)) + '\n');
   process.exitCode = 1;
 });
