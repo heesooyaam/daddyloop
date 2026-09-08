@@ -13,7 +13,7 @@
 На машине, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.2.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.3.0/install.sh | bash
 ```
 
 Релиз содержит UI, Node 24, Codex CLI и GitHub CLI. Установщик проверяет SHA-256, устанавливает `reviewctl` в `~/.local/bin` и настраивает systemd. Нужны Linux с systemd, curl и tar; отсутствующий Git установится через apt/sudo, если они доступны. Архивы: x64 и arm64. Доступ к приватному релизу ограничен владельцем до изменения видимости репозитория.
@@ -40,7 +40,9 @@ reviewctl
 
 ## CLI
 
-`reviewctl` без аргументов открывает интерактивную консоль:
+`reviewctl` без аргументов открывает полноэкранный терминальный интерфейс. Tab переключает роли, Ctrl+T выбирает задачу, Ctrl+J добавляет строку, PgUp/PgDn прокручивают переписку. `reviewctl --theme light` включает светлую тему, `reviewctl --plain` возвращает простой построчный режим. [Полное руководство](terminal.md).
+
+Команды внутри интерфейса:
 
 ```text
 /tasks

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -19,6 +19,10 @@ const program = new Command()
   .name('reviewctl')
   .description('Persistent author/reviewer workflow for GitHub, GitLab and Arcadia')
   .version(VERSION)
+  .option('--plain', 'use the basic line-oriented console')
+  .addOption(
+    new Option('--theme <theme>', 'terminal appearance').choices(['dark', 'light']).default('dark'),
+  )
   .option('--data-dir <path>', 'local state directory', defaultDataDir())
   .option(
     '--url <url>',
@@ -350,10 +354,24 @@ program
     }
   });
 registerOperations(program);
-const main =
-  process.argv.length === 2
-    ? consoleUI(<T>(path: string, body?: unknown) => callApi<T>(path, body))
-    : program.parseAsync();
+const interactive = (options: { id?: string; role?: 'author' | 'reviewer' } = {}) =>
+  consoleUI(
+    <T>(path: string, body?: unknown, signal?: AbortSignal) =>
+      callApi<T>(path, body, { dataDir: dataDir(), url: program.opts().url, signal }),
+    { ...options, plain: program.opts().plain, theme: program.opts().theme },
+  );
+program
+  .command('console')
+  .argument('[task]', 'task ID or unique prefix')
+  .addOption(
+    new Option('--role <role>', 'conversation to open')
+      .choices(['author', 'reviewer'])
+      .default('reviewer'),
+  )
+  .description('Open the interactive terminal workspace')
+  .action(async (id, options) => interactive({ id, role: options.role }));
+program.action(async () => interactive());
+const main = program.parseAsync();
 main.catch((error) => {
   process.stderr.write(redact(String(error)) + '\n');
   process.exitCode = 1;

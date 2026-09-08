@@ -1,12 +1,13 @@
-# Reviewloop 0.2.0
+# Reviewloop 0.3.0
 
-Installable single-host service with an interactive CLI, persistent website access, phone pairing, Telegram controls, resource limits, safe cache cleanup and optional Arcadia support.
+The default CLI is now a full-screen terminal workspace with a task sidebar, separate author/reviewer conversations, a multiline composer and command suggestions.
 
-- Self-contained Linux x64/arm64 archives include Node, Codex CLI, GitHub CLI and the web UI.
-- systemd owns the backend and agent processes. No terminal or tmux session is required.
-- Tailscale Serve or an existing HTTPS proxy connects phones directly to the host. Browser sessions are individually revocable.
-- A paired private Telegram bot supports role conversations, notifications and revision-bound publication confirmation.
-- Cache pruning preserves author work, active snapshots, history and credentials. Resource pressure interrupts work with recoverable state.
-- Arcadia uses existing corporate tools, full revisions, pinned diff IDs and leased mounts.
+- Dark and light themes, Markdown/code formatting, working indicators, resource status and responsive layouts.
+- Tab switches roles; Ctrl+T searches tasks; PgUp/PgDn scroll; Ctrl+J inserts a newline.
+- Drafts stay with each task/role while navigating. Bracketed paste remains literal text and never runs a slash command automatically.
+- `/findings`, `/logs`, `/context` and a guided `/attach` expose the workflow from the terminal.
+- The client reconnects after read failures, fences late selection responses and restores unconfirmed messages at their original recipient.
+- `reviewctl --plain` retains the original line-oriented console. Existing script commands keep their output.
+- Closing the TUI restores the terminal and leaves the managed service and agents running.
 
-This is a prerelease. Native GitHub/GitLab/Arcanum publication and author push are covered by fixtures, not a live end-to-end provider cycle. A live Codex transport smoke, native Arc read, managed-service SSH-disconnect smoke and HTTPS browser workflow were verified. External phone connectivity and real Telegram delivery need account setup.
+The self-contained Linux x64/ARM64 release includes the terminal UI dependencies. Existing data and accounts are preserved. This remains a prerelease; earlier provider-write and external-account validation limits still apply.

@@ -4,7 +4,13 @@ import { loadConfig, defaultDataDir, validateServerUrl } from './config.js';
 export async function api<T = unknown>(
   path: string,
   body?: unknown,
-  options: { dataDir?: string; url?: string; tokenFile?: string; token?: string } = {},
+  options: {
+    dataDir?: string;
+    url?: string;
+    tokenFile?: string;
+    token?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<T> {
   const config = loadConfig(),
     url = validateServerUrl(options.url ?? process.env.REVIEWLOOP_URL ?? config.serverUrl);
@@ -17,7 +23,9 @@ export async function api<T = unknown>(
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(120000),
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(120000)])
+      : AbortSignal.timeout(120000),
     redirect: 'error',
   });
   const result = (await response.json()) as { error?: { message: string } };

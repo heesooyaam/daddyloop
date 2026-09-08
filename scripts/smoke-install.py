@@ -6,6 +6,10 @@ import os
 import subprocess
 import tempfile
 import threading
+import pty
+import select
+import termios
+import time
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -41,6 +45,35 @@ try:
         cli = bin_dir / 'reviewctl'
         version = subprocess.check_output([str(cli), '--version'], text=True).strip()
         assert version == json.loads((root / 'package.json').read_text())['version']
+        # --version alone does not load the lazy TUI and cannot verify its dependencies.
+        console_state = Path(temporary) / 'console-state'; console_state.mkdir()
+        (console_state / 'access-token').write_text('installer-demo-token')
+        console_config = Path(temporary) / 'console-config.json'
+        console_url = f'http://127.0.0.1:{server.server_port}'
+        console_config.write_text(json.dumps({'dataDir': str(console_state), 'serverUrl': console_url}))
+        master, slave = pty.openpty(); before_modes = termios.tcgetattr(slave)
+        console_env = {**env, 'REVIEWLOOP_CONFIG': str(console_config), 'REVIEWLOOP_DATA_DIR': str(console_state), 'REVIEWLOOP_URL': console_url, 'TERM': 'xterm-256color'}
+        child = subprocess.Popen([str(cli)], stdin=slave, stdout=slave, stderr=slave, env=console_env, start_new_session=True)
+        captured = bytearray()
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([master], [], [], 0.1)
+                if readable: captured.extend(os.read(master, 65536))
+                if b'\x1b[?2004h' in captured: break
+                if child.poll() is not None: break
+            assert b'\x1b[?1049h' in captured and b'reviewloop.' in captured, 'Bundled TUI did not render'
+            os.write(master, b'\x11')
+            deadline = time.monotonic() + 10
+            while child.poll() is None and time.monotonic() < deadline:
+                readable, _, _ = select.select([master], [], [], 0.1)
+                if readable: captured.extend(os.read(master, 65536))
+            assert child.poll() == 0, 'Bundled TUI did not exit cleanly'
+            after_modes = termios.tcgetattr(slave)
+            assert after_modes[3] & (termios.ICANON | termios.ECHO) == before_modes[3] & (termios.ICANON | termios.ECHO), 'Terminal modes were not restored'
+        finally:
+            if child.poll() is None: child.terminate(); child.wait(timeout=10)
+            os.close(master); os.close(slave)
         data = prefix / 'data'; data.mkdir(); (data / 'keep.txt').write_text('user state')
         install()
         assert (data / 'keep.txt').read_text() == 'user state'
@@ -55,8 +88,8 @@ try:
         assert 'Existing reviewctl command preserved' in failure.stderr
         assert cli.read_text() == 'unrelated user command'
         assert os.readlink(prefix / 'current') == target
-        print('PASS: fresh install, spaces in paths, bundled CLI, idempotent reinstall, checksum rejection and command-collision preservation.')
-        (assets / 'installer-smoke.json').write_text(json.dumps({'passed': True, 'version': version, 'checks': ['fresh', 'spaces', 'bundled-cli', 'idempotent', 'checksum', 'command-collision', 'preserved-state']}, indent=2))
+        print('PASS: fresh install, paths with spaces, bundled TUI in a PTY, idempotent reinstall, checksum rejection and preservation.')
+        (assets / 'installer-smoke.json').write_text(json.dumps({'passed': True, 'version': version, 'checks': ['fresh', 'spaces', 'bundled-tui-pty', 'idempotent', 'checksum', 'command-collision', 'preserved-state']}, indent=2))
 finally:
     server.shutdown()
     server.server_close()
