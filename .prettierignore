@@ -1,0 +1,7 @@
+node_modules
+dist
+.tools
+.reviewloop
+package-lock.json
+docs/screenshots
+test-results

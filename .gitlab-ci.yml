@@ -1,0 +1,15 @@
+image: node:24-bookworm
+stages: [test]
+checks:
+  stage: test
+  timeout: 15m
+  script:
+    - npm ci
+    - npm run check
+    - npx playwright install --with-deps chromium
+    - npm run test:e2e
+  artifacts:
+    when: on_failure
+    paths:
+      - test-results/
+    expire_in: 7 days
