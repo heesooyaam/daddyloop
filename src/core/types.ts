@@ -1,4 +1,4 @@
-export type ProviderName = 'github' | 'gitlab' | 'demo';
+export type ProviderName = 'github' | 'gitlab' | 'arcadia' | 'demo';
 export type Role = 'author' | 'reviewer';
 export type State =
   | 'queued'
@@ -38,6 +38,7 @@ export interface Revision {
   head: string;
   base: string;
   start: string;
+  revisionId?: string;
 }
 export interface PullRequest extends Revision {
   title: string;
@@ -107,6 +108,19 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   reviewerWorktree?: string;
+  arcWorkspaces?: Partial<
+    Record<
+      Role,
+      {
+        mount: string;
+        ownerId: string;
+        objectStore: string;
+        initialHash: string;
+        initialBranch: string;
+        baseHead: string;
+      }
+    >
+  >;
   planTaskId?: string;
   planDocuments?: { path: string; body: string }[];
   approvedPlan?: {
@@ -174,6 +188,8 @@ export interface AgentResult {
   disputedCommentIds?: string[];
 }
 export interface ResourceStatus {
+  hostMemoryAvailableGiB?: number;
+  memoryScope?: 'host' | 'service';
   memoryAvailableGiB: number;
   memoryTotalGiB: number;
   diskAvailableGiB: number;
@@ -193,4 +209,15 @@ export class AppError extends Error {
 }
 export const now = () => new Date().toISOString();
 export const sameRevision = (a?: Revision, b?: Revision) =>
-  !!a && !!b && a.head === b.head && a.base === b.base && a.start === b.start;
+  !!a &&
+  !!b &&
+  a.head === b.head &&
+  a.base === b.base &&
+  a.start === b.start &&
+  a.revisionId === b.revisionId;
+export const revisionOf = (value: Revision): Revision => ({
+  head: value.head,
+  base: value.base,
+  start: value.start,
+  ...(value.revisionId ? { revisionId: value.revisionId } : {}),
+});

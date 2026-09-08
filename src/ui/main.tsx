@@ -54,6 +54,9 @@ type Detail = {
   decisions: Decision[];
 };
 type Status = {
+  version: string;
+  publicOrigin: string | null;
+  telegram: { configured: boolean; paired?: boolean; bot?: string; error?: string | null };
   demoEnabled: boolean;
   resources: ResourceStatus;
   connections: Record<'github' | 'gitlab', { host: string; configured: boolean }>;
@@ -167,11 +170,27 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState('');
   const [policyOpen, setPolicyOpen] = useState(false);
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const initialPair = useRef(location.hash.startsWith('#pair/') ? location.hash.slice(6) : '');
+  const pairingPromise = useRef<Promise<unknown> | null>(null);
   const chatInput = useRef<HTMLTextAreaElement>(null);
   const previousStates = useRef(new Map<string, State>());
   const [notify, setNotify] = useState(false);
   const load = useCallback(async () => {
     try {
+      if (initialPair.current) {
+        if (!pairingPromise.current)
+          pairingPromise.current = api('/session/pair', { code: initialPair.current });
+        try {
+          await pairingPromise.current;
+        } catch (error) {
+          setError((error as Error).message);
+          throw error;
+        } finally {
+          initialPair.current = '';
+          history.replaceState(null, '', location.pathname);
+        }
+      }
       const [nextTasks, nextStatus] = await Promise.all([
         api<Task[]>('/tasks'),
         api<Status>('/status'),
@@ -290,6 +309,7 @@ function App() {
   if (!authenticated)
     return (
       <Login
+        initialError={error}
         onConnect={() => {
           setAuthenticated(true);
           void load();
@@ -374,12 +394,16 @@ function App() {
           <br />
           <code>reviewctl doctor</code>
         </p>
+        <button className="nav-item" onClick={() => setConnectionsOpen(true)}>
+          <Settings2 size={18} />
+          Devices & connections
+        </button>
         <div className="sidebar-bottom">
           <div className="local-status">
             <span className="connection-dot on" />
             <span>Running on this machine</span>
           </div>
-          <small>v0.1.0 · State stored on this machine</small>
+          <small>v{status?.version} · State stored on this machine</small>
         </div>
       </aside>
       <main className="main">
@@ -389,6 +413,14 @@ function App() {
             <strong>Review tasks</strong>
           </div>
           <div className="top-actions">
+            <button
+              className="icon-button"
+              aria-label="Devices and connections"
+              title="Devices and connections"
+              onClick={() => setConnectionsOpen(true)}
+            >
+              <Settings2 size={18} />
+            </button>
             <button
               className={`icon-button ${notify ? 'enabled' : ''}`}
               aria-label="Enable desktop notifications"
@@ -439,7 +471,12 @@ function App() {
             </span>
             <div>
               <strong>
-                {status?.resources.memoryAvailableGiB.toFixed(1)} <small>GiB available</small>
+                {status?.resources.memoryAvailableGiB.toFixed(1)}{' '}
+                <small>
+                  {status?.resources.memoryScope === 'service'
+                    ? 'GiB in service budget'
+                    : 'GiB RAM available'}
+                </small>
               </strong>
               <span>
                 {status?.resources.diskAvailableGiB.toFixed(0)} GiB disk free · {status?.activeJobs}{' '}
@@ -966,6 +1003,9 @@ function App() {
           <span>Built for a calmer review cycle.</span>
         </footer>
       </main>
+      {connectionsOpen && status && (
+        <Connections status={status} onClose={() => setConnectionsOpen(false)} />
+      )}
       {creating && (
         <CreateTask
           tasks={tasks}
@@ -989,6 +1029,95 @@ function App() {
         />
       )}
     </div>
+  );
+}
+function Connections({ status, onClose }: { status: Status; onClose: () => void }) {
+  const [link, setLink] = useState(''),
+    [error, setError] = useState('');
+  const [devices, setDevices] = useState<{ id: string; name: string; revoked: number }[]>([]);
+  useEffect(() => {
+    void api<typeof devices>('/devices')
+      .then(setDevices)
+      .catch((e) => setError(e.message));
+  }, []);
+  return (
+    <Modal
+      title="Devices & connections"
+      subtitle="The service runs on the host. Your laptop is never a relay for your phone."
+      onClose={onClose}
+    >
+      <div className="task-form">
+        <h3>Web address</h3>
+        <p>
+          {status.publicOrigin ? (
+            <a href={status.publicOrigin}>{status.publicOrigin}</a>
+          ) : (
+            'Local access only. Configure a permanent HTTPS address with reviewctl web on the host.'
+          )}
+        </p>
+        <p>
+          Connect the phone to the same private network, then open a one-use login link. Closing
+          your laptop or the browser does not stop the service.
+        </p>
+        <button
+          className="button primary"
+          disabled={!status.publicOrigin}
+          onClick={async () => {
+            try {
+              const result = await api<{ url: string }>('/pairings', {
+                name: 'Phone',
+                kind: 'web',
+              });
+              setLink(result.url);
+            } catch (e) {
+              setError((e as Error).message);
+            }
+          }}
+        >
+          Create phone login link
+        </button>
+        {link && (
+          <div className="pair-link">
+            <p>Valid for five minutes and one use:</p>
+            <a href={link}>{link}</a>
+            <button
+              className="button small"
+              onClick={() => void navigator.clipboard.writeText(link)}
+            >
+              Copy link
+            </button>
+          </div>
+        )}
+        <h3>Telegram</h3>
+        <p>
+          {status.telegram?.paired
+            ? `Connected to @${status.telegram.bot}`
+            : 'Run reviewctl telegram setup on the host, then open its private-chat pairing link.'}
+        </p>
+        <h3>Paired browsers</h3>
+        {devices
+          .filter((d) => !d.revoked)
+          .map((device) => (
+            <div className="device-row" key={device.id}>
+              <span>{device.name}</span>
+              <button
+                className="button small"
+                onClick={async () => {
+                  await api(`/devices/${device.id}/revoke`, {});
+                  setDevices(await api('/devices'));
+                }}
+              >
+                Revoke
+              </button>
+            </div>
+          ))}
+        {error && (
+          <p role="alert" className="field-error">
+            {error}
+          </p>
+        )}
+      </div>
+    </Modal>
   );
 }
 function EmptyNote({ icon, text }: { icon: React.ReactNode; text: string }) {
@@ -1052,9 +1181,9 @@ function Waiver({ onWaive }: { onWaive: (reason: string) => void }) {
     </div>
   );
 }
-function Login({ onConnect }: { onConnect: () => void }) {
+function Login({ onConnect, initialError = '' }: { onConnect: () => void; initialError?: string }) {
   const [token, setToken] = useState(''),
-    [error, setError] = useState(''),
+    [error, setError] = useState(initialError),
     [busy, setBusy] = useState(false);
   return (
     <div className="login-page">

@@ -1,8 +1,8 @@
 {
   "name": "reviewloop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "A local service that connects persistent author and reviewer sessions around GitHub and GitLab reviews.",
+  "description": "A managed single-host service for persistent author and reviewer sessions with GitHub, GitLab and Arcadia.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <25 || >=26.0.0"
@@ -10,6 +10,12 @@
   "bin": {
     "reviewctl": "scripts/reviewctl.mjs"
   },
+  "files": [
+    "dist",
+    "scripts/reviewctl.mjs",
+    "README.md",
+    "docs"
+  ],
   "scripts": {
     "dev": "tsx src/cli.ts serve",
     "demo": "tsx src/cli.ts serve --demo",
@@ -23,7 +29,8 @@
     "start": "node dist/server/cli.js serve",
     "reviewctl": "tsx src/cli.ts",
     "format": "prettier --write src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
-    "format:check": "prettier --check src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml"
+    "format:check": "prettier --check src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
+    "release:build": "npm run build && node scripts/build-release.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

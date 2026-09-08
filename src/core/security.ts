@@ -40,6 +40,22 @@ export function accessToken(dir: string) {
 }
 export function credential(provider: ProviderName, host: string): string {
   if (provider === 'demo') return '';
+  if (provider === 'arcadia') {
+    if (host !== 'a.yandex-team.ru')
+      throw new AppError(
+        'host_mismatch',
+        'Arcadia credentials are limited to the configured Arcanum host',
+        422,
+      );
+    const path = join(homedir(), '.tokens/arcadia'),
+      token =
+        process.env.ARC_TOKEN ||
+        process.env.ARC_OAUTH_TOKEN ||
+        (existsSync(path) ? readFileSync(path, 'utf8').trim() : '');
+    if (!token)
+      throw new AppError('credentials_missing', 'Configure ARC_TOKEN or ~/.tokens/arcadia', 422);
+    return rememberSecret(token);
+  }
   const key = provider.toUpperCase();
   const customFile = process.env[`REVIEWLOOP_${key}_TOKEN_FILE`];
   const files = customFile

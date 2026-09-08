@@ -1,56 +1,117 @@
-# Running and recovering Reviewloop
+# Operations
 
-## Local files
+## Installation and lifecycle
 
-`.reviewloop/` is ignored by Git. It contains the SQLite database and WAL files, the web access token, the server PID lock, managed Git objects/worktrees, and optional live transport reports. Use owner-only directory permissions. Provider tokens live in environment variables or separate token files; they are not copied into this directory by the application.
+Reviewloop is a single-user service on one Linux host. The API, SQLite, scheduler and both agent sessions belong to that host. CLI and browser clients can disconnect without stopping jobs. No tmux or laptop relay is required.
 
-The web server binds only `127.0.0.1`. The API requires a bearer token or an HttpOnly, SameSite=Strict session cookie. Cookie-authenticated mutations also require the application request header. Origin and Host validation protect the local control API; remote access uses an SSH tunnel. This release is not a multi-user public server.
+The installer places immutable versions in `~/.local/share/reviewloop/releases/<version>` and points `~/.local/bin/reviewctl` through `current`. Node, Codex CLI, GitHub CLI and UI assets are bundled. Git is supplied by the host or installed through apt. Reinstalling the same archive is idempotent; a different archive with the same version is rejected. Failed checksum verification does not switch the installed version. Installation changes files under the chosen prefix; setup additionally configures the OS service.
 
-## Resource controls
+Configuration defaults to `~/.config/reviewloop/config.json` (`REVIEWLOOP_CONFIG` overrides it). New installations store data in `~/.local/share/reviewloop/data`; an existing project's `.reviewloop/reviewloop.sqlite` is adopted on first setup. An explicit configured data directory takes precedence. Upgrades retain that path.
 
-`--min-disk-gib`, `--max-disk-percent` and `--min-memory-gib` gate new agent executions. Defaults are 10 GiB, 95%, and 2 GiB. On the original development host use 100 GiB and 80% for disk. Linux memory monitoring uses **MemAvailable**, which accounts for reclaimable page cache, rather than interpreting low `MemFree` as an emergency.
+On unified-cgroup Linux, setup enables the user systemd manager and lingering. On older hybrid/v1 hosts it installs `reviewloop-<uid>.service` as a system unit with explicit `User` and `Group`. Agents still run as the ordinary user. The system service has its own memory cgroup. `reviewctl service status` reports the actual mode, PID, memory limit and logout persistence.
 
-Only one agent is active by default. Codex runs have a 20-minute limit, RPC requests have timeouts, and child process groups are terminated at the end of each run. Git subprocesses have a two-minute limit and bounded output. The service does not remove user workspaces, caches or unrelated processes automatically.
+```bash
+reviewctl init
+reviewctl up
+reviewctl down
+reviewctl restart
+reviewctl service status
+reviewctl service logs --follow
+reviewctl service uninstall
+```
 
-When space is low: inspect exact ownership, stop task-owned services before cleaning generated runtime files, and preserve uncommitted/unpushed author work. This application never runs `git reset --hard`, `git clean`, force-push or Arcadia garbage collection.
+`down` and `uninstall` preserve database history, credentials and working copies. They do not remove the separately installed private-network service. A system-mode installation needs sudo for unit changes; normal control API operations do not. The installer can acquire sudo interactively. For direct service installation without passwordless sudo, run `sudo -v` first.
 
-## What to do after a failure
+Graceful stop cancels active runs and records a recoverable `needs_input` state. Crash recovery marks interrupted runs incomplete. Neither path silently replays an uncertain provider write or declares an unfinished review successful. After inspection use `retry` for the reviewer or `resume` for the author.
 
-| Situation                                                | Behavior and next step                                                                                                                                                                                |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Service restarted during an agent turn                   | The run is marked interrupted and the task waits for input. Inspect Activity and the native review. Use `retry` to continue an unfinished reviewer, or `resume` to continue interrupted author fixes. |
-| Provider accepted a write but the response was lost      | The operation remains pending in the outbox. A matching native result can confirm it; otherwise the application refuses a blind retry. Inspect native objects and the operation ID in Activity.       |
-| GitHub already has another pending review by the user    | Creation fails without adopting or deleting that review. Publish/discard it explicitly before retrying.                                                                                               |
-| Head/base changed while a draft was open                 | The old generation is invalidated. Inspect/discard the stale native draft before retrying the new revision.                                                                                           |
-| GitLab notes were partly published                       | Task waits for input. Finish or discard the affected review explicitly in GitLab, preserving markers, then reconcile.                                                                                 |
-| GitLab has additional untracked notes or removed markers | Task waits for input. The initial release cannot safely infer group membership. Keep native notes intact, inspect the batch and reconnect a clean review cycle.                                       |
-| Author workspace contains unpushed commits               | They are preserved. If they belong to the same base revision, an interrupted author can continue; unrelated divergence needs manual reconciliation.                                                   |
-| CI is missing or red                                     | Task stays in Waiting for checks. Fix CI or record a human waiver with a reason for the exact revision.                                                                                               |
-| Author and reviewer disagree                             | The author returns disputed IDs and the task waits for a decision. Discuss it with the reviewer and preserve the decision before continuing.                                                          |
+## Permanent website access
 
-Use `reviewctl logs <task-id> --follow` for JSONL events. The UI Activity tab shows confirmed effects and IDs. Database snapshots include source and comment content; keep the state directory private even though known credential patterns are redacted from logs.
+The HTTP backend always listens on loopback. Configure one HTTPS origin and a server-side proxy. A phone must reach that proxy directly, without an SSH tunnel on the laptop.
 
-The API intentionally exposes no “pretend everything succeeded” recovery switch. Some ambiguous native edits require resolving the underlying platform state before retrying. There is no remote API administrative endpoint for changing SQLite rows.
+`reviewctl web tailscale` installs pinned, checksum-verified Tailscale binaries in the data directory, starts a separate systemd network service, asks for account login and configures Tailscale Serve in background mode. Userspace networking does not replace the host's DNS, routes or system Tailscale installation. The daemon has a 512 MiB memory limit. Install Tailscale on the phone and join the same network. This is private tailnet access, not public Funnel.
 
-## Backups
+An alternative is an existing HTTPS reverse proxy. For example, Caddy on the service host:
 
-Stop the service before copying its state directory, or use SQLite's backup mechanism. Copying the database file while ignoring its live WAL can lose recent state. Keep task worktrees if they contain unpushed changes. The local access token can be rotated by stopping the service, replacing `.reviewloop/access-token`, and restarting; existing browser sessions will require the new token.
+```caddyfile
+review.example.com {
+    reverse_proxy 127.0.0.1:4317 {
+        flush_interval -1
+    }
+}
+```
 
-## Current scope and limits
+Point the domain at the host and configure the proxy's certificate and network access, then:
 
-- GitHub/GitLab adapters implement real HTTP requests but have only fixture-based HTTP validation until user tokens are supplied. A live native draft/edit/publish/push test remains outstanding.
-- A live Codex smoke test verifies dynamic tools, valid structured completion and resuming the same persisted thread. It does not constitute a live PR integration test.
-- Existing PRs/MRs are attached; creating a plan PR or implementation PR from a bare idea is outside this initial product flow. Repository creation for this project's own remotes is a separate CLI command.
-- Runner and backend modules share one process; a distributed runner protocol, webhook ingestion, automatic CI repair, configurable command-approval UI and Telegram transport are not implemented. Polling is the durable reconciliation mechanism; browser notifications are available.
-- Codex configuration and authentication are local. The integration disables apps via thread configuration, removes provider-token environment variables, and requests a read-only reviewer sandbox / workspace-write author sandbox with network disabled. These are runtime policies, not an OS identity boundary. Installed extensions and readable home files should be considered when using a trusted local account. Use a dedicated OS account or an externally managed sandbox for untrusted repositories.
-- Reviewer local commands that require filesystem writes cannot run in its read-only sandbox. The reviewer must report that limitation and use actual CI evidence where sufficient; inability to verify is not treated as success.
-- The service refuses permission-expansion requests instead of silently granting them, records them in Activity, and relies on an explicit incomplete/needs-input result. There is no interactive approval relay in this version.
-- GitLab currently uses one anchor line for inline comments; multi-line context remains in the full Markdown body. GitHub supports start/end line ranges.
-- Very large plans (over 300 KB of changed Markdown) and provider lists over 10,000 entries fail explicitly rather than silently truncating the task material.
+```bash
+reviewctl web origin https://review.example.com
+reviewctl restart
+reviewctl phone
+```
 
-## Development host browser tests
+Preserve the incoming Host header, keep SSE responses unbuffered and permit long connections. The API accepts only the configured origin or matching local origins. Pairing links expire after five minutes and can be consumed once. Their secret is in a URL fragment, removed by the UI on consumption. Each browser receives its own HttpOnly session cookie, Secure for HTTPS, with a 90-day expiry. Revoke a device using the UI or `reviewctl revoke-device <id>`.
 
-The original host has Ubuntu 20.04, which current Playwright no longer supports officially. For local UI verification a Chromium fallback for `ubuntu22.04-x64` was installed and the Ubuntu 20.04 `libnspr4`/`libnss3` packages were extracted into `.tools/browser-libs`, without installing system packages.
+The root token in the data directory remains a local administrative credential. Rotating it does not revoke separately paired devices; revoke those explicitly if needed. `reviewctl connect <https-url>` configures a separate CLI client with a hidden token prompt and validates the connection before replacing its previous credential. The prebuilt managed installer is Linux-only; a macOS CLI client requires a source build with Node, while its browser works directly.
+
+The server must remain powered on. Network outages can temporarily interrupt clients and provider calls. A server restart preserves history but requires explicit resumption of an interrupted agent turn. Logout persistence is not a claim of uninterrupted work through a reboot.
+
+## Accounts and Telegram
+
+GitHub credentials: `GITHUB_TOKEN` / `GH_TOKEN`, `REVIEWLOOP_GITHUB_TOKEN_FILE`, or `~/.tokens/github`. GitLab equivalents: `GITLAB_TOKEN` / `GLAB_TOKEN`, `REVIEWLOOP_GITLAB_TOKEN_FILE`, `~/.tokens/gitlab`. Host-specific token files use `github-<host>` / `gitlab-<host>`. Configure a custom provider host with `REVIEWLOOP_GITHUB_HOST` or `REVIEWLOOP_GITLAB_HOST` when using a generic credential. A token is not sent to an arbitrary host from an attached URL.
+
+`reviewctl auth github` uses gh's browser/device flow and saves a private credential file for the service. SSH authentication for Git is separate from API authentication. GitHub API permissions must allow reading code/checks and writing pull requests; automatic author push also requires repository write permission. GitLab needs a user API token with project access. Branch protection still applies.
+
+Arc credentials are read from the existing Arc token environment or `~/.tokens/arcadia`. Public packages contain no corporate tools or credentials. `reviewctl arcadia setup` verifies the local helper, shared store and native identity. Author and reviewer each need a separate free clean configured mount. Leases are journaled before checkout, so an interrupted checkout is preserved and fails closed on recovery. Never remove that mount to clear an error without inspecting its changes.
+
+Telegram setup needs a dedicated bot without an existing webhook. Save its token in `~/.tokens/reviewloop-telegram` or use the hidden setup prompt. `reviewctl telegram setup` activates polling and prints a one-use ten-minute private-chat pairing link. The binding checks both chat and user IDs; groups and unknown chats receive no task data. A newly paired chat replaces the old binding.
+
+Polling offsets and update receipts survive restarts and are reset when changing the bot identity. Duplicate callbacks cannot repeat a publication. A publish button expires after five minutes and binds the generation, head, review ID and exact draft snapshot. Editing the draft or advancing the revision invalidates it. `reviewctl telegram unpair` revokes the chat and outstanding buttons. Notifications are best effort: an ambiguous outgoing request is not blindly repeated, so a Telegram delivery failure can lose a notification. The database/UI remain authoritative. Telegram initialization errors do not prevent the website from starting.
+
+## Resource controls and cleanup
+
+Defaults: one active agent, 8 GiB combined service/child memory limit, 2 GiB RAM reserve, 10 GiB disk reserve, 90% maximum disk usage. On the original development host the configured disk thresholds are 100 GiB and 80%. Linux monitoring uses MemAvailable plus the process's cgroup budget, subtracting reclaimable inactive file pages from usage. UI status distinguishes the service budget from total host RAM.
+
+New agent runs are gated on available resources. An active run is cancelled when the resource check detects pressure. A sudden allocation can still hit the kernel limit before the next check; systemd and interrupted-job recovery handle that case. Codex turns and subprocesses also have time/output limits.
+
+```bash
+reviewctl cache status
+reviewctl cache prune
+reviewctl cache prune --apply
+reviewctl cache auto on
+reviewctl restart
+reviewctl cache arcadia-gc
+reviewctl cache arcadia-gc --apply
+```
+
+Cleanup defaults to a dry run. Only old, clean, registered Git reviewer snapshots and explicitly marked temporary cache directories are eligible. Current snapshots, the newest retained copy, busy tasks, author work, unknown ownership and symlinks are preserved. Age defaults to seven days. The owner, cleanliness, path and active task state are rechecked under a task lock before removal. Automatic cleanup is off by default and only runs under disk pressure, at most once per five minutes.
+
+Arc maintenance uses the native `arc gc --dry-run`, or ordinary `arc gc` with `--apply`, through a temporary lease. It never uses `--truncate`. Reviewloop does not erase shared object stores, `ya` caches, unrelated `/tmp` directories, author worktrees or database history. Disk inspection is still necessary when another project's artifacts are the cause of pressure.
+
+## Recovery and backups
+
+| Situation                                                                 | Next step                                                                           |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Service stops during an agent turn                                        | Inspect saved work and native review; retry the reviewer or resume the author.      |
+| Provider response is lost after a write                                   | Outbox reconciliation must confirm the native effect before any retry.              |
+| PR revision changes during review                                         | Reconcile and inspect the stale draft before reviewing the new revision.            |
+| Another pending GitHub review exists                                      | Publish/discard it explicitly; Reviewloop does not adopt or delete it.              |
+| GitLab/Arcanum draft set is partly published or contains unrelated drafts | Inspect the native draft group; the handoff remains blocked until unambiguous.      |
+| Author has unpushed/diverging work                                        | Work is preserved; reconcile it without force-push/reset.                           |
+| CI is missing/red                                                         | Fix CI or record a reasoned waiver for this exact revision.                         |
+| Arc lease is unavailable or its branch changed                            | Inspect the journal and mount ownership; no replacement agent starts on that mount. |
+
+Stop the service before copying the entire data directory, or use SQLite's backup API for a consistent live database snapshot. Copying the database file while ignoring its WAL can lose recent state. Preserve worktrees with unpushed changes. Backups contain source and review content and should remain private.
+
+## Validation boundaries
+
+The v0.2 review report records fixture, browser, real SSH-disconnect and native Arc read validation. A live native draft/edit/publish/author-push cycle is still outstanding for the providers. A live Codex smoke verified scoped dynamic tools and persistent thread resume. Real Telegram delivery and external phone reachability require the owner's account setup.
+
+Existing PRs are attached; creating a plan or implementation PR from a bare idea is outside this flow. Distributed runners, automatic merge, webhook ingestion, automatic CI repair and interactive command-approval relay are not implemented.
+
+Codex runs with a read-only reviewer sandbox and workspace-write author sandbox, network disabled and provider-token environment variables removed. These are runtime policies, not a separate OS identity boundary. The service refuses permission-expansion requests and records them. A reviewer that cannot execute a write-requiring test must report the limitation and use real CI evidence; it cannot claim the test passed. Use a dedicated account or stronger sandbox for untrusted repositories.
+
+## Development-host browser tests
+
+The original Ubuntu 20.04 host uses a Chromium fallback plus extracted libnspr4/libnss3 under `.tools/browser-libs`, without installing system packages:
 
 ```bash
 PATH="$PWD/.tools/node/bin:$PATH" \
@@ -58,4 +119,4 @@ LD_LIBRARY_PATH="$PWD/.tools/browser-libs/usr/lib/x86_64-linux-gnu${LD_LIBRARY_P
 npm run test:e2e
 ```
 
-For a new supported Linux machine use the ordinary Playwright installation command in the README. The local fallback is a test-host accommodation, not a runtime dependency of Reviewloop.
+On a supported Linux host use the ordinary Playwright installation from the README. Test-generated TLS certificates and private probe data stay in ignored task state.

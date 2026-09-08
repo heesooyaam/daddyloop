@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test';
+import { resolve } from 'node:path';
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: 45000,
@@ -11,7 +12,8 @@ export default defineConfig({
     launchOptions: { args: ['--disable-dev-shm-usage'] },
   },
   webServer: {
-    command: 'node dist/server/cli.js --data-dir .reviewloop/e2e serve --demo --port 4318',
+    env: { REVIEWLOOP_CONFIG: resolve('.reviewloop/e2e/config.json') },
+    command: 'node tests/e2e/host.mjs',
     url: 'http://127.0.0.1:4318/api/health',
     reuseExistingServer: false,
     timeout: 20000,

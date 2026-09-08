@@ -68,3 +68,40 @@ test('mobile layout has no horizontal overflow and the create form validates inp
     fullPage: true,
   });
 });
+test('a paired phone uses HTTPS and remains connected after the laptop browser closes', async ({
+  browser,
+}) => {
+  const laptop = await browser.newContext();
+  const token = readFileSync('.reviewloop/e2e/access-token', 'utf8').trim();
+  const response = await laptop.request.post('http://127.0.0.1:4318/api/pairings', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { name: 'Phone test', kind: 'web' },
+  });
+  expect(response.ok()).toBe(true);
+  const { url } = await response.json();
+  const phone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    ignoreHTTPSErrors: true,
+  });
+  try {
+    const page = await phone.newPage();
+    await page.goto(url);
+    await expect(page.getByRole('heading', { name: 'Review workspace' })).toBeVisible();
+    expect(page.url()).not.toContain('#pair/');
+    expect((await phone.cookies()).find((c) => c.name === 'reviewloop_session')?.secure).toBe(true);
+    await laptop.close();
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Review workspace' })).toBeVisible();
+    await page.getByRole('button', { name: 'Devices and connections', exact: true }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    expect(
+      (
+        await phone.request.get('https://localhost:4319/api/tasks', {
+          headers: { Origin: 'https://evil.example' },
+        })
+      ).status(),
+    ).toBe(403);
+  } finally {
+    await phone.close();
+  }
+});

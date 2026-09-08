@@ -6,11 +6,14 @@ Reviewloop is a local, single-user service. Workflow decisions are deterministic
 flowchart LR
     UI[Web panel] --> API[Fastify API]
     CLI[reviewctl] --> API
+    Phone[Phone over persistent HTTPS] --> API
+    Telegram[Paired Telegram bot] --> Engine
     API --> Engine[Workflow engine]
     Engine --> DB[(SQLite WAL)]
     Engine --> Broker[Review tool broker + outbox]
     Broker --> GH[GitHub REST + GraphQL]
     Broker --> GL[GitLab REST]
+    Broker --> Arc[Arc native CLI + Arcanum]
     Engine --> Queue[Persistent job queue]
     Queue --> Worker[Local runner]
     Worker --> Author[Codex author thread]
@@ -20,7 +23,7 @@ flowchart LR
     Reviewer --> Broker
 ```
 
-The first release packages API, engine, poller and scheduler in one process. Each agent run starts a separate `codex app-server` subprocess over stdio and closes it at the end of the turn. Thread IDs persist, so this does not discard the conversation. Runner code is separated behind `AgentRuntime` and `Workspaces`; remote workers are not implemented.
+The installed service packages API, engine, poller and scheduler in one process under systemd. Both agents run on this same host. Each agent run starts a separate `codex app-server` subprocess over stdio and closes it at the end of the turn. Thread IDs persist, so this does not discard the conversation. Runner code is separated behind `AgentRuntime` and `Workspaces`; remote workers are out of scope. CLI and browser disconnects do not stop the service.
 
 ## Module boundaries
 
@@ -35,7 +38,7 @@ The first release packages API, engine, poller and scheduler in one process. Eac
 | `src/server/`        | Local API, auth, CSRF/Origin checks, static assets and event stream              |
 | `src/ui/`            | Task list, role conversations, findings, history, decisions and context          |
 
-`ReviewProvider` has real GitHub and GitLab implementations, plus a visibly labeled persistent demo implementation. It does not know which agent runtime is used. `AgentRuntime` receives scoped tools and never needs platform tokens. SQLite contains no provider credentials.
+`ReviewProvider` has GitHub, GitLab and optional Arcadia implementations, plus a visibly labeled persistent demo implementation. It does not know which agent runtime is used. `AgentRuntime` receives scoped tools and never needs platform tokens. SQLite contains no provider credentials. Arcadia uses existing corporate tools and leased shared-store mounts; it pins both full revisions and the native diff ID. Browser access and Telegram publication confirmations use separate scoped, expiring credentials.
 
 ## State machine
 

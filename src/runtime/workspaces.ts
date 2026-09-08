@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { AppError, type Task, type Role } from '../core/types.js';
 import { credential, redact, rememberSecret } from '../core/security.js';
+import { ArcWorkspaces } from './arc-workspaces.js';
 
 export async function git(
   args: string[],
@@ -44,8 +45,12 @@ export async function git(
   });
 }
 export class Workspaces {
-  constructor(readonly dataDir: string) {}
-  async validate(path: string) {
+  private arc: ArcWorkspaces;
+  constructor(readonly dataDir: string) {
+    this.arc = new ArcWorkspaces(dataDir);
+  }
+  async validate(path: string, provider?: string) {
+    if (provider === 'arcadia') return this.arc.validate(path);
     if (!path || !existsSync(path))
       throw new AppError(
         'repository_missing',
@@ -80,6 +85,7 @@ export class Workspaces {
     };
   }
   async prepare(task: Task, role: Role, signal?: AbortSignal): Promise<string> {
+    if (task.ref.provider === 'arcadia') return this.arc.prepare(task, role, signal);
     const run = (args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) =>
       git(args, cwd, env, signal);
     if (!task.revision || !task.pr)
@@ -169,6 +175,7 @@ export class Workspaces {
     message: string,
     signal?: AbortSignal,
   ): Promise<{ head: string; pushed: boolean }> {
+    if (task.ref.provider === 'arcadia') return this.arc.submit(task, message, signal);
     if (!task.authorWorktree || !task.revision || !task.pr)
       throw new AppError('workspace_missing', 'Author workspace is not initialized');
     const cwd = resolve(task.authorWorktree);
@@ -203,5 +210,11 @@ export class Workspaces {
       this.env(task),
     );
     return { head, pushed: true };
+  }
+  async arcPlanDocuments(task: Task, cwd: string) {
+    return this.arc.planDocuments(task, cwd);
+  }
+  async releaseArc(task: Task, role: Role) {
+    return this.arc.release(task, role);
   }
 }
