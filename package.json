@@ -1,6 +1,6 @@
 {
   "name": "reviewloop",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "A managed single-host service for persistent author and reviewer sessions with GitHub, GitLab and Arcadia.",
   "type": "module",

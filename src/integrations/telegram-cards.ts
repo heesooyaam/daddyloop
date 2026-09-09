@@ -224,7 +224,7 @@ export function noteCard(title: string, body: string): TelegramCard {
 }
 export function errorCard(message: string): TelegramCard {
   const text = new TelegramText()
-    .add('⚠️ Не получилось выполнить действие', 'bold')
+    .add('⚠️ Проверь результат действия', 'bold')
     .add('\n\n')
     .add(message)
     .add('\n\nПосмотри текущий статус задачи перед повтором.');

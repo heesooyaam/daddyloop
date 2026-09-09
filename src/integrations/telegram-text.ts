@@ -78,6 +78,8 @@ export function markdownText(source: string): FormattedText {
   }
 }
 function renderMarkdown(source: string): FormattedText {
+  const serviceMarker = (node: Nodes) =>
+    node.type === 'html' && /^<!--\s*reviewloop:[A-Za-z0-9_.:-]+\s*-->$/.test(node.value.trim());
   const root = fromMarkdown(source, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
   const definitions = new Map<string, Definition>();
   const collect = (node: Nodes) => {
@@ -103,7 +105,9 @@ function renderMarkdown(source: string): FormattedText {
     };
     switch (node.type) {
       case 'root': {
-        const blocks = node.children.filter((child) => child.type !== 'definition');
+        const blocks = node.children.filter(
+          (child) => child.type !== 'definition' && !serviceMarker(child),
+        );
         blocks.forEach((child, i) => {
           if (i) output.add('\n\n');
           render(child, styles, depth + 1);
@@ -145,7 +149,7 @@ function renderMarkdown(source: string): FormattedText {
         output.add('──────────');
         return;
       case 'html':
-        write(node.value, styles);
+        if (!serviceMarker(node)) write(node.value, styles);
         return;
       case 'link':
       case 'linkReference':

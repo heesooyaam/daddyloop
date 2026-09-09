@@ -118,7 +118,7 @@ reviewctl agents defaults \
 Выполни на хосте, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.2/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.3/install.sh | bash
 ```
 
 **Linux x64 / ARM64 · systemd · curl и tar.** В архиве уже есть Node 24, Codex CLI, GitHub CLI и сайт. Установщик проверит контрольную сумму и настроит постоянный сервис; для системных действий может понадобиться sudo. `reviewctl` появится в `~/.local/bin`.
@@ -214,9 +214,9 @@ reviewctl attach https://a.yandex-team.ru/review/11111111 \
 
 ## Проверки и документация
 
-**v0.4 — prerelease.** Проверены 121 тест и четыре браузерных сценария, реальное чтение GitHub/Tracker, обе модели с max и восстановление сессии Codex. Терминал проверен через PTY, включая отключение клиента. Установщик проверяется на x64/ARM64 в CI. Полный цикл записи на реальных провайдерах ещё требует отдельной проверки; Telegram и внешний доступ с телефона требуют настройки аккаунтов владельца.
+**v0.4 — prerelease.** Проверены 123 теста и четыре браузерных сценария, реальное чтение GitHub/Tracker, обе модели с max и восстановление сессии Codex. Терминал проверен через PTY, включая отключение клиента. Установщик проверяется на x64/ARM64 в CI. Полный цикл записи на реальных провайдерах ещё требует отдельной проверки; Telegram и внешний доступ с телефона требуют настройки аккаунтов владельца.
 
-[CI](https://github.com/heesooyaam/reviewloop/actions/workflows/ci.yml) · [Релиз](https://github.com/heesooyaam/reviewloop/releases/tag/v0.4.2) · [Ревью версии 0.4](docs/review-v0.4.md)
+[CI](https://github.com/heesooyaam/reviewloop/actions/workflows/ci.yml) · [Релиз](https://github.com/heesooyaam/reviewloop/releases/tag/v0.4.3) · [Ревью версии 0.4](docs/review-v0.4.md)
 
 | Документ                                 | Что внутри                                                         |
 | ---------------------------------------- | ------------------------------------------------------------------ |
