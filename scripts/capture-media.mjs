@@ -35,8 +35,40 @@ const catalogue = {
       isDefault: profile === profiles.reviewer,
     })),
   validate: async () => {},
+  metadata: () => ({
+    source: 'codex-app-server:model/list',
+    executable: '/opt/reviewloop/tools/codex',
+    cliVersion: '0.153.4',
+    retrievedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 300000).toISOString(),
+  }),
 };
-const { app } = await buildApp({ dataDir: state, config, token, demo: true, catalogue });
+const { app, store } = await buildApp({
+  startUpdateCheck: false,
+  dataDir: state,
+  config,
+  token,
+  demo: true,
+  catalogue,
+});
+store.setSetting('updates.status', {
+  checkedAt: new Date().toISOString(),
+  intervalHours: 6,
+  notifications: true,
+  tools: [
+    {
+      id: 'codex',
+      name: 'Codex CLI',
+      supported: true,
+      source: 'bundled',
+      executable: '/opt/reviewloop/tools/codex',
+      installed: '0.153.4',
+      latest: '0.153.4',
+      updateAvailable: false,
+      releaseUrl: 'https://github.com/openai/codex/releases',
+    },
+  ],
+});
 let browser;
 async function command(executable, args) {
   await new Promise((resolveValue, reject) => {
@@ -73,6 +105,21 @@ try {
     await page.getByRole('button', { name: 'Notification settings', exact: true }).click();
     await page.getByLabel('Enable Telegram notifications').check();
     await page.screenshot({ path: join(output, 'notifications-phone.png'), fullPage: false });
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await page.setViewportSize({ width: 1440, height: 1080 });
+    await page.getByLabel('Interface language').selectOption('ru');
+    await page.getByRole('button', { name: 'Новая задача из тикета', exact: true }).click();
+    await expect(page.getByLabel('Модель: Автор этого тикета')).toHaveValue('gpt-5.6-sol');
+    await page.screenshot({ path: join(output, 'ticket-start-ru.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Закрыть окно' }).click();
+    await page.getByRole('button', { name: 'Обновления', exact: true }).click();
+    await expect(page.getByText('Codex CLI', { exact: true })).toBeVisible();
+    await page.screenshot({ path: join(output, 'updates-ru.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Закрыть окно' }).click();
+    await page.getByLabel('Язык интерфейса').selectOption('en');
+    await expect(
+      page.getByRole('heading', { name: 'Review workspace', exact: true }),
+    ).toBeVisible();
     await settings.close();
   }
   if (process.argv.includes('--terminal-only')) {

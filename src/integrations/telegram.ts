@@ -22,6 +22,11 @@ import {
   errorCard,
   publishCard,
 } from './telegram-cards.js';
+import { preferences, setLocale } from '../core/preferences.js';
+import type { Locale } from '../i18n/index.js';
+import type { Catalogue } from '../server/planning.js';
+import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
+import { languageCard, modelsCard, updateCard, updatesCard } from './telegram-meta.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type User = { id: number; is_bot?: boolean };
 type Chat = { id: number; type: string };
@@ -191,6 +196,13 @@ export class Telegram {
   private controller?: AbortController;
   private polling?: Promise<void>;
   private notices = Promise.resolve();
+  private integrations?: { catalogue: Catalogue; updates: UpdateMonitor };
+  configure(value: { catalogue: Catalogue; updates: UpdateMonitor }) {
+    this.integrations = value;
+  }
+  private locale(): Locale {
+    return this.engine.store.setting('preferences') ? preferences(this.engine.store).locale : 'ru';
+  }
   constructor(
     private engine: Engine,
     private api: TelegramApi,
@@ -230,8 +242,13 @@ export class Telegram {
   start() {
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
+    this.currentUpdates();
   }
   private onEvent = (event: Event) => {
+    if (['runtime.update_available', 'runtime.version_changed'].includes(event.type)) {
+      this.updateNotice(event.data as UpdateNotice);
+      return;
+    }
     const preferences = notificationPreferences(this.engine.store);
     if (!this.paired() || !preferences.enabled) return;
     const state = (event.data as { state?: string }).state;
@@ -278,8 +295,8 @@ export class Telegram {
             .messages(task.id)
             .find((m) => m.id === (event.data as { messageId: string }).messageId);
           if (!message || message.sender !== 'agent') return;
-          content = agentCard(task, message.role, message.text, this.publicOrigin);
-        } else content = taskCard(task, this.publicOrigin);
+          content = agentCard(task, message.role, message.text, this.publicOrigin, this.locale());
+        } else content = taskCard(task, this.publicOrigin, this.locale());
         // Lost sendMessage responses cannot be conclusively looked up. Keep an
         // uncertain notification instead of repeatedly sending it to the user.
         store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
@@ -311,7 +328,8 @@ export class Telegram {
         store.setSetting('telegram.pairCode', null);
         store.db.prepare('DELETE FROM bot_actions').run();
       });
-      await this.api.send(chat.id, welcomeCard());
+      await this.api.send(chat.id, welcomeCard(this.locale()));
+      this.currentUpdates();
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
@@ -348,18 +366,36 @@ export class Telegram {
         await this.engine.reconcile(action.taskId);
         await this.api.send(
           chat.id,
-          noteCard('✅ Ревью опубликовано', 'Цикл работы продолжается автоматически.'),
+          noteCard(
+            '✅ Ревью опубликовано',
+            'Цикл работы продолжается автоматически.',
+            this.locale(),
+          ),
         );
         return;
       }
       const text = message?.text?.trim();
       if (!text) return;
+      const language = text.match(/^\/language(?:\s+(en|ru))?$/i);
+      if (language) {
+        if (language[1]) setLocale(store, language[1].toLowerCase() as Locale);
+        await this.api.send(chat.id, languageCard(this.locale()));
+        return;
+      }
+      if (text === '/models') {
+        await this.showModels(chat.id, false);
+        return;
+      }
+      if (text === '/updates') {
+        await this.showUpdates(chat.id, false);
+        return;
+      }
       if (text === '/tasks' || text === '/start') {
-        await this.api.send(chat.id, tasksCard(store.tasks()));
+        await this.api.send(chat.id, tasksCard(store.tasks(), 0, this.locale()));
         return;
       }
       if (text === '/help') {
-        await this.api.send(chat.id, helpCard());
+        await this.api.send(chat.id, helpCard(this.locale()));
         return;
       }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
@@ -369,7 +405,10 @@ export class Telegram {
             enabled: mode !== 'off',
             mode: mode === 'all' ? 'all' : 'attention',
           });
-        await this.api.send(chat.id, notificationsCard(notificationPreferences(store)));
+        await this.api.send(
+          chat.id,
+          notificationsCard(notificationPreferences(store), this.locale()),
+        );
         return;
       }
       if (text === '/web') {
@@ -383,6 +422,7 @@ export class Telegram {
         const content = noteCard(
           '🌐 Войти в рабочее пространство',
           'Одноразовая ссылка действует 5 минут. Телефон должен быть подключён к сети сервера.',
+          this.locale(),
         );
         content.buttons = [[{ text: 'Открыть рабочее пространство ↗', url: link.url }]];
         await this.api.send(chat.id, content);
@@ -392,7 +432,7 @@ export class Telegram {
         /^\/(status|reviewer|author|publish|pause|resume|retry)\s+([a-zA-Z0-9-]+)(?:\s+([\s\S]+))?$/,
       );
       if (!match) {
-        await this.api.send(chat.id, helpCard());
+        await this.api.send(chat.id, helpCard(this.locale()));
         return;
       }
       const [, verb, prefix, content] = match,
@@ -400,7 +440,7 @@ export class Telegram {
       if (matches.length !== 1) throw new Error('Task ID is missing or ambiguous. Use /tasks.');
       const task = matches[0];
       if (verb === 'status') {
-        await this.api.send(chat.id, taskCard(task, this.publicOrigin));
+        await this.api.send(chat.id, taskCard(task, this.publicOrigin, this.locale()));
         return;
       }
       if (verb === 'author' || verb === 'reviewer') {
@@ -411,6 +451,7 @@ export class Telegram {
           noteCard(
             verb === 'author' ? '✍️ Сообщение передано автору' : '🔎 Сообщение передано ревьюеру',
             'Сообщение поставлено в очередь. Историю можно открыть в рабочем пространстве.',
+            this.locale(),
           ),
         );
         return;
@@ -425,9 +466,9 @@ export class Telegram {
             ? await this.engine.retryTicket(task.id)
             : await this.engine.review(task.id, true)
           : await this.engine.action(task.id, verb as 'pause' | 'resume');
-      await this.api.send(chat.id, taskCard(result, this.publicOrigin));
+      await this.api.send(chat.id, taskCard(result, this.publicOrigin, this.locale()));
     } catch (error) {
-      await this.api.send(chat.id, errorCard(redact((error as Error).message)));
+      await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
   }
   private async confirm(task: Task, chatId: number) {
@@ -454,23 +495,44 @@ export class Telegram {
     this.engine.store.db
       .prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)')
       .run(id, JSON.stringify(action));
-    await this.api.send(chatId, publishCard(task, snapshot, id));
+    await this.api.send(chatId, publishCard(task, snapshot, id, this.locale()));
   }
   private async navigate(data: string, chatId: number): Promise<boolean> {
+    const language = data.match(/^language:(en|ru|show)$/);
+    if (language) {
+      if (language[1] !== 'show') setLocale(this.engine.store, language[1] as Locale);
+      await this.api.send(chatId, languageCard(this.locale()));
+      return true;
+    }
+    if (data === 'models:refresh') {
+      await this.showModels(chatId, true);
+      return true;
+    }
+    const updates = data.match(/^updates:(show|check|on|off)$/);
+    if (updates) {
+      if (['on', 'off'].includes(updates[1]))
+        this.engine.store.setSetting('updates.notifications', updates[1] === 'on');
+      await this.showUpdates(chatId, updates[1] === 'check');
+      return true;
+    }
+
     if (data === 'help') {
-      await this.api.send(chatId, helpCard());
+      await this.api.send(chatId, helpCard(this.locale()));
       return true;
     }
     const list = data.match(/^tasks:(\d{1,8})$/);
     if (list) {
-      await this.api.send(chatId, tasksCard(this.engine.store.tasks(), Number(list[1])));
+      await this.api.send(
+        chatId,
+        tasksCard(this.engine.store.tasks(), Number(list[1]), this.locale()),
+      );
       return true;
     }
     const task = data.match(/^(task|publish):([a-f0-9-]{36})$/);
     if (task) {
       const current = this.engine.store.getTask(task[2]);
       if (task[1] === 'publish') await this.confirm(current, chatId);
-      else await this.api.send(chatId, taskCard(current, this.publicOrigin));
+      else await this.api.send(chatId, taskCard(current, this.publicOrigin, this.locale()));
       return true;
     }
     const prefs = data.match(/^notifications:(show|on|off|all)$/);
@@ -480,12 +542,68 @@ export class Telegram {
           enabled: prefs[1] !== 'off',
           mode: prefs[1] === 'all' ? 'all' : 'attention',
         });
-      await this.api.send(chatId, notificationsCard(notificationPreferences(this.engine.store)));
+      await this.api.send(
+        chatId,
+        notificationsCard(notificationPreferences(this.engine.store), this.locale()),
+      );
       return true;
     }
     return false;
   }
 
+  private async showModels(chatId: number, refresh: boolean) {
+    if (!this.integrations) throw new Error('Model catalogue is unavailable');
+    const models = await this.integrations.catalogue.list(refresh);
+    await this.api.send(
+      chatId,
+      modelsCard(
+        this.locale(),
+        this.engine.defaultAgents(),
+        models,
+        this.integrations.catalogue.metadata?.(),
+      ),
+    );
+  }
+  private async showUpdates(chatId: number, refresh: boolean) {
+    if (!this.integrations) throw new Error('Update checks are unavailable');
+    const status = refresh
+      ? await this.integrations.updates.check(true)
+      : this.integrations.updates.status();
+    await this.api.send(chatId, updatesCard(this.locale(), status));
+  }
+  private currentUpdates() {
+    const status = this.integrations?.updates.status();
+    if (!status?.checkedAt) return;
+    for (const tool of status.tools) {
+      if (tool.updateAvailable)
+        this.updateNotice({ kind: 'available', tool, checkedAt: status.checkedAt });
+      if (tool.changedFrom)
+        this.updateNotice({ kind: 'changed', tool, checkedAt: status.checkedAt });
+    }
+  }
+  private updateNotice(notice: UpdateNotice) {
+    if (!notice.tool.supported || !this.paired()) return;
+    const store = this.engine.store;
+    const enabled = () =>
+      notificationPreferences(store).enabled &&
+      (store.setting<boolean>('updates.notifications') ?? true);
+    if (!enabled()) return;
+    this.notices = this.notices
+      .then(async () => {
+        const pair = this.paired();
+        if (this.stopped || !pair || !enabled()) return;
+        const id = `telegram:runtime:${notice.kind}:${notice.tool.id}:${notice.tool.installed}:${notice.kind === 'available' ? notice.tool.latest : notice.tool.changedFrom}`;
+        if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+        store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
+        try {
+          await this.api.send(pair.chatId, updateCard(this.locale(), notice));
+          store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+        } catch (error) {
+          store.setSetting('telegram.error', redact(String(error)));
+        }
+      })
+      .catch((error) => store.setSetting('telegram.error', redact(String(error))));
+  }
   private async poll() {
     while (!this.stopped) {
       this.controller = new AbortController();

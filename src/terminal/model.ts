@@ -1,3 +1,7 @@
+import { translator, type Locale } from '../i18n/index.js';
+import type { Preferences } from '../core/preferences.js';
+import type { UpdateStatus } from '../core/updates.js';
+import type { ModelCatalogueInfo } from '../core/agents.js';
 import type {
   Task,
   Message,
@@ -28,6 +32,8 @@ export interface Detail {
   siblings?: { id: string; title: string; state: Task['state']; parentTaskId?: string }[];
 }
 export interface Status {
+  preferences?: Preferences;
+  updates?: UpdateStatus;
   version: string;
   resources: ResourceStatus;
   activeJobs: number;
@@ -40,9 +46,11 @@ export interface AgentSettings {
   defaults: AgentProfiles;
   maxConcurrentAgents: number;
   error?: string;
+  catalogue?: ModelCatalogueInfo;
 }
 export interface Overlay {
-  kind: 'tasks' | 'help' | 'attach' | 'ticket' | 'models' | 'notifications';
+  kind:
+    'tasks' | 'help' | 'attach' | 'ticket' | 'models' | 'notifications' | 'language' | 'updates';
   id?: number;
   editor: Editor;
   index: number;
@@ -57,6 +65,9 @@ export interface Overlay {
   paired?: boolean;
 }
 export interface ConsoleState {
+  locale: Locale;
+  preferences?: Preferences;
+  updates?: UpdateStatus;
   tasks: Task[];
   selectedId: string;
   role: Role;
@@ -77,6 +88,8 @@ export interface ConsoleState {
   agentSettings?: AgentSettings;
 }
 export const commands = [
+  { name: '/language', hint: 'Choose English or Russian' },
+  { name: '/updates', hint: 'CLI versions and update notifications' },
   { name: '/new', hint: 'Start from a GitHub issue or Tracker ticket' },
   { name: '/child', hint: 'Add a ticket with the same reviewer' },
   { name: '/models', hint: 'Choose author / reviewer models' },
@@ -118,12 +131,17 @@ export class ConsoleModel {
   private initialId?: string;
   private autoSelected = false;
   private overlayId = 0;
+  private localeOverride?: Locale;
+  t = (text: string, values?: Record<string, unknown>) =>
+    translator(this.state.locale)(text, values);
   constructor(
     private api: Api,
-    initial?: { id?: string; role?: Role },
+    initial?: { id?: string; role?: Role; locale?: Locale },
   ) {
     this.initialId = initial?.id;
+    this.localeOverride = initial?.locale;
     this.state = {
+      locale: initial?.locale ?? 'en',
       tasks: [],
       selectedId: '',
       role: initial?.role ?? 'reviewer',
@@ -278,6 +296,14 @@ export class ConsoleModel {
         status,
         connection: 'online',
         connectionError: undefined,
+        updates: status.updates ?? this.state.updates,
+        ...(status.preferences &&
+        status.preferences.version >= (this.state.preferences?.version ?? -1)
+          ? {
+              preferences: status.preferences,
+              locale: this.localeOverride ?? status.preferences.locale,
+            }
+          : {}),
         ...(id === this.state.selectedId && selection === this.selection && detail
           ? { detail }
           : {}),
@@ -359,7 +385,7 @@ export class ConsoleModel {
   async submitOverlay() {
     const overlay = this.state.overlay;
     if (!overlay) return;
-    if (['ticket', 'models', 'notifications'].includes(overlay.kind)) {
+    if (['ticket', 'models', 'notifications', 'language', 'updates'].includes(overlay.kind)) {
       await submitPlanning(this);
       return;
     }
@@ -398,6 +424,11 @@ export class ConsoleModel {
     else
       await this.mutate('attach', { url: fields[0], repoPath: fields[1], requirements: fields[2] });
   }
+  async changeLanguage(locale: Locale) {
+    const value = await this.request<Preferences>('/preferences', { locale });
+    this.localeOverride = undefined;
+    this.patch({ preferences: value, locale: value.locale, notice: 'Language saved.' });
+  }
   async execute(text: string): Promise<'exit' | undefined> {
     const [name, ...args] = text.trim().split(/\s+/);
     if (name === '/quit' || name === '/exit') return 'exit';
@@ -405,14 +436,47 @@ export class ConsoleModel {
     this.patch({ error: undefined, notice: undefined, menuHidden: true });
     if (
       args.length >
-      (['/use', '/role', '/new', '/child', '/concurrency', '/link'].includes(name) ? 1 : 0)
+      ([
+        '/use',
+        '/role',
+        '/new',
+        '/child',
+        '/concurrency',
+        '/link',
+        '/language',
+        '/updates',
+        '/models',
+        '/defaults',
+      ].includes(name)
+        ? 1
+        : 0)
     ) {
       this.patch({
         error: `${name} acts on the selected task. Use /use to choose another task first.`,
       });
       return;
     }
-    if (['/new', '/child', '/models', '/defaults', '/notifications'].includes(name))
+    if (name === '/language' && args[0]) {
+      if (!['en', 'ru'].includes(args[0])) {
+        this.patch({ error: 'Choose /language en or /language ru.' });
+        return;
+      }
+      try {
+        await this.changeLanguage(args[0] as Locale);
+      } catch (error) {
+        this.patch({ error: oneLine((error as Error).message) });
+      }
+    } else if (
+      [
+        '/new',
+        '/child',
+        '/models',
+        '/defaults',
+        '/notifications',
+        '/language',
+        '/updates',
+      ].includes(name)
+    )
       await openPlanning(this, name, args[0]);
     else if (name === '/concurrency') {
       const count = Number(args[0]);

@@ -1,9 +1,15 @@
 import { render } from 'ink';
 import { TerminalApp } from './app.js';
 import { ConsoleModel, type Api } from './model.js';
+import { translator, type Locale } from '../i18n/index.js';
 export async function runTerminal(
   api: Api,
-  options: { id?: string; role?: 'author' | 'reviewer'; theme?: 'dark' | 'light' } = {},
+  options: {
+    id?: string;
+    role?: 'author' | 'reviewer';
+    theme?: 'dark' | 'light';
+    locale?: Locale;
+  } = {},
 ) {
   const model = new ConsoleModel(api, options);
   const instance = render(<TerminalApp model={model} themeName={options.theme} />, {
@@ -25,5 +31,9 @@ export async function runTerminal(
     process.off('SIGTERM', stop);
     process.off('SIGHUP', stop);
   }
-  process.stdout.write('Reviewloop console closed. The service and agents continue running.\n');
+  process.stdout.write(
+    translator(model.snapshot().locale)(
+      'Reviewloop console closed. The service and agents continue running.',
+    ) + '\n',
+  );
 }

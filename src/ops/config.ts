@@ -17,6 +17,14 @@ export const configSchema = z.object({
     .default('8G'),
   serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
   demo: z.boolean().default(true),
+  locale: z.enum(['en', 'ru']).default('en'),
+  codex: z.object({ executable: z.string().min(1).optional() }).default({}),
+  updates: z
+    .object({
+      enabled: z.boolean().default(true),
+      intervalHours: z.number().int().min(1).max(168).default(6),
+    })
+    .default({ enabled: true, intervalHours: 6 }),
   agents: profilesSchema.default(inheritedProfiles),
   maxConcurrentAgents: z.number().int().min(1).max(8).default(1),
   resources: z

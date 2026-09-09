@@ -1976,3 +1976,52 @@ button {
     transition: none !important;
   }
 }
+.language-select {
+  width: auto;
+  max-width: 110px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.login-page > .language-select {
+  position: absolute;
+  right: 24px;
+  top: 24px;
+}
+.top-actions .icon-button {
+  position: relative;
+}
+.update-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d99531;
+  right: 3px;
+  top: 3px;
+}
+.model-source,
+.runtime-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #dce5df;
+  border-radius: 10px;
+  background: #f7faf8;
+}
+.model-source small,
+.runtime-card small {
+  color: #687b72;
+  overflow-wrap: anywhere;
+}
+.runtime-card code {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .topbar .breadcrumb {
+    display: none;
+  }
+  .top-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-import { Command, Option } from 'commander';
+import { Command, Option, Help } from 'commander';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import type { Locale } from './i18n/index.js';
 import { buildApp } from './server/app.js';
 import { credential, redact, rememberSecret } from './core/security.js';
 import { resources } from './core/resources.js';
@@ -15,12 +17,17 @@ import { registerOperations } from './ops/commands.js';
 import { consoleUI } from './ops/console.js';
 import { VERSION } from './version.js';
 import { registerPlanningCommands } from './ops/planning.js';
+import { registerEnvironmentCommands } from './ops/environment.js';
+import { normalizeLocale, translator } from './i18n/index.js';
 
 const program = new Command()
   .name('reviewctl')
   .description('Persistent author/reviewer workflow for GitHub, GitLab and Arcadia')
   .version(VERSION)
   .option('--plain', 'use the basic line-oriented console')
+  .addOption(
+    new Option('--language <locale>', 'interface language for this client').choices(['en', 'ru']),
+  )
   .addOption(
     new Option('--theme <theme>', 'terminal appearance').choices(['dark', 'light']).default('dark'),
   )
@@ -359,11 +366,58 @@ program
   });
 registerOperations(program);
 registerPlanningCommands(program);
+registerEnvironmentCommands(program);
+let cachedCliLocale: Locale | undefined;
+const cliText = (value: string) => {
+  if (!cachedCliLocale) {
+    const config = loadConfig();
+    cachedCliLocale = config.locale;
+    const file = join(program.opts().dataDir ?? defaultDataDir(config), 'reviewloop.sqlite');
+    if (existsSync(file)) {
+      let db: DatabaseSync | undefined;
+      try {
+        db = new DatabaseSync(file, { readOnly: true });
+        const row = db.prepare("SELECT value FROM settings WHERE key='preferences'").get();
+        if (row)
+          cachedCliLocale = normalizeLocale(JSON.parse(String(row.value)).locale, config.locale);
+      } catch {
+        /* Help remains available without a working service database. */
+      } finally {
+        db?.close();
+      }
+    }
+  }
+  return translator(
+    normalizeLocale(program.opts().language ?? process.env.REVIEWLOOP_LANG ?? cachedCliLocale),
+  )(value);
+};
+const localizedHelp = {
+  optionDescription: (option: Option) => cliText(option.description),
+  commandDescription: (command: Command) => cliText(command.description()),
+  subcommandDescription: (command: Command) => cliText(command.summary() || command.description()),
+  formatHelp(command: Command, helper: Help) {
+    return Help.prototype.formatHelp
+      .call(helper, command, helper)
+      .replace(/^(Usage|Options|Commands|Arguments):/gm, (label) => cliText(label));
+  },
+};
+const configureHelp = (command: Command) => {
+  command.configureHelp(localizedHelp);
+  for (const child of command.commands) configureHelp(child);
+};
+configureHelp(program);
 const interactive = (options: { id?: string; role?: 'author' | 'reviewer' } = {}) =>
   consoleUI(
     <T>(path: string, body?: unknown, signal?: AbortSignal) =>
       callApi<T>(path, body, { dataDir: dataDir(), url: program.opts().url, signal }),
-    { ...options, plain: program.opts().plain, theme: program.opts().theme },
+    {
+      ...options,
+      plain: program.opts().plain,
+      theme: program.opts().theme,
+      locale:
+        program.opts().language ??
+        (process.env.REVIEWLOOP_LANG ? normalizeLocale(process.env.REVIEWLOOP_LANG) : undefined),
+    },
   );
 program
   .command('console')

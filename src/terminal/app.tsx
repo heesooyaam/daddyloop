@@ -1,3 +1,4 @@
+import { translator, type Locale } from '../i18n/index.js';
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Box, Text, useApp, useInput, usePaste, useWindowSize, type Key } from 'ink';
 import { ConsoleModel, commands, type ConsoleState, type Detail } from './model.js';
@@ -66,28 +67,36 @@ const time = (value: string) => {
     ? ''
     : date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 };
-function recentActivity(detail?: Detail) {
+function recentActivity(detail?: Detail, locale: Locale = 'en') {
+  const tr = translator(locale);
+
   const event = detail?.events
     .filter((event) =>
       ['tool.started', 'tool.completed', 'runtime.item', 'job.queued'].includes(event.type),
     )
     .at(-1);
-  if (!event) return 'Waiting for the service';
+  if (!event) return tr('Waiting for the service');
   const data = event.data as Record<string, unknown> | undefined;
   return oneLine(data?.command ?? data?.tool ?? event.type.replaceAll('.', ' / '));
 }
 export function contentRows(state: ConsoleState, columns: number): Row[] {
+  const tr = translator(state.locale);
+
   const detail = state.detail;
   if (!detail)
     return [
-      { text: 'A workspace for the work between agents.', kind: 'heading' },
+      { text: tr('A workspace for the work between agents.'), kind: 'heading' },
       { text: '' },
       ...markdown(
         state.connection === 'offline'
-          ? 'The service is unavailable. Your console will reconnect automatically.\n\nRun reviewctl init on the service host, or reviewctl connect <https-url> on a client.\n\n/refresh retries now. Ctrl+Q closes this client.'
+          ? tr(
+              'The service is unavailable. Your console will reconnect automatically.\n\nRun reviewctl init on the service host, or reviewctl connect <https-url> on a client.\n\n/refresh retries now. Ctrl+Q closes this client.',
+            )
           : state.tasks.length
-            ? 'Loading the selected conversation…'
-            : 'Start with a ticket, attach a PR or try the demo.\n\n/new      Start from a GitHub issue or Tracker ticket\n/defaults Choose author and reviewer models\n/attach   Connect an existing review\n/demo     Explore a complete review loop\n/notifications  Telegram updates\n\nThe service owns the agent sessions. Closing this console leaves the work running.',
+            ? tr('Loading the selected conversation…')
+            : tr(
+                'Start with a ticket, attach a PR or try the demo.\n\n/new      Start from a GitHub issue or Tracker ticket\n/defaults Choose author and reviewer models\n/attach   Connect an existing review\n/demo     Explore a complete review loop\n/notifications  Telegram updates\n\nThe service owns the agent sessions. Closing this console leaves the work running.',
+              ),
         columns,
       ),
     ];
@@ -96,8 +105,14 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     rows.push(
       ...markdown(
         detail.group
-          ? `${detail.group.title}\n\nShared reviewer: ${profileText(detail.group.reviewer)}\n\n${detail.group.requirements}`
-          : 'This task has no group yet. /child adds a ticket with its own author and this reviewer.',
+          ? tr('{v0}\n\nShared reviewer: {v1}\n\n{v2}', {
+              v0: detail.group.title,
+              v1: profileText(detail.group.reviewer, state.locale),
+              v2: detail.group.requirements,
+            })
+          : tr(
+              'This task has no group yet. /child adds a ticket with its own author and this reviewer.',
+            ),
         columns,
       ),
       { text: '' },
@@ -105,13 +120,16 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     for (const sibling of detail.siblings ?? [])
       rows.push(
         { text: `${sibling.id === detail.task.id ? '›' : ' '} ${sibling.title}`, kind: 'accent' },
-        { text: `${sibling.id.slice(0, 8)} · ${labels[sibling.state]}`, kind: 'muted' },
+        { text: `${sibling.id.slice(0, 8)} · ${tr(labels[sibling.state])}`, kind: 'muted' },
       );
   } else if (state.view === 'findings') {
     const snapshot = detail.task.snapshot;
     rows.push(
       {
-        text: `${snapshot?.status === 'published' ? 'PUBLISHED REVIEW' : 'REVIEW DRAFT'} · ${snapshot?.comments.length ?? 0} findings`,
+        text: tr('{v0} · {v1} findings', {
+          v0: snapshot?.status === 'published' ? 'PUBLISHED REVIEW' : 'REVIEW DRAFT',
+          v1: snapshot?.comments.length ?? 0,
+        }),
         kind: 'heading',
       },
       { text: '' },
@@ -120,30 +138,43 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     for (const comment of snapshot?.comments ?? [])
       rows.push(
         {
-          text: `${comment.location ? `${comment.location.path}:${comment.location.line}` : 'General comment'} · ${comment.id}`,
+          text: `${comment.location ? `${comment.location.path}:${comment.location.line}` : tr('General comment')} · ${comment.id}`,
           kind: 'accent',
         },
         ...markdown(comment.body, columns),
         { text: '' },
       );
     if (!snapshot?.comments.length)
-      rows.push({ text: 'No findings in the current review.', kind: 'muted' });
+      rows.push({ text: tr('No findings in the current review.'), kind: 'muted' });
   } else if (state.view === 'context') {
     rows.push(
-      { text: 'ORIGINAL REQUIREMENTS', kind: 'heading' },
+      { text: tr('ORIGINAL REQUIREMENTS'), kind: 'heading' },
       { text: '' },
       ...markdown(detail.task.requirements, columns),
       { text: '' },
-      { text: 'PERSISTENT SESSIONS', kind: 'heading' },
+      { text: tr('PERSISTENT SESSIONS'), kind: 'heading' },
     );
     rows.push(
       ...markdown(
-        `Reviewer model: ${profileText(detail.agents?.reviewer)}\nAuthor model: ${profileText(detail.agents?.author)}\nReviewer session: ${detail.group?.reviewerThreadId ?? detail.task.reviewerThreadId ?? 'Starts with the first review'}\nAuthor session: ${detail.task.authorThreadId ?? 'Starts with the first conversation'}\nRepository: ${detail.task.repoPath}\nSource: ${detail.task.ref.url}`,
+        tr(
+          'Reviewer model: {v0}\nAuthor model: {v1}\nReviewer session: {v2}\nAuthor session: {v3}\nRepository: {v4}\nSource: {v5}',
+          {
+            v0: profileText(detail.agents?.reviewer, state.locale),
+            v1: profileText(detail.agents?.author, state.locale),
+            v2:
+              detail.group?.reviewerThreadId ??
+              detail.task.reviewerThreadId ??
+              tr('Starts with the first review'),
+            v3: detail.task.authorThreadId ?? tr('Starts with the first conversation'),
+            v4: detail.task.repoPath,
+            v5: detail.task.ref.url,
+          },
+        ),
         columns,
       ),
     );
   } else if (state.view === 'activity') {
-    rows.push({ text: 'ACTIVITY · latest persisted events', kind: 'heading' }, { text: '' });
+    rows.push({ text: tr('ACTIVITY · latest persisted events'), kind: 'heading' }, { text: '' });
     for (const event of detail.events
       .filter((event) => event.type !== 'runtime.text')
       .slice(-150)) {
@@ -166,7 +197,10 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     }
     if (selected.length < messages.length)
       rows.push(
-        { text: 'Older messages are available in the web panel / reviewctl show.', kind: 'muted' },
+        {
+          text: tr('Older messages are available in the web panel / reviewctl show.'),
+          kind: 'muted',
+        },
         { text: '' },
       );
     if (!messages.length)
@@ -175,28 +209,32 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
           text:
             state.role === 'author'
               ? detail.task.ref.kind === 'ticket'
-                ? 'Discuss the ticket here. /implement starts code changes and the automatic review loop.'
-                : 'Your author session starts after feedback is published.'
-              : 'Your reviewer will report findings here.',
+                ? tr(
+                    'Discuss the ticket here. /implement starts code changes and the automatic review loop.',
+                  )
+                : tr('Your author session starts after feedback is published.')
+              : tr('Your reviewer will report findings here.'),
           kind: 'muted',
         },
         { text: '' },
         ...markdown(
-          'Write a message below. Use Tab to switch sessions; drafts stay with their recipient.',
+          tr(
+            'Write a message below. Use Tab to switch sessions; drafts stay with their recipient.',
+          ),
           columns,
         ),
       );
     for (const message of selected) {
       const user = message.sender === 'user';
       rows.push({
-        text: `${user ? '❯ YOU' : '● ' + state.role.toUpperCase()}  ${time(message.at)}`,
+        text: `${user ? tr('❯ YOU') : '● ' + tr(state.role).toUpperCase()}  ${time(message.at)}`,
         kind: user ? 'user' : state.role === 'author' ? 'author' : 'accent',
       });
       rows.push(...markdown(message.text, columns), { text: '' });
     }
     if (state.pending?.key === `${state.selectedId}:${state.role}`)
       rows.push(
-        { text: '❯ YOU · sending…', kind: 'user' },
+        { text: tr('❯ YOU · sending…'), kind: 'user' },
         ...markdown(state.pending.text, columns),
         { text: '' },
       );
@@ -206,10 +244,10 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     if (active)
       rows.push(
         {
-          text: `${state.role.toUpperCase()} · ${active.status === 'queued' ? 'queued on the service' : 'working'}`,
+          text: `${tr(state.role).toUpperCase()} · ${active.status === 'queued' ? tr('queued on the service') : 'working'}`,
           kind: 'accent',
         },
-        ...markdown(recentActivity(detail), columns),
+        ...markdown(recentActivity(detail, state.locale), columns),
       );
   }
   return rows.flatMap((row) => wrap(row.text, columns).map((text) => ({ ...row, text })));
@@ -243,6 +281,8 @@ function Lines({ rows, theme }: { rows: Row[]; theme: Theme }) {
   );
 }
 function Sidebar({ state, height, theme }: { state: ConsoleState; height: number; theme: Theme }) {
+  const tr = translator(state.locale);
+
   const selected = state.tasks.findIndex((task) => task.id === state.selectedId);
   const count = Math.max(1, Math.floor((height - 12) / 4)),
     start = Math.max(0, Math.min(selected - Math.floor(count / 2), state.tasks.length - count));
@@ -256,7 +296,8 @@ function Sidebar({ state, height, theme }: { state: ConsoleState; height: number
       paddingTop={1}
     >
       <Text color={theme.muted}>
-        WORKSPACE <Text color={theme.accent}>{state.tasks.length}</Text>
+        {tr(' WORKSPACE ')}
+        <Text color={theme.accent}>{state.tasks.length}</Text>
       </Text>
       <Text> </Text>
       {state.tasks.slice(start, start + count).map((task) => (
@@ -270,52 +311,57 @@ function Sidebar({ state, height, theme }: { state: ConsoleState; height: number
           </Text>
           <Text color={task.state === 'complete' ? theme.accent : theme.muted}>
             {' '}
-            {taskIcon(task)} {labels[task.state]}
+            {taskIcon(task)} {tr(labels[task.state])}
           </Text>
           <Text color={theme.muted}>
             {' '}
-            {task.id.slice(0, 8)} {task.ref.provider === 'demo' ? '· DEMO' : ''}
+            {task.id.slice(0, 8)} {task.ref.provider === 'demo' ? tr('· DEMO') : ''}
           </Text>
         </Box>
       ))}
       <Box flexGrow={1} />
-      <Text color={theme.muted}>Ctrl+T choose task</Text>
-      <Text color={theme.muted}>Tab switch role</Text>
-      <Text color={theme.muted}>/ commands</Text>
+      <Text color={theme.muted}>{tr('Ctrl+T choose task')}</Text>
+      <Text color={theme.muted}>{tr('Tab switch role')}</Text>
+      <Text color={theme.muted}>{tr('/ commands')}</Text>
       <Text> </Text>
-      <Text color={theme.accent}>● Sessions stay on host</Text>
-      <Text color={theme.muted}> Exit safely with Ctrl+Q</Text>
+      <Text color={theme.accent}>{tr('● Sessions stay on host')}</Text>
+      <Text color={theme.muted}>{tr(' Exit safely with Ctrl+Q')}</Text>
     </Box>
   );
 }
 function overlayRows(model: ConsoleModel, columns: number, height: number): Row[] {
+  const tr = model.t;
+
   const state = model.snapshot(),
     overlay = state.overlay!;
-  if (['ticket', 'models', 'notifications'].includes(overlay.kind))
+  if (['ticket', 'models', 'notifications', 'language', 'updates'].includes(overlay.kind))
     return planningRows(model, columns, height);
   if (overlay.kind === 'help')
     return markdown(
-      'KEYBOARD\n\nEnter          Send a message / run a typed command\nTab            Switch author and reviewer (or complete /command)\nCtrl+T         Choose a task\nPgUp / PgDn    Scroll conversation, findings or activity\nShift+Enter    New line (supported terminals)\nCtrl+J         New line on all terminals\nCtrl+A / E     Start / end of line\nCtrl+W         Delete previous word\nCtrl+C         Clear draft, then close the console\nCtrl+Q         Close console; service and agents continue\nEsc            Close a menu or cancel attaching a PR\n\nCOMMANDS\n\n' +
-        commands.map((command) => command.name.padEnd(12) + command.hint).join('\n'),
+      tr(
+        'KEYBOARD\n\nEnter          Send a message / run a typed command\nTab            Switch author and reviewer (or complete /command)\nCtrl+T         Choose a task\nPgUp / PgDn    Scroll conversation, findings or activity\nShift+Enter    New line (supported terminals)\nCtrl+J         New line on all terminals\nCtrl+A / E     Start / end of line\nCtrl+W         Delete previous word\nCtrl+C         Clear draft, then close the console\nCtrl+Q         Close console; service and agents continue\nEsc            Close a menu or cancel attaching a PR\n\nCOMMANDS\n\n',
+      ) + commands.map((command) => command.name.padEnd(12) + tr(command.hint)).join('\n'),
       columns,
     );
   if (overlay.kind === 'attach') {
     const step = overlay.step ?? 0;
     return markdown(
       [
-        'Connect an existing review',
+        tr('Connect an existing review'),
         '',
-        ['1  PR / MR URL', '2  Repository path', '3  Original requirements']
+        [tr('1  PR / MR URL'), tr('2  Repository path'), tr('3  Original requirements')]
           .map((label, index) => `${index === step ? '›' : index < step ? '✓' : ' '} ${label}`)
           .join('\n'),
         '',
         [
-          'Paste a clean HTTPS URL from GitHub, GitLab or Arcanum.',
-          'Use an absolute path on the service host. The original working copy is preserved.',
-          'Tell both agents what this change should achieve. Paste multiple lines, then press Enter.',
+          tr('Paste a clean HTTPS URL from GitHub, GitLab or Arcanum.'),
+          tr('Use an absolute path on the service host. The original working copy is preserved.'),
+          tr(
+            'Tell both agents what this change should achieve. Paste multiple lines, then press Enter.',
+          ),
         ][step],
         '',
-        'Esc cancels and preserves your current conversation draft.',
+        tr('Esc cancels and preserves your current conversation draft.'),
       ].join('\n'),
       columns,
     );
@@ -324,7 +370,7 @@ function overlayRows(model: ConsoleModel, columns: number, height: number): Row[
     count = Math.max(1, Math.floor((height - 3) / 3));
   const start = Math.max(0, Math.min(overlay.index - Math.floor(count / 2), tasks.length - count));
   const rows: Row[] = [
-    { text: `TASKS · ${tasks.length} matches · ↑ / ↓ to choose`, kind: 'heading' },
+    { text: tr('TASKS · {v0} matches · ↑ / ↓ to choose', { v0: tasks.length }), kind: 'heading' },
     { text: '' },
   ];
   for (let i = start; i < Math.min(tasks.length, start + count); i++)
@@ -334,7 +380,7 @@ function overlayRows(model: ConsoleModel, columns: number, height: number): Row[
         kind: i === overlay.index ? 'accent' : undefined,
       },
       {
-        text: `  ${tasks[i].id.slice(0, 8)}  ${labels[tasks[i].state]} · ${tasks[i].ref.provider}`,
+        text: `  ${tasks[i].id.slice(0, 8)}  ${tr(labels[tasks[i].state])} · ${tasks[i].ref.provider}`,
         kind: 'muted',
       },
       { text: '' },
@@ -342,8 +388,8 @@ function overlayRows(model: ConsoleModel, columns: number, height: number): Row[
   if (!tasks.length)
     rows.push({
       text: state.tasks.length
-        ? 'No tasks match this search.'
-        : 'No tasks yet. Esc, then /demo or /attach.',
+        ? tr('No tasks match this search.')
+        : tr('No tasks yet. Esc, then /demo or /attach.'),
       kind: 'muted',
     });
   return rows;
@@ -355,6 +401,8 @@ export function TerminalApp({
   model: ConsoleModel;
   themeName?: 'dark' | 'light';
 }) {
+  const tr = model.t;
+
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const { columns, rows } = useWindowSize();
   const { exit } = useApp();
@@ -373,7 +421,7 @@ export function TerminalApp({
   const overlay = state.overlay;
   const hiddenComposer =
     overlay?.kind === 'help' ||
-    overlay?.kind === 'notifications' ||
+    ['notifications', 'language', 'updates'].includes(overlay?.kind ?? '') ||
     (overlay?.kind === 'models' && overlay.step !== 1) ||
     (overlay?.kind === 'ticket' && [3, 5].includes(overlay.step ?? 0));
   const contentHeight = Math.max(
@@ -401,6 +449,7 @@ export function TerminalApp({
       state.pending,
       state.role,
       state.view,
+      state.locale,
       state.connection,
       textWidth,
       state.tasks.length,
@@ -439,7 +488,7 @@ export function TerminalApp({
       if (current.overlay) model.closeOverlay();
       else if (model.editor().text) {
         model.setEditor(emptyEditor());
-        model.patch({ notice: 'Draft cleared. Ctrl+C again closes only this console.' });
+        model.patch({ notice: tr('Draft cleared. Ctrl+C again closes only this console.') });
       } else exit();
       return;
     }
@@ -531,9 +580,12 @@ export function TerminalApp({
   if (columns < 50 || rows < 20)
     return (
       <Box width={columns} flexDirection="column">
-        <Text color="green">reviewloop {VERSION}</Text>
-        <Text>Resize to at least 50 × 20.</Text>
-        <Text>Ctrl+Q closes this client.</Text>
+        <Text color="green">
+          {tr('reviewloop ')}
+          {VERSION}
+        </Text>
+        <Text>{tr('Resize to at least 50 × 20.')}</Text>
+        <Text>{tr('Ctrl+Q closes this client.')}</Text>
       </Box>
     );
   const editorStart = Math.max(
@@ -552,7 +604,7 @@ export function TerminalApp({
     >
       <Box height={topHeight} paddingX={1} alignItems="center">
         <Text bold color={theme.accent}>
-          ● reviewloop.
+          {tr(' ● reviewloop. ')}
         </Text>
         <Text color={theme.muted}> {VERSION}</Text>
         <Box flexGrow={1} />
@@ -567,9 +619,9 @@ export function TerminalApp({
         >
           {state.connection === 'connecting' ? spin : '●'}{' '}
           {state.connection === 'online'
-            ? 'Connected to your service'
+            ? tr('Connected to your service')
             : state.connection === 'offline'
-              ? 'Offline · reconnecting'
+              ? tr('Offline · reconnecting')
               : 'Connecting…'}
         </Text>
       </Box>
@@ -587,27 +639,38 @@ export function TerminalApp({
             {clip(
               state.overlay
                 ? state.overlay.kind === 'tasks'
-                  ? 'Choose a task'
+                  ? tr('Choose a task')
                   : state.overlay.kind === 'attach'
-                    ? 'Attach a review'
+                    ? tr('Attach a review')
                     : state.overlay.kind === 'ticket'
-                      ? 'Start from a ticket'
+                      ? tr('Start from a ticket')
                       : state.overlay.kind === 'models'
-                        ? 'Agent models'
-                        : state.overlay.kind === 'notifications'
-                          ? 'Telegram notifications'
-                          : 'Keyboard & commands'
-                : (task?.title ?? 'Your review workspace'),
+                        ? tr('Agent models')
+                        : state.overlay.kind === 'language'
+                          ? tr('Language')
+                          : state.overlay.kind === 'updates'
+                            ? tr('Updates')
+                            : state.overlay.kind === 'notifications'
+                              ? tr('Telegram notifications')
+                              : tr('Keyboard & commands')
+                : (task?.title ?? tr('Your review workspace')),
               textWidth,
             )}
           </Text>
           <Text color={theme.muted}>
             {clip(
               state.overlay
-                ? 'Esc to return · your conversation draft is preserved'
+                ? tr('Esc to return · your conversation draft is preserved')
                 : task
-                  ? `${labels[task.state]} · round ${task.round}/${task.policy.maxRounds} · ${task.revision?.head.slice(0, 8) ?? 'pending'} · ${task.ref.provider.toUpperCase()}${task.policy.publication === 'human' ? ' · manual publication' : ''}`
-                  : 'One host · persistent author and reviewer sessions',
+                  ? tr('{v0} · round {v1}/{v2} · {v3} · {v4}{v5}', {
+                      v0: tr(labels[task.state]),
+                      v1: task.round,
+                      v2: task.policy.maxRounds,
+                      v3: task.revision?.head.slice(0, 8) ?? 'pending',
+                      v4: task.ref.provider.toUpperCase(),
+                      v5: task.policy.publication === 'human' ? tr(' · manual publication') : '',
+                    })
+                  : tr('One host · persistent author and reviewer sessions'),
               textWidth,
             )}
           </Text>
@@ -618,11 +681,11 @@ export function TerminalApp({
             ) : (
               <>
                 <Text color={roleColor} bold>
-                  {state.role === 'reviewer' ? '● REVIEWER' : '● AUTHOR'}
+                  {state.role === 'reviewer' ? tr('● REVIEWER') : tr('● AUTHOR')}
                 </Text>
                 {'  │  '}
                 {textWidth < 60
-                  ? state.view
+                  ? tr(state.view)
                   : (['chat', 'findings', 'activity', 'context'] as const).map((view) => (
                       <Text
                         key={view}
@@ -630,7 +693,7 @@ export function TerminalApp({
                         bold={state.view === view}
                       >
                         {view === state.view ? '› ' : ''}
-                        {view}
+                        {tr(view)}
                         {'  '}
                       </Text>
                     ))}
@@ -642,7 +705,7 @@ export function TerminalApp({
             <Box flexGrow={1} />
             {!!menu.length && (
               <Box flexDirection="column" backgroundColor={theme.panel}>
-                <Text color={theme.muted}>COMMANDS · ↑↓ choose · Tab complete</Text>
+                <Text color={theme.muted}>{tr('COMMANDS · ↑↓ choose · Tab complete')}</Text>
                 {menu
                   .slice(
                     Math.max(0, Math.min(state.menuIndex - 2, menu.length - 6)),
@@ -657,7 +720,7 @@ export function TerminalApp({
                       }
                     >
                       {clip(
-                        `${command === menu[state.menuIndex % menu.length] ? '›' : ' '} ${command.name.padEnd(12)} ${command.hint}`,
+                        `${command === menu[state.menuIndex % menu.length] ? '›' : ' '} ${command.name.padEnd(12)} ${tr(command.hint)}`,
                         textWidth,
                       )}
                     </Text>
@@ -688,21 +751,21 @@ export function TerminalApp({
                       {clip(
                         state.overlay
                           ? state.overlay.kind === 'tasks'
-                            ? 'Search tasks…'
+                            ? tr('Search tasks…')
                             : state.overlay.kind === 'models' ||
                                 (state.overlay.kind === 'ticket' && (state.overlay.step ?? 0) >= 2)
-                              ? 'Filter models…'
+                              ? tr('Filter models…')
                               : state.overlay.kind === 'ticket'
                                 ? [
-                                    'GitHub issue URL or Tracker key',
-                                    'Repository path on the service host',
+                                    tr('GitHub issue URL or Tracker key'),
+                                    tr('Repository path on the service host'),
                                   ][state.overlay.step ?? 0]
                                 : [
-                                    'PR / MR URL',
-                                    'Repository path on the service host',
-                                    'Original requirements',
+                                    tr('PR / MR URL'),
+                                    tr('Repository path on the service host'),
+                                    tr('Original requirements'),
                                   ][state.overlay.step ?? 0]
-                          : `Message ${state.role}, or / for commands…`,
+                          : tr('Message {v0}, or / for commands…', { v0: state.role }),
                         textWidth - 6,
                       )}
                     </Text>
@@ -715,9 +778,9 @@ export function TerminalApp({
             {clip(
               state.overlay
                 ? state.overlay.kind === 'help'
-                  ? 'Enter / Esc close · PgUp / PgDn scroll'
-                  : 'Enter continue · Esc cancel'
-                : `${active || state.busy ? spin + ' ' : ''}${state.pending ? 'Sending message…' : active ? recentActivity(state.detail) : state.role === 'reviewer' ? 'Private to you and the reviewer' : 'Separate from the reviewer conversation'}${offset ? ' · scrolled' : ''}`,
+                  ? tr('Enter / Esc close · PgUp / PgDn scroll')
+                  : tr('Enter continue · Esc cancel')
+                : `${active || state.busy ? spin + ' ' : ''}${state.pending ? tr('Sending message…') : active ? recentActivity(state.detail, state.locale) : state.role === 'reviewer' ? tr('Private to you and the reviewer') : tr('Separate from the reviewer conversation')}${offset ? tr(' · scrolled') : ''}`,
               textWidth,
             )}
           </Text>
@@ -734,8 +797,10 @@ export function TerminalApp({
         <Text color={theme.muted}>
           {clip(
             columns >= 100
-              ? 'Enter send  ·  Tab role  ·  Ctrl+T tasks  ·  PgUp/PgDn scroll  ·  Ctrl+J newline  ·  Ctrl+Q quit'
-              : 'Enter send · Tab role · /help · Ctrl+Q quit',
+              ? tr(
+                  'Enter send  ·  Tab role  ·  Ctrl+T tasks  ·  PgUp/PgDn scroll  ·  Ctrl+J newline  ·  Ctrl+Q quit',
+                )
+              : tr('Enter send · Tab role · /help · Ctrl+Q quit'),
             columns - 4,
           )}
         </Text>
@@ -744,10 +809,17 @@ export function TerminalApp({
         <Text color={theme.muted}>
           {clip(
             state.connection === 'offline'
-              ? (state.connectionError ?? 'Connection unavailable; drafts preserved.')
+              ? (state.connectionError ?? tr('Connection unavailable; drafts preserved.'))
               : state.status
-                ? `${state.status.activeJobs} active agent · RAM free ${state.status.resources.memoryAvailableGiB.toFixed(1)} GiB · disk free ${state.status.resources.diskAvailableGiB.toFixed(0)} GiB · service continues after exit`
-                : 'Your service and agents continue after closing this console.',
+                ? tr(
+                    '{v0} active agent · RAM free {v1} GiB · disk free {v2} GiB · service continues after exit',
+                    {
+                      v0: state.status.activeJobs,
+                      v1: state.status.resources.memoryAvailableGiB.toFixed(1),
+                      v2: state.status.resources.diskAvailableGiB.toFixed(0),
+                    },
+                  )
+                : tr('Your service and agents continue after closing this console.'),
             columns - 4,
           )}
         </Text>

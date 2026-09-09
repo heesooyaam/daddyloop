@@ -67,8 +67,9 @@ export function registerPlanningCommands(program: Command) {
     .action((parent, source, options) => start(source, { ...options, parent }));
   program
     .command('models')
+    .option('--refresh', 'query the Codex model catalogue again')
     .description('List available Codex models and reasoning efforts')
-    .action(async () => print(await api('/agents')));
+    .action(async (options) => print(await api(options.refresh ? '/agents?refresh=1' : '/agents')));
   const agents = program
     .command('agents')
     .description('Choose independent author and reviewer profiles');

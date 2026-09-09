@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { AppError } from '../core/types.js';
 import { redact } from '../core/security.js';
+import { VERSION } from '../version.js';
 
 export interface RpcMessage {
   id?: string | number;
@@ -79,11 +80,12 @@ export class CodexConnection extends EventEmitter {
       lines.close();
       this.fail(new AppError('codex_exited', `Codex exited (${code ?? signal})`, 502));
     });
-    await this.request('initialize', {
-      clientInfo: { name: 'reviewloop', title: 'Reviewloop', version: '0.1.0' },
+    const initialized = await this.request<{ userAgent?: string }>('initialize', {
+      clientInfo: { name: 'reviewloop', title: 'Reviewloop', version: VERSION },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: 'initialized', params: {} });
+    return initialized;
   }
   request<T = unknown>(
     method: string,

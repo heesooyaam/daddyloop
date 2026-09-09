@@ -203,3 +203,46 @@ it('saves notification preferences and does not close a newer overlay after a la
   expect(model.snapshot().overlay?.kind).toBe('tasks');
   expect(writes.at(-1)?.body).toEqual({ enabled: false, mode: 'attention' });
 });
+
+it('switches language without losing drafts and ignores an older preference response', async () => {
+  const { status } = await import('./terminal-fixture.js');
+  const { api } = transport((path, body) =>
+    path === '/preferences' && body
+      ? Promise.resolve({ locale: 'ru', version: 2 })
+      : path === '/status'
+        ? Promise.resolve({ ...status, preferences: { locale: 'en', version: 1 } })
+        : undefined,
+  );
+  const model = await ready(api);
+  model.setEditor(insert(emptyEditor(), 'Original reviewer draft'));
+  model.setRole('author');
+  model.setEditor(insert(emptyEditor(), 'Исходный черновик автора'));
+  model.open('language');
+  model.patch({ overlay: { ...model.snapshot().overlay!, index: 1 } });
+  await model.submitOverlay();
+  expect(model.snapshot().locale).toBe('ru');
+  expect(model.editor().text).toBe('Исходный черновик автора');
+  model.setRole('reviewer');
+  expect(model.editor().text).toBe('Original reviewer draft');
+  await model.refresh();
+  expect(model.snapshot().locale).toBe('ru');
+  expect(model.snapshot().selectedId).toBe(taskA.id);
+});
+it('requests a fresh catalogue from the models command instead of replacing model names locally', async () => {
+  const { catalogue, profiles } = await import('./planning-fixture.js');
+  let refreshed = false;
+  const { api } = transport((path) =>
+    path === '/agents?refresh=1'
+      ? ((refreshed = true),
+        Promise.resolve({ models: [], defaults: profiles, maxConcurrentAgents: 1 }))
+      : path === '/agents'
+        ? catalogue
+            .list()
+            .then((models) => ({ models, defaults: profiles, maxConcurrentAgents: 1 }))
+        : undefined,
+  );
+  const model = await ready(api);
+  await model.execute('/models refresh');
+  expect(refreshed).toBe(true);
+  expect(model.snapshot().overlay?.kind).toBe('models');
+});

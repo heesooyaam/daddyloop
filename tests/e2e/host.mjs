@@ -6,6 +6,8 @@ import http from 'node:http';
 import { buildApp } from '../../dist/server/server/app.js';
 import { TicketReader } from '../../dist/server/integrations/tickets.js';
 import { Workspaces } from '../../dist/server/runtime/workspaces.js';
+import { Store } from '../../dist/server/core/store.js';
+import { UpdateMonitor } from '../../dist/server/core/updates.js';
 import { configSchema } from '../../dist/server/ops/config.js';
 const dir = resolve('.reviewloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -79,7 +81,22 @@ workspaces.describeTicket = async (repoPath, ref) => ({
   },
 });
 workspaces.prepareTicket = async () => dir;
+const store = new Store(join(dir, 'reviewloop.sqlite'));
+store.setSetting('preferences', {
+  locale: 'en',
+  version: (store.setting('preferences')?.version ?? 0) + 1,
+});
+const updates = new UpdateMonitor(store, {
+  probe: async (name) =>
+    name === 'codex'
+      ? { path: '/fixture/codex', version: '0.153.4', source: 'bundled' }
+      : { source: 'missing' },
+  fetcher: async () => new Response(JSON.stringify({ version: '0.153.5' })),
+});
 const { app } = await buildApp({
+  startUpdateCheck: false,
+  store,
+  updateMonitor: updates,
   ticketReader: reader,
   workspaces,
   catalogue: {
@@ -92,6 +109,13 @@ const { app } = await buildApp({
         isDefault: false,
       })),
     validate: async () => {},
+    metadata: () => ({
+      source: 'codex-app-server:model/list',
+      executable: '/fixture/codex',
+      cliVersion: '0.153.4',
+      retrievedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 300000).toISOString(),
+    }),
   },
   liveRuntime: {
     run: async (input) => {
@@ -140,6 +164,7 @@ async function stop() {
   proxy.closeAllConnections();
   await new Promise((resolve) => proxy.close(resolve));
   await app.close();
+  store.close();
   process.exit(0);
 }
 process.on('SIGTERM', () => void stop());

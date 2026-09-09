@@ -86,3 +86,11 @@ reviewctl --plain
 ![Выбор модели в CLI](media/cli-models.png)
 
 ![Уведомления Telegram в CLI](media/cli-notifications.png)
+
+## Язык и версии
+
+`/language` открывает выбор English/Русский, `/language ru` и `/language en` сохраняют выбор. `/updates` показывает версии CLI; `/updates check` запускает проверку. В `/models` и `/defaults` видны источник каталога и версия CLI. Для повторного запроса: `/models refresh` или `/defaults refresh`.
+
+![Терминал на русском](media/cli-ru.png)
+
+![Модели и источник каталога](media/cli-models-ru.png)

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { CodexConnection } from '../runtime/protocol.js';
 import { AppError, type AgentProfile } from './types.js';
+import { versionNumber } from '../runtime/executable.js';
 export const profileSchema = z
   .object({
     engine: z.literal('codex').default('codex'),
@@ -8,7 +9,14 @@ export const profileSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/)
       .optional(),
-    effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    effort: z
+      .string()
+      .regex(/^[a-z][a-z0-9_-]{0,39}$/)
+      .refine(
+        (value) => value !== 'ultra',
+        'Ultra delegation is not supported by the managed single-reviewer workflow',
+      )
+      .optional(),
   })
   .strict()
   .refine(
@@ -27,11 +35,25 @@ export interface ModelOption {
   defaultEffort: string;
   isDefault: boolean;
 }
+export interface ModelCatalogueInfo {
+  source: 'codex-app-server:model/list';
+  retrievedAt?: string;
+  expiresAt?: string;
+  cliVersion?: string;
+  executable: string;
+}
 export class ModelCatalogue {
   private cached?: { at: number; models: ModelOption[] };
   private pending?: Promise<ModelOption[]>;
-  constructor(private executable?: string) {}
-  async list(): Promise<ModelOption[]> {
+  private info: ModelCatalogueInfo;
+  constructor(private executable?: string) {
+    this.info = { source: 'codex-app-server:model/list', executable: executable ?? 'codex' };
+  }
+  metadata(): ModelCatalogueInfo {
+    return { ...this.info };
+  }
+  async list(refresh = false): Promise<ModelOption[]> {
+    if (refresh) this.cached = undefined;
     if (this.cached && Date.now() - this.cached.at < 300000) return this.cached.models;
     if (this.pending) return this.pending;
     this.pending = this.load().finally(() => {
@@ -43,7 +65,8 @@ export class ModelCatalogue {
     const rpc = new CodexConnection(this.executable);
     const models: ModelOption[] = [];
     try {
-      await rpc.start(process.cwd());
+      const initialized = await rpc.start(process.cwd());
+      this.info.cliVersion = versionNumber(initialized.userAgent ?? '');
       let cursor: string | undefined;
       for (let page = 0; page < 10; page++) {
         const response = await rpc.request<{
@@ -69,6 +92,8 @@ export class ModelCatalogue {
           });
         if (!response.nextCursor) {
           this.cached = { at: Date.now(), models };
+          this.info.retrievedAt = new Date(this.cached.at).toISOString();
+          this.info.expiresAt = new Date(this.cached.at + 300000).toISOString();
           return models;
         }
         cursor = response.nextCursor;

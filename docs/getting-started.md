@@ -13,7 +13,7 @@
 На машине, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.3/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.5.0/install.sh | bash
 ```
 
 Релиз содержит UI, Node 24, Codex CLI и GitHub CLI. Установщик проверяет SHA-256, устанавливает `reviewctl` в `~/.local/bin` и настраивает systemd. Нужны Linux с systemd, curl и tar; отсутствующий Git установится через apt/sudo, если они доступны. Архивы: x64 и arm64. Доступ к приватному релизу ограничен владельцем до изменения видимости репозитория.
@@ -78,6 +78,16 @@ reviewctl logs <task-id> --follow
 Открой `reviewctl`: `/defaults` настраивает новые задачи, `/new` запускает мастер импорта GitHub issue или Tracker тикета. После обсуждения `/implement` запускает реализацию и создание PR. `/models` меняет модели выбранной задачи; `/child` создаёт отдельного автора для дочернего тикета, сохраняя общего ревьюера.
 
 На сайте: **New from ticket → Import ticket and start chat → Start implementation**. Настройки — **Agents & models** или **Models** у выбранной задачи. [Полный пример большого тикета и его детей →](tickets.md)
+
+## Язык, модели и версии CLI
+
+`reviewctl language ru` / `reviewctl language en` сохраняет язык рабочего пространства. В TUI есть `/language`, на сайте — переключатель вверху, в Telegram — `/language` с кнопками. Для одного запуска клиента: `reviewctl --language en`.
+
+Модели приходят из `codex app-server` через `model/list` и кешируются до пяти минут. `/models refresh`, `reviewctl models --refresh` или кнопка **Обновить список моделей** делает новый запрос. Автор и ревьюер настраиваются отдельно через `/models` / `/defaults` или сайт.
+
+`reviewctl updates --check` проверяет версии CLI сейчас; автоматически сервис делает это раз в шесть часов. `/updates` доступна в TUI и боте. Текущий путь CLI показан в диагностике. Для выбора внешнего Codex на сервере: `reviewctl runtime use system`; для возврата к встроенному: `reviewctl runtime use bundled`. Это явный перезапуск свободного сервиса, а не автоматическое обновление работающих агентов.
+
+[Детали и ограничения](models-and-updates.md). Движок Claude пока не реализован.
 
 ## Сайт и телефон
 

@@ -27,6 +27,9 @@ import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../integrations/tickets.js';
 import { registerPlanning, type Catalogue } from './planning.js';
 import type { AgentRuntime } from '../runtime/agent.js';
+import { randomUUID } from 'node:crypto';
+import { preferences, preferenceInput, setLocale } from '../core/preferences.js';
+import { UpdateMonitor } from '../core/updates.js';
 
 const policySchema = z
   .object({
@@ -54,6 +57,8 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  updateMonitor?: UpdateMonitor;
+  startUpdateCheck?: boolean;
   catalogue?: Catalogue;
   ticketReader?: TicketReader;
   workspaces?: Workspaces;
@@ -80,9 +85,16 @@ export async function buildApp(options: ServerOptions) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const store = options.store ?? new Store(join(dataDir, 'reviewloop.sqlite'));
   const engine = new Engine(store, options.provider ?? providers(store), config.agents);
+  if (!store.setting('preferences'))
+    store.setSetting('preferences', { locale: config.locale, version: 0 });
+  if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
   const workspaces = options.workspaces ?? new Workspaces(dataDir);
-  const catalogue = options.catalogue ?? new ModelCatalogue(process.env.REVIEWLOOP_CODEX_BIN);
+  const executable = process.env.REVIEWLOOP_CODEX_BIN ?? config.codex.executable;
+  const catalogue = options.catalogue ?? new ModelCatalogue(executable);
+  const updates =
+    options.updateMonitor ??
+    new UpdateMonitor(store, { codex: executable, intervalHours: config.updates.intervalHours });
   const tickets = new TicketWorkflow(engine, workspaces, options.ticketReader);
   const getResources =
     options.resourceCheck ??
@@ -97,7 +109,7 @@ export async function buildApp(options: ServerOptions) {
     workspaces,
     options.liveRuntime ??
       new CodexRuntime({
-        executable: process.env.REVIEWLOOP_CODEX_BIN,
+        executable,
         model: process.env.REVIEWLOOP_CODEX_MODEL,
       }),
     new DemoRuntime(),
@@ -291,6 +303,18 @@ export async function buildApp(options: ServerOptions) {
     };
     return {
       version: VERSION,
+      preferences: preferences(store),
+      instanceId: store.setting('server.instanceId'),
+      runtime: {
+        source: process.env.REVIEWLOOP_CODEX_BIN
+          ? 'environment'
+          : config.codex.executable
+            ? 'configuration'
+            : 'path',
+        executable: executable ?? 'codex',
+      },
+      updates: updates.status(),
+      queuedJobs: store.jobs().filter((job) => job.status === 'queued').length,
       publicOrigin: publicOrigin ?? null,
       telegram: telegram?.status() ?? {
         configured: false,
@@ -306,6 +330,17 @@ export async function buildApp(options: ServerOptions) {
     };
   });
   app.get('/api/tasks', async () => store.tasks());
+  app.get('/api/preferences', async () => preferences(store));
+  app.post('/api/preferences', async (request) =>
+    setLocale(store, preferenceInput.parse(request.body).locale),
+  );
+  app.get('/api/updates', async () => updates.status());
+  app.post('/api/updates/check', async () => updates.check(true));
+  app.post('/api/updates/notifications', async (request) => {
+    const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    store.setSetting('updates.notifications', enabled);
+    return updates.status();
+  });
   registerPlanning(app, engine, tickets, catalogue, config.maxConcurrentAgents);
   app.post('/api/tasks', async (request, reply) => {
     const input = createSchema.parse(request.body);
@@ -503,6 +538,7 @@ export async function buildApp(options: ServerOptions) {
     if (!options.store) store.close();
   });
   app.addHook('preClose', async () => {
+    await updates.stop();
     for (const stop of eventStreams) stop();
     await worker.stop();
     telegramController.abort();
@@ -510,6 +546,12 @@ export async function buildApp(options: ServerOptions) {
     await telegram?.stop();
   });
   app.addHook('onReady', async () => {
+    if (
+      options.startWorker !== false &&
+      options.startUpdateCheck !== false &&
+      config.updates.enabled
+    )
+      updates.start();
     if (options.startWorker !== false && config.telegram.enabled) {
       telegramStartup = connectTelegram(
         () =>
@@ -525,6 +567,7 @@ export async function buildApp(options: ServerOptions) {
         .then((instance) => {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
+          telegram.configure({ catalogue, updates });
           store.setSetting('telegram.error', null);
           telegram.start();
         })
