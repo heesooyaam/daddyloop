@@ -5,6 +5,23 @@ import type { Engine } from '../core/engine.js';
 import { AppError, now, prRef, type Event, type Task } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
 import { notificationPreferences } from './notifications.js';
+import {
+  splitTelegramText,
+  TelegramText,
+  type TelegramCard,
+  type TelegramButton,
+} from './telegram-text.js';
+import {
+  taskCard,
+  agentCard,
+  tasksCard,
+  notificationsCard,
+  welcomeCard,
+  helpCard,
+  noteCard,
+  errorCard,
+  publishCard,
+} from './telegram-cards.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type User = { id: number; is_bot?: boolean };
 type Chat = { id: number; type: string };
@@ -149,30 +166,23 @@ export class TelegramApi {
       }
     }
   }
-  async send(
-    chatId: number,
-    text: string,
-    buttons?: { text: string; callback_data?: string; url?: string }[][],
-  ) {
-    const chunks: string[] = [];
-    while (text.length > 3800) {
-      let end = 3800;
-      const code = text.charCodeAt(end - 1);
-      if (code >= 0xd800 && code <= 0xdbff) end--;
-      chunks.push(text.slice(0, end));
-      text = text.slice(end);
-    }
-    chunks.push(text);
+  async send(chatId: number, content: string | TelegramCard, buttons?: TelegramButton[][]) {
+    const value = typeof content === 'string' ? new TelegramText().add(content) : content;
+    const chunks = splitTelegramText(value);
+    const keyboard = buttons ?? (value as TelegramCard).buttons;
     let result: unknown;
-    for (let i = 0; i < chunks.length; i++)
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
       result = await this.call('sendMessage', {
         chat_id: chatId,
-        text: chunks[i] + (i < chunks.length - 1 ? '\n[continued in the next message]' : ''),
+        text: chunk.text,
+        ...(chunk.entities.length ? { entities: chunk.entities } : {}),
         link_preview_options: { is_disabled: true },
-        ...(buttons && i === chunks.length - 1
-          ? { reply_markup: { inline_keyboard: buttons } }
+        ...(keyboard && i === chunks.length - 1
+          ? { reply_markup: { inline_keyboard: keyboard } }
           : {}),
       });
+    }
     return result;
   }
 }
@@ -262,25 +272,19 @@ export class Telegram {
         const task = snapshot,
           pair = this.paired();
         if (!pair) return;
-        let text = `Reviewloop · ${task.title}\n${task.state}\n${task.reason}\n\nTask: ${task.id.slice(0, 8)}`;
+        let content: TelegramCard;
         if (event.type === 'message.created') {
           const message = store
             .messages(task.id)
             .find((m) => m.id === (event.data as { messageId: string }).messageId);
           if (!message || message.sender !== 'agent') return;
-          text = `${message.role} · ${task.title} (${task.id.slice(0, 8)})\n\n${message.text}`;
-        }
+          content = agentCard(task, message.role, message.text, this.publicOrigin);
+        } else content = taskCard(task, this.publicOrigin);
         // Lost sendMessage responses cannot be conclusively looked up. Keep an
         // uncertain notification instead of repeatedly sending it to the user.
         store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
         try {
-          await this.api.send(
-            pair.chatId,
-            text,
-            this.publicOrigin
-              ? [[{ text: 'Open task', url: `${this.publicOrigin}/#task/${task.id}` }]]
-              : undefined,
-          );
+          await this.api.send(pair.chatId, content);
           store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
         } catch (error) {
           store.setSetting('telegram.error', redact(String(error)));
@@ -307,16 +311,14 @@ export class Telegram {
         store.setSetting('telegram.pairCode', null);
         store.db.prepare('DELETE FROM bot_actions').run();
       });
-      await this.api.send(
-        chat.id,
-        'Reviewloop connected.\n/tasks — tasks\n/status <id> — status\n/reviewer <id> <message> — discuss\n/author <id> <message> — talk to author\n/publish <id> — confirmation\n/pause <id>, /resume <id>, /retry <id>\n/web — one-use browser login',
-      );
+      await this.api.send(chat.id, welcomeCard());
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
     try {
       if (callback) {
         await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+        if (await this.navigate(callback.data ?? '', chat.id)) return;
         const row = store.db
           .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
           .get(callback.data ?? '');
@@ -344,19 +346,20 @@ export class Telegram {
           await this.engine.broker.publish(task);
         });
         await this.engine.reconcile(action.taskId);
-        await this.api.send(chat.id, 'Review published. The workflow continues automatically.');
+        await this.api.send(
+          chat.id,
+          noteCard('✅ Ревью опубликовано', 'Цикл работы продолжается автоматически.'),
+        );
         return;
       }
       const text = message?.text?.trim();
       if (!text) return;
       if (text === '/tasks' || text === '/start') {
-        const tasks = store.tasks().slice(0, 20);
-        await this.api.send(
-          chat.id,
-          tasks.length
-            ? tasks.map((t) => `${t.id.slice(0, 8)} · ${t.state}\n${t.title}`).join('\n\n')
-            : 'No tasks yet. Attach a PR in the web panel or CLI.',
-        );
+        await this.api.send(chat.id, tasksCard(store.tasks()));
+        return;
+      }
+      if (text === '/help') {
+        await this.api.send(chat.id, helpCard());
         return;
       }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
@@ -366,11 +369,7 @@ export class Telegram {
             enabled: mode !== 'off',
             mode: mode === 'all' ? 'all' : 'attention',
           });
-        const prefs = notificationPreferences(store);
-        await this.api.send(
-          chat.id,
-          `Notifications: ${prefs.enabled ? prefs.mode : 'off'}.\n/notifications on — completion or input needed\n/notifications all — all replies\n/notifications off — silence`,
-        );
+        await this.api.send(chat.id, notificationsCard(notificationPreferences(store)));
         return;
       }
       if (text === '/web') {
@@ -381,20 +380,19 @@ export class Telegram {
           'Telegram browser',
           this.publicOrigin,
         );
-        await this.api.send(
-          chat.id,
-          `One-use login, valid for 5 minutes. Your phone must reach the service network.\n${link.url}`,
+        const content = noteCard(
+          '🌐 Войти в рабочее пространство',
+          'Одноразовая ссылка действует 5 минут. Телефон должен быть подключён к сети сервера.',
         );
+        content.buttons = [[{ text: 'Открыть рабочее пространство ↗', url: link.url }]];
+        await this.api.send(chat.id, content);
         return;
       }
       const match = text.match(
         /^\/(status|reviewer|author|publish|pause|resume|retry)\s+([a-zA-Z0-9-]+)(?:\s+([\s\S]+))?$/,
       );
       if (!match) {
-        await this.api.send(
-          chat.id,
-          'Use /tasks, /status <id>, /reviewer <id> <message>, /author <id> <message>, /publish <id>, /pause <id>, /resume <id>, /retry <id>, or /web.',
-        );
+        await this.api.send(chat.id, helpCard());
         return;
       }
       const [, verb, prefix, content] = match,
@@ -402,13 +400,19 @@ export class Telegram {
       if (matches.length !== 1) throw new Error('Task ID is missing or ambiguous. Use /tasks.');
       const task = matches[0];
       if (verb === 'status') {
-        await this.api.send(chat.id, `${task.title}\n${task.state}\n${task.reason}`);
+        await this.api.send(chat.id, taskCard(task, this.publicOrigin));
         return;
       }
       if (verb === 'author' || verb === 'reviewer') {
         if (!content?.trim()) throw new Error('Include a message after the task ID.');
         await this.engine.chat(task.id, verb, content);
-        await this.api.send(chat.id, `Message queued for ${verb}.`);
+        await this.api.send(
+          chat.id,
+          noteCard(
+            verb === 'author' ? '✍️ Сообщение передано автору' : '🔎 Сообщение передано ревьюеру',
+            'Сообщение поставлено в очередь. Историю можно открыть в рабочем пространстве.',
+          ),
+        );
         return;
       }
       if (verb === 'publish') {
@@ -421,9 +425,9 @@ export class Telegram {
             ? await this.engine.retryTicket(task.id)
             : await this.engine.review(task.id, true)
           : await this.engine.action(task.id, verb as 'pause' | 'resume');
-      await this.api.send(chat.id, `${result.state}: ${result.reason}`);
+      await this.api.send(chat.id, taskCard(result, this.publicOrigin));
     } catch (error) {
-      await this.api.send(chat.id, redact((error as Error).message));
+      await this.api.send(chat.id, errorCard(redact((error as Error).message)));
     }
   }
   private async confirm(task: Task, chatId: number) {
@@ -450,12 +454,38 @@ export class Telegram {
     this.engine.store.db
       .prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)')
       .run(id, JSON.stringify(action));
-    await this.api.send(
-      chatId,
-      `Publish ${snapshot.comments.length} comment(s) for “${task.title}”, revision ${task.revision!.head.slice(0, 8)}?\n${prRef(task).url}`,
-      [[{ text: 'Publish this review', callback_data: id }]],
-    );
+    await this.api.send(chatId, publishCard(task, snapshot, id));
   }
+  private async navigate(data: string, chatId: number): Promise<boolean> {
+    if (data === 'help') {
+      await this.api.send(chatId, helpCard());
+      return true;
+    }
+    const list = data.match(/^tasks:(\d{1,8})$/);
+    if (list) {
+      await this.api.send(chatId, tasksCard(this.engine.store.tasks(), Number(list[1])));
+      return true;
+    }
+    const task = data.match(/^(task|publish):([a-f0-9-]{36})$/);
+    if (task) {
+      const current = this.engine.store.getTask(task[2]);
+      if (task[1] === 'publish') await this.confirm(current, chatId);
+      else await this.api.send(chatId, taskCard(current, this.publicOrigin));
+      return true;
+    }
+    const prefs = data.match(/^notifications:(show|on|off|all)$/);
+    if (prefs) {
+      if (prefs[1] !== 'show')
+        this.engine.store.setSetting('notifications.telegram', {
+          enabled: prefs[1] !== 'off',
+          mode: prefs[1] === 'all' ? 'all' : 'attention',
+        });
+      await this.api.send(chatId, notificationsCard(notificationPreferences(this.engine.store)));
+      return true;
+    }
+    return false;
+  }
+
   private async poll() {
     while (!this.stopped) {
       this.controller = new AbortController();

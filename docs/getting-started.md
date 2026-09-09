@@ -13,7 +13,7 @@
 На машине, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.1/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.2/install.sh | bash
 ```
 
 Релиз содержит UI, Node 24, Codex CLI и GitHub CLI. Установщик проверяет SHA-256, устанавливает `reviewctl` в `~/.local/bin` и настраивает systemd. Нужны Linux с systemd, curl и tar; отсутствующий Git установится через apt/sudo, если они доступны. Архивы: x64 и arm64. Доступ к приватному релизу ограничен владельцем до изменения видимости репозитория.
@@ -115,6 +115,8 @@ reviewctl telegram setup
 ```
 
 Команда скрыто спросит токен и выдаст ссылку для привязки личного чата. Также поддерживается `--token-file /path/to/token`; по умолчанию читается `~/.tokens/reviewloop-telegram`. Бот использует long polling: отдельный домен или входящий webhook ему не нужен.
+
+Карточки содержат понятный статус, название задачи, результат и кнопки. Длинные ответы сохраняют форматирование и продолжаются в следующих сообщениях. Кнопки позволяют открыть задачу или выбрать режим уведомлений. [Подробнее об интерфейсе бота](telegram.md).
 
 Доступны `/tasks`, `/status <id>`, `/reviewer <id> текст`, `/author <id> текст`, `/pause <id>`, `/resume <id>`, `/retry <id>`, `/publish <id>` и `/web`. По умолчанию после привязки бот сообщает о завершении и ситуациях, требующих внимания. `/notifications all` включает промежуточные ответы, `/notifications off` выключает уведомления, `/notifications on` возвращает тихий режим. Настройки также доступны через `/notifications` в TUI, колокольчик на сайте и `reviewctl notifications on --events attention`. Ручная команда `/publish` требует отдельной кнопки подтверждения; смена ревизии или текста ревью делает старую кнопку недействительной. Посторонние чаты и группы не получают данные.
 

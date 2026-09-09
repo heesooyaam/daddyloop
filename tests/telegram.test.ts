@@ -200,7 +200,8 @@ it('sends quiet completion notices once, supports all replies and can be disable
     f.store.event(task.id, 'task.state', { state: 'complete' });
     f.store.event(task.id, 'task.state', { state: 'complete' });
     await vi.waitFor(() => expect(sent).toHaveLength(baseline + 1));
-    expect(sent.at(-1)?.text).toContain('All checks passed');
+    expect(sent.at(-1)?.text).toContain('✅ Задача завершена');
+    expect(sent.at(-1)?.text).toContain('CI: пройдены');
     await bot.handle(update(2, '/notifications all'));
     f.store.message(task.id, 'author', 'agent', 'Detailed author reply');
     await vi.waitFor(() => expect(sent.at(-1)?.text).toContain('Detailed author reply'));
@@ -211,6 +212,77 @@ it('sends quiet completion notices once, supports all replies and can be disable
     expect(sent).toHaveLength(after);
   } finally {
     await bot.stop();
+    f.store.close();
+  }
+});
+
+it('serves formatted navigation and preference buttons only to the paired private user', async () => {
+  const f = await fixture(),
+    t = transport(),
+    bot = new Telegram(f.engine, t.api, 'test_bot');
+  try {
+    await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+    expect(t.sent.at(-1)?.body.entities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'bold' })]),
+    );
+    const click = (id: number, data: string, user = 7): Update => ({
+      update_id: id,
+      callback_query: {
+        id: 'cb' + id,
+        data,
+        from: { id: user },
+        message: { chat: { id: user, type: 'private' } },
+      },
+    });
+    const before = t.sent.length;
+    await bot.handle(click(2, 'tasks:0', 99));
+    await bot.handle(click(3, 'notifications:off', 99));
+    expect(t.sent).toHaveLength(before);
+    expect(f.store.setting('notifications.telegram')).toBeUndefined();
+    await bot.handle(click(4, 'tasks:0'));
+    expect(t.sent.at(-1)?.body.text).toContain(f.task.title);
+    await bot.handle(click(5, 'task:' + f.task.id));
+    expect(t.sent.at(-1)?.body.text).toContain('Задача ' + f.task.id.slice(0, 8));
+    await bot.handle(click(6, 'notifications:off'));
+    expect(f.store.setting('notifications.telegram')).toEqual({
+      enabled: false,
+      mode: 'attention',
+    });
+    await bot.handle(click(7, 'notifications:on'));
+    expect(f.store.setting('notifications.telegram')).toEqual({ enabled: true, mode: 'attention' });
+  } finally {
+    f.store.close();
+  }
+});
+it('opens a fresh confirmation from the task button before any publication occurs', async () => {
+  const f = await fixture(),
+    t = transport(),
+    bot = new Telegram(f.engine, t.api, 'test_bot');
+  try {
+    await f.engine.review(f.task.id);
+    await f.run();
+    await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+    const callback = (id: number, data: string): Update => ({
+      update_id: id,
+      callback_query: {
+        id: 'cb' + id,
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+    await bot.handle(callback(2, 'publish:' + f.task.id));
+    expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication');
+    const review = f.store.getTask(f.task.id).review!;
+    expect((await f.provider.getReview(prRef(f.task), review)).status).toBe('draft');
+    const buttons = t.sent.at(-1)!.body.reply_markup as {
+      inline_keyboard: { callback_data: string }[][];
+    };
+    const confirmation = buttons.inline_keyboard[0][0].callback_data;
+    expect(confirmation).not.toContain('publish:');
+    await bot.handle(callback(3, confirmation));
+    expect((await f.provider.getReview(prRef(f.task), review)).status).toBe('published');
+  } finally {
     f.store.close();
   }
 });
