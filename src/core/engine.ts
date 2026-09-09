@@ -3,6 +3,14 @@ import { Store } from './store.js';
 import { Broker } from './broker.js';
 import {
   AppError,
+  prRef,
+  isTicket,
+  type AgentProfiles,
+  type AgentProfile,
+  type ReviewGroup,
+  type TicketSource,
+  type TicketRef,
+  type PRTask,
   defaultPolicy,
   now,
   sameRevision,
@@ -16,6 +24,7 @@ import {
 } from './types.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
+import { inheritedProfiles } from './agents.js';
 
 export class Engine {
   readonly broker: Broker;
@@ -24,8 +33,11 @@ export class Engine {
   constructor(
     readonly store: Store,
     readonly provider: (ref: PRRef) => ReviewProvider,
+    defaults?: AgentProfiles,
   ) {
     this.broker = new Broker(store, provider);
+    if (!store.setting('agents.defaults'))
+      store.setSetting('agents.defaults', defaults ?? inheritedProfiles());
   }
   async lock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(id) ?? Promise.resolve();
@@ -46,6 +58,8 @@ export class Engine {
     policy?: Partial<Policy>;
     planTaskId?: string;
     authorThreadId?: string;
+    agents?: AgentProfiles;
+    groupId?: string;
   }) {
     const pr = await this.provider(input.ref).getPR(input.ref);
     if (pr.state !== 'open')
@@ -63,7 +77,8 @@ export class Engine {
         )
     )
       throw new AppError('thread_in_use', 'This Codex thread is already assigned to another task');
-    const task: Task = {
+    const group = input.groupId ? this.store.getGroup(input.groupId) : undefined;
+    const task: PRTask = {
       id: randomUUID(),
       title: input.title || pr.title,
       requirements: input.requirements,
@@ -84,6 +99,12 @@ export class Engine {
       revision: revisionOf(pr),
       authorThreadId: input.authorThreadId,
       planTaskId: input.planTaskId,
+      groupId: group?.id,
+      agents: {
+        ...this.defaultAgents(),
+        ...input.agents,
+        ...(group ? { reviewer: group.reviewer } : {}),
+      },
     };
     if (input.planTaskId) {
       const plan = this.store.getTask(input.planTaskId);
@@ -109,7 +130,7 @@ export class Engine {
       this.store.saveTask(task);
       this.store.event(task.id, 'task.created', {
         kind: task.kind,
-        ref: task.ref,
+        ref: prRef(task),
         policy: task.policy,
       });
     });
@@ -133,12 +154,12 @@ export class Engine {
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
         throw new AppError('task_paused', 'Resume this task before starting a review');
-      const pr = await this.provider(task.ref).getPR(task.ref);
+      const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       const changed = !sameRevision(task.revision, pr);
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
-        const snapshot = await this.provider(task.ref).getReview(task.ref, task.review);
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
         if (snapshot.status === 'published') task.feedback = snapshot;
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
@@ -194,9 +215,9 @@ export class Engine {
   }
   private async reconcileLocked(id: string): Promise<Task> {
     const task = this.store.getTask(id);
-    if (task.state === 'paused') return task;
-    const provider = this.provider(task.ref),
-      pr = await provider.getPR(task.ref);
+    if (task.state === 'paused' || isTicket(task)) return task;
+    const provider = this.provider(prRef(task)),
+      pr = await provider.getPR(prRef(task));
     if (pr.state !== 'open') {
       this.onCancel(id);
       this.store.cancelJobs(id);
@@ -226,7 +247,7 @@ export class Engine {
       this.store.saveTask(task);
       return task;
     }
-    const snapshot = await provider.getReview(task.ref, task.review);
+    const snapshot = await provider.getReview(prRef(task), task.review);
     if (task.snapshot && JSON.stringify(task.snapshot) !== JSON.stringify(snapshot))
       this.store.event(id, 'review.changed', {
         previous: task.snapshot,
@@ -362,7 +383,52 @@ export class Engine {
         this.store.event(task.id, 'job.stale_result', { generation: job.generation }, job.id);
         return;
       }
-      const pr = await this.provider(task.ref).getPR(task.ref);
+      if (isTicket(task)) {
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+        if (result.status !== 'completed' || result.checkedHead !== task.revision?.head) {
+          task.resumeState = task.state;
+          this.state(
+            task,
+            'needs_input',
+            result.question || result.summary || 'The ticket turn was incomplete',
+          );
+        } else if (job.kind === 'implement') {
+          if (!task.pendingAuthorHead || task.pendingAuthorHead === task.revision?.head)
+            this.state(
+              task,
+              'needs_input',
+              'The author produced no new committed changes. Discuss the result before implementing again.',
+            );
+          else {
+            task.revision = { ...task.revision!, head: task.pendingAuthorHead };
+            task.resumeState = 'ready_for_review';
+            this.state(
+              task,
+              'ready_for_review',
+              'Implementation saved locally. Submit it to a native PR for the shared reviewer.',
+            );
+          }
+        } else {
+          const pendingSubmission = !!this.store.db
+            .prepare('SELECT 1 FROM operations WHERE id=?')
+            .get('ticket-submit:' + task.id);
+          this.state(
+            task,
+            pendingSubmission
+              ? 'needs_input'
+              : task.pendingAuthorHead
+                ? 'ready_for_review'
+                : 'discussing',
+            pendingSubmission
+              ? 'Submit again to reconcile the existing PR creation before changing implementation.'
+              : task.pendingAuthorHead
+                ? 'Saved implementation is ready to submit for review.'
+                : 'Continue the conversation, or start implementation when the requirements are clear.',
+          );
+        }
+        return;
+      }
+      const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
         this.invalidate(task, pr);
         this.state(
@@ -396,7 +462,7 @@ export class Engine {
           this.state(task, 'needs_input', 'Reviewer reported a different revision');
           return;
         }
-        const snapshot = await this.provider(task.ref).getReview(task.ref, task.review!);
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review!);
         const decisions = this.store.decisions(task.id);
         const verified = new Set(result.verifiedCommentIds ?? []);
         const exempt = new Set(
@@ -478,7 +544,7 @@ export class Engine {
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
-          task.snapshot = await this.provider(task.ref).getReview(task.ref, task.review);
+          task.snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
           task.summary = result.summary;
         }
         this.store.saveTask(task);
@@ -503,6 +569,26 @@ export class Engine {
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
+        if (isTicket(task)) {
+          const implementing = task.resumeState === 'implementing';
+          this.state(
+            task,
+            implementing
+              ? 'implementing'
+              : task.pendingAuthorHead
+                ? 'ready_for_review'
+                : 'discussing',
+            'Resumed ticket work; existing changes were preserved',
+          );
+          if (implementing)
+            this.store.enqueue(
+              task,
+              'author',
+              'implement',
+              'Continue the interrupted implementation. Preserve the existing working copy and test the result.',
+            );
+          return task;
+        }
         if (
           task.resumeState === 'fixing' &&
           task.reviewFinished &&
@@ -531,7 +617,7 @@ export class Engine {
       } else if (action === 'approve-plan') {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
-        const current = await this.provider(task.ref).getPR(task.ref);
+        const current = await this.provider(prRef(task)).getPR(prRef(task));
         if (!sameRevision(current, task.revision))
           throw new AppError('stale_plan', 'The plan changed after review');
         task.approvedAt = now();
@@ -543,7 +629,7 @@ export class Engine {
             'A waiver requires a reason and a task waiting for CI checks',
             400,
           );
-        const current = await this.provider(task.ref).getPR(task.ref);
+        const current = await this.provider(prRef(task)).getPR(prRef(task));
         if (!sameRevision(current, task.revision))
           throw new AppError(
             'stale_revision',
@@ -567,6 +653,13 @@ export class Engine {
     });
   }
   recoverInterruptedJobs() {
+    for (const task of this.store.tasks())
+      if (task.state === 'submitting')
+        this.state(
+          task,
+          'needs_input',
+          'PR submission was interrupted. Submit again to reconcile its native result before retrying.',
+        );
     for (const job of this.store.jobs())
       if (
         job.status === 'running' ||
@@ -610,5 +703,304 @@ export class Engine {
     if (job.role === 'reviewer') task.reviewFinished = false;
     this.state(task, 'needs_input', redact(String(error)));
     this.store.event(task.id, 'job.failed', { error: redact(String(error)) }, job.id);
+  }
+  defaultAgents(): AgentProfiles {
+    return this.store.setting<AgentProfiles>('agents.defaults') ?? inheritedProfiles();
+  }
+  effectiveAgents(task: Task): AgentProfiles {
+    return {
+      ...this.defaultAgents(),
+      ...task.agents,
+      ...(task.groupId ? { reviewer: this.store.getGroup(task.groupId).reviewer } : {}),
+    };
+  }
+  setDefaultAgents(profiles: AgentProfiles) {
+    this.store.setSetting('agents.defaults', profiles);
+    return profiles;
+  }
+  async setTaskAgent(id: string, role: 'author' | 'reviewer', profile: AgentProfile) {
+    const existing = this.store.getTask(id);
+    return this.lock(
+      existing.groupId && role === 'reviewer' ? `group:${existing.groupId}` : id,
+      async () => {
+        const task = this.store.getTask(id);
+        if (role === 'reviewer' && task.groupId) {
+          if (
+            this.store
+              .jobs()
+              .some(
+                (job) =>
+                  job.groupId === task.groupId &&
+                  job.role === 'reviewer' &&
+                  ['queued', 'running'].includes(job.status),
+              )
+          )
+            throw new AppError(
+              'reviewer_busy',
+              'Wait for the shared reviewer queue to become idle before changing its model',
+            );
+          const group = this.store.getGroup(task.groupId);
+          group.reviewer = profile;
+          group.generation++;
+          this.store.saveGroup(group);
+        } else {
+          if (this.store.busy(id))
+            throw new AppError(
+              'task_busy',
+              'Wait for this task to become idle before changing its model',
+            );
+          task.agents = { ...this.effectiveAgents(task), [role]: profile };
+          task.contextVersion++;
+          task.generation++;
+          this.store.saveTask(task);
+        }
+        this.store.event(id, 'agents.updated', {
+          role,
+          profile,
+          groupId: role === 'reviewer' ? task.groupId : undefined,
+        });
+        return this.effectiveAgents(this.store.getTask(id));
+      },
+    );
+  }
+  async createTicket(input: {
+    ref: TicketRef;
+    source: TicketSource;
+    repoPath: string;
+    repository: NonNullable<Task['ticketRepository']>;
+    requirements?: string;
+    parentTaskId?: string;
+    agents?: AgentProfiles;
+    publication?: 'auto' | 'human';
+    autoPush?: boolean;
+  }) {
+    if (
+      this.store
+        .tasks()
+        .some((task) => task.source?.url === input.source.url && task.state !== 'complete')
+    )
+      throw new AppError('already_attached', 'This ticket already has an active task');
+    const parent = input.parentTaskId ? this.store.getTask(input.parentTaskId) : undefined;
+    const create = async () => {
+      if (
+        this.store
+          .tasks()
+          .some((task) => task.source?.url === input.source.url && task.state !== 'complete')
+      )
+        throw new AppError('already_attached', 'This ticket already has an active task');
+      const parent = input.parentTaskId ? this.store.getTask(input.parentTaskId) : undefined;
+      let group: ReviewGroup;
+      if (parent?.groupId) group = this.store.getGroup(parent.groupId);
+      else if (parent) {
+        if (this.store.busy(parent.id))
+          throw new AppError(
+            'task_busy',
+            'Wait for the parent to become idle before creating its shared review group',
+          );
+        group = {
+          id: randomUUID(),
+          rootTaskId: parent.id,
+          title: parent.title,
+          requirements: parent.requirements,
+          source: parent.source,
+          reviewer: this.effectiveAgents(parent).reviewer,
+          reviewerThreadId: parent.reviewerThreadId,
+          generation: 1,
+          createdAt: now(),
+          updatedAt: now(),
+        };
+        parent.groupId = group.id;
+      } else
+        group = {
+          id: randomUUID(),
+          rootTaskId: '',
+          title: input.source.title,
+          source: input.source,
+          requirements: input.requirements ?? (input.source.body || input.source.title),
+          reviewer: input.agents?.reviewer ?? this.defaultAgents().reviewer,
+          generation: 1,
+          createdAt: now(),
+          updatedAt: now(),
+        };
+      if (
+        parent &&
+        input.agents?.reviewer &&
+        (['engine', 'model', 'effort'] as const).some(
+          (key) => input.agents!.reviewer[key] !== group.reviewer[key],
+        )
+      )
+        throw new AppError(
+          'shared_reviewer',
+          'Child tickets inherit the group reviewer; change it in the group model settings',
+        );
+      const task: Task = {
+        id: randomUUID(),
+        title: input.source.title,
+        kind: 'code',
+        ref: input.ref,
+        source: input.source,
+        repoPath: input.repoPath,
+        ticketRepository: input.repository,
+        requirements: input.requirements ?? (input.source.body || input.source.title),
+        parentTaskId: parent?.id,
+        groupId: group.id,
+        agents: {
+          author: input.agents?.author ?? this.defaultAgents().author,
+          reviewer: group.reviewer,
+        },
+        policy: {
+          ...defaultPolicy,
+          publication: input.publication ?? defaultPolicy.publication,
+          autoPush: input.autoPush ?? defaultPolicy.autoPush,
+        },
+        state: 'discussing',
+        reason: 'Ticket imported. The author is reading it before implementation.',
+        generation: 1,
+        contextVersion: 1,
+        round: 0,
+        noProgress: 0,
+        summary: '',
+        revision: {
+          head: input.repository.baseHead,
+          base: input.repository.baseHead,
+          start: input.repository.baseHead,
+        },
+        createdAt: now(),
+        updatedAt: now(),
+      };
+      task.ticketRepository!.branch = `reviewloop/${task.id}`;
+      group.rootTaskId ||= task.id;
+      this.store.transaction(() => {
+        this.store.saveGroup(group);
+        if (parent) this.store.saveTask(parent);
+        this.store.saveTask(task);
+        this.store.event(task.id, 'ticket.imported', {
+          source: input.source.url,
+          groupId: group.id,
+          parentTaskId: parent?.id,
+        });
+        this.store.enqueue(
+          task,
+          'author',
+          'chat',
+          'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
+        );
+      });
+      return task;
+    };
+    return parent ? this.lock(parent.id, create) : create();
+  }
+  async implement(id: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (!isTicket(task))
+        throw new AppError(
+          'already_in_review',
+          'This task already has a PR; use the review/fix cycle',
+        );
+      if (this.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get('ticket-submit:' + id))
+        throw new AppError(
+          'submission_pending',
+          'Reconcile the existing PR submission before changing implementation again',
+        );
+      if (task.state === 'paused' || this.store.busy(id))
+        throw new AppError(
+          'task_busy',
+          'Resume or wait for the current discussion before implementing',
+        );
+      task.resumeState = 'implementing';
+      this.state(
+        task,
+        'implementing',
+        'The author is implementing this ticket in its managed workspace',
+      );
+      this.store.enqueue(
+        task,
+        'author',
+        'implement',
+        'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
+      );
+      return task;
+    });
+  }
+  async retryTicket(id: string) {
+    const task = this.store.getTask(id);
+    if (!isTicket(task)) return this.review(id, true);
+    if (this.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get('ticket-submit:' + id))
+      throw new AppError(
+        'submission_pending',
+        `Use Submit for review in the web panel or reviewctl submit ${id} to reconcile the existing PR.`,
+      );
+    if (task.state === 'paused' || this.store.busy(id))
+      throw new AppError('task_busy', 'Resume or wait for the current task before retrying');
+    const previous = this.store
+      .jobs(id)
+      .filter((job) => ['failed', 'cancelled'].includes(job.status))
+      .at(-1);
+    if (previous?.kind === 'implement') return this.implement(id);
+    return this.lock(id, async () => {
+      const current = this.store.getTask(id);
+      if (!isTicket(current) || current.state === 'paused' || this.store.busy(id))
+        throw new AppError('task_busy', 'The task changed before the retry');
+      this.state(current, 'discussing', 'Retrying the ticket conversation');
+      this.store.enqueue(
+        current,
+        previous?.role ?? 'author',
+        'chat',
+        previous?.input ??
+          'Continue discussing the ticket and explain the next steps. Do not edit files yet.',
+      );
+      return current;
+    });
+  }
+  async linkPR(id: string, ref: PRRef, expectedGeneration?: number, expectedHead?: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (
+        !isTicket(task) ||
+        this.store.busy(id) ||
+        task.state === 'paused' ||
+        (expectedGeneration !== undefined && task.generation !== expectedGeneration)
+      )
+        throw new AppError(
+          'task_busy',
+          'Only an unchanged, idle ticket task can be connected to a PR',
+        );
+      if (
+        ref.provider !== task.ref.provider ||
+        ref.host !== task.ref.host ||
+        ref.repo.toLowerCase() !== task.ref.repo.toLowerCase()
+      )
+        throw new AppError(
+          'repository_mismatch',
+          'The PR must belong to this task’s configured repository',
+        );
+      const pr = await this.provider(ref).getPR(ref);
+      if (expectedHead && pr.head !== expectedHead)
+        throw new AppError(
+          'submitted_head_changed',
+          'The PR does not point to the submitted implementation; inspect it before connecting',
+        );
+      if (pr.state !== 'open') throw new AppError('pr_closed', 'Connect an open PR');
+      if (
+        this.store
+          .tasks()
+          .some(
+            (other) => other.id !== id && other.ref.url === ref.url && other.state !== 'complete',
+          )
+      )
+        throw new AppError('already_attached', 'This PR is already attached');
+      task.ref = ref;
+      task.pr = pr;
+      task.revision = revisionOf(pr);
+      task.generation++;
+      task.review = undefined;
+      task.snapshot = undefined;
+      task.reviewFinished = false;
+      task.round = 0;
+      this.state(task, 'queued', 'PR connected. The shared reviewer will check this revision.');
+      this.store.event(id, 'ticket.pr_connected', { ref });
+      return task;
+    });
   }
 }

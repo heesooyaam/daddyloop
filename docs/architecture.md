@@ -46,7 +46,12 @@ The terminal client uses Ink/React with a separate `ConsoleModel`. It owns only 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued
+    [*] --> discussing: ticket imported read-only
+    discussing --> implementing: explicit implementation action
+    implementing --> ready_for_review: local commit saved
+    ready_for_review --> submitting: automatic by default
+    submitting --> queued: native PR created and pinned
+    [*] --> queued: attach existing PR
     queued --> reviewing: pinned PR + native draft
     reviewing --> awaiting_publication: valid completed review
     awaiting_publication --> fixing: published comments exist
@@ -67,7 +72,7 @@ stateDiagram-v2
 
 An empty review and an incomplete review are different. `reviewFinished` is set only after a valid completed reviewer result for the pinned revision. Neither a restart nor `resume` can turn a half-written native draft into a completed review. Completed reviews with outstanding historical findings require verification IDs or a recorded disposition.
 
-Every task transition is serialized by a per-task lock. SQLite job claiming is transactional and has a unique running-job constraint per task. The worker also limits total active agents to one. Long asynchronous preparation re-reads the task generation before saving any state, so a late operation cannot overwrite a user's pause. Generation fencing also covers tools and session callbacks.
+Every task transition is serialized by a per-task lock. SQLite job claiming is transactional and has a unique running-job constraint per task. The worker defaults to one active agent, with a configurable limit of 1–8. Reviewer jobs in one group share a persistent thread and are serialized across tasks; each author keeps its own session and working copy. Jobs freeze the role profile when queued. Long asynchronous preparation re-reads the task generation before saving any state, so a late operation cannot overwrite a user's pause. Generation fencing also covers tools and session callbacks.
 
 ## Comment authority and identity
 
@@ -101,3 +106,9 @@ Private reviewer chat is never replayed into the author's thread. Draft-related 
 - [Node SQLite](https://nodejs.org/api/sqlite.html): built-in synchronous SQLite database API.
 
 Original product discussion: [shared conversation](https://chatgpt.com/share/6a9f5293-9640-83eb-b9ed-a45f371041a2). The later clarifications in that discussion take precedence over its early sketches: the reviewer writes comments using tools, discussion stays in the reviewer session, and plan PRs share the same review cycle as code.
+
+## Tickets and profiles
+
+See [ADR 0004](adr/0004-ticket-groups.md). `TicketReader` snapshots GitHub issues or Tracker tickets, including comments, without writing back. `TicketWorkflow` verifies the managed implementation, performs ordinary pushes, creates a native PR through the durable outbox and binds the exact submitted head. A failed or uncertain submission stays recoverable; a conversation cannot erase that intent or authorize a second creation. Native submissions run independently of the scheduling tick so resource checks continue while the provider responds.
+
+Model defaults and Telegram preferences are persisted settings in SQLite. Config-file agent defaults seed a new database; afterwards the CLI/UI settings are authoritative. Old tasks retain their saved policies. New tasks publish completed reviews automatically; incomplete reviews, disputes, revision mismatches, CI and explicit human plan approval still gate completion. Automatic publication does not merge a PR.

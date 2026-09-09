@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
+import { profilesSchema, inheritedProfiles } from '../core/agents.js';
 
 export const configSchema = z.object({
   version: z.literal(1).default(1),
@@ -16,6 +17,8 @@ export const configSchema = z.object({
     .default('8G'),
   serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
   demo: z.boolean().default(true),
+  agents: profilesSchema.default(inheritedProfiles),
+  maxConcurrentAgents: z.number().int().min(1).max(8).default(1),
   resources: z
     .object({
       minDiskGiB: z.number().nonnegative(),

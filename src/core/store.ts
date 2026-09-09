@@ -11,6 +11,8 @@ import {
   type Job,
   type Message,
   type Decision,
+  type ReviewGroup,
+  type AgentProfiles,
 } from './types.js';
 
 export class Store {
@@ -21,7 +23,7 @@ export class Store {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
-    if (version > 2) {
+    if (version > 3) {
       this.db.close();
       throw new AppError(
         'schema_newer',
@@ -47,7 +49,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_receipts (id INTEGER PRIMARY KEY, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS bot_actions (id TEXT PRIMARY KEY, data TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, status TEXT NOT NULL, at TEXT NOT NULL);
-      PRAGMA user_version=2;
+      CREATE TABLE IF NOT EXISTS review_groups (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      PRAGMA user_version=3;
     `);
     this.changes.setMaxListeners(100);
   }
@@ -115,6 +118,8 @@ export class Store {
       }));
   }
   enqueue(task: Task, role: Job['role'], kind: Job['kind'], input: string): Job {
+    const group = task.groupId ? this.getGroup(task.groupId) : undefined;
+    const defaults = this.setting<AgentProfiles>('agents.defaults');
     const job: Job = {
       id: randomUUID(),
       taskId: task.id,
@@ -124,6 +129,10 @@ export class Store {
       input,
       status: 'queued',
       createdAt: now(),
+      profile:
+        role === 'reviewer' && group ? group.reviewer : (task.agents?.[role] ?? defaults?.[role]),
+      groupId: group?.id,
+      groupGeneration: group?.generation,
     };
     this.saveJob(job);
     this.event(task.id, 'job.queued', { role, kind }, job.id);
@@ -143,31 +152,63 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
-  claim(): Job | undefined {
+  claim(eligible: (job: Job) => boolean = () => true): Job | undefined {
     return this.transaction(() => {
-      const row = this.db
+      const rows = this.db
         .prepare(
-          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ORDER BY rowid LIMIT 1`,
+          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ORDER BY rowid`,
         )
-        .get();
-      if (!row) return;
-      const job: Job = JSON.parse(row.data as string),
-        task = this.getTask(job.taskId);
-      if (task.generation !== job.generation || task.state === 'paused') {
-        job.status = 'cancelled';
+        .all();
+      for (const row of rows) {
+        const job: Job = JSON.parse(row.data as string),
+          task = this.getTask(job.taskId);
+        if (task.generation !== job.generation || task.state === 'paused') {
+          job.status = 'cancelled';
+          this.saveJob(job);
+          continue;
+        }
+        if (!eligible(job)) continue;
+        if (
+          job.role === 'reviewer' &&
+          job.groupId &&
+          this.jobs().some(
+            (active) =>
+              active.status === 'running' &&
+              active.role === 'reviewer' &&
+              active.groupId === job.groupId,
+          )
+        )
+          continue;
+        job.status = 'running';
+        job.startedAt = now();
         this.saveJob(job);
-        return;
+        return job;
       }
-      job.status = 'running';
-      job.startedAt = now();
-      this.saveJob(job);
-      return job;
     });
   }
   busy(id: string) {
     return !!this.db
       .prepare("SELECT 1 FROM jobs WHERE task_id=? AND status IN ('queued','running') LIMIT 1")
       .get(id);
+  }
+  groups(): ReviewGroup[] {
+    return this.db
+      .prepare('SELECT data FROM review_groups ORDER BY rowid DESC')
+      .all()
+      .map((row) => JSON.parse(row.data as string));
+  }
+  getGroup(id: string): ReviewGroup {
+    const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);
+    if (!row) throw new AppError('not_found', 'Review group not found', 404);
+    return JSON.parse(row.data as string);
+  }
+  saveGroup(group: ReviewGroup) {
+    group.updatedAt = now();
+    this.db
+      .prepare(
+        'INSERT INTO review_groups VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+      )
+      .run(group.id, JSON.stringify(group));
   }
   cancelJobs(id: string) {
     for (const job of this.jobs(id))

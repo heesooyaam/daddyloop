@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Store } from '../src/core/store.js';
 import { Engine } from '../src/core/engine.js';
 import { DemoProvider } from '../src/providers/demo.js';
-import type { Task, Job, AgentResult } from '../src/core/types.js';
+import type { PRTask as Task, Job, AgentResult } from '../src/core/types.js';
 export async function fixture(overrides: Partial<Task> = {}) {
   const store = new Store(':memory:'),
     provider = new DemoProvider(store),
@@ -17,6 +17,7 @@ export async function fixture(overrides: Partial<Task> = {}) {
     },
     repoPath: '/tmp',
     requirements: 'Preserve session generation invariants',
+    policy: { publication: 'human' },
   });
   task = { ...task, ...overrides };
   store.saveTask(task);

@@ -22,6 +22,11 @@ import { VERSION } from '../version.js';
 import { Telegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
+import { ModelCatalogue, profilesSchema } from '../core/agents.js';
+import { TicketWorkflow } from '../core/ticket-workflow.js';
+import { TicketReader } from '../integrations/tickets.js';
+import { registerPlanning, type Catalogue } from './planning.js';
+import type { AgentRuntime } from '../runtime/agent.js';
 
 const policySchema = z
   .object({
@@ -44,9 +49,15 @@ const createSchema = z
     policy: policySchema.optional(),
     planTaskId: z.string().uuid().optional(),
     authorThreadId: z.string().max(200).optional(),
+    agents: profilesSchema.optional(),
+    groupId: z.string().uuid().optional(),
   })
   .strict();
 export interface ServerOptions {
+  catalogue?: Catalogue;
+  ticketReader?: TicketReader;
+  workspaces?: Workspaces;
+  liveRuntime?: AgentRuntime;
   config?: Config;
   telegramFactory?: typeof Telegram.create;
   publicOrigin?: string;
@@ -68,9 +79,11 @@ export async function buildApp(options: ServerOptions) {
   const dataDir = resolve(options.dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const store = options.store ?? new Store(join(dataDir, 'reviewloop.sqlite'));
-  const engine = new Engine(store, options.provider ?? providers(store));
+  const engine = new Engine(store, options.provider ?? providers(store), config.agents);
   const cache = new CacheManager(engine, dataDir, config.cache);
-  const workspaces = new Workspaces(dataDir);
+  const workspaces = options.workspaces ?? new Workspaces(dataDir);
+  const catalogue = options.catalogue ?? new ModelCatalogue(process.env.REVIEWLOOP_CODEX_BIN);
+  const tickets = new TicketWorkflow(engine, workspaces, options.ticketReader);
   const getResources =
     options.resourceCheck ??
     (() =>
@@ -82,13 +95,17 @@ export async function buildApp(options: ServerOptions) {
   const worker = new Worker(
     engine,
     workspaces,
-    new CodexRuntime({
-      executable: process.env.REVIEWLOOP_CODEX_BIN,
-      model: process.env.REVIEWLOOP_CODEX_MODEL,
-    }),
+    options.liveRuntime ??
+      new CodexRuntime({
+        executable: process.env.REVIEWLOOP_CODEX_BIN,
+        model: process.env.REVIEWLOOP_CODEX_MODEL,
+      }),
     new DemoRuntime(),
     getResources,
+    15000,
+    config.maxConcurrentAgents,
   );
+  worker.autoSubmit = (id) => tickets.submit(id);
   if (config.cache.auto) worker.autoCleanup = () => cache.prune(true);
   const token = options.token ?? accessToken(dataDir);
   const access = new Access(store, token);
@@ -282,8 +299,14 @@ export async function buildApp(options: ServerOptions) {
     };
   });
   app.get('/api/tasks', async () => store.tasks());
+  registerPlanning(app, engine, tickets, catalogue, config.maxConcurrentAgents);
   app.post('/api/tasks', async (request, reply) => {
     const input = createSchema.parse(request.body);
+    if (input.agents)
+      await Promise.all([
+        catalogue.validate(input.agents.author),
+        catalogue.validate(input.agents.reviewer),
+      ]);
     const ref = parsePR(input.url, input.provider);
     const repoPath = await workspaces.validate(input.repoPath, ref.provider);
     const task = await engine.create({
@@ -310,6 +333,7 @@ export async function buildApp(options: ServerOptions) {
         'Prevent callbacks from an old session from changing the current session. Preserve the single event loop design and cover replacement in a regression test.',
       repoPath: dataDir,
       title: 'Guard against stale session callbacks',
+      policy: { publication: 'human' },
     });
     reply.code(201);
     return task;
@@ -321,6 +345,20 @@ export async function buildApp(options: ServerOptions) {
       .get(id);
     return {
       task: store.getTask(id),
+      agents: engine.effectiveAgents(store.getTask(id)),
+      group: store.getTask(id).groupId ? store.getGroup(store.getTask(id).groupId!) : undefined,
+      siblings: store.getTask(id).groupId
+        ? store
+            .tasks()
+            .filter((task) => task.groupId === store.getTask(id).groupId)
+            .map((task) => ({
+              id: task.id,
+              title: task.title,
+              state: task.state,
+              parentTaskId: task.parentTaskId,
+              author: engine.effectiveAgents(task).author,
+            }))
+        : [],
       messages: store.messages(id),
       events: store.events(id, recent ? Number(recent.id) - 1 : 0),
       jobs: store.jobs(id),
@@ -348,12 +386,20 @@ export async function buildApp(options: ServerOptions) {
           'approve-plan',
           'waive-checks',
           'reopen',
+          'implement',
+          'submit',
         ]),
         reason: z.string().max(10000).default(''),
       })
       .strict()
       .parse(request.body);
     const id = request.params.id;
+    if (action === 'implement') return engine.implement(id);
+    if (action === 'submit') return tickets.submit(id);
+    if (action === 'retry' && store.getTask(id).ref.kind === 'ticket')
+      return store.getTask(id).resumeState === 'submitting'
+        ? tickets.submit(id)
+        : engine.retryTicket(id);
     if (action === 'review' || action === 'retry') return engine.review(id, action === 'retry');
     if (action === 'reconcile') return engine.reconcile(id);
     if (action === 'publish') return engine.publish(id);

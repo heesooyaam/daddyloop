@@ -4,6 +4,8 @@ import { resolve, join } from 'node:path';
 import https from 'node:https';
 import http from 'node:http';
 import { buildApp } from '../../dist/server/server/app.js';
+import { TicketReader } from '../../dist/server/integrations/tickets.js';
+import { Workspaces } from '../../dist/server/runtime/workspaces.js';
 import { configSchema } from '../../dist/server/ops/config.js';
 const dir = resolve('.reviewloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -31,10 +33,79 @@ execFileSync(
   { stdio: 'ignore' },
 );
 chmodSync(key, 0o600);
+const fixtureProfiles = {
+  author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  reviewer: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+};
+const reader = new TicketReader();
+reader.read = async (source) => {
+  const number = Number(new URL(source).pathname.split('/').at(-1));
+  if (
+    !source.startsWith('https://github.com/fixture/planning/issues/') ||
+    !Number.isSafeInteger(number)
+  )
+    throw new Error('Use the browser test fixture issue');
+  return {
+    source: {
+      kind: 'github_issue',
+      key: `fixture/planning#${number}`,
+      title: `Ticket fixture ${number}`,
+      body: 'Preserve the session generation invariant.',
+      state: 'open',
+      url: source,
+      fetchedAt: new Date().toISOString(),
+      comments: [],
+    },
+    ref: {
+      kind: 'ticket',
+      provider: 'github',
+      host: 'github.com',
+      repo: 'fixture/planning',
+      number,
+      key: `fixture/planning#${number}`,
+      url: source,
+    },
+  };
+};
+const workspaces = new Workspaces(dir);
+workspaces.describeTicket = async (repoPath, ref) => ({
+  repoPath,
+  ref,
+  repository: {
+    baseHead: 'a'.repeat(40),
+    baseBranch: 'main',
+    cloneUrl: 'https://github.com/fixture/planning.git',
+    branch: '',
+  },
+});
+workspaces.prepareTicket = async () => dir;
 const { app } = await buildApp({
+  ticketReader: reader,
+  workspaces,
+  catalogue: {
+    list: async () =>
+      Object.values(fixtureProfiles).map((profile) => ({
+        id: profile.model,
+        name: profile.model,
+        efforts: ['medium', 'max'],
+        defaultEffort: 'medium',
+        isDefault: false,
+      })),
+    validate: async () => {},
+  },
+  liveRuntime: {
+    run: async (input) => {
+      input.onSession(`fixture-${input.job.role}-${input.task.id}`);
+      return {
+        status: 'completed',
+        summary: 'I have read the ticket. Discuss the requirements or start implementation.',
+        checkedHead: input.task.revision.head,
+      };
+    },
+  },
   dataDir: dir,
   demo: true,
-  config: configSchema.parse({ publicOrigin: 'https://localhost:4319' }),
+  config: configSchema.parse({ publicOrigin: 'https://localhost:4319', agents: fixtureProfiles }),
 });
 await app.listen({ host: '127.0.0.1', port: 4318 });
 const proxy = https.createServer(

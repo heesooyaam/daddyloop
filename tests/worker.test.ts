@@ -126,3 +126,27 @@ it('does not overwrite a human pause when workspace preparation finishes late', 
     f.store.close();
   }
 });
+
+it('emits an attention milestone when a native review cannot start', async () => {
+  const f = await fixture(),
+    runtime = { run: vi.fn() };
+  vi.spyOn(f.engine, 'review').mockRejectedValue(new Error('Native account needs reconnection'));
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+  try {
+    await worker.tick();
+    expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+    expect(
+      f.store
+        .events(f.task.id)
+        .some(
+          (event) =>
+            event.type === 'task.state' &&
+            (event.data as { state: string }).state === 'needs_input',
+        ),
+    ).toBe(true);
+    expect(runtime.run).not.toHaveBeenCalled();
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});

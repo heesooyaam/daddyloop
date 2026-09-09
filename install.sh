@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-reviewloop_version="0.3.0"
+reviewloop_version="0.4.0"
 reviewloop_prefix="${REVIEWLOOP_INSTALL_DIR:-$HOME/.local/share/reviewloop}"
 reviewloop_bin_dir="${REVIEWLOOP_BIN_DIR:-$HOME/.local/bin}"
 reviewloop_base="${REVIEWLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/reviewloop/releases/download/v$reviewloop_version}"

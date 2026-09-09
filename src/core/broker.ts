@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
+  prRef,
   sameRevision,
   type Task,
   type Job,
@@ -75,15 +76,15 @@ export class Broker {
   async ensureReview(task: Task) {
     if (task.review) return task.review;
     const marker = `reviewloop:${task.id}:${task.generation}:${task.round}`;
-    const provider = this.provider(task.ref),
+    const provider = this.provider(prRef(task)),
       revision = task.revision!;
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => provider.createReview(task.ref, revision, marker),
+      () => provider.createReview(prRef(task), revision, marker),
       async () => {
-        const existing = await provider.findReview(task.ref, marker);
+        const existing = await provider.findReview(prRef(task), marker);
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
     );
@@ -103,17 +104,17 @@ export class Broker {
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
-    const provider = this.provider(task.ref);
+    const provider = this.provider(prRef(task));
     if (!task.review)
       throw new AppError('review_missing', 'No native review is attached to this task');
-    const snapshot = await provider.getReview(task.ref, task.review);
+    const snapshot = await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
       if (job.role === 'author' && snapshot.status !== 'published')
         throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;
     }
-    const current = await provider.getPR(task.ref);
+    const current = await provider.getPR(prRef(task));
     if (
       current.state !== 'open' ||
       !sameRevision(current, task.revision) ||
@@ -136,7 +137,7 @@ export class Broker {
     assertDraft(snapshot);
     const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 24);
     const key = `${task.review.marker}:${job.id}:${tool}:${callId}:${hash}`;
-    const refresh = () => provider.getReview(task.ref, task.review!);
+    const refresh = () => provider.getReview(prRef(task), task.review!);
     if (tool === 'add_comment') {
       const data = schemas.add_comment.parse(input),
         marker = `${task.review.marker}:comment:${data.key}`;
@@ -167,7 +168,7 @@ export class Broker {
         task.id,
         marker,
         data,
-        () => provider.createComment(task.ref, task.review!, data.body, marker, location),
+        () => provider.createComment(prRef(task), task.review!, data.body, marker, location),
         async () => {
           const found = (await refresh()).comments.find((c) => c.body.includes(tag(marker)));
           return found ? { found: true, value: found } : { found: false };
@@ -184,7 +185,7 @@ export class Broker {
         task.id,
         key,
         data,
-        () => provider.updateComment(task.ref, task.review!, data.id, next),
+        () => provider.updateComment(prRef(task), task.review!, data.id, next),
         async () => {
           const found = (await refresh()).comments.find((c) => c.id === data.id && c.body === next);
           return found ? { found: true, value: found } : { found: false };
@@ -200,7 +201,7 @@ export class Broker {
         key,
         data,
         async () => {
-          await provider.deleteComment(task.ref, task.review!, data.id);
+          await provider.deleteComment(prRef(task), task.review!, data.id);
           return null;
         },
         async () => ({
@@ -221,7 +222,7 @@ export class Broker {
       key,
       data,
       async () => {
-        await provider.updateSummary(task.ref, task.review!, data.body);
+        await provider.updateSummary(prRef(task), task.review!, data.body);
         return null;
       },
       async () => {
@@ -234,15 +235,15 @@ export class Broker {
     return { summaryUpdated: true };
   }
   async publish(task: Task): Promise<ReviewSnapshot> {
-    const provider = this.provider(task.ref);
+    const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
-    const pr = await provider.getPR(task.ref);
+    const pr = await provider.getPR(prRef(task));
     if (pr.state !== 'open' || !sameRevision(pr, task.review.revision))
       throw new AppError(
         'stale_revision',
         'PR revision changed. This review cannot release feedback for the new revision.',
       );
-    const snapshot = await provider.getReview(task.ref, task.review);
+    const snapshot = await provider.getReview(prRef(task), task.review);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
     await this.outbox.perform(
@@ -250,14 +251,14 @@ export class Broker {
       `${task.review.marker}:publish`,
       { review: task.review.id },
       async () => {
-        await provider.publish(task.ref, task.review!);
+        await provider.publish(prRef(task), task.review!);
         return null;
       },
       async () =>
-        (await provider.getReview(task.ref, task.review!)).status === 'published'
+        (await provider.getReview(prRef(task), task.review!)).status === 'published'
           ? { found: true, value: null }
           : { found: false },
     );
-    return provider.getReview(task.ref, task.review);
+    return provider.getReview(prRef(task), task.review);
   }
 }

@@ -126,3 +126,80 @@ it('aborts pending requests on close without issuing pause or stop actions', asy
   expect(signals.every((signal) => signal.aborted)).toBe(true);
   expect(writes).toEqual([]);
 });
+
+it('configures role models from the catalogue and keeps the chosen effort', async () => {
+  const { catalogue, profiles } = await import('./planning-fixture.js');
+  const settings = { defaults: profiles, models: await catalogue.list(), maxConcurrentAgents: 1 };
+  const { api, writes } = transport((path) =>
+    path === '/agents'
+      ? Promise.resolve(settings)
+      : path === '/agents/defaults/reviewer'
+        ? Promise.resolve({ defaults: profiles })
+        : undefined,
+  );
+  const model = await ready(api);
+  await model.execute('/defaults');
+  model.patch({ overlay: { ...model.snapshot().overlay!, index: 1 } });
+  await model.submitOverlay();
+  expect(model.snapshot().overlay?.index).toBe(2);
+  await model.submitOverlay();
+  expect(model.snapshot().overlay?.step).toBe(2);
+  await model.submitOverlay();
+  expect(writes.at(-1)).toEqual({ path: '/agents/defaults/reviewer', body: profiles.reviewer });
+  expect(model.snapshot().overlay).toBeUndefined();
+});
+it('imports a ticket through the terminal wizard with defaults and opens its author chat', async () => {
+  const { catalogue, profiles, ticketInput } = await import('./planning-fixture.js');
+  const settings = { defaults: profiles, models: await catalogue.list(), maxConcurrentAgents: 1 };
+  const task = { ...taskA, ref: ticketInput().ref, source: ticketInput().source };
+  const { api, writes } = transport((path) =>
+    path === '/agents'
+      ? Promise.resolve(settings)
+      : path === '/tickets/preview'
+        ? Promise.resolve(ticketInput())
+        : path === '/tickets'
+          ? Promise.resolve(task)
+          : undefined,
+  );
+  const model = await ready(api);
+  await model.execute('/new');
+  model.setEditor(insert(emptyEditor(), ticketInput().source.url));
+  await model.submitOverlay();
+  model.setEditor(insert(emptyEditor(), '/work/repo'));
+  await model.submitOverlay();
+  for (let i = 0; i < 4; i++) await model.submitOverlay();
+  expect(writes.at(-1)).toEqual({
+    path: '/tickets',
+    body: {
+      source: ticketInput().source.url,
+      repoPath: '/work/repo',
+      agents: profiles,
+      publication: 'auto',
+      autoPush: true,
+    },
+  });
+  expect(model.snapshot().role).toBe('author');
+  expect(model.snapshot().overlay).toBeUndefined();
+});
+it('saves notification preferences and does not close a newer overlay after a late response', async () => {
+  let done!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  const { api, writes } = transport((path, body) =>
+    path === '/notifications'
+      ? body
+        ? pending
+        : Promise.resolve({ telegram: { enabled: true, mode: 'attention' }, paired: true })
+      : undefined,
+  );
+  const model = await ready(api);
+  await model.execute('/notifications');
+  model.patch({ overlay: { ...model.snapshot().overlay!, index: 0 } });
+  const saving = model.submitOverlay();
+  model.open('tasks');
+  done();
+  await saving;
+  expect(model.snapshot().overlay?.kind).toBe('tasks');
+  expect(writes.at(-1)?.body).toEqual({ enabled: false, mode: 'attention' });
+});

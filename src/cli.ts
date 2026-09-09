@@ -14,6 +14,7 @@ import { api as callApi } from './ops/client.js';
 import { registerOperations } from './ops/commands.js';
 import { consoleUI } from './ops/console.js';
 import { VERSION } from './version.js';
+import { registerPlanningCommands } from './ops/planning.js';
 
 const program = new Command()
   .name('reviewctl')
@@ -123,6 +124,7 @@ program
   .option('--plan <task-id>', 'approved plan task')
   .option('--author-thread <id>', 'existing Codex author thread to resume')
   .option('--auto-publish', 'allow automatic review publication')
+  .option('--manual-publish', 'wait for you before publishing review comments')
   .option('--no-auto-push', 'leave author commits for a manual push')
   .action(async (url, options) =>
     print(
@@ -134,7 +136,7 @@ program
         planTaskId: options.plan,
         authorThreadId: options.authorThread,
         policy: {
-          publication: options.autoPublish ? 'auto' : 'human',
+          publication: options.manualPublish ? 'human' : 'auto',
           autoPush: options.autoPush,
         },
       }),
@@ -154,6 +156,8 @@ for (const action of [
   'approve-plan',
   'waive-checks',
   'reopen',
+  'implement',
+  'submit',
 ]) {
   program
     .command(action)
@@ -354,6 +358,7 @@ program
     }
   });
 registerOperations(program);
+registerPlanningCommands(program);
 const interactive = (options: { id?: string; role?: 'author' | 'reviewer' } = {}) =>
   consoleUI(
     <T>(path: string, body?: unknown, signal?: AbortSignal) =>
