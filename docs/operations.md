@@ -103,7 +103,7 @@ Stop the service before copying the entire data directory, or use SQLite's backu
 
 ## Validation boundaries
 
-The v0.2 review report records fixture, browser, real SSH-disconnect and native Arc read validation. A live native draft/edit/publish/author-push cycle is still outstanding for the providers. A live Codex smoke verified scoped dynamic tools and persistent thread resume. Real Telegram delivery and external phone reachability require the owner's account setup.
+The v0.2 review report records fixture, browser, real SSH-disconnect and native Arc read validation. A live native draft/edit/publish/author-push cycle is still outstanding for the providers. A live Codex smoke verified scoped dynamic tools and persistent thread resume. Real private-chat Telegram delivery and a complete demo workflow have been verified. External phone reachability requires the owner's network setup.
 
 Existing PRs are attached; creating a plan or implementation PR from a bare idea is outside this flow. Distributed runners, automatic merge, webhook ingestion, automatic CI repair and interactive command-approval relay are not implemented.
 
