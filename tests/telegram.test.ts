@@ -286,3 +286,100 @@ it('opens a fresh confirmation from the task button before any publication occur
     f.store.close();
   }
 });
+
+it('switches English/Russian only for the bound user and reads fresh model choices from the CLI catalogue', async () => {
+  const { catalogue, profiles } = await import('./planning-fixture.js');
+  const { UpdateMonitor } = await import('../src/core/updates.js');
+  const f = await fixture(),
+    t = transport(),
+    bot = new Telegram(f.engine, t.api, 'test_bot');
+  const list = vi.fn(catalogue.list),
+    updates = new UpdateMonitor(f.store, { probe: async () => ({ source: 'missing' }) });
+  bot.configure({ catalogue: { ...catalogue, list }, updates });
+  try {
+    f.engine.setDefaultAgents(profiles);
+    await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+    await bot.handle(update(2, '/language en'));
+    expect(t.sent.at(-1)?.body.text).toContain('Language');
+    expect(f.store.setting<{ locale: string }>('preferences')?.locale).toBe('en');
+    await bot.handle(update(3, '/language ru', 99));
+    expect(f.store.setting<{ locale: string }>('preferences')?.locale).toBe('en');
+    await bot.handle(update(4, '/models'));
+    expect(t.sent.at(-1)?.body.text).toContain(profiles.author.model);
+    expect(list).toHaveBeenCalledWith(false);
+    await bot.handle({
+      update_id: 5,
+      callback_query: {
+        id: 'fresh-models',
+        data: 'models:refresh',
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+    expect(list).toHaveBeenCalledWith(true);
+    await bot.handle({
+      update_id: 6,
+      callback_query: {
+        id: 'language-ru',
+        data: 'language:ru',
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+    expect(f.store.setting<{ locale: string }>('preferences')?.locale).toBe('ru');
+    expect(t.sent.at(-1)?.body.text).toContain('Язык');
+  } finally {
+    await updates.stop();
+    f.store.close();
+  }
+});
+it('sends one CLI update notice per version and respects notification opt-out', async () => {
+  const f = await fixture(),
+    sent: string[] = [];
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    if (String(url).endsWith('/getUpdates'))
+      return new Promise((_resolve, reject) =>
+        options?.signal?.addEventListener('abort', () => reject(new Error('stopped')), {
+          once: true,
+        }),
+      );
+    const body = JSON.parse(String(options?.body));
+    if (body.text) sent.push(body.text);
+    return new Response(JSON.stringify({ ok: true, result: {} }));
+  });
+  const bot = new Telegram(f.engine, api, 'fixture_bot');
+  await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+  await bot.handle(update(2, '/language en'));
+  const baseline = sent.length;
+  bot.start();
+  const notice = {
+    kind: 'available',
+    checkedAt: new Date().toISOString(),
+    tool: {
+      id: 'codex',
+      name: 'Codex CLI',
+      supported: true,
+      source: 'bundled',
+      installed: '1.0.0',
+      latest: '1.1.0',
+      updateAvailable: true,
+      releaseUrl: 'https://example.com/releases',
+    },
+  };
+  try {
+    f.store.event('_system', 'runtime.update_available', notice);
+    f.store.event('_system', 'runtime.update_available', notice);
+    await vi.waitFor(() => expect(sent).toHaveLength(baseline + 1));
+    expect(sent.at(-1)).toContain('CLI update available');
+    f.store.setSetting('updates.notifications', false);
+    f.store.event('_system', 'runtime.update_available', {
+      ...notice,
+      tool: { ...notice.tool, latest: '1.2.0' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sent).toHaveLength(baseline + 1);
+  } finally {
+    await bot.stop();
+    f.store.close();
+  }
+});

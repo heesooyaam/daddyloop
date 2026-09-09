@@ -2,7 +2,7 @@
 
 All product screenshots come from the actual Reviewloop UI and CLI connected to a fresh, isolated demo server. The demo label stays visible. Agent responses and PR operations in this workspace are fixtures; these images do not demonstrate a live provider write or a real model response.
 
-The CLI images replay the real ANSI screen updates from a PTY through xterm.js. Panels, colours and menus are rendered by the actual terminal app. `cli-chat.png` shows a reviewer response; `cli.png` shows the initial workspace. Separate captures show command suggestions, task selection, author drafts, light theme, compact layout, role models and Telegram preferences. Model catalogues in media captures are illustrative offline fixtures. The green README header is a separate SVG illustration, not an application screen.
+The CLI images replay the real ANSI screen updates from a PTY through xterm.js. Panels, colours and menus are rendered by the actual terminal app. `cli-chat.png` shows a reviewer response; `cli.png` shows the initial workspace. Separate captures show command suggestions, task selection, author drafts, light theme, compact layout, role models and Telegram preferences. Model catalogues and version status in media captures are illustrative offline fixtures. Russian screenshots show language switching, the model catalogue provenance and the CLI update panel. The green README header is a separate SVG illustration, not an application screen.
 
 ## Watch
 

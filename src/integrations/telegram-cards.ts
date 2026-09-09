@@ -1,7 +1,24 @@
+import { translate, type Locale } from '../i18n/index.js';
+import type { TextEntity } from './telegram-text.js';
 import type { Task, State, Role, ReviewSnapshot } from '../core/types.js';
 import type { NotificationPreferences } from './notifications.js';
 import { TelegramText, safeLink, type TelegramCard, type TelegramButton } from './telegram-text.js';
 
+class LocalText extends TelegramText {
+  constructor(readonly locale: Locale) {
+    super();
+  }
+  override add(
+    text: string,
+    type?: TextEntity['type'],
+    extra: Pick<TextEntity, 'url' | 'language'> = {},
+  ) {
+    return super.add(translate(this.locale, text), type, extra);
+  }
+  literal(text: string, type?: TextEntity['type']) {
+    return super.add(text, type);
+  }
+}
 const states: Record<State, [string, string, string]> = {
   discussing: [
     '💬',
@@ -38,25 +55,32 @@ const compact = (text: string, max = 160) => {
   const chars = [...text.replace(/\s+/g, ' ').trim()];
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join('');
 };
-const card = (text: TelegramText, buttons?: TelegramButton[][]): TelegramCard => ({
+const card = (text: LocalText, buttons?: TelegramButton[][]): TelegramCard => ({
   text: text.text,
   entities: text.entities,
-  buttons,
+  buttons: buttons?.map((row) =>
+    row.map((button) => ({
+      ...button,
+      text: /^\d+ · /.test(button.text) ? button.text : translate(text.locale, button.text),
+    })),
+  ),
 });
 const navigation = (): TelegramButton[][] => [
   [
     { text: '📋 Задачи', callback_data: 'tasks:0' },
     { text: '🔔 Уведомления', callback_data: 'notifications:show' },
   ],
+  [
+    { text: '🌐 Language', callback_data: 'language:show' },
+    { text: '🤖 Models', callback_data: 'models:refresh' },
+    { text: '⬆️ Updates', callback_data: 'updates:show' },
+  ],
 ];
-function identity(text: TelegramText, task: Task) {
-  text.add(compact(task.title), 'bold').add('\n');
-  text.add(
-    task.ref.provider === 'demo'
-      ? 'ДЕМО · Reviewloop'
-      : compact(task.source?.key ?? `${task.ref.repo} · #${task.ref.number}`),
-    'italic',
-  );
+function identity(text: LocalText, task: Task) {
+  text.literal(compact(task.title), 'bold').add('\n');
+  if (task.ref.provider === 'demo') text.add('ДЕМО · Reviewloop', 'italic');
+  else
+    text.literal(compact(task.source?.key ?? `${task.ref.repo} · #${task.ref.number}`), 'italic');
 }
 function taskButtons(task: Task, publicOrigin?: string): TelegramButton[][] {
   const rows: TelegramButton[][] = [];
@@ -78,18 +102,18 @@ function taskButtons(task: Task, publicOrigin?: string): TelegramButton[][] {
   ]);
   return rows;
 }
-export function taskCard(task: Task, publicOrigin?: string): TelegramCard {
+export function taskCard(task: Task, publicOrigin?: string, locale: Locale = 'ru'): TelegramCard {
   let [icon, title, explanation] = states[task.state];
   if (task.state === 'complete' && task.kind === 'plan') title = 'План принят';
   if (task.state === 'awaiting_checks' && task.pr?.checks === 'failing') {
     icon = '🔴';
     title = 'Проверки не прошли';
   }
-  const text = new TelegramText().add(`${icon} ${title}`, 'bold').add('\n\n');
+  const text = new LocalText(locale).add(`${icon} ${translate(locale, title)}`, 'bold').add('\n\n');
   identity(text, task);
   text.add('\n\n');
   if (task.state === 'needs_input' || task.state === 'paused' || task.state === 'awaiting_checks')
-    text.markdown(task.reason || explanation);
+    text.markdown(translate(locale, task.reason || explanation));
   else if (task.state === 'complete' && task.summary.trim()) text.markdown(task.summary);
   else text.add(explanation);
   if (task.state === 'awaiting_publication')
@@ -118,22 +142,23 @@ export function agentCard(
   role: Role,
   body: string,
   publicOrigin?: string,
+  locale: Locale = 'ru',
 ): TelegramCard {
-  const text = new TelegramText()
+  const text = new LocalText(locale)
     .add(role === 'author' ? '✍️ Ответ автора' : '🔎 Ответ ревьюера', 'bold')
     .add('\n\n');
   identity(text, task);
   text.add('\n\n').markdown(body).add('\n\nЗадача ').add(task.id.slice(0, 8), 'code');
   return card(text, taskButtons(task, publicOrigin));
 }
-export function tasksCard(tasks: Task[], offset = 0): TelegramCard {
+export function tasksCard(tasks: Task[], offset = 0, locale: Locale = 'ru'): TelegramCard {
   const pageSize = 5,
     start = Math.min(
       Math.max(0, offset),
       Math.max(0, Math.floor((tasks.length - 1) / pageSize) * pageSize),
     );
   const page = tasks.slice(start, start + pageSize),
-    text = new TelegramText().add('📋 Твои задачи', 'bold');
+    text = new LocalText(locale).add('📋 Твои задачи', 'bold');
   const buttons: TelegramButton[][] = [];
   if (!tasks.length)
     text
@@ -146,7 +171,7 @@ export function tasksCard(tasks: Task[], offset = 0): TelegramCard {
       const [icon, status] = states[task.state];
       text
         .add('\n\n')
-        .add(`${i + 1}. ${compact(task.title, 90)}`, 'bold')
+        .literal(`${i + 1}. ${compact(task.title, 90)}`, 'bold')
         .add(`\n${icon} ${status} · `)
         .add(task.id.slice(0, 8), 'code');
       if (task.ref.provider === 'demo') text.add(' · демо');
@@ -167,9 +192,12 @@ export function tasksCard(tasks: Task[], offset = 0): TelegramCard {
   ]);
   return card(text, buttons);
 }
-export function notificationsCard(prefs: NotificationPreferences): TelegramCard {
+export function notificationsCard(
+  prefs: NotificationPreferences,
+  locale: Locale = 'ru',
+): TelegramCard {
   const mode = !prefs.enabled ? 'off' : prefs.mode,
-    text = new TelegramText().add('🔔 Уведомления', 'bold').add('\n\n');
+    text = new LocalText(locale).add('🔔 Уведомления', 'bold').add('\n\n');
   text
     .add(mode === 'off' ? 'Выключены' : mode === 'attention' ? 'Тихий режим' : 'Все ответы', 'bold')
     .add('\n');
@@ -192,8 +220,8 @@ export function notificationsCard(prefs: NotificationPreferences): TelegramCard 
   buttons.push([{ text: '📋 Задачи', callback_data: 'tasks:0' }]);
   return card(text, buttons);
 }
-export function welcomeCard(): TelegramCard {
-  const text = new TelegramText()
+export function welcomeCard(locale: Locale = 'ru'): TelegramCard {
+  const text = new LocalText(locale)
     .add('👋 Reviewloop подключён', 'bold')
     .add('\n\nТеперь этот чат связан с твоим рабочим пространством.\n\n');
   text.add('Задачи', 'bold').add(' — статус и быстрый переход к результату.\n');
@@ -201,8 +229,8 @@ export function welcomeCard(): TelegramCard {
   text.add('Работа продолжается на сервере, даже когда ноутбук выключен.');
   return card(text, navigation());
 }
-export function helpCard(): TelegramCard {
-  const text = new TelegramText().add('🧭 Reviewloop · команды', 'bold').add('\n\n');
+export function helpCard(locale: Locale = 'ru'): TelegramCard {
+  const text = new LocalText(locale).add('🧭 Reviewloop · команды', 'bold').add('\n\n');
   for (const [command, label] of [
     ['/tasks', 'выбрать задачу'],
     ['/status <id>', 'посмотреть статус'],
@@ -214,16 +242,19 @@ export function helpCard(): TelegramCard {
     ['/publish <id>', 'перейти к подтверждению публикации'],
     ['/notifications', 'выбрать уведомления'],
     ['/web', 'получить ссылку входа на сайт'],
+    ['/language', 'выбрать язык интерфейса'],
+    ['/models', 'посмотреть модели'],
+    ['/updates', 'проверить версии CLI'],
   ])
-    text.add(command, 'code').add(`\n${label}\n\n`);
+    text.literal(translate(locale, command), 'code').add(`\n${label}\n\n`);
   text.add('Вместо <id> достаточно первых символов номера задачи.');
   return card(text, navigation());
 }
-export function noteCard(title: string, body: string): TelegramCard {
-  return card(new TelegramText().add(title, 'bold').add('\n\n').add(body), navigation());
+export function noteCard(title: string, body: string, locale: Locale = 'ru'): TelegramCard {
+  return card(new LocalText(locale).add(title, 'bold').add('\n\n').add(body), navigation());
 }
-export function errorCard(message: string): TelegramCard {
-  const text = new TelegramText()
+export function errorCard(message: string, locale: Locale = 'ru'): TelegramCard {
+  const text = new LocalText(locale)
     .add('⚠️ Проверь результат действия', 'bold')
     .add('\n\n')
     .add(message)
@@ -234,8 +265,9 @@ export function publishCard(
   task: Task,
   snapshot: ReviewSnapshot,
   callbackId: string,
+  locale: Locale = 'ru',
 ): TelegramCard {
-  const text = new TelegramText().add('📤 Опубликовать ревью?', 'bold').add('\n\n');
+  const text = new LocalText(locale).add('📤 Опубликовать ревью?', 'bold').add('\n\n');
   identity(text, task);
   text
     .add(`\n\nЗамечаний: ${snapshot.comments.length}\nРевизия: `)

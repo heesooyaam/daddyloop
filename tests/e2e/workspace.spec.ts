@@ -148,3 +148,64 @@ test('starts ticket conversations with separate models, adds a child and saves p
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test('switches both interface languages, preserves task text, refreshes models and checks CLI versions', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page
+    .getByLabel('Local access token')
+    .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
+  await page.getByRole('button', { name: 'Connect to workspace' }).click();
+  await expect(page.getByRole('heading', { name: 'Review workspace', exact: true })).toBeVisible();
+  await page.getByLabel('Interface language').selectOption('ru');
+  await expect(
+    page.getByRole('heading', { name: 'Рабочее пространство', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Новая задача из тикета', exact: true }).click();
+  await page
+    .getByLabel('GitHub issue или тикет Tracker')
+    .fill('https://github.com/fixture/planning/issues/777');
+  await page.getByRole('button', { name: 'Посмотреть тикет' }).click();
+  await expect(
+    page.getByText('Preserve the session generation invariant.', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel('Модель: Автор этого тикета')).toHaveValue('gpt-5.6-sol');
+  const refreshed = page.waitForRequest((request) =>
+    request.url().includes('/api/agents?refresh=1'),
+  );
+  await page.getByRole('button', { name: 'Обновить список моделей' }).click();
+  await refreshed;
+  await expect(page.getByText('Codex CLI 0.153.4')).toBeVisible();
+  await page.getByRole('button', { name: 'Закрыть окно' }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Обновления', exact: true }).click();
+  await page.getByRole('button', { name: 'Проверить сейчас', exact: true }).click();
+  await expect(page.getByText('Доступно обновление', { exact: true })).toBeVisible();
+  await expect(page.getByText('Интеграция пока недоступна', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole('button', { name: 'Закрыть окно' }).click();
+  await page.getByLabel('Язык интерфейса').selectOption('en');
+  await expect(page.getByRole('heading', { name: 'Review workspace', exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('keeps the language chosen before login after connection and reload', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Interface language').selectOption('ru');
+  await page
+    .getByLabel('Локальный токен доступа')
+    .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
+  await page.getByRole('button', { name: 'Подключиться', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Рабочее пространство', exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole('heading', { name: 'Рабочее пространство', exact: true }),
+  ).toBeVisible();
+  await page.getByLabel('Язык интерфейса').selectOption('en');
+  await expect(page.getByRole('heading', { name: 'Review workspace', exact: true })).toBeVisible();
+});

@@ -1,10 +1,11 @@
-# Reviewloop 0.4.3
+# Reviewloop 0.5.0
 
-Telegram now presents task cards, formatted author/reviewer replies and inline navigation. This release includes the 0.4.2 presentation changes and two final review corrections:
+English and Russian are now selectable across the website, terminal workspace and Telegram. Interface preferences persist without changing task content, agent profiles or drafts.
 
-- Native GitHub/GitLab correlation comments are hidden from rendered summaries; original database/native Markdown and literal code examples are preserved.
-- Error cards ask the user to check the result instead of claiming the operation failed when only its confirmation may have been lost.
+- Visible model provenance: the selected Codex CLI provides model/list, with a five-minute cache, retrieval/version metadata and explicit refresh controls.
+- Author and reviewer model/effort choices remain independent; model names and supported effort values come from the CLI rather than a maintained name list.
+- CLI version checks run every six hours and can be requested immediately. Telegram update alerts are deduplicated, with a separate notification preference.
+- Diagnostics distinguish the bundled Codex from external CLI installations. Explicit local runtime selection validates the app-server catalogue, requires an idle queue and preserves updater-compatible launcher paths.
+- Claude installation/version diagnostics are available; the Claude agent runtime is still not implemented.
 
-Bold/italic text, lists, links, code language and long-message formatting are preserved. Task pagination, status and notification buttons work only in the paired private chat; publication still requires the existing fresh confirmation.
-
-Validation: 123 tests, production build and live Telegram acceptance of formatted demo messages. Pairing, task data, policies and notification preferences are preserved.
+Existing tasks, accounts, pairing, policies and model defaults are preserved. The updater does not install new binaries or restart running agents automatically.

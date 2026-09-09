@@ -1,4 +1,5 @@
 import type { Api } from '../terminal/model.js';
+import type { Locale } from '../i18n/index.js';
 export async function consoleUI(
   api: Api,
   options: {
@@ -6,6 +7,7 @@ export async function consoleUI(
     role?: 'author' | 'reviewer';
     plain?: boolean;
     theme?: 'dark' | 'light';
+    locale?: Locale;
   } = {},
 ) {
   if (
@@ -18,6 +20,7 @@ export async function consoleUI(
     return plain(
       api,
       options.id ? { id: options.id, role: options.role ?? 'reviewer' } : undefined,
+      options.locale,
     );
   }
   const { runTerminal } = await import('../terminal/run.js');

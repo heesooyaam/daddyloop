@@ -1,3 +1,8 @@
+import { useLocale, LocaleProvider } from './i18n.js';
+import { localeNames, type Locale } from '../i18n/index.js';
+import type { Preferences } from '../core/preferences.js';
+import type { UpdateStatus } from '../core/updates.js';
+import { UpdatesPanel } from './runtime.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Markdown from 'react-markdown';
@@ -67,6 +72,8 @@ type Detail = {
   }[];
 };
 type Status = {
+  preferences?: Preferences;
+  updates?: UpdateStatus;
   version: string;
   publicOrigin: string | null;
   telegram: { configured: boolean; paired?: boolean; bot?: string; error?: string | null };
@@ -128,6 +135,8 @@ function safeLink(value: string) {
   }
 }
 function StatusPill({ state }: { state: State }) {
+  const { t: tr } = useLocale();
+
   return (
     <span
       className={`pill ${state === 'complete' ? 'green' : needsAttention(state) ? 'amber' : isRunning(state) ? 'blue' : 'neutral'}`}
@@ -139,7 +148,7 @@ function StatusPill({ state }: { state: State }) {
       ) : (
         <span className="status-dot" />
       )}
-      {stateLabels[state]}
+      {tr(stateLabels[state])}
     </span>
   );
 }
@@ -171,6 +180,8 @@ function Brand() {
 }
 
 function App() {
+  const { t: tr, locale, adopt } = useLocale();
+
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [status, setStatus] = useState<Status>();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -190,6 +201,7 @@ function App() {
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [ticketOpen, setTicketOpen] = useState<'root' | 'child' | null>(null);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const initialPair = useRef(location.hash.startsWith('#pair/') ? location.hash.slice(6) : '');
   const pairingPromise = useRef<Promise<unknown> | null>(null);
@@ -218,6 +230,7 @@ function App() {
       setAuthenticated(true);
       setTasks(nextTasks);
       setStatus(nextStatus);
+      if (nextStatus.preferences) adopt(nextStatus.preferences);
       for (const task of nextTasks) {
         const previous = previousStates.current.get(task.id);
         if (
@@ -228,7 +241,7 @@ function App() {
           'Notification' in window &&
           Notification.permission === 'granted'
         )
-          new Notification(`Reviewloop · ${stateLabels[task.state]}`, {
+          new Notification(`Reviewloop · ${tr(stateLabels[task.state])}`, {
             body: task.title,
           });
         previousStates.current.set(task.id, task.state);
@@ -241,7 +254,7 @@ function App() {
       if (e instanceof ApiError && e.status === 401) setAuthenticated(false);
       else setError(String(e));
     }
-  }, [selected, notify]);
+  }, [selected, notify, adopt]);
   useEffect(() => {
     void load();
     const timer = setInterval(() => {
@@ -322,8 +335,8 @@ function App() {
       <div className="loading-screen">
         <Brand />
         <LoaderCircle className="spin" />
-        <span>Connecting to your workspace…</span>
-        {error && <p role="alert">{error}</p>}
+        <span>{tr('Connecting to your workspace…')}</span>
+        {error && <p role="alert">{tr(error)}</p>}
       </div>
     );
   if (!authenticated)
@@ -358,27 +371,28 @@ function App() {
       <aside className="sidebar">
         <Brand />
         <div className="workspace-switch">
-          <span className="workspace-avatar">W</span>
+          <span className="workspace-avatar">{tr('W')}</span>
           <div>
-            <strong>Personal workspace</strong>
-            <small>Local installation</small>
+            <strong>{tr('Personal workspace')}</strong>
+            <small>{tr('Local installation')}</small>
           </div>
           <ChevronDown size={14} />
         </div>
-        <span className="nav-label">WORKSPACE</span>
+        <span className="nav-label">{tr('WORKSPACE')}</span>
         <button
           className={`nav-item ${filter === 'all' ? 'selected' : ''}`}
           onClick={() => setFilter('all')}
         >
           <LayoutGrid size={18} />
-          All tasks<span>{tasks.length}</span>
+          {tr(' All tasks')}
+          <span>{tasks.length}</span>
         </button>
         <button
           className={`nav-item ${filter === 'attention' ? 'selected' : ''}`}
           onClick={() => setFilter('attention')}
         >
           <MessageSquare size={18} />
-          Needs attention
+          {tr(' Needs attention ')}
           {attentionCount > 0 && <span className="count-amber">{attentionCount}</span>}
         </button>
         <button
@@ -386,94 +400,132 @@ function App() {
           onClick={() => setFilter('active')}
         >
           <Activity size={18} />
-          In progress<span>{runningCount}</span>
+          {tr(' In progress')}
+          <span>{runningCount}</span>
         </button>
         <button
           className={`nav-item ${filter === 'complete' ? 'selected' : ''}`}
           onClick={() => setFilter('complete')}
         >
           <CircleCheck size={18} />
-          Completed
+          {tr(' Completed ')}
         </button>
         <div className="sidebar-divider" />
-        <span className="nav-label">CONNECTIONS</span>
+        <span className="nav-label">{tr('CONNECTIONS')}</span>
         {(['github', 'gitlab'] as const).map((name) => (
           <div className="connection" key={name}>
             {name === 'github' ? <Code2 size={17} /> : <GitBranch size={17} />}
-            <span>{name === 'github' ? 'GitHub' : 'GitLab'}</span>
+            <span>{name === 'github' ? tr('GitHub') : tr('GitLab')}</span>
             <span
               className={`connection-dot ${status?.connections[name].configured ? 'on' : ''}`}
               title={
-                status?.connections[name].configured ? 'Credential configured' : 'Credential needed'
+                status?.connections[name].configured
+                  ? tr('Credential configured')
+                  : tr('Credential needed')
               }
             />
           </div>
         ))}
         <p className="connection-hint">
-          Connect credentials locally with
+          {tr(' Connect credentials locally with ')}
           <br />
-          <code>reviewctl doctor</code>
+          <code>{tr('reviewctl doctor')}</code>
         </p>
         <button className="nav-item" onClick={() => setConnectionsOpen(true)}>
           <Settings2 size={18} />
-          Devices & connections
+          {tr(' Devices & connections ')}
         </button>
         <button className="nav-item" onClick={() => setAgentsOpen(true)}>
           <Code2 size={18} />
-          Agents & models
+          {tr(' Agents & models ')}
         </button>
         <button className="nav-item" onClick={() => setNotificationsOpen(true)}>
           <Bell size={18} />
-          Notifications
+          {tr(' Notifications ')}
         </button>
         <div className="sidebar-bottom">
           <div className="local-status">
             <span className="connection-dot on" />
-            <span>Running on this machine</span>
+            <span>{tr('Running on this machine')}</span>
           </div>
-          <small>v{status?.version} · State stored on this machine</small>
+          <small>
+            {tr('v')}
+            {status?.version}
+            {tr(' · State stored on this machine')}
+          </small>
         </div>
       </aside>
       <main className="main">
         <header className="topbar">
           <div className="breadcrumb">
-            Workspace<span>/</span>
-            <strong>Review tasks</strong>
+            {tr(' Workspace')}
+            <span>/</span>
+            <strong>{tr('Review tasks')}</strong>
           </div>
           <div className="top-actions">
+            <select
+              className="language-select"
+              aria-label={tr('Interface language')}
+              value={locale}
+              onChange={async (event) => {
+                const next = event.target.value as Locale;
+                try {
+                  adopt(await api<Preferences>('/preferences', { locale: next }));
+                } catch (error) {
+                  setError((error as Error).message);
+                }
+              }}
+            >
+              {Object.entries(localeNames).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {tr(label)}
+                </option>
+              ))}
+            </select>
             <button
               className="icon-button"
-              aria-label="Devices and connections"
-              title="Devices and connections"
+              aria-label={tr('Updates')}
+              title={tr('Updates')}
+              onClick={() => setUpdatesOpen(true)}
+            >
+              <RefreshCw size={18} />
+              {status?.updates?.tools.some((tool) => tool.supported && tool.updateAvailable) && (
+                <span className="update-dot" />
+              )}
+            </button>
+            <button
+              className="icon-button"
+              aria-label={tr('Devices and connections')}
+              title={tr('Devices and connections')}
               onClick={() => setConnectionsOpen(true)}
             >
               <Settings2 size={18} />
             </button>
             <button
               className={`icon-button ${notify ? 'enabled' : ''}`}
-              aria-label="Notification settings"
-              title="Notification settings"
+              aria-label={tr('Notification settings')}
+              title={tr('Notification settings')}
               onClick={() => setNotificationsOpen(true)}
             >
               <Bell size={18} />
             </button>
-            <span className="user-avatar">Y</span>
+            <span className="user-avatar">{tr('Y')}</span>
           </div>
         </header>
         <div className="page-heading">
           <div>
-            <div className="eyebrow">THE WORK BETWEEN AGENTS, HANDLED.</div>
-            <h1>Review workspace</h1>
-            <p>Keep the author moving. Give every change an independent review.</p>
+            <div className="eyebrow">{tr('THE WORK BETWEEN AGENTS, HANDLED.')}</div>
+            <h1>{tr('Review workspace')}</h1>
+            <p>{tr('Keep the author moving. Give every change an independent review.')}</p>
           </div>
           <div className="heading-actions">
             <button className="button primary" onClick={() => setTicketOpen('root')}>
               <Plus size={17} />
-              New from ticket
+              {tr(' New from ticket ')}
             </button>
             <button className="button" onClick={() => setCreating(true)}>
               <Plus size={17} />
-              Attach a PR
+              {tr(' Attach a PR ')}
             </button>
           </div>
         </div>
@@ -484,7 +536,7 @@ function App() {
             </span>
             <div>
               <strong>{attentionCount}</strong>
-              <span>Need your attention</span>
+              <span>{tr('Need your attention')}</span>
             </div>
           </div>
           <div>
@@ -493,7 +545,7 @@ function App() {
             </span>
             <div>
               <strong>{runningCount}</strong>
-              <span>Moving through the loop</span>
+              <span>{tr('Moving through the loop')}</span>
             </div>
           </div>
           <div className="resource-metric">
@@ -505,13 +557,14 @@ function App() {
                 {status?.resources.memoryAvailableGiB.toFixed(1)}{' '}
                 <small>
                   {status?.resources.memoryScope === 'service'
-                    ? 'GiB in service budget'
-                    : 'GiB RAM available'}
+                    ? tr('GiB in service budget')
+                    : tr('GiB RAM available')}
                 </small>
               </strong>
               <span>
-                {status?.resources.diskAvailableGiB.toFixed(0)} GiB disk free · {status?.activeJobs}{' '}
-                active agent
+                {status?.resources.diskAvailableGiB.toFixed(0)}
+                {tr(' GiB disk free · ')}
+                {status?.activeJobs} {tr(' active agent ')}
               </span>
             </div>
             <span className={`small-dot ${status?.resources.ok ? 'healthy' : 'unhealthy'}`} />
@@ -519,16 +572,17 @@ function App() {
         </div>
         {error && (
           <div className="error-banner" role="alert">
-            <span>{error}</span>
-            <button aria-label="Dismiss error" onClick={() => setError('')}>
+            <span>{tr(error)}</span>
+            <button aria-label={tr('Dismiss error')} onClick={() => setError('')}>
               <X size={16} />
             </button>
           </div>
         )}
         {status && !status.resources.ok && (
           <div className="warning-banner">
-            New agent jobs are held: {status.resources.reasons.join('; ')}. Existing files and other
-            processes are preserved.
+            {tr(' New agent jobs are held: ')}
+            {status.resources.reasons.join('; ')}
+            {tr('. Existing files and other processes are preserved. ')}
           </div>
         )}
         <div className="workbench">
@@ -536,17 +590,17 @@ function App() {
             <div className="section-heading">
               <strong>
                 {filter === 'all'
-                  ? 'All tasks'
+                  ? tr('All tasks')
                   : filter === 'attention'
-                    ? 'Needs attention'
+                    ? tr('Needs attention')
                     : filter === 'active'
-                      ? 'In progress'
-                      : 'Completed'}{' '}
+                      ? tr('In progress')
+                      : tr('Completed')}{' '}
                 <span>{visible.length}</span>
               </strong>
               <button
                 className="icon-button"
-                aria-label="Refresh tasks"
+                aria-label={tr('Refresh tasks')}
                 onClick={() => void load()}
               >
                 <RefreshCw size={15} />
@@ -555,7 +609,9 @@ function App() {
             {!visible.length && (
               <div className="list-empty">
                 <FolderGit2 size={26} />
-                <p>{tasks.length ? 'Nothing in this view.' : 'Your next review starts here.'}</p>
+                <p>
+                  {tasks.length ? tr('Nothing in this view.') : tr('Your next review starts here.')}
+                </p>
               </div>
             )}
             {visible.map((t) => (
@@ -574,16 +630,19 @@ function App() {
                 <div className="task-card-bottom">
                   <span>
                     {t.kind === 'plan' ? <FileText size={12} /> : <Code2 size={12} />}
-                    {t.kind === 'plan' ? 'Plan' : 'Code'}
-                    {t.ref.provider === 'demo' && <em>DEMO</em>}
+                    {t.kind === 'plan' ? tr('Plan') : tr('Code')}
+                    {t.ref.provider === 'demo' && <em>{tr('DEMO')}</em>}
                   </span>
-                  <span>Round {t.round || '—'}</span>
+                  <span>
+                    {tr('Round ')}
+                    {t.round || '—'}
+                  </span>
                 </div>
               </button>
             ))}
             <button className="add-task" onClick={() => setCreating(true)}>
               <Plus size={15} />
-              Attach a pull request
+              {tr(' Attach a pull request ')}
             </button>
           </section>
           {!task ? (
@@ -601,39 +660,39 @@ function App() {
                   <ShieldCheck size={25} />
                 </span>
               </div>
-              <span className="eyebrow">TWO SESSIONS. ONE SHARED OUTCOME.</span>
+              <span className="eyebrow">{tr('TWO SESSIONS. ONE SHARED OUTCOME.')}</span>
               <h2>
                 {selected
-                  ? 'Opening your task…'
-                  : 'A second pair of eyes,\nwithout the back-and-forth.'}
+                  ? tr('Opening your task…')
+                  : tr('A second pair of eyes, without the back-and-forth.')}
               </h2>
               <p>
-                Attach a GitHub pull request or GitLab merge request.
+                {tr(' Attach a GitHub pull request or GitLab merge request. ')}
                 <br />
-                Discuss findings with the reviewer. Publish when you’re ready.
+                {tr(' Discuss findings with the reviewer. Publish when you’re ready. ')}
                 <br />
-                The author picks up the feedback from there.
+                {tr(' The author picks up the feedback from there. ')}
               </p>
               <div className="empty-actions">
                 <button className="button primary" onClick={() => setCreating(true)}>
                   <Plus size={16} />
-                  Attach a PR
+                  {tr(' Attach a PR ')}
                 </button>
                 {status?.demoEnabled && (
                   <button className="button" onClick={() => void demo()} disabled={busy}>
                     <Play size={15} />
-                    Try a demo loop
+                    {tr(' Try a demo loop ')}
                   </button>
                 )}
               </div>
               <div className="empty-notes">
                 <span>
                   <LockKeyhole size={13} />
-                  Manual publication by default
+                  {tr(' Manual publication by default ')}
                 </span>
                 <span>
                   <GitBranch size={13} />
-                  Plans and code use the same loop
+                  {tr(' Plans and code use the same loop ')}
                 </span>
               </div>
             </section>
@@ -647,9 +706,11 @@ function App() {
                       ? task.ref.key
                       : `${task.ref.repo} #${task.ref.number}`}
                   </span>
-                  {task.ref.provider === 'demo' && <span className="demo-label">DEMO FIXTURE</span>}
+                  {task.ref.provider === 'demo' && (
+                    <span className="demo-label">{tr('DEMO FIXTURE')}</span>
+                  )}
                   <a href={safeLink(task.ref.url)} target="_blank" rel="noreferrer">
-                    {task.ref.kind === 'ticket' ? 'Open ticket' : 'Open PR'}{' '}
+                    {task.ref.kind === 'ticket' ? tr('Open ticket') : tr('Open PR')}{' '}
                     <ArrowUpRight size={13} />
                   </a>
                 </div>
@@ -657,7 +718,10 @@ function App() {
                 <div className="detail-subtitle">
                   <StatusPill state={task.state} />
                   <span>
-                    Round {task.round} of {task.policy.maxRounds}
+                    {tr(' Round ')}
+                    {task.round}
+                    {tr(' of ')}
+                    {task.policy.maxRounds}
                   </span>
                   <span className="sha">
                     <GitBranch size={12} />
@@ -666,30 +730,36 @@ function App() {
                   <button className="policy-control" onClick={() => setPolicyOpen(true)}>
                     <Settings2 size={13} />
                     {task.policy.publication === 'human'
-                      ? 'Manual publication'
-                      : 'Automatic publication'}
+                      ? tr('Manual publication')
+                      : tr('Automatic publication')}
                   </button>
                 </div>
               </div>
               <div className="agent-strip">
                 <span>
-                  <Code2 size={13} /> Author: {profileLabel(detail?.agents?.author)}
+                  <Code2 size={13} />
+                  {tr(' Author: ')}
+                  {tr(profileLabel(detail?.agents?.author))}
                 </span>
                 <span>
-                  <ShieldCheck size={13} /> {detail?.group ? 'Shared reviewer' : 'Reviewer'}:{' '}
-                  {profileLabel(detail?.agents?.reviewer)}
+                  <ShieldCheck size={13} /> {detail?.group ? tr('Shared reviewer') : tr('Reviewer')}
+                  : {tr(profileLabel(detail?.agents?.reviewer))}
                 </span>
                 <button className="button small" onClick={() => setAgentsOpen(true)}>
-                  Models
+                  {tr(' Models ')}
                 </button>
                 <button className="button small" onClick={() => setTicketOpen('child')}>
-                  Add child ticket
+                  {tr(' Add child ticket ')}
                 </button>
               </div>
               {detail?.group && (
                 <div className="group-strip">
                   <strong>{detail.group.source?.key ?? detail.group.title}</strong>
-                  <span>One reviewer · {detail.siblings?.length ?? 1} author tasks</span>
+                  <span>
+                    {tr('One reviewer · ')}
+                    {detail.siblings?.length ?? 1}
+                    {tr(' author tasks')}
+                  </span>
                   {detail.siblings
                     ?.filter((sibling) => sibling.id !== task.id)
                     .map((sibling) => (
@@ -701,7 +771,7 @@ function App() {
                             setTab('author');
                         }}
                       >
-                        {sibling.title} · {stateLabels[sibling.state]}
+                        {sibling.title} · {tr(stateLabels[sibling.state])}
                       </button>
                     ))}
                 </div>
@@ -719,8 +789,8 @@ function App() {
                   )}
                 </div>
                 <div>
-                  <strong>{stateLabels[task.state]}</strong>
-                  <p>{task.reason}</p>
+                  <strong>{tr(stateLabels[task.state])}</strong>
+                  <p>{tr(task.reason)}</p>
                 </div>
                 <div className="callout-actions">
                   {task.ref.kind === 'ticket' &&
@@ -730,7 +800,7 @@ function App() {
                         disabled={busy || !!runningJob}
                         onClick={() => void act('implement')}
                       >
-                        Start implementation
+                        {tr(' Start implementation ')}
                         <Play size={14} />
                       </button>
                     )}
@@ -742,7 +812,7 @@ function App() {
                         disabled={busy || !!runningJob}
                         onClick={() => void act('submit')}
                       >
-                        Submit for review
+                        {tr(' Submit for review ')}
                         <ArrowRight size={14} />
                       </button>
                     )}
@@ -752,7 +822,9 @@ function App() {
                       disabled={busy || !!runningJob}
                       onClick={() => void act('publish')}
                     >
-                      {task.ref.provider === 'demo' ? 'Publish demo review' : 'Publish review'}
+                      {task.ref.provider === 'demo'
+                        ? tr('Publish demo review')
+                        : tr('Publish review')}
                       <ArrowRight size={14} />
                     </button>
                   )}
@@ -762,7 +834,7 @@ function App() {
                       disabled={busy}
                       onClick={() => void act('approve-plan')}
                     >
-                      Approve plan
+                      {tr(' Approve plan ')}
                       <Check size={14} />
                     </button>
                   )}
@@ -773,7 +845,7 @@ function App() {
                       onClick={() => void act('resume')}
                     >
                       <Play size={14} />
-                      Resume
+                      {tr(' Resume ')}
                     </button>
                   )}
                   {task.state === 'needs_input' && (
@@ -783,7 +855,7 @@ function App() {
                       onClick={() => void act('retry')}
                     >
                       <RefreshCw size={14} />
-                      {task.ref.kind === 'ticket' ? 'Retry task' : 'Retry review'}
+                      {task.ref.kind === 'ticket' ? tr('Retry task') : tr('Retry review')}
                     </button>
                   )}
                   {task.state === 'complete' && (
@@ -792,14 +864,14 @@ function App() {
                       disabled={busy}
                       onClick={() => void act('reopen')}
                     >
-                      Reopen
+                      {tr(' Reopen ')}
                     </button>
                   )}
                   {task.state !== 'paused' && task.state !== 'complete' && (
                     <button
                       className="icon-button"
-                      title="Pause task"
-                      aria-label="Pause task"
+                      title={tr('Pause task')}
+                      aria-label={tr('Pause task')}
                       disabled={busy}
                       onClick={() => void act('pause')}
                     >
@@ -827,7 +899,7 @@ function App() {
                     }}
                   >
                     <Icon size={15} />
-                    {label}
+                    {tr(label)}
                     {key === 'decisions' && !!detail?.decisions.length && (
                       <span>{detail.decisions.length}</span>
                     )}
@@ -843,12 +915,12 @@ function App() {
                       </span>
                       <div>
                         <strong>
-                          {tab === 'reviewer' ? 'Independent reviewer' : 'Author session'}
+                          {tab === 'reviewer' ? tr('Independent reviewer') : tr('Author session')}
                         </strong>
                         <small>
                           {runningJob?.role === tab
-                            ? 'Working · updates appear here'
-                            : 'A persistent session for this task'}
+                            ? tr('Working · updates appear here')
+                            : tr('A persistent session for this task')}
                         </small>
                       </div>
                       <span className="session-indicator" />
@@ -859,13 +931,17 @@ function App() {
                           <Sparkles size={22} />
                           <h3>
                             {tab === 'reviewer'
-                              ? 'Make sense of the findings.'
-                              : 'Stay close to the implementation.'}
+                              ? tr('Make sense of the findings.')
+                              : tr('Stay close to the implementation.')}
                           </h3>
                           <p>
                             {tab === 'reviewer'
-                              ? 'Ask about a failure scenario, challenge an assumption, or discuss a specific comment. This is the same reviewer who checks the changes.'
-                              : 'Discuss requirements and ask about progress. Published feedback reaches this session automatically.'}
+                              ? tr(
+                                  'Ask about a failure scenario, challenge an assumption, or discuss a specific comment. This is the same reviewer who checks the changes.',
+                                )
+                              : tr(
+                                  'Discuss requirements and ask about progress. Published feedback reaches this session automatically.',
+                                )}
                           </p>
                         </div>
                       )}
@@ -874,12 +950,12 @@ function App() {
                           <div className="message-heading">
                             <strong>
                               {message.sender === 'user'
-                                ? 'You'
+                                ? tr('You')
                                 : message.sender === 'system'
-                                  ? 'Reviewloop'
+                                  ? tr('Reviewloop')
                                   : tab === 'reviewer'
-                                    ? 'Reviewer'
-                                    : 'Author'}
+                                    ? tr('Reviewer')
+                                    : tr('Author')}
                             </strong>
                             <time>{time(message.at)}</time>
                           </div>
@@ -891,13 +967,14 @@ function App() {
                           <div className="message-heading">
                             <strong>
                               <LoaderCircle className="spin" size={13} />
-                              {tab === 'reviewer' ? 'Reviewer' : 'Author'} is working
+                              {tab === 'reviewer' ? tr('Reviewer') : tr('Author')}
+                              {tr(' is working ')}
                             </strong>
                           </div>
                           {liveText ? (
                             <Md text={liveText} />
                           ) : (
-                            <p>Preparing context and checking the repository…</p>
+                            <p>{tr('Preparing context and checking the repository…')}</p>
                           )}
                         </div>
                       )}
@@ -905,11 +982,11 @@ function App() {
                     <form className="composer" onSubmit={sendMessage}>
                       <textarea
                         ref={chatInput}
-                        aria-label={`Message ${tab}`}
+                        aria-label={tr('Message {v0}', { v0: tr(tab) })}
                         placeholder={
                           tab === 'reviewer'
-                            ? 'Ask about a finding, or paste a comment link…'
-                            : 'Discuss the task with the author…'
+                            ? tr('Ask about a finding, or paste a comment link…')
+                            : tr('Discuss the task with the author…')
                         }
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
@@ -926,12 +1003,12 @@ function App() {
                         <span>
                           <LockKeyhole size={11} />
                           {tab === 'reviewer'
-                            ? 'Private to you and the reviewer'
-                            : 'Separate from the reviewer’s conversation'}
+                            ? tr('Private to you and the reviewer')
+                            : tr('Separate from the reviewer’s conversation')}
                         </span>
                         <button
                           className="button primary icon-send"
-                          aria-label="Send message"
+                          aria-label={tr('Send message')}
                           disabled={
                             busy ||
                             !draft.trim() ||
@@ -949,8 +1026,8 @@ function App() {
                       <div className="section-heading">
                         <strong>
                           {task.snapshot?.status === 'published'
-                            ? 'Published findings'
-                            : 'Draft findings'}
+                            ? tr('Published findings')
+                            : tr('Draft findings')}
                           <span>{task.snapshot?.comments.length ?? 0}</span>
                         </strong>
                       </div>
@@ -959,20 +1036,23 @@ function App() {
                           <ShieldCheck size={25} />
                           <p>
                             {task.state === 'complete'
-                              ? 'Review complete. No remaining findings.'
-                              : 'Findings will appear here as the reviewer saves them.'}
+                              ? tr('Review complete. No remaining findings.')
+                              : tr('Findings will appear here as the reviewer saves them.')}
                           </p>
                         </div>
                       )}
                       {task.snapshot?.comments.map((comment, index) => (
                         <article key={comment.id} className="finding">
                           <div className="finding-number">
-                            <span>R{index + 1}</span>
+                            <span>
+                              {tr('R')}
+                              {index + 1}
+                            </span>
                             <a
                               href={safeLink(comment.url)}
                               target="_blank"
                               rel="noreferrer"
-                              aria-label="Open comment"
+                              aria-label={tr('Open comment')}
                             >
                               <ExternalLink size={13} />
                             </a>
@@ -993,7 +1073,7 @@ function App() {
                             }}
                           >
                             <MessageSquare size={13} />
-                            Discuss with reviewer
+                            {tr(' Discuss with reviewer ')}
                             <ArrowRight size={13} />
                           </button>
                         </article>
@@ -1002,8 +1082,12 @@ function App() {
                         <LockKeyhole size={14} />
                         <p>
                           {task.policy.publication === 'human'
-                            ? 'Drafts stay with you until you publish. The author receives the final, published comments.'
-                            : 'Completed reviews publish automatically when the session is idle.'}
+                            ? tr(
+                                'Drafts stay with you until you publish. The author receives the final, published comments.',
+                              )
+                            : tr(
+                                'Completed reviews publish automatically when the session is idle.',
+                              )}
                         </p>
                       </div>
                     </aside>
@@ -1016,7 +1100,9 @@ function App() {
                   {!detail?.decisions.length && (
                     <EmptyNote
                       icon={<CheckCheck size={24} />}
-                      text="Decisions made during review will be kept here, so the next round remembers why a finding was withdrawn or deferred."
+                      text={tr(
+                        'Decisions made during review will be kept here, so the next round remembers why a finding was withdrawn or deferred.',
+                      )}
                     />
                   )}
                   {detail?.decisions.map((d) => (
@@ -1030,7 +1116,12 @@ function App() {
                         </time>
                       </div>
                       <Md text={d.reason} />
-                      {d.commentId && <small>Comment {d.commentId}</small>}
+                      {d.commentId && (
+                        <small>
+                          {tr('Comment ')}
+                          {d.commentId}
+                        </small>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -1038,31 +1129,37 @@ function App() {
                 <div className="context-panel">
                   <div className="context-heading">
                     <FileText size={18} />
-                    <h3>Original requirements</h3>
-                    <span>v{task.contextVersion}</span>
+                    <h3>{tr('Original requirements')}</h3>
+                    <span>
+                      {tr('v')}
+                      {task.contextVersion}
+                    </span>
                   </div>
                   <Md text={task.requirements} />
                   <div className="context-grid">
                     <div>
-                      <small>BASE</small>
+                      <small>{tr('BASE')}</small>
                       <code>{shortSha(task.revision?.base)}</code>
                     </div>
                     <div>
-                      <small>REVIEWED HEAD</small>
+                      <small>{tr('REVIEWED HEAD')}</small>
                       <code>{shortSha(task.revision?.head)}</code>
                     </div>
                     <div>
-                      <small>AUTHOR THREAD</small>
-                      <code>{task.authorThreadId ?? 'Created on first run'}</code>
+                      <small>{tr('AUTHOR THREAD')}</small>
+                      <code>{task.authorThreadId ?? tr('Created on first run')}</code>
                     </div>
                     <div>
-                      <small>REVIEWER THREAD</small>
-                      <code>{task.reviewerThreadId ?? 'Created on first run'}</code>
+                      <small>{tr('REVIEWER THREAD')}</small>
+                      <code>{task.reviewerThreadId ?? tr('Created on first run')}</code>
                     </div>
                   </div>
                   {task.approvedPlan && (
                     <>
-                      <h3>Approved plan · {shortSha(task.approvedPlan.head)}</h3>
+                      <h3>
+                        {tr('Approved plan · ')}
+                        {shortSha(task.approvedPlan.head)}
+                      </h3>
                       {task.approvedPlan.documents.map((doc) => (
                         <details key={doc.path}>
                           <summary>{doc.path}</summary>
@@ -1080,7 +1177,7 @@ function App() {
                     onClick={() => void act('reconcile')}
                   >
                     <RefreshCw size={14} />
-                    Reconcile with provider
+                    {tr(' Reconcile with provider ')}
                   </button>
                 </div>
               )}
@@ -1090,18 +1187,27 @@ function App() {
         <footer className="page-footer">
           <span>
             <ShieldCheck size={12} />
-            Publication is a decision. A completed review is tied to a revision.
+            {tr(' Publication is a decision. A completed review is tied to a revision. ')}
           </span>
-          <span>Built for a calmer review cycle.</span>
+          <span>{tr('Built for a calmer review cycle.')}</span>
         </footer>
       </main>
+      {updatesOpen && (
+        <Modal
+          title={tr('Updates')}
+          subtitle={tr('CLI versions and update notifications')}
+          onClose={() => setUpdatesOpen(false)}
+        >
+          <UpdatesPanel api={api} />
+        </Modal>
+      )}
       {connectionsOpen && status && (
         <Connections status={status} onClose={() => setConnectionsOpen(false)} />
       )}
       {ticketOpen && (
         <Modal
-          title={ticketOpen === 'child' ? 'Add a child ticket' : 'Start from a ticket'}
-          subtitle="Import the requirements, choose the agents, and begin a conversation."
+          title={ticketOpen === 'child' ? tr('Add a child ticket') : tr('Start from a ticket')}
+          subtitle={tr('Import the requirements, choose the agents, and begin a conversation.')}
           onClose={() => setTicketOpen(null)}
         >
           <TicketForm
@@ -1118,8 +1224,10 @@ function App() {
       )}
       {agentsOpen && (
         <Modal
-          title="Agents & models"
-          subtitle="Choose a separate writer for each task and a shared reviewer for its group."
+          title={tr('Agents & models')}
+          subtitle={tr(
+            'Choose a separate writer for each task and a shared reviewer for its group.',
+          )}
           onClose={() => setAgentsOpen(false)}
         >
           <AgentSettingsForm api={api} selected={detail} onSaved={() => void load()} />
@@ -1127,8 +1235,8 @@ function App() {
       )}
       {notificationsOpen && (
         <Modal
-          title="Notifications"
-          subtitle="Choose which updates reach your private Telegram chat."
+          title={tr('Notifications')}
+          subtitle={tr('Choose which updates reach your private Telegram chat.')}
           onClose={() => setNotificationsOpen(false)}
         >
           <NotificationsForm api={api} />
@@ -1139,7 +1247,7 @@ function App() {
                 setNotify((await Notification.requestPermission()) === 'granted');
             }}
           >
-            {notify ? 'Browser notifications enabled' : 'Enable browser notifications too'}
+            {notify ? tr('Browser notifications enabled') : tr('Enable browser notifications too')}
           </button>
         </Modal>
       )}
@@ -1169,6 +1277,8 @@ function App() {
   );
 }
 function Connections({ status, onClose }: { status: Status; onClose: () => void }) {
+  const { t: tr } = useLocale();
+
   const [link, setLink] = useState(''),
     [error, setError] = useState('');
   const [devices, setDevices] = useState<{ id: string; name: string; revoked: number }[]>([]);
@@ -1179,22 +1289,25 @@ function Connections({ status, onClose }: { status: Status; onClose: () => void 
   }, []);
   return (
     <Modal
-      title="Devices & connections"
-      subtitle="The service runs on the host. Your laptop is never a relay for your phone."
+      title={tr('Devices & connections')}
+      subtitle={tr('The service runs on the host. Your laptop is never a relay for your phone.')}
       onClose={onClose}
     >
       <div className="task-form">
-        <h3>Web address</h3>
+        <h3>{tr('Web address')}</h3>
         <p>
           {status.publicOrigin ? (
             <a href={status.publicOrigin}>{status.publicOrigin}</a>
           ) : (
-            'Local access only. Configure a permanent HTTPS address with reviewctl web on the host.'
+            tr(
+              'Local access only. Configure a permanent HTTPS address with reviewctl web on the host.',
+            )
           )}
         </p>
         <p>
-          Connect the phone to the same private network, then open a one-use login link. Closing
-          your laptop or the browser does not stop the service.
+          {tr(
+            ' Connect the phone to the same private network, then open a one-use login link. Closing your laptop or the browser does not stop the service. ',
+          )}
         </p>
         <button
           className="button primary"
@@ -1211,27 +1324,29 @@ function Connections({ status, onClose }: { status: Status; onClose: () => void 
             }
           }}
         >
-          Create phone login link
+          {tr(' Create phone login link ')}
         </button>
         {link && (
           <div className="pair-link">
-            <p>Valid for five minutes and one use:</p>
+            <p>{tr('Valid for five minutes and one use:')}</p>
             <a href={link}>{link}</a>
             <button
               className="button small"
               onClick={() => void navigator.clipboard.writeText(link)}
             >
-              Copy link
+              {tr(' Copy link ')}
             </button>
           </div>
         )}
-        <h3>Telegram</h3>
+        <h3>{tr('Telegram')}</h3>
         <p>
           {status.telegram?.paired
-            ? `Connected to @${status.telegram.bot}`
-            : 'Run reviewctl telegram setup on the host, then open its private-chat pairing link.'}
+            ? tr('Connected to @{v0}', { v0: status.telegram.bot })
+            : tr(
+                'Run reviewctl telegram setup on the host, then open its private-chat pairing link.',
+              )}
         </p>
-        <h3>Paired browsers</h3>
+        <h3>{tr('Paired browsers')}</h3>
         {devices
           .filter((d) => !d.revoked)
           .map((device) => (
@@ -1244,13 +1359,13 @@ function Connections({ status, onClose }: { status: Status; onClose: () => void 
                   setDevices(await api('/devices'));
                 }}
               >
-                Revoke
+                {tr(' Revoke ')}
               </button>
             </div>
           ))}
         {error && (
           <p role="alert" className="field-error">
-            {error}
+            {tr(error)}
           </p>
         )}
       </div>
@@ -1258,14 +1373,17 @@ function Connections({ status, onClose }: { status: Status; onClose: () => void 
   );
 }
 function EmptyNote({ icon, text }: { icon: React.ReactNode; text: string }) {
+  const { t: tr } = useLocale();
   return (
     <div className="empty-note">
       {icon}
-      <p>{text}</p>
+      <p>{tr(text)}</p>
     </div>
   );
 }
 function ActivityView({ detail }: { detail: Detail }) {
+  const { t: tr } = useLocale();
+
   const events = detail.events
     .filter((e) => e.type !== 'runtime.text' && e.type !== 'runtime.diagnostic')
     .slice()
@@ -1274,8 +1392,15 @@ function ActivityView({ detail }: { detail: Detail }) {
     <div className="activity-panel">
       <div className="activity-intro">
         <Activity size={16} />
-        <span>Persisted events · {detail.jobs.length} runs</span>
-        <code>reviewctl logs {detail.task.id.slice(0, 8)}…</code>
+        <span>
+          {tr('Persisted events · ')}
+          {detail.jobs.length}
+          {tr(' runs')}
+        </span>
+        <code>
+          {tr('reviewctl logs ')}
+          {detail.task.id.slice(0, 8)}…
+        </code>
       </div>
       {events.map((event) => (
         <details className="event" key={event.id}>
@@ -1288,8 +1413,9 @@ function ActivityView({ detail }: { detail: Detail }) {
           </summary>
           <div>
             <small>
-              Event {event.id}
-              {event.runId ? ` · Run ${event.runId}` : ''}
+              {tr(' Event ')}
+              {event.id}
+              {event.runId ? tr(' · Run {v0}', { v0: event.runId }) : ''}
             </small>
             <pre>
               {typeof event.data === 'string' ? event.data : JSON.stringify(event.data, null, 2)}
@@ -1301,39 +1427,67 @@ function ActivityView({ detail }: { detail: Detail }) {
   );
 }
 function Waiver({ onWaive }: { onWaive: (reason: string) => void }) {
+  const { t: tr } = useLocale();
+
   const [reason, setReason] = useState('');
   return (
     <div className="waiver">
-      <h3>Human CI decision</h3>
-      <p>Record why this exact revision may proceed without passing CI.</p>
+      <h3>{tr('Human CI decision')}</h3>
+      <p>{tr('Record why this exact revision may proceed without passing CI.')}</p>
       <textarea
-        aria-label="CI waiver reason"
+        aria-label={tr('CI waiver reason')}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
-        placeholder="Reason for waiving checks…"
+        placeholder={tr('Reason for waiving checks…')}
       />
       <button className="button small" disabled={!reason.trim()} onClick={() => onWaive(reason)}>
-        Record waiver
+        {tr(' Record waiver ')}
       </button>
     </div>
   );
 }
-function Login({ onConnect, initialError = '' }: { onConnect: () => void; initialError?: string }) {
+function Login({
+  onConnect,
+  initialError = '',
+}: {
+  onConnect: () => void | Promise<void>;
+  initialError?: string;
+}) {
+  const { t: tr, locale, local, adopt } = useLocale();
+  const [languageChosen, setLanguageChosen] = useState(false);
+
   const [token, setToken] = useState(''),
     [error, setError] = useState(initialError),
     [busy, setBusy] = useState(false);
   return (
     <div className="login-page">
       <Brand />
+      <select
+        className="language-select"
+        aria-label={tr('Interface language')}
+        value={locale}
+        disabled={busy}
+        onChange={(event) => {
+          local(event.target.value as Locale);
+          setLanguageChosen(true);
+        }}
+      >
+        {Object.entries(localeNames).map(([value, label]) => (
+          <option key={value} value={value}>
+            {tr(label)}
+          </option>
+        ))}
+      </select>
       <div className="login-card">
         <span className="login-lock">
           <LockKeyhole size={25} />
         </span>
-        <h1>Your review workspace.</h1>
+        <h1>{tr('Your review workspace.')}</h1>
         <p>
-          Connect to the service running on your machine.
+          {tr(' Connect to the service running on your machine. ')}
           <br />
-          Find your access token with <code>reviewctl token</code>.
+          {tr(' Find your access token with ')}
+          <code>{tr('reviewctl token')}</code>.
         </p>
         <form
           onSubmit={async (e) => {
@@ -1341,7 +1495,8 @@ function Login({ onConnect, initialError = '' }: { onConnect: () => void; initia
             setBusy(true);
             try {
               await api('/session', { token });
-              onConnect();
+              if (languageChosen) adopt(await api<Preferences>('/preferences', { locale }));
+              await onConnect();
             } catch (e) {
               setError((e as Error).message);
             } finally {
@@ -1349,28 +1504,28 @@ function Login({ onConnect, initialError = '' }: { onConnect: () => void; initia
             }
           }}
         >
-          <label htmlFor="token">Local access token</label>
+          <label htmlFor="token">{tr('Local access token')}</label>
           <input
             id="token"
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
             autoComplete="off"
-            placeholder="Paste your access token"
+            placeholder={tr('Paste your access token')}
             autoFocus
           />
           {error && (
             <p className="field-error" role="alert">
-              {error}
+              {tr(error)}
             </p>
           )}
           <button className="button primary" disabled={busy || !token.trim()}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <ArrowRight size={16} />}
-            Connect to workspace
+            {tr(' Connect to workspace ')}
           </button>
         </form>
       </div>
-      <small>Local by default. Reach a remote machine through an SSH tunnel.</small>
+      <small>{tr('Local by default. Reach a remote machine through an SSH tunnel.')}</small>
     </div>
   );
 }
@@ -1385,6 +1540,8 @@ function Modal({
   children: React.ReactNode;
   onClose: () => void;
 }) {
+  const { t: tr } = useLocale();
+
   const close = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -1433,10 +1590,15 @@ function Modal({
       >
         <div className="modal-heading">
           <div>
-            <h2 id="modal-title">{title}</h2>
-            <p>{subtitle}</p>
+            <h2 id="modal-title">{tr(title)}</h2>
+            <p>{tr(subtitle)}</p>
           </div>
-          <button ref={close} className="icon-button" aria-label="Close dialog" onClick={onClose}>
+          <button
+            ref={close}
+            className="icon-button"
+            aria-label={tr('Close dialog')}
+            onClick={onClose}
+          >
             <X size={20} />
           </button>
         </div>
@@ -1454,6 +1616,8 @@ function CreateTask({
   onClose: () => void;
   onCreated: (task: Task) => void;
 }) {
+  const { t: tr } = useLocale();
+
   const [url, setUrl] = useState(''),
     [repoPath, setRepoPath] = useState(''),
     [requirements, setRequirements] = useState(''),
@@ -1465,8 +1629,8 @@ function CreateTask({
     [busy, setBusy] = useState(false);
   return (
     <Modal
-      title="Attach a pull request"
-      subtitle="Give the reviewer the original intent, not just the diff."
+      title={tr('Attach a pull request')}
+      subtitle={tr('Give the reviewer the original intent, not just the diff.')}
       onClose={onClose}
     >
       <form
@@ -1494,7 +1658,7 @@ function CreateTask({
         }}
       >
         <label>
-          Pull request or merge request URL
+          {tr(' Pull request or merge request URL ')}
           <input
             required
             type="url"
@@ -1504,37 +1668,39 @@ function CreateTask({
           />
         </label>
         <label>
-          Local repository path
+          {tr(' Local repository path ')}
           <input
             required
             placeholder="/home/you/projects/your-repo"
             value={repoPath}
             onChange={(e) => setRepoPath(e.target.value)}
           />
-          <small>The runner creates separate working copies from this checkout.</small>
+          <small>{tr('The runner creates separate working copies from this checkout.')}</small>
         </label>
         <label>
-          Original requirements
+          {tr(' Original requirements ')}
           <textarea
             required
             rows={4}
-            placeholder="What should this change achieve? Include constraints and acceptance criteria."
+            placeholder={tr(
+              'What should this change achieve? Include constraints and acceptance criteria.',
+            )}
             value={requirements}
             onChange={(e) => setRequirements(e.target.value)}
           />
         </label>
         <div className="form-row">
           <label>
-            Review type
+            {tr(' Review type ')}
             <select value={kind} onChange={(e) => setKind(e.target.value)}>
-              <option value="code">Code implementation</option>
-              <option value="plan">Markdown plan</option>
+              <option value="code">{tr('Code implementation')}</option>
+              <option value="plan">{tr('Markdown plan')}</option>
             </select>
           </label>
           <label>
-            Approved plan
+            {tr(' Approved plan ')}
             <select value={planTaskId} onChange={(e) => setPlan(e.target.value)}>
-              <option value="">No linked plan</option>
+              <option value="">{tr('No linked plan')}</option>
               {tasks
                 .filter((t) => t.kind === 'plan' && t.state === 'complete')
                 .map((t) => (
@@ -1546,36 +1712,36 @@ function CreateTask({
           </label>
         </div>
         <details className="advanced">
-          <summary>Existing author session</summary>
+          <summary>{tr('Existing author session')}</summary>
           <label>
-            Codex thread ID
+            {tr(' Codex thread ID ')}
             <input
-              placeholder="Optional: resume an existing author"
+              placeholder={tr('Optional: resume an existing author')}
               value={thread}
               onChange={(e) => setThread(e.target.value)}
             />
-            <small>Hand control of this session to Reviewloop before attaching it.</small>
+            <small>{tr('Hand control of this session to Reviewloop before attaching it.')}</small>
           </label>
         </details>
         <label className="checkbox-label">
           <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
           <span>
-            <strong>Publish completed reviews automatically</strong>
-            <small>Leave off to discuss and publish each draft yourself.</small>
+            <strong>{tr('Publish completed reviews automatically')}</strong>
+            <small>{tr('Leave off to discuss and publish each draft yourself.')}</small>
           </span>
         </label>
         {error && (
           <div className="field-error" role="alert">
-            {error}
+            {tr(error)}
           </div>
         )}
         <div className="modal-actions">
           <button type="button" className="button" onClick={onClose}>
-            Cancel
+            {tr(' Cancel ')}
           </button>
           <button className="button primary" disabled={busy}>
             {busy ? <LoaderCircle className="spin" size={15} /> : <GitPullRequest size={15} />}
-            Attach and start review
+            {tr(' Attach and start review ')}
           </button>
         </div>
       </form>
@@ -1591,13 +1757,15 @@ function PolicyModal({
   onClose: () => void;
   onSave: (policy: Policy) => Promise<void>;
 }) {
+  const { t: tr } = useLocale();
+
   const [policy, setPolicy] = useState(task.policy),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   return (
     <Modal
-      title="Automation settings"
-      subtitle="These permissions belong to you and remain outside the agent sessions."
+      title={tr('Automation settings')}
+      subtitle={tr('These permissions belong to you and remain outside the agent sessions.')}
       onClose={onClose}
     >
       <form
@@ -1615,7 +1783,7 @@ function PolicyModal({
         }}
       >
         <label>
-          Review publication
+          {tr(' Review publication ')}
           <select
             value={policy.publication}
             onChange={(e) =>
@@ -1625,12 +1793,12 @@ function PolicyModal({
               })
             }
           >
-            <option value="human">I publish each review</option>
-            <option value="auto">Publish completed reviews automatically</option>
+            <option value="human">{tr('I publish each review')}</option>
+            <option value="auto">{tr('Publish completed reviews automatically')}</option>
           </select>
         </label>
         <label>
-          Plan approval
+          {tr(' Plan approval ')}
           <select
             value={policy.planApproval}
             onChange={(e) =>
@@ -1640,12 +1808,12 @@ function PolicyModal({
               })
             }
           >
-            <option value="human">Human approval before implementation</option>
-            <option value="auto">Approve after the review and checks finish</option>
+            <option value="human">{tr('Human approval before implementation')}</option>
+            <option value="auto">{tr('Approve after the review and checks finish')}</option>
           </select>
         </label>
         <label>
-          Maximum review rounds
+          {tr(' Maximum review rounds ')}
           <input
             type="number"
             min="1"
@@ -1660,7 +1828,7 @@ function PolicyModal({
             checked={policy.requireChecks}
             onChange={(e) => setPolicy({ ...policy, requireChecks: e.target.checked })}
           />
-          Require passing CI on the reviewed revision
+          {tr(' Require passing CI on the reviewed revision ')}
         </label>
         <label className="checkbox-label">
           <input
@@ -1668,19 +1836,19 @@ function PolicyModal({
             checked={policy.autoPush}
             onChange={(e) => setPolicy({ ...policy, autoPush: e.target.checked })}
           />
-          Push the author’s completed fixes automatically
+          {tr(' Push the author’s completed fixes automatically ')}
         </label>
         {error && (
           <p className="field-error" role="alert">
-            {error}
+            {tr(error)}
           </p>
         )}
         <div className="modal-actions">
           <button type="button" className="button" onClick={onClose}>
-            Cancel
+            {tr(' Cancel ')}
           </button>
           <button className="button primary" disabled={busy}>
-            Save settings
+            {tr(' Save settings ')}
           </button>
         </div>
       </form>
@@ -1689,6 +1857,8 @@ function PolicyModal({
 }
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <LocaleProvider>
+      <App />
+    </LocaleProvider>
   </React.StrictMode>,
 );

@@ -44,8 +44,8 @@ export interface TicketRef extends Omit<PRRef, 'kind'> {
   key: string;
 }
 export type TaskRef = PRRef | TicketRef;
-export type ReasoningEffort =
-  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+/** Validated against the selected CLI model catalogue before use. */
+export type ReasoningEffort = string;
 export interface AgentProfile {
   engine: 'codex';
   model?: string;

@@ -1,3 +1,5 @@
+import { translator, type Locale } from '../i18n/index.js';
+import type { Preferences } from '../core/preferences.js';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import type { Task, Message } from '../core/types.js';
@@ -6,12 +8,24 @@ import { VERSION } from '../version.js';
 export async function consoleUI(
   api: <T>(path: string, body?: unknown) => Promise<T>,
   initial?: { id: string; role: 'author' | 'reviewer' },
+  preferred?: Locale,
 ) {
+  let locale: Locale = preferred ?? 'en';
+  const tr = (value: string) => translator(locale)(value);
   if (!stdin.isTTY) {
     stdout.write(
-      'Use reviewctl --help for commands, or run reviewctl in a terminal for the interactive console.\n',
+      tr(
+        'Use reviewctl --help for commands, or run reviewctl in a terminal for the interactive console.\n',
+      ),
     );
     return;
+  }
+  if (!preferred) {
+    try {
+      locale = (await api<Preferences>('/preferences')).locale;
+    } catch {
+      /* Older servers retain the English fallback. */
+    }
   }
   const rl = createInterface({ input: stdin, output: stdout });
   let taskId = initial?.id ?? '',
@@ -24,9 +38,11 @@ export async function consoleUI(
     const tasks = await api<Task[]>('/tasks');
     stdout.write('\n');
     for (const task of tasks)
-      stdout.write(`${task.id.slice(0, 8)}  ${task.state.padEnd(22)} ${task.title}\n`);
+      stdout.write(`${task.id.slice(0, 8)}  ${tr(task.state).padEnd(22)} ${task.title}\n`);
     if (!tasks.length)
-      stdout.write('No tasks yet. Use /attach to connect a PR, or /demo to try the workflow.\n');
+      stdout.write(
+        tr('No tasks yet. Use /attach to connect a PR, or /demo to try the workflow.\n'),
+      );
     stdout.write('\n');
     return tasks;
   };
@@ -40,10 +56,10 @@ export async function consoleUI(
     for (const message of detail.messages) seen.add(message.id);
     stdout.write(`\n${color(matches[0].title)} · ${matches[0].state}\n`);
     for (const message of detail.messages.filter((m) => m.role === role).slice(-3))
-      stdout.write(`\n${message.sender}: ${message.text}\n`);
+      stdout.write(`\n${tr(message.sender === 'user' ? 'YOU' : role)}: ${message.text}\n`);
   };
   stdout.write(
-    `\n${color('reviewloop')} ${VERSION}\nAuthor and reviewer sessions, managed by your background service.\nType /help for commands. Closing this console does not stop the service or agents.\n`,
+    `\n${color('reviewloop')} ${VERSION}\n${tr('Author and reviewer sessions, managed by your background service.')}\n${tr('Type /help for commands. Closing this console does not stop the service or agents.')}\n`,
   );
   try {
     if (taskId) await select(taskId);
@@ -66,7 +82,7 @@ export async function consoleUI(
         if (seen.has(message.id)) continue;
         seen.add(message.id);
         if (message.role === role && message.sender === 'agent')
-          stdout.write(`\n\n${color(role)}\n${message.text}\n\n`);
+          stdout.write(`\n\n${color(tr(role))}\n${message.text}\n\n`);
       }
     } catch {
       /* The next user action reports connection errors without flooding the prompt. */
@@ -87,8 +103,38 @@ export async function consoleUI(
       try {
         if (input === '/quit' || input === '/exit') break;
         if (input === '/help') {
+          const commands = [
+            ['/tasks', 'List tasks'],
+            ['/use <id-prefix>', 'Select a task'],
+            ['/role author|reviewer', 'Choose a conversation'],
+            ['/attach', 'Connect a PR/MR'],
+            ['/demo', 'Create a demo task'],
+            ['/status', 'Show current task'],
+            ['/publish', 'Publish the current finished review'],
+            ['/pause /resume /retry', 'Control the task'],
+            ['/logs', 'Show recent activity'],
+            ['/language en|ru', 'Choose English or Russian'],
+            ['/models', 'Models'],
+            ['/updates', 'Updates'],
+            ['/quit', 'Close this client; work continues'],
+          ];
           stdout.write(
-            '\n/tasks                 List tasks\n/use <id-prefix>       Select a task\n/role author|reviewer  Choose a conversation\n/attach                Connect a PR/MR\n/demo                  Create a demo task\n/status                Show current task\n/publish               Publish the current finished review\n/pause /resume /retry  Control the task\n/logs                  Show recent activity\n/quit                  Close this client; work continues\n\nOther text is sent to the selected agent.\n',
+            '\n' +
+              commands.map(([name, label]) => name.padEnd(24) + tr(label)).join('\n') +
+              '\n\n' +
+              tr('Other text is sent to the selected agent.') +
+              '\n',
+          );
+          continue;
+        }
+        if (/^\/language (en|ru)$/.test(input)) {
+          locale = (await api<Preferences>('/preferences', { locale: input.split(' ')[1] })).locale;
+          stdout.write(tr('Language saved.') + '\n');
+          continue;
+        }
+        if (input === '/models' || input === '/updates') {
+          stdout.write(
+            JSON.stringify(await api(input === '/models' ? '/agents' : '/updates'), null, 2) + '\n',
           );
           continue;
         }
@@ -113,9 +159,9 @@ export async function consoleUI(
           continue;
         }
         if (input === '/attach') {
-          const url = await rl.question('PR/MR URL: '),
-            repoPath = await rl.question('Repository path on the service host: '),
-            requirements = await rl.question('Original requirements: ');
+          const url = await rl.question(tr('PR/MR URL: ')),
+            repoPath = await rl.question(tr('Repository path on the service host: ')),
+            requirements = await rl.question(tr('Original requirements: '));
           const task = await api<Task>('/tasks', { url, repoPath, requirements });
           await select(task.id);
           continue;
@@ -139,9 +185,9 @@ export async function consoleUI(
         }
         if (input.startsWith('/')) throw new Error('Unknown command. Use /help');
         await api(`/tasks/${taskId}/messages`, { role, text: input });
-        stdout.write('Message queued. The response will appear here.\n');
+        stdout.write(tr('Message queued. The response will appear here.\n'));
       } catch (error) {
-        stdout.write(`${(error as Error).message}\n`);
+        stdout.write(tr((error as Error).message) + '\n');
       }
     }
   } catch (error) {

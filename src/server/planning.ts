@@ -7,7 +7,8 @@ import { AppError, type AgentProfiles } from '../core/types.js';
 import { parsePR } from '../providers/provider.js';
 import { notificationPreferences, notificationsSchema } from '../integrations/notifications.js';
 import { redact } from '../core/security.js';
-export type Catalogue = Pick<ModelCatalogue, 'list' | 'validate'>;
+export type Catalogue = Pick<ModelCatalogue, 'list' | 'validate'> &
+  Partial<Pick<ModelCatalogue, 'metadata'>>;
 export function registerPlanning(
   app: FastifyInstance,
   engine: Engine,
@@ -22,11 +23,11 @@ export function registerPlanning(
         catalogue.validate(profiles.reviewer),
       ]);
   };
-  app.get('/api/agents', async () => {
+  app.get<{ Querystring: { refresh?: string } }>('/api/agents', async (request) => {
     let models: Awaited<ReturnType<Catalogue['list']>> = [],
       error: string | undefined;
     try {
-      models = await catalogue.list();
+      models = await catalogue.list(request.query.refresh === '1');
     } catch (value) {
       error = redact(String(value));
     }
@@ -36,6 +37,7 @@ export function registerPlanning(
       error,
       maxConcurrentAgents: engine.store.setting<number>('worker.maxAgents') ?? maxAgents,
       engines: ['codex'],
+      catalogue: catalogue.metadata?.(),
     };
   });
   app.post('/api/agents/defaults', async (request) => {

@@ -24,6 +24,7 @@ it('keeps the website available during a Telegram outage and connects without re
     return bot;
   };
   const server = await buildApp({
+    startUpdateCheck: false,
     dataDir: dir,
     token: 'fixture',
     telegramFactory: factory,
@@ -64,6 +65,7 @@ it('cancels a pending startup reconnect during service shutdown', async () => {
     .fn()
     .mockRejectedValue(new AppError('telegram_unreachable', 'Temporary outage'));
   const server = await buildApp({
+    startUpdateCheck: false,
     dataDir: dir,
     token: 'fixture',
     telegramFactory: factory,
