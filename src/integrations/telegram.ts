@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../core/engine.js';
 import { AppError, now, prRef, type Event, type Task } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
@@ -22,6 +23,47 @@ type Confirmation = {
   expiresAt: string;
   chatId: number;
 };
+function networkFailure(error: unknown) {
+  const codes = new Set<string>();
+  const visit = (value: unknown, depth = 0) => {
+    if (!value || typeof value !== 'object' || depth > 4) return;
+    const item = value as { code?: unknown; cause?: unknown; errors?: unknown[] };
+    if (typeof item.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(item.code))
+      codes.add(item.code);
+    visit(item.cause, depth + 1);
+    if (Array.isArray(item.errors)) for (const nested of item.errors) visit(nested, depth + 1);
+  };
+  visit(error);
+  return new AppError(
+    'telegram_unreachable',
+    `Cannot reach Telegram at api.telegram.org:443${codes.size ? ` (${[...codes].join(', ')})` : ''}. Check this host's connection, DNS and trusted certificates; retry setup or pairing.`,
+    502,
+  );
+}
+export async function connectTelegram(
+  factory: () => Promise<Telegram>,
+  signal: AbortSignal,
+  onError: (error: unknown) => void,
+  retryDelayMs = 3000,
+): Promise<Telegram | undefined> {
+  let attempt = 0;
+  while (!signal.aborted) {
+    try {
+      return await factory();
+    } catch (error) {
+      if (signal.aborted) return;
+      onError(error);
+      if (!(error instanceof AppError) || error.code !== 'telegram_unreachable') return;
+      try {
+        await delay(Math.min(30000, retryDelayMs * 2 ** Math.min(attempt++, 5)), undefined, {
+          signal,
+        });
+      } catch {
+        return;
+      }
+    }
+  }
+}
 export class TelegramApi {
   private token: string;
   constructor(
@@ -33,21 +75,79 @@ export class TelegramApi {
     this.token = rememberSecret(token);
   }
   async call<T>(method: string, body: unknown = {}, signal?: AbortSignal): Promise<T> {
-    const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      redirect: 'error',
-      signal: signal ?? AbortSignal.timeout(40000),
-    });
-    const value = (await response.json()) as { ok: boolean; result?: T; description?: string };
-    if (!response.ok || !value.ok)
-      throw new AppError(
-        'telegram_error',
-        redact(value.description ?? `Telegram HTTP ${response.status}`),
-        502,
-      );
-    return value.result as T;
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(40000)])
+      : AbortSignal.timeout(40000);
+    const readOnly = ['getMe', 'getWebhookInfo', 'getUpdates'].includes(method);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          redirect: 'manual',
+          signal: requestSignal,
+        });
+        if (response.status >= 300 && response.status < 400) {
+          await response.body?.cancel();
+          throw new AppError(
+            'telegram_redirect',
+            'Telegram redirected a bot API request. Check the host network or proxy; the token was not forwarded.',
+            502,
+          );
+        }
+        if (response.status >= 500) {
+          await response.body?.cancel();
+          throw new AppError(
+            'telegram_unreachable',
+            `Telegram returned HTTP ${response.status}. The API is temporarily unavailable.`,
+            502,
+          );
+        }
+        let value: { ok: boolean; result?: T; description?: string };
+        try {
+          value = (await response.json()) as typeof value;
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+          throw new AppError(
+            'telegram_invalid_response',
+            `Telegram returned a non-JSON response (HTTP ${response.status}). Check the host network or proxy.`,
+            502,
+          );
+        }
+        if (!value || typeof value !== 'object' || typeof value.ok !== 'boolean')
+          throw new AppError(
+            'telegram_invalid_response',
+            `Telegram returned an invalid response (HTTP ${response.status}). Check the host network or proxy.`,
+            502,
+          );
+        if (!response.ok || !value.ok)
+          throw new AppError(
+            'telegram_error',
+            redact(value.description ?? `Telegram HTTP ${response.status}`),
+            502,
+          );
+        return value.result as T;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        const failure = error instanceof AppError ? error : networkFailure(error);
+        // Writes can have succeeded before their response was lost. Only reads
+        // are safe to retry; message delivery keeps its existing durable intent.
+        if (
+          !readOnly ||
+          attempt >= 2 ||
+          requestSignal.aborted ||
+          failure.code !== 'telegram_unreachable'
+        )
+          throw failure;
+        try {
+          await delay(250 * (attempt + 1), undefined, { signal: requestSignal });
+        } catch {
+          if (signal?.aborted) throw signal.reason;
+          throw failure;
+        }
+      }
+    }
   }
   async send(
     chatId: number,
@@ -100,7 +200,10 @@ export class Telegram {
       configured: true,
       bot: this.username,
       paired: !!this.engine.store.setting('telegram.pairing'),
-      error: this.engine.store.setting('telegram.error') ?? null,
+      error:
+        this.engine.store.setting('telegram.error') ??
+        this.engine.store.setting('telegram.pollError') ??
+        null,
     };
   }
   unpair() {
@@ -363,6 +466,7 @@ export class Telegram {
           { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] },
           AbortSignal.any([this.controller.signal, AbortSignal.timeout(35000)]),
         );
+        this.engine.store.setSetting('telegram.pollError', null);
         for (const update of updates) {
           if (this.stopped) break;
           try {
@@ -374,8 +478,8 @@ export class Telegram {
         }
       } catch (error) {
         if (!this.stopped) {
-          this.engine.store.setSetting('telegram.error', redact(String(error)));
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+          this.engine.store.setSetting('telegram.pollError', redact(String(error)));
+          await delay(3000, undefined, { signal: this.controller.signal }).catch(() => {});
         }
       }
     }

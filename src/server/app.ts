@@ -19,7 +19,7 @@ import { DemoRuntime } from '../runtime/demo.js';
 import { loadConfig, validateServerUrl, type Config } from '../ops/config.js';
 import { Access, allowedRequest } from './access.js';
 import { VERSION } from '../version.js';
-import { Telegram } from '../integrations/telegram.js';
+import { Telegram, connectTelegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
 import { ModelCatalogue, profilesSchema } from '../core/agents.js';
@@ -260,8 +260,15 @@ export async function buildApp(options: ServerOptions) {
     });
   });
   app.post('/api/telegram/pair', async () => {
-    if (!telegram)
+    if (!telegram) {
+      if (config.telegram.enabled)
+        throw new AppError(
+          'telegram_connecting',
+          `${store.setting<string>('telegram.error') ?? 'Telegram is connecting.'} Configuration is saved; run reviewctl telegram status, then reviewctl telegram pair when connected.`,
+          503,
+        );
       throw new AppError('telegram_not_configured', 'Run reviewctl telegram setup first', 422);
+    }
     return telegram.pair();
   });
   app.post('/api/telegram/unpair', async () => {
@@ -504,14 +511,19 @@ export async function buildApp(options: ServerOptions) {
   });
   app.addHook('onReady', async () => {
     if (options.startWorker !== false && config.telegram.enabled) {
-      telegramStartup = (options.telegramFactory ?? Telegram.create)(
-        engine,
-        config.telegram.tokenFile ?? join(homedir(), '.tokens/reviewloop-telegram'),
-        publicOrigin,
+      telegramStartup = connectTelegram(
+        () =>
+          (options.telegramFactory ?? Telegram.create)(
+            engine,
+            config.telegram.tokenFile ?? join(homedir(), '.tokens/reviewloop-telegram'),
+            publicOrigin,
+            telegramController.signal,
+          ),
         telegramController.signal,
+        (error) => store.setSetting('telegram.error', redact(String(error))),
       )
         .then((instance) => {
-          if (telegramController.signal.aborted) return;
+          if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
           store.setSetting('telegram.error', null);
           telegram.start();
