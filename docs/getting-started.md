@@ -13,7 +13,7 @@
 На машине, где будут работать агенты:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.2/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.4.3/install.sh | bash
 ```
 
 Релиз содержит UI, Node 24, Codex CLI и GitHub CLI. Установщик проверяет SHA-256, устанавливает `reviewctl` в `~/.local/bin` и настраивает systemd. Нужны Linux с systemd, curl и tar; отсутствующий Git установится через apt/sudo, если они доступны. Архивы: x64 и arm64. Доступ к приватному релизу ограничен владельцем до изменения видимости репозитория.

@@ -171,3 +171,19 @@ it('paginates task cards and exposes current notification preferences through bu
     'notifications:on',
   );
 });
+
+it('hides native correlation markers from summaries while preserving literal code examples', () => {
+  const marker = '<!-- reviewloop:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1:2 -->';
+  const source = '**Проверено**\n\n' + marker;
+  const value = markdownText(source);
+  expect(value.text).toBe('Проверено');
+  expect(source).toContain(marker);
+  const example = markdownText('```html\n' + marker + '\n```');
+  expect(fragments(example, 'pre')).toEqual([marker]);
+});
+it('does not claim an operation failed when only its confirmation could not be delivered', async () => {
+  const { errorCard } = await import('../src/integrations/telegram-cards.js');
+  const value = errorCard('Telegram connection timed out after the request.');
+  expect(value.text).toContain('Проверь результат действия');
+  expect(value.text).toContain('перед повтором');
+});
