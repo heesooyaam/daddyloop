@@ -1,12 +1,11 @@
-# Reviewloop 0.4.0
+# Reviewloop 0.4.1
 
-Start a task from a GitHub issue or Yandex Tracker ticket, discuss the requirements with its author, then start implementation. The service saves the isolated changes, creates a native PR and runs the review/fix loop.
+Telegram setup and service startup recover from temporary network failures instead of leaving the bot disconnected after a generic `TypeError: fetch failed`.
 
-- Independent Codex model and reasoning-effort profiles for author and reviewer, selected from the account's model catalogue. Available in the terminal, CLI commands and web UI.
-- Parent/child ticket groups: each child gets its own author and working copy; the group shares one persistent reviewer session and a serialized review queue. Configurable total concurrency, defaulting to one active agent.
-- Finished reviews publish automatically for new tasks. Existing saved policies are retained, and manual publication remains available.
-- Telegram notification settings in the TUI, website, CLI and paired bot. Quiet completion/attention updates by default; all intermediate replies are optional.
-- Durable PR creation and recovery after uncertain responses, exact submitted-head checks, scoped credentials and preserved source checkouts.
-- README guides and actual terminal/browser screenshots for ticket setup, models and notifications.
+- Bounded retries for safe Bot API reads; startup reconnects in the background with backoff and cancels promptly during shutdown.
+- Network diagnostics include DNS/socket/TLS codes without exposing credential-bearing request URLs. Redirects and malformed responses produce explicit errors.
+- Pairing reports that configuration is saved while Telegram is connecting. Polling errors clear after recovery.
+- Outgoing messages are never retried automatically after a lost response, preserving the existing duplicate-delivery protection.
+- Corrected the ansi-tokenize lockfile version metadata to match its existing pinned archive; its payload and checksum remain unchanged.
 
-Linux x64/ARM64 bundles preserve existing accounts and task data. Database schema 3 adds review groups; take a backup before upgrading because older releases reject newer schemas. This remains a prerelease. Native Arc writes are fixture-tested, while real Tracker reads and both requested Codex model profiles were verified on the development host. Telegram delivery requires the owner's bot token and private-chat pairing.
+Validation: 112 tests, including connection recovery with the website available, cancellation, invalid credentials, redirects and uncertain outgoing delivery. Existing task data, model profiles, policies and bot pairing are preserved.

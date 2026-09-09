@@ -120,3 +120,9 @@ npm run test:e2e
 ```
 
 On a supported Linux host use the ordinary Playwright installation from the README. Test-generated TLS certificates and private probe data stay in ignored task state.
+
+### Telegram connection failures
+
+`reviewctl telegram setup --token-file /absolute/path/to/token` validates the account and saves the file path. Since 0.4.1, transient DNS, socket and server errors on read-only Bot API requests get bounded retries; the service also reconnects failed startup in the background with backoff. Credentials errors and unexpected redirects are reported explicitly. Requests retain HTTPS verification and do not forward bot tokens across redirects.
+
+Use `reviewctl telegram status` to inspect the connection and `reviewctl telegram pair` to obtain a new private-chat link. A temporarily disconnected bot does not require re-entering its token. Outgoing messages and action responses are not automatically repeated after an ambiguous failure. Polling errors clear after reconnection; uncertain outgoing deliveries retain their own diagnostic.
