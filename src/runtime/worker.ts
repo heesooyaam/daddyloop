@@ -1,6 +1,6 @@
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus } from '../core/types.js';
-import { AppError, now, sameRevision } from '../core/types.js';
+import { AppError, now, sameRevision, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
@@ -9,6 +9,7 @@ import { buildContext } from './context.js';
 
 export class Worker {
   private active = new Map<string, AbortController>();
+  private runningJobs = new Map<string, Job>();
   private pendingRuns = new Set<Promise<void>>();
   private timer?: NodeJS.Timeout;
   private ticking = false;
@@ -17,6 +18,7 @@ export class Worker {
   private tickDone: Promise<void> = Promise.resolve();
   private lastCleanup = 0;
   autoCleanup?: () => Promise<unknown>;
+  autoSubmit?: (id: string) => Promise<unknown>;
   constructor(
     readonly engine: Engine,
     private workspaces: Workspaces,
@@ -24,6 +26,7 @@ export class Worker {
     private demoRuntime: AgentRuntime,
     private resourceCheck: () => ResourceStatus,
     private pollMs = 15000,
+    private maxAgents = 1,
   ) {
     engine.onCancel = (id) => this.active.get(id)?.abort();
   }
@@ -90,6 +93,24 @@ export class Worker {
           }
       }
       if (this.stopped) return;
+      if (this.autoSubmit && resources.ok)
+        for (const task of store.tasks()) {
+          if (
+            isTicket(task) &&
+            task.state === 'ready_for_review' &&
+            task.policy.autoPush &&
+            !store.busy(task.id)
+          ) {
+            const submission = this.autoSubmit(task.id).then(
+              () => {},
+              (error) => {
+                store.event(task.id, 'ticket.submission_failed', { error: redact(String(error)) });
+              },
+            );
+            this.pendingRuns.add(submission);
+            void submission.finally(() => this.pendingRuns.delete(submission));
+          }
+        }
       for (const task of store.tasks())
         if (task.state === 'queued' && !store.busy(task.id)) {
           try {
@@ -102,6 +123,7 @@ export class Worker {
               current.reason = redact(String(error));
               store.saveTask(current);
               store.event(task.id, 'review.start_failed', { error: current.reason });
+              store.event(task.id, 'task.state', { state: current.state, reason: current.reason });
             }
           }
         }
@@ -122,17 +144,32 @@ export class Worker {
               current.reason = redact(String(error));
               store.saveTask(current);
               store.event(task.id, 'publication.failed', { error: current.reason });
+              store.event(task.id, 'task.state', { state: current.state, reason: current.reason });
             }
           }
         }
-      // One agent at a time by default bounds memory consumption and workspace writers.
-      if (!this.stopped && !this.active.size && this.resourceCheck().ok) {
-        const job = store.claim();
+      // Authors may be independent; each shared reviewer thread has one writer.
+      const limit = Math.max(
+        1,
+        Math.min(8, store.setting<number>('worker.maxAgents') ?? this.maxAgents),
+      );
+      while (!this.stopped && this.active.size < limit && this.resourceCheck().ok) {
+        const job = store.claim(
+          (candidate) =>
+            !this.active.has(candidate.taskId) &&
+            !(
+              candidate.role === 'reviewer' &&
+              candidate.groupId &&
+              [...this.runningJobs.values()].some(
+                (active) => active.role === 'reviewer' && active.groupId === candidate.groupId,
+              )
+            ),
+        );
         if (job) {
           const running = this.run(job);
           this.pendingRuns.add(running);
           void running.finally(() => this.pendingRuns.delete(running));
-        }
+        } else break;
       }
     } finally {
       this.ticking = false;
@@ -142,11 +179,22 @@ export class Worker {
   private async run(job: Job) {
     const abort = new AbortController();
     this.active.set(job.taskId, abort);
+    this.runningJobs.set(job.taskId, job);
     const store = this.engine.store;
     try {
       let task = store.getTask(job.taskId);
-      const startingPR = await this.engine.provider(task.ref).getPR(task.ref);
-      if (!sameRevision(startingPR, task.revision))
+      const group = task.groupId ? store.getGroup(task.groupId) : undefined;
+      if (job.role === 'reviewer' && group) {
+        if (job.groupGeneration !== group.generation)
+          throw new Error('The shared reviewer configuration changed before this job started');
+        task.reviewerThreadId = group.reviewerThreadId;
+      }
+      job.profile ??= this.engine.effectiveAgents(task)[job.role];
+      store.saveJob(job);
+      const startingPR = isTicket(task)
+        ? undefined
+        : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      if (startingPR && !sameRevision(startingPR, task.revision))
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
@@ -154,7 +202,9 @@ export class Worker {
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir
-        : await this.workspaces.prepare(task, job.role, abort.signal);
+        : isTicket(task)
+          ? await this.workspaces.prepareTicket(task, job.role, abort.signal)
+          : await this.workspaces.prepare(task, job.role, abort.signal);
       if (task.kind === 'plan' && job.kind === 'review') {
         if (demo)
           task.planDocuments = [
@@ -206,9 +256,11 @@ export class Worker {
       task.reviewerWorktree = prepared.reviewerWorktree;
       task.planDocuments = prepared.planDocuments;
       task.arcWorkspaces = prepared.arcWorkspaces;
+      if (isTicket(task)) task.revision = prepared.revision;
+      if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
       if (job.kind === 'fix') {
-        const actual = await this.engine.provider(task.ref).getReview(task.ref, task.review!);
+        const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
             'The published review changed before the author started; feedback was not released.',
@@ -229,13 +281,26 @@ export class Worker {
         onSession: (threadId, turnId) => {
           const current = store.getTask(job.taskId);
           if (current.generation !== job.generation || abort.signal.aborted) return;
+          if (job.role === 'reviewer' && current.groupId) {
+            const shared = store.getGroup(current.groupId);
+            if (shared.generation !== job.groupGeneration) return;
+            if (shared.reviewerThreadId && shared.reviewerThreadId !== threadId)
+              throw new Error('The shared reviewer returned a different thread identity');
+            shared.reviewerThreadId = threadId;
+            store.saveGroup(shared);
+          }
           if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);
           job.threadId = threadId;
           job.turnId = turnId;
           store.saveJob(job);
-          store.event(job.taskId, 'session.attached', { role: job.role, threadId, turnId }, job.id);
+          store.event(
+            job.taskId,
+            'session.attached',
+            { role: job.role, threadId, turnId, profile: job.profile, groupId: job.groupId },
+            job.id,
+          );
         },
         onEvent: (type, data) =>
           store.event(
@@ -250,12 +315,34 @@ export class Worker {
       if (
         !abort.signal.aborted &&
         task.generation === job.generation &&
+        isTicket(task) &&
+        job.kind === 'implement' &&
+        result.status === 'completed' &&
+        result.checkedHead === task.revision?.head
+      ) {
+        const head = demo
+          ? job.id.replaceAll('-', '').padEnd(40, '0')
+          : await this.workspaces.commitTicket(
+              task,
+              `${task.source?.key ?? 'Ticket'}: implement requirements`,
+              abort.signal,
+            );
+        const latest = store.getTask(task.id);
+        if (latest.generation === job.generation && !abort.signal.aborted) {
+          latest.pendingAuthorHead = head;
+          store.saveTask(latest);
+        }
+        store.event(task.id, 'author.implementation_saved', { head }, job.id);
+      }
+      if (
+        !abort.signal.aborted &&
+        task.generation === job.generation &&
         job.kind === 'fix' &&
         result.status === 'completed' &&
         !result.disputedCommentIds?.length &&
         result.checkedHead === task.revision?.head
       ) {
-        if (demo) await new DemoProvider(store).advance(task.ref);
+        if (demo) await new DemoProvider(store).advance(prRef(task));
         else {
           const submission = await this.workspaces.submit(
             task,
@@ -277,10 +364,30 @@ export class Worker {
       job.error = redact(String(error));
       if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
+      if (job.role === 'reviewer') {
+        const task = store.getTask(job.taskId);
+        if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
+          try {
+            await this.workspaces.releaseArc(task, 'reviewer');
+            const latest = store.getTask(task.id);
+            latest.arcWorkspaces = task.arcWorkspaces;
+            latest.reviewerWorktree = undefined;
+            store.saveTask(latest);
+          } catch (error) {
+            store.event(
+              task.id,
+              'reviewer.workspace_preserved',
+              { error: redact(String(error)) },
+              job.id,
+            );
+          }
+        }
+      }
       job.finishedAt = now();
       store.saveJob(job);
       store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
       this.active.delete(job.taskId);
+      this.runningJobs.delete(job.taskId);
     }
   }
   async stop() {

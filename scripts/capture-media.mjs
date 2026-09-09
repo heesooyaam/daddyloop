@@ -19,8 +19,24 @@ mkdirSync(state, { mode: 0o700 });
 const configFile = join(scratch, 'config.json');
 const token = randomBytes(32).toString('hex');
 writeFileSync(join(state, 'access-token'), token, { mode: 0o600 });
-const config = configSchema.parse({ dataDir: state, demo: true });
-const { app } = await buildApp({ dataDir: state, config, token, demo: true });
+const profiles = {
+  author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  reviewer: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+};
+const config = configSchema.parse({ dataDir: state, demo: true, agents: profiles });
+// The media demo remains offline, including its illustrative model catalogue.
+const catalogue = {
+  list: async () =>
+    Object.values(profiles).map((profile) => ({
+      id: profile.model,
+      name: profile.model,
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+      isDefault: profile === profiles.reviewer,
+    })),
+  validate: async () => {},
+};
+const { app } = await buildApp({ dataDir: state, config, token, demo: true, catalogue });
 let browser;
 async function command(executable, args) {
   await new Promise((resolveValue, reject) => {
@@ -40,6 +56,25 @@ try {
   const origin = `http://127.0.0.1:${app.server.address().port}`;
   writeFileSync(configFile, JSON.stringify({ ...config, serverUrl: origin }), { mode: 0o600 });
   browser = await chromium.launch({ args: ['--disable-dev-shm-usage'] });
+  {
+    const settings = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    await settings.request.post(`${origin}/api/session`, { data: { token } });
+    const page = await settings.newPage();
+    await page.goto(origin);
+    await page.getByRole('button', { name: 'New from ticket', exact: true }).first().click();
+    await expect(page.getByLabel('Author for this ticket model')).toHaveValue('gpt-5.6-sol');
+    await page
+      .getByLabel('GitHub issue or Tracker ticket')
+      .fill('https://github.com/your-team/project/issues/42');
+    await page.getByLabel('Repository path on the service host').fill('/home/you/projects/project');
+    await page.screenshot({ path: join(output, 'ticket-start.png'), fullPage: true });
+    await page.getByRole('button', { name: 'Close dialog' }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: 'Notification settings', exact: true }).click();
+    await page.getByLabel('Enable Telegram notifications').check();
+    await page.screenshot({ path: join(output, 'notifications-phone.png'), fullPage: false });
+    await settings.close();
+  }
   if (process.argv.includes('--terminal-only')) {
     await captureTerminal({ root, origin, token, configFile, scratch, output, browser, command });
   } else {

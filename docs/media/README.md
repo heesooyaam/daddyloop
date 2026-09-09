@@ -2,7 +2,7 @@
 
 All product screenshots come from the actual Reviewloop UI and CLI connected to a fresh, isolated demo server. The demo label stays visible. Agent responses and PR operations in this workspace are fixtures; these images do not demonstrate a live provider write or a real model response.
 
-The CLI images replay the real ANSI screen updates from a PTY through xterm.js. Panels, colours and menus are rendered by the actual terminal app. `cli-chat.png` shows a reviewer response; `cli.png` shows the initial workspace. Separate captures show command suggestions, task selection, author drafts, light theme and compact layout. The green README header is a separate SVG illustration, not an application screen.
+The CLI images replay the real ANSI screen updates from a PTY through xterm.js. Panels, colours and menus are rendered by the actual terminal app. `cli-chat.png` shows a reviewer response; `cli.png` shows the initial workspace. Separate captures show command suggestions, task selection, author drafts, light theme, compact layout, role models and Telegram preferences. Model catalogues in media captures are illustrative offline fixtures. The green README header is a separate SVG illustration, not an application screen.
 
 ## Watch
 
@@ -16,7 +16,7 @@ The video is silent, about 20 seconds long, and shows the real demo workflow:
 4. Review the next revision and publish the completed review.
 5. Inspect the recorded verification decision and activity history.
 
-The GIF uses fewer frames and colours for a smaller inline preview. The MP4 preserves the full 1440 × 1080 recording. Screenshots provide a static alternative to the animation. The mobile captures use a 390 × 844 browser viewport; they demonstrate layout, not an authenticated external phone connection. No live Telegram screenshot is included because no bot was paired for this capture.
+The GIF uses fewer frames and colours for a smaller inline preview. The MP4 preserves the full 1440 × 1080 recording. Screenshots provide a static alternative to the animation. The mobile captures use a 390 × 844 browser viewport; they demonstrate layout, not an authenticated external phone connection. The Telegram preferences screenshot shows the actual phone-sized settings UI; no live Telegram chat is shown because no bot was paired for this capture.
 
 ## Reproduce
 

@@ -3,7 +3,12 @@ import type { AgentResult } from '../core/types.js';
 import { setTimeout as delay } from 'node:timers/promises';
 export class DemoRuntime implements AgentRuntime {
   async run(input: AgentInput): Promise<AgentResult> {
-    input.onSession(`${input.job.role}-demo-${input.task.id}`, `demo-turn-${input.job.id}`);
+    input.onSession(
+      input.job.role === 'reviewer'
+        ? (input.task.reviewerThreadId ?? `reviewer-demo-${input.task.groupId ?? input.task.id}`)
+        : (input.task.authorThreadId ?? `author-demo-${input.task.id}`),
+      `demo-turn-${input.job.id}`,
+    );
     input.onEvent('runtime.item', {
       type: 'commandExecution',
       command: 'Demo fixture · inspect session generation guard',
@@ -12,7 +17,12 @@ export class DemoRuntime implements AgentRuntime {
     await delay(150, undefined, { signal: input.signal });
     let summary =
       'Demo fixture: the final revision has a generation guard and its test checks the stale callback scenario.';
-    if (input.job.kind === 'review') {
+    if (input.task.ref.kind === 'ticket')
+      summary =
+        input.job.kind === 'implement'
+          ? 'Demo fixture: implementation and checks are complete. Submit the saved result to the shared reviewer.'
+          : 'Demo fixture: I read the ticket and parent requirements. We can discuss the approach, or start implementation when it is clear.';
+    else if (input.job.kind === 'review') {
       if (input.task.round === 1) {
         await input.onTool('add_comment', {
           key: 'R1',

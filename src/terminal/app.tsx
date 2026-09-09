@@ -5,6 +5,7 @@ import { edit, editorRows, emptyEditor, insert } from './editor.js';
 import { clip, markdown, oneLine, wrap, type Row } from './text.js';
 import type { State, Task } from '../core/types.js';
 import { VERSION } from '../version.js';
+import { choices, planningRows, profileText } from './planning.js';
 
 const themes = {
   dark: {
@@ -36,6 +37,10 @@ const themes = {
 };
 type Theme = typeof themes.dark;
 const labels: Record<State, string> = {
+  discussing: 'Discussing ticket',
+  implementing: 'Implementing',
+  ready_for_review: 'Ready to submit',
+  submitting: 'Creating PR',
   queued: 'Queued',
   reviewing: 'Reviewing',
   awaiting_publication: 'Review ready',
@@ -82,12 +87,27 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
           ? 'The service is unavailable. Your console will reconnect automatically.\n\nRun reviewctl init on the service host, or reviewctl connect <https-url> on a client.\n\n/refresh retries now. Ctrl+Q closes this client.'
           : state.tasks.length
             ? 'Loading the selected conversation…'
-            : 'Attach an existing PR or try the built-in demo.\n\n/attach   Connect a GitHub, GitLab or Arcanum review\n/demo     Explore a complete review loop\n/help     Keyboard shortcuts\n\nThe service owns both agent sessions. Closing this console leaves the work running.',
+            : 'Start with a ticket, attach a PR or try the demo.\n\n/new      Start from a GitHub issue or Tracker ticket\n/defaults Choose author and reviewer models\n/attach   Connect an existing review\n/demo     Explore a complete review loop\n/notifications  Telegram updates\n\nThe service owns the agent sessions. Closing this console leaves the work running.',
         columns,
       ),
     ];
   const rows: Row[] = [];
-  if (state.view === 'findings') {
+  if (state.view === 'group') {
+    rows.push(
+      ...markdown(
+        detail.group
+          ? `${detail.group.title}\n\nShared reviewer: ${profileText(detail.group.reviewer)}\n\n${detail.group.requirements}`
+          : 'This task has no group yet. /child adds a ticket with its own author and this reviewer.',
+        columns,
+      ),
+      { text: '' },
+    );
+    for (const sibling of detail.siblings ?? [])
+      rows.push(
+        { text: `${sibling.id === detail.task.id ? '›' : ' '} ${sibling.title}`, kind: 'accent' },
+        { text: `${sibling.id.slice(0, 8)} · ${labels[sibling.state]}`, kind: 'muted' },
+      );
+  } else if (state.view === 'findings') {
     const snapshot = detail.task.snapshot;
     rows.push(
       {
@@ -118,7 +138,7 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
     );
     rows.push(
       ...markdown(
-        `Reviewer: ${detail.task.reviewerThreadId ?? 'Starts with the first review'}\nAuthor: ${detail.task.authorThreadId ?? 'Starts after feedback is published'}\nRepository: ${detail.task.repoPath}\nPR: ${detail.task.ref.url}`,
+        `Reviewer model: ${profileText(detail.agents?.reviewer)}\nAuthor model: ${profileText(detail.agents?.author)}\nReviewer session: ${detail.group?.reviewerThreadId ?? detail.task.reviewerThreadId ?? 'Starts with the first review'}\nAuthor session: ${detail.task.authorThreadId ?? 'Starts with the first conversation'}\nRepository: ${detail.task.repoPath}\nSource: ${detail.task.ref.url}`,
         columns,
       ),
     );
@@ -154,7 +174,9 @@ export function contentRows(state: ConsoleState, columns: number): Row[] {
         {
           text:
             state.role === 'author'
-              ? 'Your author session starts after feedback is published.'
+              ? detail.task.ref.kind === 'ticket'
+                ? 'Discuss the ticket here. /implement starts code changes and the automatic review loop.'
+                : 'Your author session starts after feedback is published.'
               : 'Your reviewer will report findings here.',
           kind: 'muted',
         },
@@ -269,6 +291,8 @@ function Sidebar({ state, height, theme }: { state: ConsoleState; height: number
 function overlayRows(model: ConsoleModel, columns: number, height: number): Row[] {
   const state = model.snapshot(),
     overlay = state.overlay!;
+  if (['ticket', 'models', 'notifications'].includes(overlay.kind))
+    return planningRows(model, columns, height);
   if (overlay.kind === 'help')
     return markdown(
       'KEYBOARD\n\nEnter          Send a message / run a typed command\nTab            Switch author and reviewer (or complete /command)\nCtrl+T         Choose a task\nPgUp / PgDn    Scroll conversation, findings or activity\nShift+Enter    New line (supported terminals)\nCtrl+J         New line on all terminals\nCtrl+A / E     Start / end of line\nCtrl+W         Delete previous word\nCtrl+C         Clear draft, then close the console\nCtrl+Q         Close console; service and agents continue\nEsc            Close a menu or cancel attaching a PR\n\nCOMMANDS\n\n' +
@@ -346,7 +370,12 @@ export function TerminalApp({
   const editor = model.editor(),
     layout = editorRows(editor, textWidth - 4);
   const inputRows = Math.min(4, Math.max(1, layout.rows.length));
-  const hiddenComposer = state.overlay?.kind === 'help';
+  const overlay = state.overlay;
+  const hiddenComposer =
+    overlay?.kind === 'help' ||
+    overlay?.kind === 'notifications' ||
+    (overlay?.kind === 'models' && overlay.step !== 1) ||
+    (overlay?.kind === 'ticket' && [3, 5].includes(overlay.step ?? 0));
   const contentHeight = Math.max(
     1,
     bodyHeight -
@@ -379,11 +408,11 @@ export function TerminalApp({
   );
   const menuHeight = menu.length ? Math.min(6, menu.length) + 2 : 0;
   const available = Math.max(1, contentHeight - menuHeight - 1);
-  const pageRows = state.overlay ? overlayRows(model, textWidth, contentHeight) : allRows;
+  const pageRows = state.overlay ? overlayRows(model, textWidth, available) : allRows;
   const fromTop = state.view !== 'chat' || state.overlay?.kind === 'help';
   const offset = Math.min(state.scroll, Math.max(0, pageRows.length - available));
   const start =
-    state.overlay?.kind === 'tasks' || state.overlay?.kind === 'attach'
+    state.overlay && state.overlay.kind !== 'help'
       ? 0
       : fromTop
         ? offset
@@ -452,6 +481,17 @@ export function TerminalApp({
       return;
     }
     const menu = model.menu();
+    const options = choices(model);
+    if (options.length && (key.upArrow || key.downArrow)) {
+      model.patch({
+        overlay: {
+          ...current.overlay!,
+          index:
+            (current.overlay!.index + (key.downArrow ? 1 : options.length - 1)) % options.length,
+        },
+      });
+      return;
+    }
     if (menu.length && (key.upArrow || key.downArrow)) {
       model.patch({
         menuIndex: (current.menuIndex + (key.downArrow ? 1 : menu.length - 1)) % menu.length,
@@ -484,7 +524,7 @@ export function TerminalApp({
       else void model.send();
       return;
     }
-    model.setEditor(edit(model.editor(), value, key));
+    if (!hiddenComposer) model.setEditor(edit(model.editor(), value, key));
   };
   useInput(input);
   usePaste((text) => model.paste(text));
@@ -550,7 +590,13 @@ export function TerminalApp({
                   ? 'Choose a task'
                   : state.overlay.kind === 'attach'
                     ? 'Attach a review'
-                    : 'Keyboard & commands'
+                    : state.overlay.kind === 'ticket'
+                      ? 'Start from a ticket'
+                      : state.overlay.kind === 'models'
+                        ? 'Agent models'
+                        : state.overlay.kind === 'notifications'
+                          ? 'Telegram notifications'
+                          : 'Keyboard & commands'
                 : (task?.title ?? 'Your review workspace'),
               textWidth,
             )}
@@ -643,11 +689,19 @@ export function TerminalApp({
                         state.overlay
                           ? state.overlay.kind === 'tasks'
                             ? 'Search tasks…'
-                            : [
-                                'PR / MR URL',
-                                'Repository path on the service host',
-                                'Original requirements',
-                              ][state.overlay.step ?? 0]
+                            : state.overlay.kind === 'models' ||
+                                (state.overlay.kind === 'ticket' && (state.overlay.step ?? 0) >= 2)
+                              ? 'Filter models…'
+                              : state.overlay.kind === 'ticket'
+                                ? [
+                                    'GitHub issue URL or Tracker key',
+                                    'Repository path on the service host',
+                                  ][state.overlay.step ?? 0]
+                                : [
+                                    'PR / MR URL',
+                                    'Repository path on the service host',
+                                    'Original requirements',
+                                  ][state.overlay.step ?? 0]
                           : `Message ${state.role}, or / for commands…`,
                         textWidth - 6,
                       )}

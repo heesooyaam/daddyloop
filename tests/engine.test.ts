@@ -1,3 +1,4 @@
+import { prRef } from '../src/core/types.js';
 import { describe, it, expect } from 'vitest';
 import { fixture } from './helpers.js';
 import { buildContext } from '../src/runtime/context.js';
@@ -13,7 +14,7 @@ describe('publication gates and revision safety', () => {
     })) as { id: string };
     const first = f.store.claim()!,
       task = f.store.getTask(f.task.id);
-    await f.provider.publish(task.ref, task.review!);
+    await f.provider.publish(prRef(task), task.review!);
     await f.engine.completeJob(first, f.result());
     first.status = 'completed';
     f.store.saveJob(first);
@@ -32,7 +33,7 @@ describe('publication gates and revision safety', () => {
     await f.engine.broker.call(job, 'set_summary', { body: 'Version B' }, 'call-b');
     await f.engine.broker.call(job, 'set_summary', { body: 'Version A' }, 'call-a2');
     const task = f.store.getTask(f.task.id);
-    expect((await f.provider.getReview(task.ref, task.review!)).body).toContain('Version A');
+    expect((await f.provider.getReview(prRef(task), task.review!)).body).toContain('Version A');
     f.store.close();
   });
   it('a failed reviewer discussion cannot reopen the publication gate through resume', async () => {
@@ -57,7 +58,7 @@ describe('publication gates and revision safety', () => {
     const f = await fixture();
     await f.engine.review(f.task.id);
     await f.run();
-    const pr = await f.provider.getPR(f.task.ref);
+    const pr = await f.provider.getPR(prRef(f.task));
     pr.state = 'closed';
     f.store.setSetting('demo-pr:1', pr);
     await expect(f.engine.publish(f.task.id)).rejects.toMatchObject({ code: 'stale_revision' });
@@ -138,9 +139,14 @@ describe('publication gates and revision safety', () => {
     })) as { id: string };
     await f.run();
     const task = f.store.getTask(f.task.id);
-    await f.provider.updateComment(task.ref, task.review!, a.id, 'Human edited final requirement');
-    await f.provider.deleteComment(task.ref, task.review!, b.id);
-    await f.provider.publish(task.ref, task.review!);
+    await f.provider.updateComment(
+      prRef(task),
+      task.review!,
+      a.id,
+      'Human edited final requirement',
+    );
+    await f.provider.deleteComment(prRef(task), task.review!, b.id);
+    await f.provider.publish(prRef(task), task.review!);
     await f.engine.reconcile(task.id);
     expect(f.store.getTask(task.id).feedback?.comments.map((c) => c.body)).toEqual([
       'Human edited final requirement',
@@ -152,7 +158,7 @@ describe('publication gates and revision safety', () => {
     await f.engine.review(f.task.id);
     const job = f.store.claim()!;
     const old = f.result();
-    await f.provider.advance(f.task.ref);
+    await f.provider.advance(prRef(f.task));
     await f.engine.reconcile(f.task.id);
     await f.engine.completeJob(job, old);
     expect(f.store.getTask(f.task.id).state).toBe('needs_input');
@@ -166,7 +172,7 @@ describe('publication gates and revision safety', () => {
     const f = await fixture();
     await f.engine.review(f.task.id);
     await f.run();
-    const pr = await f.provider.getPR(f.task.ref);
+    const pr = await f.provider.getPR(prRef(f.task));
     pr.base = 'c'.repeat(40);
     f.store.setSetting('demo-pr:1', pr);
     await expect(f.engine.publish(f.task.id)).rejects.toMatchObject({
@@ -198,7 +204,7 @@ describe('publication gates and revision safety', () => {
   });
   it('a completed review with missing CI waits for a revision-bound human waiver', async () => {
     const f = await fixture();
-    const pr = await f.provider.getPR(f.task.ref);
+    const pr = await f.provider.getPR(prRef(f.task));
     pr.checks = 'missing';
     f.store.setSetting('demo-pr:1', pr);
     await f.engine.review(f.task.id);
@@ -223,7 +229,7 @@ describe('publication gates and revision safety', () => {
     expect(f.store.getTask(f.task.id).state).toBe('awaiting_plan_approval');
     await f.engine.action(f.task.id, 'approve-plan');
     const implementation = await f.engine.create({
-      ref: { ...f.task.ref, number: 2, url: 'https://demo.local/pull/2' },
+      ref: { ...prRef(f.task), number: 2, url: 'https://demo.local/pull/2' },
       repoPath: '/tmp',
       requirements: 'Implement the plan',
       planTaskId: f.task.id,
@@ -255,7 +261,7 @@ describe('publication gates and revision safety', () => {
     await f.run();
     await f.engine.publish(f.task.id);
     const fix = f.store.claim()!;
-    await f.provider.advance(f.task.ref);
+    await f.provider.advance(prRef(f.task));
     await f.engine.completeJob(fix, f.result());
     fix.status = 'completed';
     f.store.saveJob(fix);
@@ -302,7 +308,7 @@ describe('publication gates and revision safety', () => {
     const f = await fixture();
     await expect(
       f.engine.create({
-        ref: f.task.ref,
+        ref: prRef(f.task),
         requirements: 'duplicate',
         repoPath: '/tmp',
       }),

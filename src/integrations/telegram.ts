@@ -1,8 +1,9 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Engine } from '../core/engine.js';
-import { AppError, now, type Event, type Task } from '../core/types.js';
+import { AppError, now, prRef, type Event, type Task } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
+import { notificationPreferences } from './notifications.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type User = { id: number; is_bot?: boolean };
 type Chat = { id: number; type: string };
@@ -118,24 +119,44 @@ export class Telegram {
     this.polling = this.poll();
   }
   private onEvent = (event: Event) => {
-    if (!this.paired()) return;
+    const preferences = notificationPreferences(this.engine.store);
+    if (!this.paired() || !preferences.enabled) return;
     const state = (event.data as { state?: string }).state;
+    if (event.type !== 'task.state' && event.type !== 'message.created') return;
+    const snapshot = this.engine.store.getTask(event.taskId);
+    const milestone =
+      event.type === 'task.state' &&
+      state &&
+      [
+        'awaiting_publication',
+        'awaiting_plan_approval',
+        'needs_input',
+        'complete',
+        'ready_for_review',
+        'awaiting_push',
+        'awaiting_checks',
+      ].includes(state);
+    const attention =
+      milestone &&
+      (['complete', 'needs_input', 'awaiting_plan_approval', 'awaiting_push'].includes(state!) ||
+        (state === 'ready_for_review' && !snapshot.policy.autoPush) ||
+        (state === 'awaiting_publication' && snapshot.policy.publication === 'human') ||
+        (state === 'awaiting_checks' &&
+          ['failing', 'missing'].includes(snapshot.pr?.checks ?? '')));
     if (
-      event.type !== 'message.created' &&
-      (event.type !== 'task.state' ||
-        !state ||
-        !['awaiting_publication', 'awaiting_plan_approval', 'needs_input', 'complete'].includes(
-          state,
-        ))
+      preferences.mode === 'attention' ? !attention : !milestone && event.type !== 'message.created'
     )
       return;
     this.notices = this.notices
       .then(async () => {
-        if (this.stopped) return;
+        if (this.stopped || !notificationPreferences(this.engine.store).enabled) return;
         const store = this.engine.store,
-          id = `telegram:event:${event.id}`;
+          id =
+            event.type === 'message.created'
+              ? `telegram:event:${event.id}`
+              : `telegram:state:${hash(JSON.stringify([event.taskId, snapshot.generation, snapshot.revision, state, snapshot.reason]))}`;
         if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
-        const task = store.getTask(event.taskId),
+        const task = snapshot,
           pair = this.paired();
         if (!pair) return;
         let text = `Reviewloop · ${task.title}\n${task.state}\n${task.reason}\n\nTask: ${task.id.slice(0, 8)}`;
@@ -211,7 +232,9 @@ export class Telegram {
             store.busy(task.id)
           )
             throw new Error('The task changed since this confirmation. Review its current state.');
-          const snapshot = await this.engine.provider(task.ref).getReview(task.ref, task.review);
+          const snapshot = await this.engine
+            .provider(prRef(task))
+            .getReview(prRef(task), task.review);
           if (hash(JSON.stringify(snapshot)) !== action.snapshotHash)
             throw new Error('The review comments changed. Send /publish again.');
           store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(callback.data!);
@@ -230,6 +253,20 @@ export class Telegram {
           tasks.length
             ? tasks.map((t) => `${t.id.slice(0, 8)} · ${t.state}\n${t.title}`).join('\n\n')
             : 'No tasks yet. Attach a PR in the web panel or CLI.',
+        );
+        return;
+      }
+      if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
+        const mode = text.split(/\s+/)[1];
+        if (mode)
+          store.setSetting('notifications.telegram', {
+            enabled: mode !== 'off',
+            mode: mode === 'all' ? 'all' : 'attention',
+          });
+        const prefs = notificationPreferences(store);
+        await this.api.send(
+          chat.id,
+          `Notifications: ${prefs.enabled ? prefs.mode : 'off'}.\n/notifications on — completion or input needed\n/notifications all — all replies\n/notifications off — silence`,
         );
         return;
       }
@@ -277,7 +314,9 @@ export class Telegram {
       }
       const result =
         verb === 'retry'
-          ? await this.engine.review(task.id, true)
+          ? task.ref.kind === 'ticket'
+            ? await this.engine.retryTicket(task.id)
+            : await this.engine.review(task.id, true)
           : await this.engine.action(task.id, verb as 'pause' | 'resume');
       await this.api.send(chat.id, `${result.state}: ${result.reason}`);
     } catch (error) {
@@ -292,7 +331,7 @@ export class Telegram {
       this.engine.store.busy(task.id)
     )
       throw new Error('A finished, idle draft review is required before publication.');
-    const snapshot = await this.engine.provider(task.ref).getReview(task.ref, task.review);
+    const snapshot = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review);
     if (snapshot.status !== 'draft')
       throw new Error('This review is no longer an unpublished draft.');
     const id = randomBytes(18).toString('base64url');
@@ -310,7 +349,7 @@ export class Telegram {
       .run(id, JSON.stringify(action));
     await this.api.send(
       chatId,
-      `Publish ${snapshot.comments.length} comment(s) for “${task.title}”, revision ${task.revision!.head.slice(0, 8)}?\n${task.ref.url}`,
+      `Publish ${snapshot.comments.length} comment(s) for “${task.title}”, revision ${task.revision!.head.slice(0, 8)}?\n${prRef(task).url}`,
       [[{ text: 'Publish this review', callback_data: id }]],
     );
   }

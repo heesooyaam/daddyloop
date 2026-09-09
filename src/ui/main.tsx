@@ -42,9 +42,13 @@ import type {
   State,
   ResourceStatus,
   Policy,
+  AgentProfiles,
+  ReviewGroup,
+  AgentProfile,
 } from '../core/types';
 import './style.css';
 import '@fontsource-variable/inter';
+import { TicketForm, AgentSettingsForm, NotificationsForm, profileLabel } from './planning.js';
 
 type Detail = {
   task: Task;
@@ -52,6 +56,15 @@ type Detail = {
   events: Event[];
   jobs: Job[];
   decisions: Decision[];
+  agents?: AgentProfiles;
+  group?: ReviewGroup;
+  siblings?: {
+    id: string;
+    title: string;
+    state: State;
+    parentTaskId?: string;
+    author: AgentProfile;
+  }[];
 };
 type Status = {
   version: string;
@@ -84,6 +97,10 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   return data as T;
 }
 const stateLabels: Record<State, string> = {
+  discussing: 'Discussing ticket',
+  implementing: 'Author is implementing',
+  ready_for_review: 'Ready to submit',
+  submitting: 'Creating PR',
   queued: 'Queued for review',
   reviewing: 'Reviewer is working',
   awaiting_publication: 'Review ready',
@@ -171,6 +188,9 @@ function App() {
   const [draft, setDraft] = useState('');
   const [policyOpen, setPolicyOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [ticketOpen, setTicketOpen] = useState<'root' | 'child' | null>(null);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const initialPair = useRef(location.hash.startsWith('#pair/') ? location.hash.slice(6) : '');
   const pairingPromise = useRef<Promise<unknown> | null>(null);
   const chatInput = useRef<HTMLTextAreaElement>(null);
@@ -398,6 +418,14 @@ function App() {
           <Settings2 size={18} />
           Devices & connections
         </button>
+        <button className="nav-item" onClick={() => setAgentsOpen(true)}>
+          <Code2 size={18} />
+          Agents & models
+        </button>
+        <button className="nav-item" onClick={() => setNotificationsOpen(true)}>
+          <Bell size={18} />
+          Notifications
+        </button>
         <div className="sidebar-bottom">
           <div className="local-status">
             <span className="connection-dot on" />
@@ -423,12 +451,9 @@ function App() {
             </button>
             <button
               className={`icon-button ${notify ? 'enabled' : ''}`}
-              aria-label="Enable desktop notifications"
-              title="Desktop notifications"
-              onClick={async () => {
-                if ('Notification' in window)
-                  setNotify((await Notification.requestPermission()) === 'granted');
-              }}
+              aria-label="Notification settings"
+              title="Notification settings"
+              onClick={() => setNotificationsOpen(true)}
             >
               <Bell size={18} />
             </button>
@@ -441,10 +466,16 @@ function App() {
             <h1>Review workspace</h1>
             <p>Keep the author moving. Give every change an independent review.</p>
           </div>
-          <button className="button primary" onClick={() => setCreating(true)}>
-            <Plus size={17} />
-            Attach a PR
-          </button>
+          <div className="heading-actions">
+            <button className="button primary" onClick={() => setTicketOpen('root')}>
+              <Plus size={17} />
+              New from ticket
+            </button>
+            <button className="button" onClick={() => setCreating(true)}>
+              <Plus size={17} />
+              Attach a PR
+            </button>
+          </div>
         </div>
         <div className="overview">
           <div>
@@ -612,11 +643,14 @@ function App() {
                 <div className="detail-meta">
                   <span>
                     <GitPullRequest size={14} />
-                    {task.ref.repo} #{task.ref.number}
+                    {task.ref.kind === 'ticket'
+                      ? task.ref.key
+                      : `${task.ref.repo} #${task.ref.number}`}
                   </span>
                   {task.ref.provider === 'demo' && <span className="demo-label">DEMO FIXTURE</span>}
                   <a href={safeLink(task.ref.url)} target="_blank" rel="noreferrer">
-                    Open PR <ArrowUpRight size={13} />
+                    {task.ref.kind === 'ticket' ? 'Open ticket' : 'Open PR'}{' '}
+                    <ArrowUpRight size={13} />
                   </a>
                 </div>
                 <h2>{task.title}</h2>
@@ -637,6 +671,41 @@ function App() {
                   </button>
                 </div>
               </div>
+              <div className="agent-strip">
+                <span>
+                  <Code2 size={13} /> Author: {profileLabel(detail?.agents?.author)}
+                </span>
+                <span>
+                  <ShieldCheck size={13} /> {detail?.group ? 'Shared reviewer' : 'Reviewer'}:{' '}
+                  {profileLabel(detail?.agents?.reviewer)}
+                </span>
+                <button className="button small" onClick={() => setAgentsOpen(true)}>
+                  Models
+                </button>
+                <button className="button small" onClick={() => setTicketOpen('child')}>
+                  Add child ticket
+                </button>
+              </div>
+              {detail?.group && (
+                <div className="group-strip">
+                  <strong>{detail.group.source?.key ?? detail.group.title}</strong>
+                  <span>One reviewer · {detail.siblings?.length ?? 1} author tasks</span>
+                  {detail.siblings
+                    ?.filter((sibling) => sibling.id !== task.id)
+                    .map((sibling) => (
+                      <button
+                        key={sibling.id}
+                        onClick={() => {
+                          choose(sibling.id);
+                          if (tasks.find((item) => item.id === sibling.id)?.ref.kind === 'ticket')
+                            setTab('author');
+                        }}
+                      >
+                        {sibling.title} · {stateLabels[sibling.state]}
+                      </button>
+                    ))}
+                </div>
+              )}
               <div className={`task-callout ${needsAttention(task.state) ? 'attention' : ''}`}>
                 <div className="callout-icon">
                   {task.state === 'complete' ? (
@@ -654,6 +723,29 @@ function App() {
                   <p>{task.reason}</p>
                 </div>
                 <div className="callout-actions">
+                  {task.ref.kind === 'ticket' &&
+                    ['discussing', 'needs_input'].includes(task.state) && (
+                      <button
+                        className="button primary small"
+                        disabled={busy || !!runningJob}
+                        onClick={() => void act('implement')}
+                      >
+                        Start implementation
+                        <Play size={14} />
+                      </button>
+                    )}
+                  {task.ref.kind === 'ticket' &&
+                    ['ready_for_review', 'needs_input'].includes(task.state) &&
+                    task.pendingAuthorHead && (
+                      <button
+                        className="button primary small"
+                        disabled={busy || !!runningJob}
+                        onClick={() => void act('submit')}
+                      >
+                        Submit for review
+                        <ArrowRight size={14} />
+                      </button>
+                    )}
                   {task.state === 'awaiting_publication' && (
                     <button
                       className="button primary small"
@@ -691,7 +783,7 @@ function App() {
                       onClick={() => void act('retry')}
                     >
                       <RefreshCw size={14} />
-                      Retry review
+                      {task.ref.kind === 'ticket' ? 'Retry task' : 'Retry review'}
                     </button>
                   )}
                   {task.state === 'complete' && (
@@ -1005,6 +1097,51 @@ function App() {
       </main>
       {connectionsOpen && status && (
         <Connections status={status} onClose={() => setConnectionsOpen(false)} />
+      )}
+      {ticketOpen && (
+        <Modal
+          title={ticketOpen === 'child' ? 'Add a child ticket' : 'Start from a ticket'}
+          subtitle="Import the requirements, choose the agents, and begin a conversation."
+          onClose={() => setTicketOpen(null)}
+        >
+          <TicketForm
+            api={api}
+            parent={ticketOpen === 'child' ? detail : undefined}
+            onCreated={(task) => {
+              setTicketOpen(null);
+              choose(task.id);
+              setTab('author');
+              void load();
+            }}
+          />
+        </Modal>
+      )}
+      {agentsOpen && (
+        <Modal
+          title="Agents & models"
+          subtitle="Choose a separate writer for each task and a shared reviewer for its group."
+          onClose={() => setAgentsOpen(false)}
+        >
+          <AgentSettingsForm api={api} selected={detail} onSaved={() => void load()} />
+        </Modal>
+      )}
+      {notificationsOpen && (
+        <Modal
+          title="Notifications"
+          subtitle="Choose which updates reach your private Telegram chat."
+          onClose={() => setNotificationsOpen(false)}
+        >
+          <NotificationsForm api={api} />
+          <button
+            className="button small"
+            onClick={async () => {
+              if ('Notification' in window)
+                setNotify((await Notification.requestPermission()) === 'granted');
+            }}
+          >
+            {notify ? 'Browser notifications enabled' : 'Enable browser notifications too'}
+          </button>
+        </Modal>
       )}
       {creating && (
         <CreateTask
@@ -1323,7 +1460,7 @@ function CreateTask({
     [kind, setKind] = useState('code'),
     [planTaskId, setPlan] = useState(''),
     [thread, setThread] = useState(''),
-    [auto, setAuto] = useState(false),
+    [auto, setAuto] = useState(true),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   return (

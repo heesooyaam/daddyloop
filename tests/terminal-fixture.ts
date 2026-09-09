@@ -32,7 +32,7 @@ export const taskB: Task = {
   title: 'Handle reconnects',
 };
 export const status: Status = {
-  version: '0.3.0',
+  version: '0.4.0',
   activeJobs: 0,
   publicOrigin: null,
   demoEnabled: true,

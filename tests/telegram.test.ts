@@ -1,3 +1,4 @@
+import { prRef } from '../src/core/types.js';
 import { it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -132,7 +133,7 @@ it('rejects a Telegram publication confirmation if the review text changed', asy
     inline_keyboard: { callback_data: string }[][];
   };
   const task = f.store.getTask(f.task.id);
-  await f.provider.updateSummary(task.ref, task.review!, 'Changed after confirmation');
+  await f.provider.updateSummary(prRef(task), task.review!, 'Changed after confirmation');
   await bot.handle({
     update_id: 3,
     callback_query: {
@@ -169,4 +170,47 @@ it('routes author and reviewer chats separately and keeps long responses complet
       .join(''),
   ).toBe(text);
   f.store.close();
+});
+
+it('sends quiet completion notices once, supports all replies and can be disabled from the bot', async () => {
+  const f = await fixture(),
+    sent: Record<string, unknown>[] = [];
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    if (String(url).endsWith('/getUpdates'))
+      return new Promise((_resolve, reject) =>
+        options?.signal?.addEventListener('abort', () => reject(new Error('stopped')), {
+          once: true,
+        }),
+      );
+    sent.push(JSON.parse(String(options?.body)));
+    return new Response(JSON.stringify({ ok: true, result: {} }));
+  });
+  const bot = new Telegram(f.engine, api, 'test_bot');
+  await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+  const baseline = sent.length;
+  bot.start();
+  try {
+    f.store.message(f.task.id, 'reviewer', 'agent', 'Intermediate reply');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sent).toHaveLength(baseline);
+    const task = f.store.getTask(f.task.id);
+    task.state = 'complete';
+    task.reason = 'All checks passed';
+    f.store.saveTask(task);
+    f.store.event(task.id, 'task.state', { state: 'complete' });
+    f.store.event(task.id, 'task.state', { state: 'complete' });
+    await vi.waitFor(() => expect(sent).toHaveLength(baseline + 1));
+    expect(sent.at(-1)?.text).toContain('All checks passed');
+    await bot.handle(update(2, '/notifications all'));
+    f.store.message(task.id, 'author', 'agent', 'Detailed author reply');
+    await vi.waitFor(() => expect(sent.at(-1)?.text).toContain('Detailed author reply'));
+    await bot.handle(update(3, '/notifications off'));
+    const after = sent.length;
+    f.store.message(task.id, 'reviewer', 'agent', 'Silenced reply');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sent).toHaveLength(after);
+  } finally {
+    await bot.stop();
+    f.store.close();
+  }
 });

@@ -1,13 +1,12 @@
-# Reviewloop 0.3.0
+# Reviewloop 0.4.0
 
-The default CLI is now a full-screen terminal workspace with a task sidebar, separate author/reviewer conversations, a multiline composer and command suggestions.
+Start a task from a GitHub issue or Yandex Tracker ticket, discuss the requirements with its author, then start implementation. The service saves the isolated changes, creates a native PR and runs the review/fix loop.
 
-- Dark and light themes, Markdown/code formatting, working indicators, resource status and responsive layouts.
-- Tab switches roles; Ctrl+T searches tasks; PgUp/PgDn scroll; Ctrl+J inserts a newline.
-- Drafts stay with each task/role while navigating. Bracketed paste remains literal text and never runs a slash command automatically.
-- `/findings`, `/logs`, `/context` and a guided `/attach` expose the workflow from the terminal.
-- The client reconnects after read failures, fences late selection responses and restores unconfirmed messages at their original recipient.
-- `reviewctl --plain` retains the original line-oriented console. Existing script commands keep their output.
-- Closing the TUI restores the terminal and leaves the managed service and agents running.
+- Independent Codex model and reasoning-effort profiles for author and reviewer, selected from the account's model catalogue. Available in the terminal, CLI commands and web UI.
+- Parent/child ticket groups: each child gets its own author and working copy; the group shares one persistent reviewer session and a serialized review queue. Configurable total concurrency, defaulting to one active agent.
+- Finished reviews publish automatically for new tasks. Existing saved policies are retained, and manual publication remains available.
+- Telegram notification settings in the TUI, website, CLI and paired bot. Quiet completion/attention updates by default; all intermediate replies are optional.
+- Durable PR creation and recovery after uncertain responses, exact submitted-head checks, scoped credentials and preserved source checkouts.
+- README guides and actual terminal/browser screenshots for ticket setup, models and notifications.
 
-The self-contained Linux x64/ARM64 release includes the terminal UI dependencies. Existing data and accounts are preserved. This remains a prerelease; earlier provider-write and external-account validation limits still apply.
+Linux x64/ARM64 bundles preserve existing accounts and task data. Database schema 3 adds review groups; take a backup before upgrading because older releases reject newer schemas. This remains a prerelease. Native Arc writes are fixture-tested, while real Tracker reads and both requested Codex model profiles were verified on the development host. Telegram delivery requires the owner's bot token and private-chat pairing.

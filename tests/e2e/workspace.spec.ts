@@ -105,3 +105,46 @@ test('a paired phone uses HTTPS and remains connected after the laptop browser c
     await phone.close();
   }
 });
+
+test('starts ticket conversations with separate models, adds a child and saves phone notifications', async ({
+  page,
+}) => {
+  const issue = Date.now();
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page
+    .getByLabel('Local access token')
+    .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
+  await page.getByRole('button', { name: 'Connect to workspace' }).click();
+  await page.getByRole('button', { name: 'New from ticket', exact: true }).first().click();
+  await page
+    .getByLabel('GitHub issue or Tracker ticket')
+    .fill(`https://github.com/fixture/planning/issues/${issue}`);
+  await page.getByRole('button', { name: 'Preview ticket' }).click();
+  await expect(page.getByText(`fixture/planning#${issue} · Ticket fixture ${issue}`)).toBeVisible();
+  await page.getByLabel('Repository path on the service host').fill('/fixture/repo');
+  await expect(page.getByLabel('Author for this ticket model')).toHaveValue('gpt-5.6-sol');
+  await expect(page.getByLabel('Reviewer for this group model')).toHaveValue('gpt-6-astra');
+  await page.getByRole('button', { name: 'Import ticket and start chat' }).click();
+  await expect(page.getByText('I have read the ticket.', { exact: false })).toBeVisible({
+    timeout: 15000,
+  });
+  await expect(page.getByRole('button', { name: 'Start implementation' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Add child ticket' }).click();
+  await page
+    .getByLabel('GitHub issue or Tracker ticket')
+    .fill(`https://github.com/fixture/planning/issues/${issue + 1}`);
+  await expect(page.getByLabel('Shared reviewer (inherited from parent) model')).toBeDisabled();
+  await page.getByLabel('Author for this ticket effort').selectOption('medium');
+  await page.getByRole('button', { name: 'Import ticket and start chat' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByText('gpt-5.6-sol · medium', { exact: false })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Notification settings', exact: true }).click();
+  await page.getByLabel('Enable Telegram notifications').check();
+  await page.getByRole('button', { name: 'Save notifications' }).click();
+  await expect(page.getByText('Notification preferences saved.')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});

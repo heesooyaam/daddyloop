@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
 const mode = process.argv[2] ?? 'happy';
@@ -6,6 +7,7 @@ const threadId = 'thread-fixture',
 let result;
 createInterface({ input: process.stdin }).on('line', (line) => {
   const m = JSON.parse(line);
+  if (process.argv[3]) appendFileSync(process.argv[3], line + '\n');
   if (m.method === 'initialize') send({ id: m.id, result: { userAgent: 'fixture' } });
   if (m.method === 'thread/start' || m.method === 'thread/resume')
     send({ id: m.id, result: { thread: { id: threadId } } });

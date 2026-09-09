@@ -1,6 +1,10 @@
 export type ProviderName = 'github' | 'gitlab' | 'arcadia' | 'demo';
 export type Role = 'author' | 'reviewer';
 export type State =
+  | 'discussing'
+  | 'implementing'
+  | 'ready_for_review'
+  | 'submitting'
   | 'queued'
   | 'reviewing'
   | 'awaiting_publication'
@@ -20,7 +24,7 @@ export interface Policy {
   autoPush: boolean;
 }
 export const defaultPolicy: Policy = {
-  publication: 'human',
+  publication: 'auto',
   planApproval: 'human',
   maxRounds: 3,
   maxNoProgress: 2,
@@ -28,11 +32,52 @@ export const defaultPolicy: Policy = {
   autoPush: true,
 };
 export interface PRRef {
+  kind?: 'pull_request';
   provider: ProviderName;
   host: string;
   repo: string;
   number: number;
   url: string;
+}
+export interface TicketRef extends Omit<PRRef, 'kind'> {
+  kind: 'ticket';
+  key: string;
+}
+export type TaskRef = PRRef | TicketRef;
+export type ReasoningEffort =
+  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+export interface AgentProfile {
+  engine: 'codex';
+  model?: string;
+  effort?: ReasoningEffort;
+}
+export interface AgentProfiles {
+  author: AgentProfile;
+  reviewer: AgentProfile;
+}
+export interface TicketSource {
+  kind: 'github_issue' | 'tracker';
+  key: string;
+  url: string;
+  title: string;
+  body: string;
+  state: string;
+  fetchedAt: string;
+  updatedAt?: string;
+  comments?: { id: string; author: string; body: string }[];
+}
+export type PRTask = Task & { ref: PRRef };
+export interface ReviewGroup {
+  id: string;
+  title: string;
+  requirements: string;
+  source?: TicketSource;
+  rootTaskId: string;
+  reviewer: AgentProfile;
+  reviewerThreadId?: string;
+  generation: number;
+  createdAt: string;
+  updatedAt: string;
 }
 export interface Revision {
   head: string;
@@ -87,7 +132,12 @@ export interface Task {
   title: string;
   requirements: string;
   kind: 'plan' | 'code';
-  ref: PRRef;
+  ref: TaskRef;
+  source?: TicketSource;
+  groupId?: string;
+  parentTaskId?: string;
+  agents?: AgentProfiles;
+  ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
   policy: Policy;
   state: State;
@@ -169,7 +219,10 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat';
+  kind: 'review' | 'fix' | 'chat' | 'implement';
+  profile?: AgentProfile;
+  groupId?: string;
+  groupGeneration?: number;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   threadId?: string;
@@ -208,6 +261,12 @@ export class AppError extends Error {
   }
 }
 export const now = () => new Date().toISOString();
+export const isTicket = (task: Task) => task.ref.kind === 'ticket';
+export function prRef(task: Task): PRRef {
+  if (task.ref.kind === 'ticket')
+    throw new AppError('pr_required', 'Submit or attach a PR before starting native review');
+  return task.ref;
+}
 export const sameRevision = (a?: Revision, b?: Revision) =>
   !!a &&
   !!b &&

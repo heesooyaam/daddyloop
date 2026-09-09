@@ -134,6 +134,10 @@ export class ArcWorkspaces {
         throw new Error(
           'The Arc author checkout was interrupted or changed outside Reviewloop. Inspect the saved lease before continuing; no agent was started.',
         );
+      if (task.ref.kind === 'ticket') {
+        task.revision = { ...task.revision, head: current.hash };
+        saved.baseHead = current.hash;
+      }
     }
     task.arcWorkspaces[role] = saved;
     privateWrite(journal, JSON.stringify(saved));
@@ -143,10 +147,9 @@ export class ArcWorkspaces {
     } else task.reviewerWorktree = saved.mount;
     return saved.mount;
   }
-  async submit(task: Task, message: string, signal?: AbortSignal) {
+  async commit(task: Task, message: string, signal?: AbortSignal) {
     const saved = task.arcWorkspaces?.author as Saved | undefined;
-    if (!saved || !task.revision || !task.pr)
-      throw new Error('Arc author workspace is not initialized');
+    if (!saved || !task.revision) throw new Error('Arc author workspace is not initialized');
     const owned = (await this.bridge.mounts()).some(
       (m) => m.path === saved.mount && m.lease_owner_id === saved.ownerId && m.object_store_ok,
     );
@@ -191,6 +194,13 @@ export class ArcWorkspaces {
         hash: string;
       }
     ).hash;
+    return head;
+  }
+  async submit(task: Task, message: string, signal?: AbortSignal) {
+    if (!task.pr || !task.revision || !task.arcWorkspaces?.author)
+      throw new Error('Arc author workspace is not initialized');
+    const saved = task.arcWorkspaces.author;
+    const head = await this.commit(task, message, signal);
     if (head === task.revision.head || !task.policy.autoPush) return { head, pushed: false };
     if (!task.pr.branch.startsWith('users/') || /\s/.test(task.pr.branch))
       throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
@@ -224,6 +234,7 @@ export class ArcWorkspaces {
     };
     if (
       (await this.bridge.native(['status', '--short'], saved.mount)) ||
+      (role === 'reviewer' && info.hash !== saved.baseHead) ||
       (role === 'author' && info.hash !== task.revision?.head)
     )
       throw new Error(

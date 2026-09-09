@@ -1,8 +1,21 @@
-import type { Task, Message, Event, Job, Decision, ResourceStatus, Role } from '../core/types.js';
+import type {
+  Task,
+  Message,
+  Event,
+  Job,
+  Decision,
+  ResourceStatus,
+  Role,
+  AgentProfiles,
+  ReviewGroup,
+  TicketSource,
+} from '../core/types.js';
+import type { ModelOption } from '../core/agents.js';
 import type { Editor } from './editor.js';
 import { emptyEditor, insert } from './editor.js';
 import { oneLine, graphemes } from './text.js';
 import { parsePR } from '../providers/provider.js';
+import { openPlanning, submitPlanning } from './planning.js';
 export type Api = <T>(path: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
 export interface Detail {
   task: Task;
@@ -10,6 +23,9 @@ export interface Detail {
   events: Event[];
   jobs: Job[];
   decisions: Decision[];
+  agents?: AgentProfiles;
+  group?: ReviewGroup;
+  siblings?: { id: string; title: string; state: Task['state']; parentTaskId?: string }[];
 }
 export interface Status {
   version: string;
@@ -18,13 +34,27 @@ export interface Status {
   publicOrigin: string | null;
   demoEnabled: boolean;
 }
-export type View = 'chat' | 'findings' | 'activity' | 'context';
+export type View = 'chat' | 'findings' | 'activity' | 'context' | 'group';
+export interface AgentSettings {
+  models: ModelOption[];
+  defaults: AgentProfiles;
+  maxConcurrentAgents: number;
+  error?: string;
+}
 export interface Overlay {
-  kind: 'tasks' | 'help' | 'attach';
+  kind: 'tasks' | 'help' | 'attach' | 'ticket' | 'models' | 'notifications';
+  id?: number;
   editor: Editor;
   index: number;
   step?: number;
   fields?: string[];
+  parentTaskId?: string;
+  targetTaskId?: string;
+  profiles?: AgentProfiles;
+  profileRole?: Role;
+  scope?: 'task' | 'defaults';
+  source?: TicketSource;
+  paired?: boolean;
 }
 export interface ConsoleState {
   tasks: Task[];
@@ -44,8 +74,19 @@ export interface ConsoleState {
   menuIndex: number;
   menuHidden: boolean;
   overlay?: Overlay;
+  agentSettings?: AgentSettings;
 }
 export const commands = [
+  { name: '/new', hint: 'Start from a GitHub issue or Tracker ticket' },
+  { name: '/child', hint: 'Add a ticket with the same reviewer' },
+  { name: '/models', hint: 'Choose author / reviewer models' },
+  { name: '/defaults', hint: 'Default models for new tasks' },
+  { name: '/notifications', hint: 'Configure Telegram updates' },
+  { name: '/implement', hint: 'Implement this ticket and start its review loop' },
+  { name: '/submit', hint: 'Submit the saved implementation' },
+  { name: '/concurrency', hint: 'Set the maximum simultaneous agents: 1..8' },
+  { name: '/link', hint: 'Connect this ticket to an existing PR URL' },
+  { name: '/group', hint: 'View sibling tickets and the shared reviewer' },
   { name: '/tasks', hint: 'Choose a task', shortcut: 'Ctrl+T' },
   { name: '/use', hint: 'Select a task by its ID prefix' },
   { name: '/role', hint: 'Switch author / reviewer', shortcut: 'Tab' },
@@ -76,6 +117,7 @@ export class ConsoleModel {
   private stopped = false;
   private initialId?: string;
   private autoSelected = false;
+  private overlayId = 0;
   constructor(
     private api: Api,
     initial?: { id?: string; role?: Role },
@@ -151,6 +193,7 @@ export class ConsoleModel {
     this.patch({
       overlay: {
         kind,
+        id: ++this.overlayId,
         editor: emptyEditor(),
         index: 0,
         ...(kind === 'attach' ? { step: 0, fields: [] } : {}),
@@ -316,6 +359,10 @@ export class ConsoleModel {
   async submitOverlay() {
     const overlay = this.state.overlay;
     if (!overlay) return;
+    if (['ticket', 'models', 'notifications'].includes(overlay.kind)) {
+      await submitPlanning(this);
+      return;
+    }
     if (overlay.kind === 'tasks') {
       const task = this.taskMatches()[overlay.index];
       if (task) this.select(task.id);
@@ -356,13 +403,41 @@ export class ConsoleModel {
     if (name === '/quit' || name === '/exit') return 'exit';
     this.setEditor(emptyEditor());
     this.patch({ error: undefined, notice: undefined, menuHidden: true });
-    if (args.length > (['/use', '/role'].includes(name) ? 1 : 0)) {
+    if (
+      args.length >
+      (['/use', '/role', '/new', '/child', '/concurrency', '/link'].includes(name) ? 1 : 0)
+    ) {
       this.patch({
         error: `${name} acts on the selected task. Use /use to choose another task first.`,
       });
       return;
     }
-    if (name === '/tasks' || (name === '/use' && !args.length)) this.open('tasks');
+    if (['/new', '/child', '/models', '/defaults', '/notifications'].includes(name))
+      await openPlanning(this, name, args[0]);
+    else if (name === '/concurrency') {
+      const count = Number(args[0]);
+      if (!Number.isInteger(count) || count < 1 || count > 8)
+        this.patch({ error: 'Use /concurrency 1..8. Reviewers within a group stay serialized.' });
+      else {
+        try {
+          await this.request('/agents/concurrency', { maxConcurrentAgents: count });
+          this.patch({ notice: `Concurrent agent limit: ${count}` });
+        } catch (error) {
+          this.patch({ error: oneLine((error as Error).message) });
+        }
+      }
+    } else if (name === '/link') {
+      if (!this.state.selectedId || !args[0])
+        this.patch({ error: 'Select a ticket and use /link <PR URL>' });
+      else {
+        try {
+          await this.request(`/tasks/${this.state.selectedId}/link-pr`, { url: args[0] });
+          void this.refresh();
+        } catch (error) {
+          this.patch({ error: oneLine((error as Error).message) });
+        }
+      }
+    } else if (name === '/tasks' || (name === '/use' && !args.length)) this.open('tasks');
     else if (name === '/use') this.select(args[0]);
     else if (name === '/role') {
       if (!args.length) this.setRole(this.state.role === 'author' ? 'reviewer' : 'author');
@@ -370,12 +445,14 @@ export class ConsoleModel {
       else this.patch({ error: 'Choose /role author or /role reviewer.' });
     } else if (name === '/author' || name === '/reviewer') this.setRole(name.slice(1) as Role);
     else if (name === '/help' || name === '/attach') this.open(name.slice(1) as 'help' | 'attach');
-    else if (['/chat', '/findings', '/context', '/logs'].includes(name))
+    else if (['/chat', '/findings', '/context', '/logs', '/group'].includes(name))
       this.patch({ view: name === '/logs' ? 'activity' : (name.slice(1) as View), scroll: 0 });
     else if (name === '/status' || name === '/refresh') {
       void this.refresh();
       this.patch({ notice: this.state.detail?.task.reason ?? 'Refreshing connection…' });
-    } else if (['/publish', '/pause', '/resume', '/retry', '/demo'].includes(name))
+    } else if (
+      ['/publish', '/pause', '/resume', '/retry', '/demo', '/implement', '/submit'].includes(name)
+    )
       await this.mutate(name.slice(1));
     else this.patch({ error: `Unknown command: ${oneLine(name)}. Use /help.` });
   }
