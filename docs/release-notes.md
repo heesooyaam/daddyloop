@@ -1,4 +1,6 @@
-# Reviewloop 0.6.0
+# Reviewloop 0.6.1
+
+Patch: complete Russian translations for the Codex update confirmation button and the new CLI help text.
 
 Update Codex directly from the paired Telegram bot: `/updates` → **Update Codex** → **Confirm**. The server downloads and validates the selected version, reports the result, and offers rollback. Closing Telegram or disconnecting the laptop does not stop the update.
 

@@ -1,5 +1,12 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  Confirm: 'Подтвердить',
+  'Install the latest stable Codex on the service host':
+    'Установить актуальную стабильную версию Codex на сервере',
+  'Restore the previous Codex version': 'Вернуть предыдущую версию Codex',
+  'Inspect a server-side Codex update': 'Показать состояние обновления Codex на сервере',
+  'confirm the displayed version and start the operation':
+    'подтвердить указанную версию и начать операцию',
   'Managed by Reviewloop': 'Установлен через Reviewloop',
   'Open Updates to install Codex directly on this server.':
     'Открой «Обновления», чтобы установить Codex прямо на этом сервере.',
