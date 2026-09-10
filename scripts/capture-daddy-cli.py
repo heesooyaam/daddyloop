@@ -1,4 +1,4 @@
-"""Capture real Daddyloop PTY output and verify terminal/daemon lifetime."""
+"""Capture real daddyloop PTY output and verify terminal/daemon lifetime."""
 import codecs, fcntl, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time, urllib.request
 node, entry, config_file, output_file, session_id = sys.argv[1:]
 config=json.load(open(config_file));origin=config['serverUrl']
@@ -32,6 +32,7 @@ def snapshot(name):drain(.6);snapshots.append({'name':name,'at':len(events)})
 try:
     wait('daddyloop.');wait('Писатели:');snapshot('daddy-cli')
     send('/pool');send('\r');wait('Пул писателей');snapshot('daddy-cli-pool')
+    send('\x1b');send('/limits');send('\r');wait('Лимиты Codex');wait('Доступно сбросов:');snapshot('daddy-cli-limits')
     send('\x1b');send('/new');send('\r');wait('Выбрать проект');snapshot('daddy-cli-projects')
     send('\x1b');send('\x11')
     deadline=time.monotonic()+10

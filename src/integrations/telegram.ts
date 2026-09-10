@@ -240,17 +240,23 @@ export class Telegram {
     updates: UpdateMonitor;
     updater?: CodexUpdater;
     daddy?: Daddy;
+    usage?: import('../core/usage.js').UsageBackend;
   };
   configure(value: {
     catalogue: Catalogue;
     updates: UpdateMonitor;
     updater?: CodexUpdater;
     daddy?: Daddy;
+    usage?: import('../core/usage.js').UsageBackend;
   }) {
     this.integrations = value;
     if (value.daddy)
-      this.workspace = new TelegramWorkspace(value.daddy, this.api, this.username, () =>
-        this.locale(),
+      this.workspace = new TelegramWorkspace(
+        value.daddy,
+        this.api,
+        this.username,
+        () => this.locale(),
+        value.usage,
       );
   }
   private locale(): Locale {

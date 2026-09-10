@@ -1,8 +1,8 @@
 {
   "name": "daddyloop",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
-  "description": "Daddy manages a pool of writers, project workspaces and native code reviews from one conversation.",
+  "description": "daddy manages a pool of writers, project workspaces and native code reviews from one conversation.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <25 || >=26.0.0"

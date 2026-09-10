@@ -8,12 +8,15 @@ import { edit, emptyEditor, insert, editorRows, type Editor } from './editor.js'
 import { clip, markdown, oneLine, type Row } from './text.js';
 import type { UpdateStatus } from '../core/updates.js';
 import { VERSION } from '../version.js';
+import type { ResetPlan, UsageView } from '../core/usage.js';
+import { resetOutcomeText, usageLines, usageSummary } from '../client/usage.js';
 
 type MenuKind =
   | 'sessions'
   | 'projects'
   | 'discover'
   | 'pool'
+  | 'limits'
   | 'help'
   | 'updates'
   | 'notifications'
@@ -30,12 +33,16 @@ type MenuState = {
   model?: ModelOption;
   message?: string;
   updates?: UpdateStatus;
+  usage?: UsageView;
+  resetPlan?: ResetPlan;
+  notice?: string;
 };
 const commands = [
   '/new',
   '/sessions',
   '/projects',
   '/pool',
+  '/limits',
   '/repo',
   '/models',
   '/notifications',
@@ -120,6 +127,24 @@ export function DaddyTerminal({
     setMenu({ kind, index: 0, query: '', message });
   const options = useMemo(() => {
     if (!menu) return [];
+    if (menu.kind === 'limits')
+      return menu.resetPlan
+        ? [
+            { id: 'consume', label: t('Confirm: use one reset'), detail: t(menu.resetPlan.title) },
+            { id: 'cancel-reset', label: t('Cancel'), detail: '' },
+          ]
+        : [
+            { id: 'refresh', label: t('Refresh limits'), detail: '' },
+            ...(menu.usage?.resets.canUse
+              ? [
+                  {
+                    id: 'prepare',
+                    label: t(menu.usage.resets.pending ? 'Resolve pending reset' : 'Use a reset'),
+                    detail: '',
+                  },
+                ]
+              : []),
+          ];
     if (menu.kind === 'sessions')
       return state.sessions
         .filter((group) => group.title.toLowerCase().includes(menu.query.toLowerCase()))
@@ -159,7 +184,7 @@ export function DaddyTerminal({
       return [
         {
           id: 'reviewer',
-          label: 'Daddy',
+          label: 'daddy',
           detail: state.board?.group.reviewer.model ?? t('Codex configuration'),
         },
         {
@@ -185,6 +210,34 @@ export function DaddyTerminal({
     const item = options[menu.index % Math.max(1, options.length)];
     if (!item) return;
     try {
+      if (menu.kind === 'limits') {
+        if (item.id === 'prepare')
+          setMenu({
+            ...menu,
+            resetPlan: await model.api<ResetPlan>('/usage/reset/prepare', {}),
+            index: 1,
+          });
+        else if (item.id === 'consume' && menu.resetPlan) {
+          const result = await model.api<{ plan: ResetPlan; usage: UsageView }>(
+            `/usage/reset/${menu.resetPlan.id}`,
+            { confirmed: true },
+          );
+          setMenu({
+            ...menu,
+            resetPlan: undefined,
+            usage: result.usage,
+            notice: t(resetOutcomeText[result.plan.outcome!]),
+            index: 0,
+          });
+        } else
+          setMenu({
+            ...menu,
+            resetPlan: undefined,
+            usage: await model.api<UsageView>('/usage?refresh=1'),
+            index: 0,
+          });
+        return;
+      }
       if (menu.kind === 'sessions') {
         await model.select(item.id);
         setMenu(undefined);
@@ -282,11 +335,20 @@ export function DaddyTerminal({
       setMenu({ kind: 'updates', index: 0, query: '', updates });
       return;
     }
+    if (name === '/limits') {
+      setMenu({
+        kind: 'limits',
+        usage: await model.api<UsageView>('/usage?refresh=1'),
+        index: 0,
+        query: '',
+      });
+      return;
+    }
     if (name === '/notifications') {
       open('notifications');
       return;
     }
-    if (!state.selected) throw new Error(t('Start a Daddy session first.'));
+    if (!state.selected) throw new Error(t('Start a daddy session first.'));
     if (name === '/repo') {
       if (!argument || argument === 'default') model.workspace(undefined);
       else {
@@ -311,7 +373,7 @@ export function DaddyTerminal({
       await model.action(name === '/pause' ? 'pause' : 'resume');
       return;
     }
-    throw new Error(t('Use /help to see the Daddy commands.'));
+    throw new Error(t('Use /help to see the daddy commands.'));
   };
   const content: Row[] = [];
   if (menu) {
@@ -320,7 +382,8 @@ export function DaddyTerminal({
       projects: 'Choose a project',
       discover: 'Projects on this server',
       pool: 'Writer pool',
-      help: 'Daddyloop commands',
+      limits: 'Codex limits',
+      help: 'daddyloop commands',
       updates: 'CLI updates',
       notifications: 'Notifications',
       'model-role': 'Choose a role',
@@ -328,11 +391,24 @@ export function DaddyTerminal({
       effort: 'Reasoning effort',
     };
     content.push({ text: t(headings[menu.kind]), kind: 'heading' }, { text: '' });
+    if (menu.kind === 'limits') {
+      if (menu.notice) content.push({ text: menu.notice, kind: 'accent' });
+      if (menu.resetPlan)
+        content.push(
+          ...markdown(
+            t(
+              'Use one available reset for the Codex account on this server? Existing conversations and files are kept.',
+            ),
+            width,
+          ),
+          { text: '' },
+        );
+    }
     if (menu.kind === 'help')
       content.push(
         ...markdown(
           t(
-            'Talk to Daddy in plain language. Paste goals or ticket links; he handles the writers.',
+            'Talk to daddy in plain language. Paste goals or ticket links; he handles the writers.',
           ) +
             '\n\n' +
             commands.join('  ') +
@@ -376,14 +452,27 @@ export function DaddyTerminal({
           content.push({ text: '' });
         }
       content.push({ text: t('↑ ↓ choose · Enter confirm · Esc back') });
+      if (menu.kind === 'limits' && !menu.resetPlan && menu.usage) {
+        const count =
+          menu.usage.resets.availableCount == null
+            ? t('Available resets: unknown')
+            : t('Available resets: {count}', { count: menu.usage.resets.availableCount });
+        content.push(
+          { text: '' },
+          { text: count },
+          ...usageLines(menu.usage, locale)
+            .filter((line) => line !== count)
+            .flatMap((line) => markdown(line, width)),
+        );
+      }
     }
   } else if (!state.board) {
     content.push(
-      { text: t('You bring the idea. Daddy takes it from here.'), kind: 'heading' },
+      { text: t('You bring the idea. daddy takes it from here.'), kind: 'heading' },
       { text: '' },
       ...markdown(
         t(
-          'Choose a project and talk to one agent. Daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+          'Choose a project and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
         ),
         width,
       ),
@@ -403,7 +492,7 @@ export function DaddyTerminal({
         ),
         kind: 'heading',
       },
-      { text: t('Daddy decides what can run in parallel.') },
+      { text: t('daddy decides what can run in parallel.') },
       { text: '' },
     );
     for (const task of state.board.tasks)
@@ -417,14 +506,14 @@ export function DaddyTerminal({
     if (!state.board.tasks.length)
       content.push(
         ...markdown(
-          t('Daddy will put the plan and work items here as you discuss the goal.'),
+          t('daddy will put the plan and work items here as you discuss the goal.'),
           width,
         ),
       );
   } else {
     if (!state.board.messages.length)
       content.push(
-        { text: 'Daddy', kind: 'heading' },
+        { text: 'daddy', kind: 'heading' },
         ...markdown(
           t('Send me the goal. I will take care of the writers, reviews and follow-through.'),
           width,
@@ -438,8 +527,8 @@ export function DaddyTerminal({
             (message.sender === 'user'
               ? t('You')
               : message.sender === 'system'
-                ? 'Daddyloop'
-                : 'Daddy') +
+                ? 'daddyloop'
+                : 'daddy') +
             '  ' +
             new Date(message.at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }),
           kind: 'heading',
@@ -449,7 +538,7 @@ export function DaddyTerminal({
       );
     if (state.board.daddyBusy)
       content.push({
-        text: ['·', '•', '●', '•'][frame % 4] + ' ' + t('Daddy is working'),
+        text: ['·', '•', '●', '•'][frame % 4] + ' ' + t('daddy is working'),
         kind: 'accent',
       });
   }
@@ -611,7 +700,7 @@ export function DaddyTerminal({
               {clip(state.board?.group.title ?? t('What are we building?'), width - 8)}
             </Text>
             <Box flexGrow={1} />
-            <Text color={colors.muted}>{view === 'chat' ? 'Daddy' : t('Tasks')}</Text>
+            <Text color={colors.muted}>{view === 'chat' ? 'daddy' : t('Tasks')}</Text>
           </Box>
           <Box height={height} flexDirection="column" overflow="hidden">
             {visible.map((row, index) => (
@@ -658,17 +747,21 @@ export function DaddyTerminal({
             )}
             <Box flexGrow={1} />
             <Text color={colors.muted}>
-              {state.busy
-                ? '…'
-                : state.board
-                  ? (state.workspaces[state.selected]?.path ??
-                      state.board.project?.repoPath ??
-                      '') +
-                    ' · ' +
-                    (state.board.writers.pending
-                      ? `${state.board.writers.limit} → ${state.board.writers.target}`
-                      : t('Writers: {active} / {limit}', state.board.writers))
-                  : t('Start a Daddy session first.')}
+              {clip(
+                (usageSummary(state.usage) ? `Codex ${usageSummary(state.usage)} · ` : '') +
+                  (state.busy
+                    ? '…'
+                    : state.board
+                      ? (state.board.writers.pending
+                          ? `${state.board.writers.limit} → ${state.board.writers.target}`
+                          : t('Writers: {active} / {limit}', state.board.writers)) +
+                        ' · ' +
+                        (state.workspaces[state.selected]?.path ??
+                          state.board.project?.repoPath ??
+                          '')
+                      : t('Start a daddy session first.')),
+                width,
+              )}
             </Text>
           </Box>
           <Box height={1}>
@@ -710,7 +803,7 @@ export async function runDaddyTerminal(
   }
   process.stdout.write(
     translator(model.snapshot().status?.preferences.locale ?? options.locale ?? 'en')(
-      'Daddyloop console closed. Work continues on the server.',
+      'daddyloop console closed. Work continues on the server.',
     ) + '\n',
   );
 }

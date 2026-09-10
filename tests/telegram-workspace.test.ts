@@ -5,7 +5,7 @@ import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
 afterEach(() => vi.restoreAllMocks());
-it('binds a forum selected by the paired owner, creates one topic per session and routes only that owner’s messages to Daddy', async () => {
+it('binds a forum selected by the paired owner, creates one topic per session and routes only that owner’s messages to daddy', async () => {
   const f = daddyFixture(),
     sent: { method: string; body: Record<string, any> }[] = [];
   const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
@@ -218,6 +218,68 @@ it('scopes a one-message repository selection to its owner and conversation, the
       f.project.repoPath,
     ]);
     expect(f.projects.get(f.project.id)).toEqual(f.project);
+  } finally {
+    await workspace.stop();
+    await f.close();
+  }
+});
+it('shows shared limits and only the paired owner can confirm consuming a reset', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const view = {
+    source: 'codex-app-server:account/rateLimits/read' as const,
+    available: true,
+    stale: false,
+    buckets: [
+      { id: 'codex', name: 'Codex', windows: [{ remainingPercent: 19, durationMinutes: 10080 }] },
+    ],
+    resets: { availableCount: 3, canUse: true, credits: [] },
+  };
+  const id = '852c8b38-1a61-438c-a250-88098c430d5d';
+  const plan = {
+    id,
+    availableCount: 3,
+    title: 'Full reset',
+    expiresAt: '2099-01-01T00:00:00Z',
+    status: 'ready' as const,
+  };
+  const usage = {
+    read: vi.fn(async () => view),
+    prepare: vi.fn(async () => plan),
+    consume: vi.fn(async () => ({
+      plan: { ...plan, status: 'done' as const, outcome: 'reset' as const },
+      usage: view,
+    })),
+  };
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru', usage);
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const click = (data: string, userId = 7): Update => ({
+    update_id: 1,
+    callback_query: {
+      id: '1',
+      data,
+      from: { id: userId },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await workspace.handle(click('dad:limits'));
+    expect(sent.at(-1).text).toContain('осталось 19%');
+    await workspace.handle(click('dad:limits:prepare'));
+    expect(usage.consume).not.toHaveBeenCalled();
+    const confirm = sent.at(-1).buttons[0][0].callback_data;
+    await workspace.handle(click(confirm, 99));
+    expect(usage.consume).not.toHaveBeenCalled();
+    await workspace.handle(click(confirm));
+    expect(usage.consume).toHaveBeenCalledWith(id, 'telegram:7:7:0');
+    expect(sent.at(-1).text).toContain('Использован один сброс');
   } finally {
     await workspace.stop();
     await f.close();

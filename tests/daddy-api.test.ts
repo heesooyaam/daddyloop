@@ -124,7 +124,7 @@ it('authenticates project/session controls, deduplicates messages and closes pub
           method: 'POST',
           url: `/api/tasks/${task.id}/messages`,
           headers,
-          payload: { role: 'author', text: 'Bypass Daddy' },
+          payload: { role: 'author', text: 'Bypass daddy' },
         })
       ).statusCode,
     ).toBe(403);
@@ -135,11 +135,11 @@ it('authenticates project/session controls, deduplicates messages and closes pub
           method: 'POST',
           url: `/api/tasks/${task.id}/messages`,
           headers,
-          payload: { role: 'reviewer', text: 'Question for Daddy' },
+          payload: { role: 'reviewer', text: 'Question for daddy' },
         })
       ).statusCode,
     ).toBe(200);
-    expect(f.store.messages(first.group.id).at(-1)?.text).toBe('Question for Daddy');
+    expect(f.store.messages(first.group.id).at(-1)?.text).toBe('Question for daddy');
     expect(f.store.messages(task.id)).toHaveLength(0);
   } finally {
     await server.app.close();

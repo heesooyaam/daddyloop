@@ -1,4 +1,4 @@
-# Review: Daddyloop 0.8
+# Review: daddyloop 0.8
 
 Full self-review of project snapshots, request routing, persistent writer slots, Telegram controls and web/CLI behavior. No independent review agent was used. Sources: `docs/architecture.md`, the project instructions and the existing workspace, queue and publication implementations.
 
@@ -12,7 +12,7 @@ Full self-review of project snapshots, request routing, persistent writer slots,
 
 ## Validation
 
-`npm run check` covers type checking, 186 tests and the production build. Regressions cover whole-task draining through fixes/CI/pauses, asynchronous growth and superseding requests, recovery of old occupied writers, SQLite reopen, multiple repositories queued for one Daddy, later creation in a previously selected repository, unchanged project defaults, Arc-before-Git detection, owner-bound Telegram selection and message/draft retries.
+`npm run check` covers type checking, 186 tests and the production build. Regressions cover whole-task draining through fixes/CI/pauses, asynchronous growth and superseding requests, recovery of old occupied writers, SQLite reopen, multiple repositories queued for one daddy, later creation in a previously selected repository, unchanged project defaults, Arc-before-Git detection, owner-bound Telegram selection and message/draft retries.
 
 Eleven browser scenarios cover pool requests, one-request folder selection at phone width, composer reset, session drafts, both languages, models, directory browsing and existing native review controls. The phone HTTPS scenario also verifies that closing the laptop browser leaves the phone connected. Ordinary tests use offline agent/provider fixtures and do not submit real PRs.
 

@@ -23,7 +23,7 @@ import { normalizeLocale, translator } from './i18n/index.js';
 
 const program = new Command()
   .name('daddy')
-  .description('One Daddy, a pool of writers, and persistent work on your server')
+  .description('One daddy, a pool of writers, and persistent work on your server')
   .version(VERSION)
   .option('--plain', 'use the basic line-oriented console')
   .addOption(

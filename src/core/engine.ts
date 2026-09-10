@@ -87,7 +87,7 @@ export class Engine {
     if (group && input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
       throw new AppError(
         'stale_daddy',
-        'The Daddy session changed while the pull request was being attached',
+        'The daddy session changed while the pull request was being attached',
       );
     const task: PRTask = {
       id: randomUUID(),
@@ -824,10 +824,10 @@ export class Engine {
         if (input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
           throw new AppError(
             'stale_daddy',
-            'The Daddy session changed while the ticket was being imported',
+            'The daddy session changed while the ticket was being imported',
           );
         if (parent?.groupId && parent.groupId !== group.id)
-          throw new AppError('wrong_session', 'The parent belongs to another Daddy session');
+          throw new AppError('wrong_session', 'The parent belongs to another daddy session');
       } else if (parent?.groupId) group = this.store.getGroup(parent.groupId);
       else if (parent) {
         if (this.store.busy(parent.id))
@@ -898,7 +898,7 @@ export class Engine {
         },
         state: 'discussing',
         reason: group.orchestrated
-          ? 'Waiting for Daddy to assign this task.'
+          ? 'Waiting for daddy to assign this task.'
           : 'Ticket imported. The author is reading it before implementation.',
         generation: 1,
         contextVersion: 1,

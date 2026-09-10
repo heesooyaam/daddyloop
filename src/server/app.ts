@@ -37,6 +37,8 @@ import { Daddy } from '../core/daddy.js';
 import { registerDaddy } from './daddy.js';
 import type { SessionRuntime } from '../runtime/agent.js';
 import type { DaddyWorkspace } from '../runtime/daddy-workspace.js';
+import { CodexUsage, type UsageBackend } from '../core/usage.js';
+import { registerUsage } from './usage.js';
 
 const policySchema = z
   .object({
@@ -64,6 +66,7 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  usage?: UsageBackend;
   projects?: Projects;
   daddyRuntime?: SessionRuntime;
   daddyWorkspace?: Pick<DaddyWorkspace, 'prepare' | 'release'>;
@@ -296,6 +299,8 @@ export async function buildApp(options: ServerOptions) {
   });
   app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
   registerDaddy(app, daddy);
+  const usage = options.usage ?? new CodexUsage(store, executable);
+  registerUsage(app, usage);
   app.post('/api/session', async (request, reply) => {
     const input = z
       .object({ token: z.string().min(1).max(256) })
@@ -403,7 +408,7 @@ export async function buildApp(options: ServerOptions) {
     };
     return {
       version: VERSION,
-      application: 'Daddyloop',
+      application: 'daddyloop',
       preferences: preferences(store),
       instanceId: store.setting('server.instanceId'),
       runtime: {
@@ -580,7 +585,7 @@ export async function buildApp(options: ServerOptions) {
     if (role === 'author')
       throw new AppError(
         'contact_daddy',
-        'Send instructions to Daddy; writers receive tasks only from him',
+        'Send instructions to daddy; writers receive tasks only from him',
         403,
       );
     const task = store.getTask(request.params.id);
@@ -701,7 +706,7 @@ export async function buildApp(options: ServerOptions) {
         .then((instance) => {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
-          telegram.configure({ catalogue, updates, updater, daddy });
+          telegram.configure({ catalogue, updates, updater, daddy, usage });
           store.setSetting('telegram.error', null);
           telegram.start();
         })

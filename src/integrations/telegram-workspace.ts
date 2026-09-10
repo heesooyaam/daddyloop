@@ -9,6 +9,8 @@ import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
 import type { Project } from '../core/types.js';
 import type { WorkspaceInput } from '../core/projects.js';
+import type { UsageBackend, ResetPlan } from '../core/usage.js';
+import { usageLines, resetOutcomeText } from '../client/usage.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
@@ -31,6 +33,7 @@ export class TelegramWorkspace {
     private api: TelegramApi,
     private username: string,
     private locale: () => Locale,
+    private usage?: UsageBackend,
   ) {}
   private get store() {
     return this.daddy.engine.store;
@@ -162,7 +165,7 @@ export class TelegramWorkspace {
       chat_id: pair.chatId,
       text:
         this.t(
-          'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each Daddy session will get its own topic.',
+          'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.',
         ) +
         '\n\n@' +
         this.username,
@@ -248,7 +251,7 @@ export class TelegramWorkspace {
   private authorize(destination: Destination, groupId: string) {
     const pair = this.pair();
     if (destination.chatId !== pair?.chatId && this.groupAt(destination) !== groupId)
-      throw new AppError('wrong_topic', 'Use the topic belonging to this Daddy session', 403);
+      throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
     return this.daddy.group(groupId);
   }
   async show(groupId: string, destination: Destination) {
@@ -272,7 +275,7 @@ export class TelegramWorkspace {
       return;
     }
     const text = new TelegramText()
-      .add('👨‍💻 Daddyloop', 'bold')
+      .add('👨‍💻 daddyloop', 'bold')
       .add('\n\n' + this.t('Open the topic for the session you want to continue.'));
     await this.api.send(destination, {
       ...text,
@@ -310,7 +313,7 @@ export class TelegramWorkspace {
         ...text,
         buttons: [
           [
-            { text: 'Daddy', callback_data: `dad:models:${groupId}:reviewer` },
+            { text: 'daddy', callback_data: `dad:models:${groupId}:reviewer` },
             { text: this.t('New writers'), callback_data: `dad:models:${groupId}:author` },
           ],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
@@ -500,7 +503,73 @@ export class TelegramWorkspace {
       buttons: [...buttons, [{ text: this.t('Back'), callback_data: 'dad:projects' }]],
     });
   }
+  private async limits(destination: Destination, data = 'dad:limits') {
+    if (!this.usage) throw new Error(this.t('Usage controls are unavailable on this server.'));
+    const match = data.match(/^dad:limits(?::(refresh|prepare|consume)(?::([a-f0-9-]{36}))?)?$/);
+    if (!match) throw new Error('Unknown limits action');
+    const owner = `telegram:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
+    if (match[1] === 'prepare') {
+      const plan = await this.usage.prepare(owner);
+      await this.api.send(destination, {
+        ...new TelegramText()
+          .add('↻ ' + this.t('Use a reset'), 'bold')
+          .add('\n\n' + this.t(plan.title))
+          .add('\n' + this.t('Available resets: {count}', { count: plan.availableCount }))
+          .add(
+            '\n\n' +
+              this.t(
+                'Use one available reset for the Codex account on this server? Existing conversations and files are kept.',
+              ),
+          )
+          .add(
+            '\n\n' +
+              this.t(
+                'If the response is lost, retry this same operation. It will not spend a second reset.',
+              ),
+          ),
+        buttons: [
+          [
+            {
+              text: this.t('Confirm: use one reset'),
+              callback_data: `dad:limits:consume:${plan.id}`,
+            },
+          ],
+          [{ text: this.t('Cancel'), callback_data: 'dad:limits' }],
+        ],
+      });
+      return;
+    }
+    let result: { plan: ResetPlan; usage: Awaited<ReturnType<UsageBackend['read']>> } | undefined;
+    if (match[1] === 'consume') {
+      if (!match[2]) throw new Error('Reset request not found.');
+      result = await this.usage.consume(match[2], owner);
+    }
+    const usage = result?.usage ?? (await this.usage.read(true));
+    const text = new TelegramText().add('📊 ' + this.t('Codex limits'), 'bold');
+    if (result?.plan.outcome) text.add('\n\n' + this.t(resetOutcomeText[result.plan.outcome]));
+    text.add('\n\n' + usageLines(usage, this.locale()).join('\n'));
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        ...(usage.resets.canUse
+          ? [
+              [
+                {
+                  text: this.t(usage.resets.pending ? 'Resolve pending reset' : 'Use a reset'),
+                  callback_data: 'dad:limits:prepare',
+                },
+              ],
+            ]
+          : []),
+        [{ text: this.t('Refresh limits'), callback_data: 'dad:limits:refresh' }],
+      ],
+    });
+  }
   async callback(data: string, destination: Destination): Promise<boolean> {
+    if (data.startsWith('dad:limits')) {
+      await this.limits(destination, data);
+      return true;
+    }
     if (await this.repositoryCallback(data, destination)) return true;
     const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);
     if (repo) {
@@ -608,7 +677,7 @@ export class TelegramWorkspace {
       return true;
     }
     const match = data.match(/^dad:(new|open|add|pause|resume|pool):([a-f0-9-]{36})(?::([1-8]))?$/);
-    if (!match) throw new Error('Unknown Daddy action');
+    if (!match) throw new Error('Unknown daddy action');
     const [, action, id, limit] = match;
     if (action === 'new') {
       if (destination.threadId)
@@ -653,7 +722,7 @@ export class TelegramWorkspace {
       await this.api.send(
         destination,
         this.t(
-          'Send a ticket link, several tickets, or a description of the next task. Daddy will add it to this session.',
+          'Send a ticket link, several tickets, or a description of the next task. daddy will add it to this session.',
         ),
       );
       return true;
@@ -693,6 +762,10 @@ export class TelegramWorkspace {
       }
       const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
       if (!text) return false;
+      if (text === '/limits') {
+        await this.limits(destination);
+        return true;
+      }
       if (text === '/workspace' && privateChat) {
         await this.setup();
         return true;
@@ -707,7 +780,7 @@ export class TelegramWorkspace {
       const attach = text.match(/^\/attach\s+([a-f0-9-]{8,36})$/);
       if (attach && !privateChat && destination.threadId) {
         const groups = this.daddy.sessions().filter((group) => group.id.startsWith(attach[1]));
-        if (groups.length !== 1) throw new Error('Choose a unique Daddy session ID');
+        if (groups.length !== 1) throw new Error('Choose a unique daddy session ID');
         const existing = this.topic(this.room()!, groups[0].id);
         if (existing && existing.threadId !== destination.threadId)
           throw new Error('This session already has another topic');
@@ -742,7 +815,7 @@ export class TelegramWorkspace {
           await this.api.send(destination, this.t('Using project defaults'));
           return true;
         }
-        if (!creating && !groupId) throw new Error(this.t('Start a Daddy session first.'));
+        if (!creating && !groupId) throw new Error(this.t('Start a daddy session first.'));
         if (!creating) this.authorize(destination, groupId!);
         await this.repository({
           destination,
@@ -781,7 +854,7 @@ export class TelegramWorkspace {
       if (/^\/(author|reviewer)\b/.test(text)) {
         await this.api.send(
           destination,
-          this.t('Write to Daddy here. He sends instructions to the writers.'),
+          this.t('Write to daddy here. He sends instructions to the writers.'),
         );
         return true;
       }
@@ -798,7 +871,7 @@ export class TelegramWorkspace {
       if (!groupId) {
         await this.api.send(
           destination,
-          this.t('Open a Daddy session topic, or create a new session in the private bot chat.'),
+          this.t('Open a daddy session topic, or create a new session in the private bot chat.'),
         );
         return true;
       }
@@ -818,7 +891,7 @@ export class TelegramWorkspace {
       const message =
         error instanceof AppError && error.code === 'ambiguous_write'
           ? this.t(
-              'Telegram may have created the topic. Open that topic and send /attach followed by the Daddy session ID; do not create a duplicate.',
+              'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.',
             )
           : this.t(redact((error as Error).message));
       await this.api.send(
@@ -887,7 +960,7 @@ export class TelegramWorkspace {
           ? { chatId: topic.chatId, threadId: topic.threadId }
           : pair.chatId;
         this.store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        const text = new TelegramText().add('👨‍💻 Daddy', 'bold').add('\n\n').markdown(message.text);
+        const text = new TelegramText().add('👨‍💻 daddy', 'bold').add('\n\n').markdown(message.text);
         const card: TelegramCard = {
           ...text,
           buttons: [
