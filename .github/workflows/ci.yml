@@ -4,6 +4,8 @@ on:
   pull_request:
 permissions:
   contents: read
+env:
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 jobs:
   test:
     runs-on: ubuntu-24.04

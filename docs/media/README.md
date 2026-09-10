@@ -20,7 +20,7 @@ The GIF uses fewer frames and colours for a smaller inline preview. The MP4 pres
 
 ## Reproduce
 
-With Node 24, the project's dependencies, Playwright Chromium, Python 3 and ffmpeg installed, run from the repository root:
+With Node 24, the workspace's dependencies, Playwright Chromium, Python 3 and ffmpeg installed, run from the repository root:
 
 ```bash
 npm run build

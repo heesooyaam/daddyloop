@@ -4,6 +4,15 @@ import { profileSchema } from './agents.js';
 const id = z.string().uuid(),
   text = z.string().trim().min(1).max(20000);
 export const daddySchemas = {
+  create_session: z
+    .object({ title: z.string().trim().min(1).max(200), goal: text, projectId: id.optional() })
+    .strict(),
+  read_conversation: z
+    .object({
+      offset: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(50).default(30),
+    })
+    .strict(),
   read_board: z.object({}).strict(),
   list_projects: z.object({}).strict(),
   list_models: z.object({}).strict(),
@@ -36,10 +45,14 @@ export const daddySchemas = {
   set_writer_model: z.object({ taskId: id, profile: profileSchema }).strict(),
 };
 const descriptions: Record<keyof typeof daddySchemas, string> = {
+  create_session:
+    'Create an independent daddy session in a workspace ONLY when the user explicitly asks for a new session/conversation. In Telegram it gets a NEW topic; the current topic keeps its session. Use create_task for more work in the current session. The supplied goal starts the new conversation.',
+  read_conversation:
+    'Read saved messages in this session, newest first, using offset and limit. Use this to recover earlier requirements beyond the recent context. It never exposes native private-review messages.',
   read_board:
     'Read this daddy session: tasks, dependencies, writer capacity and current jobs. Inspect before dispatching.',
   list_projects:
-    'List repositories the user registered on this server. Choose only these project IDs.',
+    'List repositories the user registered on this server. Choose only these workspace IDs.',
   list_models:
     'Read the actual Codex model catalogue and supported reasoning efforts before choosing a different writer model.',
   read_task:
@@ -47,9 +60,9 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   import_ticket:
     'Read a GitHub issue or Yandex Tracker ticket and add it to this session. Does not start a writer or write to the tracker.',
   attach_review:
-    'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The project must match the native repository.',
+    'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The workspace must match the native repository.',
   create_task:
-    'Create a concrete task from the user requirements. Choose a registered project and optional dependencies. Does not start a writer.',
+    'Create a concrete task from the user requirements. Choose a registered workspace and optional dependencies. Does not start a writer.',
   dispatch:
     'Start implementation of a ready task. Dependencies and per-session writer limits are enforced by the service. Native push/review follows the task policy.',
   message_worker:

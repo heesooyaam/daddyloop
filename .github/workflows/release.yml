@@ -4,6 +4,8 @@ on:
     tags: ['v*']
 permissions:
   contents: write
+env:
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 jobs:
   package:
     strategy:

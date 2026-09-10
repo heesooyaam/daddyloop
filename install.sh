@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-reviewloop_version="0.9.0"
+reviewloop_version="0.10.0"
 reviewloop_default_prefix="$HOME/.local/share/daddyloop"
 [[ ! -d "$HOME/.local/share/reviewloop/releases" ]] || reviewloop_default_prefix="$HOME/.local/share/reviewloop"
 reviewloop_prefix="${DADDYLOOP_INSTALL_DIR:-${REVIEWLOOP_INSTALL_DIR:-$reviewloop_default_prefix}}"

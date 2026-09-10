@@ -9,7 +9,7 @@ it('fences a late session read and preserves drafts for both conversations', asy
   let resolveA!: (value: unknown) => void;
   let delayed = false;
   const api: DaddyApi = async <T>(path: string) => {
-    if (path === '/projects') return [f.project] as T;
+    if (path === '/workspaces') return [f.project] as T;
     if (path === '/status')
       return {
         version: '0.7.0',
@@ -63,7 +63,7 @@ it('reuses an uncertain message request ID and keeps text edited while a send is
       });
       return {} as T;
     }
-    if (path === '/projects') return [f.project] as T;
+    if (path === '/workspaces') return [f.project] as T;
     if (path === '/status')
       return {
         version: '0.7.0',
@@ -138,7 +138,7 @@ it('keeps a changed repository draft during an uncertain send and binds retry id
         });
       return {} as T;
     }
-    if (path === '/projects') return [f.project] as T;
+    if (path === '/workspaces') return [f.project] as T;
     if (path === '/daddy/sessions') return [] as T;
     if (path === '/status') return {} as T;
     return f.daddy.board(group.id) as T;

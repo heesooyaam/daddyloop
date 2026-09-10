@@ -50,7 +50,7 @@ export class Projects {
     )
       throw new AppError(
         'directory_outside_roots',
-        'Choose a directory inside a configured project root',
+        'Choose a directory inside a configured workspace root',
         403,
       );
     return path;
@@ -128,7 +128,7 @@ export class Projects {
       if (!remote)
         throw new AppError(
           'project_remote_missing',
-          'Add a GitHub or GitLab remote before registering this project',
+          'Add a GitHub or GitLab remote before registering this workspace',
           422,
         );
       const address = await git(['remote', 'get-url', remote], root),
@@ -222,13 +222,13 @@ export class Projects {
         }
     }
     this.store.saveProject(project);
-    this.store.event('_system', 'project.saved', { id: project.id, name: project.name });
+    this.store.event('_system', 'workspace.saved', { id: project.id, name: project.name });
     return project;
   }
   async suggestions() {
     const candidates = new Set<string>();
     for (const root of this.roots) {
-      for (const parent of [root, join(root, 'projects')]) {
+      for (const parent of [root, join(root, 'workspaces')]) {
         if (!existsSync(parent)) continue;
         for (const entry of (await readdir(parent, { withFileTypes: true })).slice(0, 200)) {
           const path = join(parent, entry.name);

@@ -128,7 +128,7 @@ export class DaddyClient {
       try {
         const [sessions, projects, status] = await Promise.all([
           this.api<DaddySession[]>('/daddy/sessions', undefined, this.controller.signal),
-          this.api<Project[]>('/projects', undefined, this.controller.signal),
+          this.api<Project[]>('/workspaces', undefined, this.controller.signal),
           this.api<DaddyStatus>('/status', undefined, this.controller.signal),
         ]);
         if (this.stopped || epoch !== this.epoch) return;

@@ -33,7 +33,7 @@ try:
     wait('daddyloop.');wait('Писатели:');snapshot('daddy-cli')
     send('/pool');send('\r');wait('Пул писателей');snapshot('daddy-cli-pool')
     send('\x1b');send('/limits');send('\r');wait('Лимиты Codex');wait('Доступно сбросов:');snapshot('daddy-cli-limits')
-    send('\x1b');send('/new');send('\r');wait('Выбрать проект');snapshot('daddy-cli-projects')
+    send('\x1b');send('/new');send('\r');wait('Выбрать воркспейс');snapshot('daddy-cli-workspaces')
     send('\x1b');send('\x11')
     deadline=time.monotonic()+10
     while child.poll() is None and time.monotonic()<deadline:drain(.1)

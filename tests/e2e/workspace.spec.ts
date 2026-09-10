@@ -93,7 +93,7 @@ test('a paired phone uses HTTPS and remains connected after the laptop browser c
     await page.reload();
     await expect(page.locator('.daddy-app')).toBeVisible();
     await page.getByRole('button', { name: 'Sessions', exact: true }).click();
-    await page.getByRole('button', { name: /Projects/ }).click();
+    await page.getByRole('button', { name: /Workspaces/ }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     expect(
       (

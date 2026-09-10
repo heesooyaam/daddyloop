@@ -143,7 +143,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, setModal] = useState<
-      'new' | 'projects' | 'settings' | 'updates' | 'notifications' | 'limits' | null
+      'new' | 'workspaces' | 'settings' | 'updates' | 'notifications' | 'limits' | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
@@ -225,14 +225,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           ))}
           {!state.sessions.length && (
             <p className="daddy-empty-small">
-              {t('Your next project starts with a conversation.')}
+              {t('Your next workspace starts with a conversation.')}
             </p>
           )}
         </nav>
         <div className="daddy-sidebar-bottom">
-          <button onClick={() => setModal('projects')}>
+          <button onClick={() => setModal('workspaces')}>
             <FolderGit2 size={17} />
-            {t('Projects')}
+            {t('Workspaces')}
             <span>{state.projects.length}</span>
           </button>
           <button onClick={() => setModal('notifications')}>
@@ -560,20 +560,20 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </h2>
             <p>
               {t(
-                'Choose a project and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+                'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
               )}
             </p>
             <button
               className="daddy-button primary"
-              onClick={() => setModal(state.projects.length ? 'new' : 'projects')}
+              onClick={() => setModal(state.projects.length ? 'new' : 'workspaces')}
             >
               <Plus size={17} />
-              {t(state.projects.length ? 'Start a session' : 'Add your first project')}
+              {t(state.projects.length ? 'Start a session' : 'Add your first workspace')}
             </button>
             <div className="daddy-welcome-steps">
               <span>
                 <FolderGit2 size={18} />
-                {t('Choose a project')}
+                {t('Choose a workspace')}
               </span>
               <span>
                 <MessageSquare size={18} />
@@ -592,7 +592,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <NewSession
             projects={state.projects}
             busy={state.busy}
-            onProjects={() => setModal('projects')}
+            onProjects={() => setModal('workspaces')}
             api={model.api}
             onCreate={async (projectId, message, title, workspace) => {
               await model.create(projectId, message, title, workspace);
@@ -603,8 +603,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           />
         </Dialog>
       )}
-      {modal === 'projects' && (
-        <Dialog title={t('Projects on this server')} onClose={() => setModal(null)} wide>
+      {modal === 'workspaces' && (
+        <Dialog title={t('Workspaces on this server')} onClose={() => setModal(null)} wide>
           <ProjectManager
             api={api}
             projects={state.projects}
@@ -647,7 +647,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </strong>
             <p>
               {t(
-                'Send /workspace to your bot to connect a group with topics. Each session gets a topic automatically.',
+                'Send /group to your bot to connect a group with topics. Each session gets a topic automatically.',
               )}
             </p>
             {state.status?.telegram.bot && (
@@ -712,7 +712,7 @@ function NewSession({
       }}
     >
       <label>
-        {t('Project')}
+        {t('Workspace')}
         <select
           value={project}
           onChange={(event) => {
@@ -721,7 +721,7 @@ function NewSession({
           }}
           required
         >
-          {!projects.length && <option value="">{t('Add a project first')}</option>}
+          {!projects.length && <option value="">{t('Add a workspace first')}</option>}
           {projects.map((project) => (
             <option key={project.id} value={project.id}>
               {project.name}
@@ -740,7 +740,7 @@ function NewSession({
       )}
       <button type="button" className="daddy-text-button" onClick={onProjects}>
         <Plus size={15} />
-        {t('Register another project')}
+        {t('Register another workspace')}
       </button>
       <label>
         {t('What should daddy do?')}
@@ -805,7 +805,7 @@ function ProjectManager({
     setError('');
     try {
       const next = await api<DirectoryList>(
-        '/projects/directories' + (value ? '?path=' + encodeURIComponent(value) : ''),
+        '/workspaces/directories' + (value ? '?path=' + encodeURIComponent(value) : ''),
       );
       if (at !== sequence.current) return;
       setListing(next);
@@ -818,7 +818,7 @@ function ProjectManager({
     }
   };
   useEffect(() => {
-    void api<{ name: string; path: string }[]>('/projects/suggestions')
+    void api<{ name: string; path: string }[]>('/workspaces/suggestions')
       .then(setSuggestions)
       .catch((error) => setError(error.message));
     void browse('');
@@ -830,7 +830,7 @@ function ProjectManager({
     setBusy(true);
     setError('');
     try {
-      await api(editing ? `/projects/${editing}/defaults` : '/projects', {
+      await api(editing ? `/workspaces/${editing}/defaults` : '/workspaces', {
         name,
         path,
         ...(base ? { base } : {}),
@@ -844,14 +844,14 @@ function ProjectManager({
     }
   };
   return (
-    <div className="daddy-project-manager">
+    <div className="daddy-workspace-manager">
       <p className="daddy-muted">
         {t(
           'Register the source folder once. Agents use separate working copies; your checkout and local edits stay in place.',
         )}
       </p>
       {!!projects.length && (
-        <div className="daddy-project-chips">
+        <div className="daddy-workspace-chips">
           {projects.map((project) => (
             <button
               key={project.id}
@@ -952,13 +952,13 @@ function ProjectManager({
                 setName('');
               }}
             >
-              {t('Register another project')}
+              {t('Register another workspace')}
             </button>
           </p>
         )}
         <div className="daddy-form-columns">
           <label>
-            {t('Project name')}
+            {t('Workspace name')}
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -985,7 +985,7 @@ function ProjectManager({
         )}
         <button disabled={busy || !path || !name.trim()} className="daddy-button primary">
           {busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}{' '}
-          {t('Save project')}
+          {t('Save workspace')}
         </button>
       </form>
     </div>

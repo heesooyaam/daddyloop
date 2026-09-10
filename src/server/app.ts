@@ -39,6 +39,7 @@ import type { SessionRuntime } from '../runtime/agent.js';
 import type { DaddyWorkspace } from '../runtime/daddy-workspace.js';
 import { CodexUsage, type UsageBackend } from '../core/usage.js';
 import { registerUsage } from './usage.js';
+import { LocalSpeech, type Speech } from '../runtime/speech.js';
 
 const policySchema = z
   .object({
@@ -66,6 +67,7 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  speech?: Speech;
   usage?: UsageBackend;
   projects?: Projects;
   daddyRuntime?: SessionRuntime;
@@ -706,7 +708,18 @@ export async function buildApp(options: ServerOptions) {
         .then((instance) => {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
-          telegram.configure({ catalogue, updates, updater, daddy, usage });
+          telegram.configure({
+            catalogue,
+            updates,
+            updater,
+            daddy,
+            usage,
+            voice: {
+              dataDir,
+              speech: options.speech ?? new LocalSpeech(dataDir),
+              resources: getResources,
+            },
+          });
           store.setSetting('telegram.error', null);
           telegram.start();
         })

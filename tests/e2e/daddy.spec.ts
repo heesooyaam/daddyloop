@@ -21,7 +21,7 @@ async function create(page: Page, title: string, issue: number) {
     timeout: 20000,
   });
 }
-test('starts from a registered project, adds N+1 tickets to daddy and exposes worker reports without a writer chat', async ({
+test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a writer chat', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -50,7 +50,7 @@ test('starts from a registered project, adds N+1 tickets to daddy and exposes wo
   ).toBeVisible();
   expect(errors).toEqual([]);
 });
-test('uses a one-request repository from a phone and resets the composer without changing project defaults', async ({
+test('uses a one-request repository from a phone and resets the composer without changing workspace defaults', async ({
   page,
 }) => {
   await login(page);
@@ -89,7 +89,7 @@ test('keeps separate conversation drafts when changing daddy sessions', async ({
   await page.locator('.daddy-session').filter({ hasText: 'Second draft session' }).click();
   await expect(page.getByLabel('Message daddy')).toHaveValue('Another unsent idea');
 });
-test('supports the phone task board, pool controls and project directory chooser without horizontal overflow', async ({
+test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
 }) => {
   await login(page);
@@ -101,7 +101,7 @@ test('supports the phone task board, pool controls and project directory chooser
   await expect(page.getByLabel('Maximum writers')).toHaveValue('3');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
-  await page.getByRole('button', { name: /Projects/ }).click();
+  await page.getByRole('button', { name: /Workspaces/ }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page
     .getByText('Detected repositories', { exact: true })

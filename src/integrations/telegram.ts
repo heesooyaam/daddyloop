@@ -30,6 +30,8 @@ import type { CodexUpdater, CodexUpdateOperation } from '../core/codex-updater.j
 import type { Daddy } from '../core/daddy.js';
 import { TelegramWorkspace } from './telegram-workspace.js';
 import { daddyHome } from './daddy-cards.js';
+import type { Speech } from '../runtime/speech.js';
+import type { ResourceStatus } from '../core/types.js';
 import {
   codexConfirmationCard,
   codexOperationCard,
@@ -49,6 +51,13 @@ export interface Update {
     from?: User;
     message_thread_id?: number;
     message_id?: number;
+    voice?: {
+      file_id: string;
+      file_unique_id: string;
+      duration: number;
+      file_size?: number;
+      mime_type?: string;
+    };
     chat_shared?: { request_id: number; chat_id: number; title?: string };
   };
   callback_query?: {
@@ -130,6 +139,7 @@ export class TelegramApi {
       'getChat',
       'getChatMember',
       'getChatMemberCount',
+      'getFile',
     ].includes(method);
     for (let attempt = 0; ; attempt++) {
       try {
@@ -201,6 +211,53 @@ export class TelegramApi {
       }
     }
   }
+  async downloadVoice(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const limit = 10 * 1024 * 1024;
+    const file = await this.call<{ file_path?: string; file_size?: number }>(
+      'getFile',
+      { file_id: fileId },
+      signal,
+    );
+    if (
+      !file.file_path ||
+      !/^[A-Za-z0-9_./-]+$/.test(file.file_path) ||
+      file.file_path.split('/').some((part) => part === '..' || part === '.') ||
+      file.file_path.startsWith('/')
+    )
+      throw new AppError('voice_file_invalid', 'Telegram returned an invalid voice file path');
+    if (file.file_size && file.file_size > limit)
+      throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+    try {
+      const response = await this.fetcher(
+        `https://api.telegram.org/file/bot${this.token}/${file.file_path}`,
+        {
+          redirect: 'manual',
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(60000)])
+            : AbortSignal.timeout(60000),
+        },
+      );
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        throw new AppError('voice_download_failed', 'Could not download the voice message');
+      }
+      if (Number(response.headers.get('content-length')) > limit) {
+        await response.body.cancel();
+        throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.length;
+        if (size > limit)
+          throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    } catch (error) {
+      throw error instanceof AppError ? error : networkFailure(error);
+    }
+  }
   async send(
     destination: number | { chatId: number; threadId?: number },
     content: string | TelegramCard,
@@ -241,6 +298,7 @@ export class Telegram {
     updater?: CodexUpdater;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
+    voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
   };
   configure(value: {
     catalogue: Catalogue;
@@ -248,6 +306,7 @@ export class Telegram {
     updater?: CodexUpdater;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
+    voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
   }) {
     this.integrations = value;
     if (value.daddy)
@@ -257,6 +316,12 @@ export class Telegram {
         this.username,
         () => this.locale(),
         value.usage,
+      );
+    if (value.voice)
+      this.workspace?.configureVoice(
+        value.voice.dataDir,
+        value.voice.speech,
+        value.voice.resources,
       );
   }
   private locale(): Locale {
@@ -303,7 +368,7 @@ export class Telegram {
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
     this.currentUpdates();
-    this.workspace?.replay();
+    this.workspace?.start();
   }
   private onEvent = (event: Event) => {
     if (this.workspace?.onEvent(event)) return;
@@ -379,6 +444,18 @@ export class Telegram {
   async handle(update: Update) {
     const store = this.engine.store;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    if (
+      this.workspace &&
+      (update.message?.voice ||
+        (update.message?.text && !update.message.text.trim().startsWith('/')))
+    ) {
+      // Persist voice and conversation input before acknowledging the update.
+      await this.workspace.handle(update);
+      store.db
+        .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+        .run(update.update_id, now());
+      return;
+    }
     store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
     const message = update.message,
       callback = update.callback_query;

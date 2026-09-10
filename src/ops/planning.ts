@@ -44,13 +44,13 @@ export function registerPlanningCommands(program: Command) {
           `/tasks/${encodeURIComponent(String(options.parent))}`,
         )
       : undefined;
-    let projects = await api<Project[]>('/projects');
+    let projects = await api<Project[]>('/workspaces');
     const path = options.repo ? String(options.repo) : parent?.task.repoPath;
     let project = projects.find(
       (item) => item.id === parent?.task.projectId || item.repoPath === path,
     );
     if (!project && path) {
-      project = await api<Project>('/projects', {
+      project = await api<Project>('/workspaces', {
         path,
         name: basename(path),
         ...(options.base ? { base: String(options.base) } : {}),
@@ -60,7 +60,7 @@ export function registerPlanningCommands(program: Command) {
     project ??= projects.length === 1 ? projects[0] : undefined;
     if (!project)
       throw new Error(
-        'Choose a project with daddy new --project <name>, or supply --repo once to register it',
+        'Choose a workspace with daddy new --workspace <name>, or supply --repo once to register it',
       );
     let group: ReviewGroup;
     if (parent)

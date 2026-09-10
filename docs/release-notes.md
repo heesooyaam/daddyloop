@@ -1,3 +1,10 @@
+# daddyloop 0.10.0
+
+- Named source repositories are now Workspaces in web, Telegram and CLI. Compatibility aliases preserve existing project IDs, commands and settings.
+- Telegram voice notes are recognized locally by bundled Whisper Small, then sent to daddy as text. English/Russian language selection, bounded downloads/decoding, a durable ordered inbox and resource-limited recognition keep the bot responsive.
+- `/new` works in linked group topics and creates a new topic with a return link. Plain-language new-session requests use a scoped, idempotent daddy tool. Notifications and language controls also work in topics; group connection and CLI upgrades use the private chat.
+- Coordination tool upgrades preserve saved conversations and native review threads. SQLite schema 5 stores voice jobs; keep the pre-upgrade backup for rollback to older releases.
+
 # daddyloop 0.9.0
 
 - Lowercase `daddy` and `daddyloop` throughout product copy, CLI help, bot cards and documentation. Existing internal identities and user-authored task text remain compatible.

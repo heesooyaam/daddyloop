@@ -5,6 +5,7 @@ import { join, resolve, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { prepareSpeech } from './prepare-speech.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch))
@@ -19,16 +20,24 @@ try {
     await cp(join(root, file), join(app, file));
   await cp(join(root, 'dist'), join(app, 'dist'), { recursive: true });
   await cp(join(root, 'docs'), join(app, 'docs'), { recursive: true });
+  await prepareSpeech(join(app, 'speech/whisper-small'));
   const env = {
     ...process.env,
     PATH: `${dirname(process.execPath)}:${process.env.PATH}`,
     npm_config_cache: join(out, 'npm-cache'),
+    ONNXRUNTIME_NODE_INSTALL_CUDA: 'skip',
   };
   execFileSync('npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], {
     cwd: app,
     env,
     stdio: 'inherit',
   });
+  // These are generated release files; retain only the target's CPU runtime.
+  const ort = join(app, 'node_modules/onnxruntime-node/bin/napi-v3');
+  for (const platform of ['darwin', 'win32'])
+    await rm(join(ort, platform), { recursive: true, force: true });
+  for (const arch of ['x64', 'arm64'])
+    if (arch !== process.arch) await rm(join(ort, 'linux', arch), { recursive: true, force: true });
   const nodeVersion = (await readFile(join(root, '.nvmrc'), 'utf8')).trim();
   const archiveName = `node-v${nodeVersion}-linux-${process.arch}.tar.gz`;
   const archive = join(stage, archiveName),
@@ -106,6 +115,27 @@ try {
     encoding: 'utf8',
   }).trim();
   if (result !== pkg.version) throw new Error('Release CLI version mismatch');
+  const speechCheck = execFileSync(
+    runtime,
+    [
+      '--input-type=module',
+      '-e',
+      `import { LocalSpeech } from './dist/server/runtime/speech.js'; const text = await new LocalSpeech('/unused').transcribe(process.env.VOICE_SAMPLE, 'en', AbortSignal.timeout(90000)); console.log(JSON.stringify({text}));`,
+    ],
+    {
+      cwd: app,
+      encoding: 'utf8',
+      timeout: 100000,
+      env: {
+        PATH: dirname(runtime),
+        LANG: 'C.UTF-8',
+        OMP_NUM_THREADS: '2',
+        VOICE_SAMPLE: join(root, 'tests/fixtures/voice-en.ogg'),
+      },
+    },
+  );
+  if (!/please\s+reply.*word/i.test(JSON.parse(speechCheck).text))
+    throw new Error('Packaged voice recognition failed');
   execFileSync(join(tools, 'node_modules/.bin/codex'), ['--version'], {
     env: { ...env, PATH: `${join(payload, 'node/bin')}:${env.PATH}` },
     stdio: 'inherit',

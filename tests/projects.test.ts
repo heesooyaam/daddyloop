@@ -138,7 +138,7 @@ it('browses directories only inside configured roots and omits hidden directorie
     const result = await projects.browse(dir);
     expect(result.parent).toBeNull();
     expect(result.directories.map((entry) => entry.name)).toEqual(['repo']);
-    await expect(projects.browse('/etc')).rejects.toThrow('configured project root');
+    await expect(projects.browse('/etc')).rejects.toThrow('configured workspace root');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

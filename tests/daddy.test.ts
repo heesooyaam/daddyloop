@@ -279,3 +279,76 @@ it('allows writer defaults to change while daddy works, but preserves his active
     await f.close();
   }
 });
+it('creates a separate session through a scoped tool without duplicating it on a retry', async () => {
+  const f = daddyFixture();
+  try {
+    const parent = f.daddy.create({
+        projectId: f.project.id,
+        message: 'Create a separate session for the API work',
+      }),
+      job = f.store.daddyJobs(parent.id)[0];
+    const result = (await f.daddy.call(
+      job,
+      'create_session',
+      { title: 'API work', goal: 'Design the new endpoint' },
+      'create-session',
+      new AbortController().signal,
+    )) as { sessionId: string };
+    const again = (await f.daddy.call(
+      job,
+      'create_session',
+      { title: 'API work', goal: 'Design the new endpoint' },
+      'create-session',
+      new AbortController().signal,
+    )) as { sessionId: string };
+    expect(again.sessionId).toBe(result.sessionId);
+    expect(f.daddy.sessions()).toHaveLength(2);
+    const child = f.daddy.group(result.sessionId);
+    expect(child.parentGroupId).toBe(parent.id);
+    expect(child.reviewer).toEqual(parent.reviewer);
+    expect(f.store.messages(child.id)[0].text).toBe('Design the new endpoint');
+    expect(f.store.tasks()).toHaveLength(0);
+    await expect(
+      f.daddy.call(
+        { ...job, trigger: 'worker' },
+        'create_session',
+        { title: 'Unasked', goal: 'Unasked' },
+        'forbidden',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('user request');
+  } finally {
+    await f.close();
+  }
+});
+it('refreshes coordination tools while preserving saved history and the native review thread', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ projectId: f.project.id });
+    group.daddyThreadId = 'previous-coordination';
+    group.reviewerThreadId = 'private-native-review';
+    f.store.saveGroup(group);
+    f.store.daddyMessage(group.id, 'user', 'An earlier requirement');
+    f.daddy.chat(group.id, 'Continue with the upgraded tools');
+    f.runtime.runSession.mockImplementation(async (input) => {
+      expect(input.threadId).toBeUndefined();
+      expect(input.tools!.some((tool) => tool.name === 'create_session')).toBe(true);
+      const history = (await input.onTool(
+        'read_conversation',
+        { offset: 0, limit: 30 },
+        'read',
+      )) as { messages: { text: string }[] };
+      expect(history.messages.some((message) => message.text === 'An earlier requirement')).toBe(
+        true,
+      );
+      input.onSession('new-coordination');
+      return { status: 'completed', summary: 'Ready', checkedHead: '' };
+    });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id)[0].status).toBe('completed'));
+    expect(f.daddy.group(group.id).reviewerThreadId).toBe('private-native-review');
+    expect(f.store.setting(`daddy.previousThread:${group.id}:previous-coordination`)).toBeTruthy();
+  } finally {
+    await f.close();
+  }
+});
