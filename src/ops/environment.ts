@@ -46,6 +46,30 @@ export function registerEnvironmentCommands(program: Command) {
     .command('runtime')
     .description('Inspect or choose the Codex CLI used by this service');
   runtime.action(async () => print(await api('/updates/check', {})));
+  for (const action of ['update', 'rollback'] as const)
+    runtime
+      .command(action)
+      .option('--yes', 'confirm the displayed version and start the operation')
+      .description(
+        action === 'update'
+          ? 'Install the latest stable Codex on the service host'
+          : 'Restore the previous Codex version',
+      )
+      .action(async (options) => {
+        const plan = await api<{ id: string }>('/runtime/update/prepare', {
+          action: action === 'update' ? 'install' : 'rollback',
+        });
+        print(plan);
+        if (options.yes) print(await api('/runtime/update/confirm', { id: plan.id }));
+        else
+          process.stdout.write(
+            t('Run again with --yes to confirm, or use Updates in Telegram.') + '\n',
+          );
+      });
+  runtime
+    .command('update-status')
+    .description('Inspect a server-side Codex update')
+    .action(async () => print(await api('/runtime/update')));
   runtime
     .command('use')
     .argument('<executable>', 'absolute path, system, or bundled')
@@ -57,6 +81,7 @@ export function registerEnvironmentCommands(program: Command) {
           activeJobs: number;
           queuedJobs: number;
           runtime: { source: string };
+          codexUpdater?: { busy: boolean };
         }>('/status');
         const config = loadConfig(),
           file = join(program.opts().dataDir ?? defaultDataDir(config), 'reviewloop.sqlite');
@@ -71,6 +96,8 @@ export function registerEnvironmentCommands(program: Command) {
         }
         if (status.activeJobs || status.queuedJobs)
           throw new Error('Wait for running and queued jobs before changing the CLI');
+        if (status.codexUpdater?.busy)
+          throw new Error('Wait for the Codex update before changing the CLI');
         if (status.runtime.source === 'environment')
           throw new Error(
             'REVIEWLOOP_CODEX_BIN overrides configuration; change that service environment setting first',

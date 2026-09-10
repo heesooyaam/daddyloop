@@ -1,6 +1,40 @@
 import { afterEach, it, expect, vi } from 'vitest';
 import { ModelCatalogue } from '../src/core/agents.js';
 import { CodexConnection } from '../src/runtime/protocol.js';
+it('reloads the catalogue after runtime selection and fences a response from the previous executable', async () => {
+  vi.spyOn(CodexConnection.prototype, 'start').mockResolvedValue({ userAgent: 'codex-cli/2.0.0' });
+  let release!: () => void,
+    first = true;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const request = vi.spyOn(CodexConnection.prototype, 'request').mockImplementation(async () => {
+    const old = first;
+    first = false;
+    if (old) await gate;
+    return {
+      data: [
+        {
+          id: old ? 'old' : 'new',
+          displayName: 'Test',
+          supportedReasoningEfforts: [],
+          defaultReasoningEffort: 'max',
+          isDefault: true,
+        },
+      ],
+    } as never;
+  });
+  let executable = '/old/codex';
+  const catalogue = new ModelCatalogue(() => executable);
+  const pending = catalogue.list();
+  await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+  executable = '/new/codex';
+  release();
+  expect((await pending)[0].id).toBe('new');
+  expect(catalogue.metadata().executable).toBe('/new/codex');
+  await catalogue.list();
+  expect(request).toHaveBeenCalledTimes(2);
+});
 afterEach(() => vi.restoreAllMocks());
 it('loads models dynamically, reuses the cache and force-refreshes new model IDs and efforts', async () => {
   vi.spyOn(CodexConnection.prototype, 'start').mockResolvedValue({

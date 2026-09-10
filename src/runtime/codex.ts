@@ -4,18 +4,20 @@ import { resultSchema, type AgentRuntime, type AgentInput } from './agent.js';
 import { dynamicTools } from '../core/broker.js';
 import { AppError, type AgentResult } from '../core/types.js';
 import { redact } from '../core/security.js';
+import { selectedExecutable, type Executable } from './executable.js';
 
 export class CodexRuntime implements AgentRuntime {
   constructor(
     private options: {
-      executable?: string;
+      executable?: Executable;
       args?: string[];
       model?: string;
       timeoutMs?: number;
     } = {},
   ) {}
   async run(input: AgentInput): Promise<AgentResult> {
-    const rpc = new CodexConnection(this.options.executable, this.options.args);
+    // Capture once per turn. Updating the selection never touches an existing process.
+    const rpc = new CodexConnection(selectedExecutable(this.options.executable), this.options.args);
     const role = input.job.role;
     const profile = input.job.profile;
     const discussion = input.task.ref.kind === 'ticket' && input.job.kind === 'chat';

@@ -1,5 +1,41 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Managed by Reviewloop': 'Установлен через Reviewloop',
+  'Open Updates to install Codex directly on this server.':
+    'Открой «Обновления», чтобы установить Codex прямо на этом сервере.',
+  'Update Codex': 'Обновить Codex',
+  'Roll back Codex': 'Откатить Codex',
+  'Roll back to {version}': 'Откатить до {version}',
+  'Back to updates': 'К обновлениям',
+  'Codex update in progress': 'Codex обновляется',
+  'Last update failed': 'Последнее обновление не удалось',
+  'The server will validate this version before switching. Running agents finish on their current version; subsequent turns use the selected version.':
+    'Сервер проверит эту версию перед переключением. Запущенные агенты закончат текущую работу на старой версии; следующие запуски будут на выбранной.',
+  'Your models, chats and login stay in place. The previous CLI remains available for rollback.':
+    'Модели, переписка и авторизация сохранятся. Предыдущая версия CLI останется доступна для отката.',
+  'This confirmation is valid for 10 minutes.': 'Подтверждение действует 10 минут.',
+  'Codex version selected': 'Версия Codex переключена',
+  'Codex update failed': 'Не удалось обновить Codex',
+  'Codex update started': 'Обновление Codex началось',
+  'New agent turns will use this version. Running agents were not interrupted.':
+    'Следующие запуски агентов будут использовать эту версию. Работающие агенты не прерывались.',
+  'The selected CLI was preserved. Open Updates to try again.':
+    'Текущая версия CLI сохранена. Открой «Обновления», чтобы повторить попытку.',
+  'Download and validation run on the server. You can close Telegram; the bot will report the result.':
+    'Скачивание и проверка идут на сервере. Можно закрыть Telegram — бот сообщит результат.',
+  'Run again with --yes to confirm, or use Updates in Telegram.':
+    'Повтори команду с --yes для подтверждения или открой «Обновления» в Telegram.',
+  'Codex is already up to date': 'Уже установлена актуальная версия Codex',
+  'A Codex update is already in progress': 'Обновление Codex уже выполняется',
+  'No matching previous Codex version is available':
+    'Подходящая предыдущая версия Codex недоступна',
+  'This Codex confirmation expired or was already used. Open Updates again.':
+    'Это подтверждение истекло или уже использовано. Открой «Обновления» ещё раз.',
+  'Codex updates are disabled by the service environment':
+    'Обновления Codex отключены настройкой окружения сервиса',
+  'Codex update interrupted. The selected CLI was preserved; open Updates to retry.':
+    'Обновление Codex прервано. Текущая версия сохранена; открой «Обновления», чтобы повторить попытку.',
+  'Codex package checksum mismatch': 'Контрольная сумма пакета Codex не совпала',
   Language: 'Язык',
   'Interface language': 'Язык интерфейса',
   Save: 'Сохранить',

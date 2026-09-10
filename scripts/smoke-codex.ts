@@ -33,7 +33,8 @@ const task: Task = {
   policy: defaultPolicy,
   revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
 };
-const runtime = new CodexRuntime({ timeoutMs: 180000 });
+let executable = process.env.REVIEWLOOP_SMOKE_CODEX_BIN;
+const runtime = new CodexRuntime({ executable: () => executable, timeoutMs: 180000 });
 const events: { type: string; data: unknown }[] = [];
 let toolCalls = 0;
 async function turn(prompt: string, model?: string) {
@@ -76,6 +77,7 @@ try {
   if (first.status !== 'completed' || toolCalls !== 1)
     throw new Error('Live dynamic-tool round trip did not complete');
   const thread = task.reviewerThreadId;
+  executable = process.env.REVIEWLOOP_SMOKE_NEXT_CODEX_BIN ?? executable;
   const second = await turn(
     `Continue the protocol test. Do not use any tools or inspect files. Return the exact phrase I asked you to remember in the previous turn as summary, with status completed, checkedHead "${task.revision!.head}", question null and empty verifiedCommentIds/disputedCommentIds.`,
     process.env.REVIEWLOOP_SMOKE_REVIEWER_MODEL,

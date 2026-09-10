@@ -16,7 +16,7 @@ import { Workspaces } from '../runtime/workspaces.js';
 import { Worker } from '../runtime/worker.js';
 import { CodexRuntime } from '../runtime/codex.js';
 import { DemoRuntime } from '../runtime/demo.js';
-import { loadConfig, validateServerUrl, type Config } from '../ops/config.js';
+import { loadConfig, saveConfig, validateServerUrl, type Config } from '../ops/config.js';
 import { Access, allowedRequest } from './access.js';
 import { VERSION } from '../version.js';
 import { Telegram, connectTelegram } from '../integrations/telegram.js';
@@ -30,6 +30,8 @@ import type { AgentRuntime } from '../runtime/agent.js';
 import { randomUUID } from 'node:crypto';
 import { preferences, preferenceInput, setLocale } from '../core/preferences.js';
 import { UpdateMonitor } from '../core/updates.js';
+import { CodexUpdater } from '../core/codex-updater.js';
+import { executablePath } from '../runtime/executable.js';
 
 const policySchema = z
   .object({
@@ -57,6 +59,7 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  codexUpdater?: CodexUpdater;
   updateMonitor?: UpdateMonitor;
   startUpdateCheck?: boolean;
   catalogue?: Catalogue;
@@ -90,11 +93,17 @@ export async function buildApp(options: ServerOptions) {
   if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
   const workspaces = options.workspaces ?? new Workspaces(dataDir);
-  const executable = process.env.REVIEWLOOP_CODEX_BIN ?? config.codex.executable;
+  let configuredExecutable = config.codex.executable;
+  const executable = () =>
+    process.env.REVIEWLOOP_CODEX_BIN ?? configuredExecutable ?? executablePath('codex') ?? 'codex';
   const catalogue = options.catalogue ?? new ModelCatalogue(executable);
   const updates =
     options.updateMonitor ??
-    new UpdateMonitor(store, { codex: executable, intervalHours: config.updates.intervalHours });
+    new UpdateMonitor(store, {
+      codex: executable,
+      intervalHours: config.updates.intervalHours,
+      managedRoot: join(dataDir, 'runtimes/codex'),
+    });
   const tickets = new TicketWorkflow(engine, workspaces, options.ticketReader);
   const getResources =
     options.resourceCheck ??
@@ -104,6 +113,55 @@ export async function buildApp(options: ServerOptions) {
         maxDiskPercent: options.maxDiskPercent ?? config.resources.maxDiskPercent,
         minMemoryGiB: options.minMemoryGiB ?? config.resources.minMemoryGiB,
       }));
+  const updater =
+    options.codexUpdater ??
+    new CodexUpdater(store, {
+      dataDir,
+      executable,
+      enabled: !process.env.REVIEWLOOP_CODEX_BIN,
+      resourceCheck: () => {
+        const status = getResources();
+        if (!status.ok || status.diskAvailableGiB < 2)
+          throw new AppError(
+            'update_resources',
+            status.reasons.join('; ') || 'Not enough disk space for a Codex update',
+            422,
+          );
+      },
+      activate: (expected, next) => {
+        const current = loadConfig();
+        if (executable() !== expected || current.codex.executable !== configuredExecutable)
+          throw new Error('Codex configuration changed during the update');
+        current.codex.executable = next;
+        saveConfig(current);
+        configuredExecutable = next;
+      },
+      validateModels: (models) => {
+        const profiles = [
+          engine.defaultAgents(),
+          ...store
+            .tasks()
+            .filter((task) => task.state !== 'complete')
+            .map((task) => engine.effectiveAgents(task)),
+        ];
+        for (const profile of profiles.flatMap((pair) => [pair.author, pair.reviewer])) {
+          if (!profile.model) continue;
+          const model = models.find((model) => model.id === profile.model);
+          if (!model || (profile.effort && !model.efforts.includes(profile.effort)))
+            throw new Error(
+              `The new Codex catalogue does not support the saved profile ${profile.model} / ${profile.effort ?? 'default'}`,
+            );
+        }
+      },
+    });
+  const checkUpdates =
+    options.startWorker !== false && options.startUpdateCheck !== false && config.updates.enabled;
+  const refreshRuntime = (event: Event) => {
+    if (event.type === 'runtime.update_finished' && checkUpdates)
+      void updates.check(true).catch(() => {});
+  };
+  store.changes.on('event', refreshRuntime);
+  await updater.recover();
   const worker = new Worker(
     engine,
     workspaces,
@@ -308,12 +366,13 @@ export async function buildApp(options: ServerOptions) {
       runtime: {
         source: process.env.REVIEWLOOP_CODEX_BIN
           ? 'environment'
-          : config.codex.executable
+          : configuredExecutable
             ? 'configuration'
             : 'path',
-        executable: executable ?? 'codex',
+        executable: executable(),
       },
       updates: updates.status(),
+      codexUpdater: updater.status(),
       queuedJobs: store.jobs().filter((job) => job.status === 'queued').length,
       publicOrigin: publicOrigin ?? null,
       telegram: telegram?.status() ?? {
@@ -335,6 +394,22 @@ export async function buildApp(options: ServerOptions) {
     setLocale(store, preferenceInput.parse(request.body).locale),
   );
   app.get('/api/updates', async () => updates.status());
+  app.get('/api/runtime/update', async () => updater.status());
+  app.post('/api/runtime/update/prepare', async (request) => {
+    const { action } = z
+      .object({ action: z.enum(['install', 'rollback']) })
+      .strict()
+      .parse(request.body);
+    return updater.prepare(action, 'api');
+  });
+  app.post('/api/runtime/update/confirm', async (request, reply) => {
+    const { id } = z
+      .object({ id: z.string().regex(/^[A-Za-z0-9_-]{24}$/) })
+      .strict()
+      .parse(request.body);
+    const result = updater.confirm(id, 'api');
+    return reply.code(202).send(result);
+  });
   app.post('/api/updates/check', async () => updates.check(true));
   app.post('/api/updates/notifications', async (request) => {
     const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
@@ -538,6 +613,8 @@ export async function buildApp(options: ServerOptions) {
     if (!options.store) store.close();
   });
   app.addHook('preClose', async () => {
+    store.changes.off('event', refreshRuntime);
+    await updater.stop();
     await updates.stop();
     for (const stop of eventStreams) stop();
     await worker.stop();
@@ -546,12 +623,12 @@ export async function buildApp(options: ServerOptions) {
     await telegram?.stop();
   });
   app.addHook('onReady', async () => {
-    if (
-      options.startWorker !== false &&
-      options.startUpdateCheck !== false &&
-      config.updates.enabled
-    )
+    if (checkUpdates) {
       updates.start();
+      const finishedAt = updater.status().operation?.finishedAt;
+      if (finishedAt && finishedAt > (updates.status().checkedAt ?? ''))
+        void updates.check(true).catch(() => {});
+    }
     if (options.startWorker !== false && config.telegram.enabled) {
       telegramStartup = connectTelegram(
         () =>
@@ -567,7 +644,7 @@ export async function buildApp(options: ServerOptions) {
         .then((instance) => {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
-          telegram.configure({ catalogue, updates });
+          telegram.configure({ catalogue, updates, updater });
           store.setSetting('telegram.error', null);
           telegram.start();
         })

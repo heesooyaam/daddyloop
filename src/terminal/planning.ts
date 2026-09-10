@@ -383,7 +383,9 @@ export function planningRows(model: ConsoleModel, columns: number, height: numbe
               ? tr('Bundled with Reviewloop')
               : tool.source === 'missing'
                 ? tr('Not installed')
-                : tr('External CLI'),
+                : tool.source === 'managed'
+                  ? tr('Managed by Reviewloop')
+                  : tr('External CLI'),
           ),
         },
         {
