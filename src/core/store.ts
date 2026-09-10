@@ -160,7 +160,10 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
-  claim(eligible: (job: Job) => boolean = () => true): Job | undefined {
+  claim(
+    eligible: (job: Job) => boolean = () => true,
+    onClaim?: (job: Job) => void,
+  ): Job | undefined {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
@@ -189,6 +192,7 @@ export class Store {
         )
           continue;
         job.status = 'running';
+        onClaim?.(job);
         job.startedAt = now();
         this.saveJob(job);
         return job;
@@ -236,7 +240,13 @@ export class Store {
       )
       .run(job.id, job.groupId, job.status, JSON.stringify(job));
   }
-  daddyMessage(groupId: string, sender: Message['sender'], text: string, runId?: string) {
+  daddyMessage(
+    groupId: string,
+    sender: Message['sender'],
+    text: string,
+    runId?: string,
+    project?: Message['project'],
+  ) {
     const message: Message = {
       id: randomUUID(),
       taskId: groupId,
@@ -244,6 +254,7 @@ export class Store {
       sender,
       text,
       runId,
+      project,
       at: now(),
     };
     this.db

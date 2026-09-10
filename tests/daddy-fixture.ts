@@ -14,9 +14,9 @@ import { DemoProvider } from '../src/providers/demo.js';
 import type { AgentInput, SessionInput } from '../src/runtime/agent.js';
 import type { AgentResult, Project, Task } from '../src/core/types.js';
 import { healthy, catalogue, profiles } from './planning-fixture.js';
-export function daddyFixture() {
+export function daddyFixture(persist = false) {
   const dir = mkdtempSync(join(tmpdir(), 'daddyloop-test-')),
-    store = new Store(':memory:');
+    store = new Store(persist ? join(dir, 'state.sqlite') : ':memory:');
   const engine = new Engine(store, () => new DemoProvider(store), profiles),
     projects = new Projects(store, [dir]);
   const project: Project = {

@@ -1,4 +1,33 @@
 export const daddyRu: Record<string, string> = {
+  'Pool: {limit} → {target}. Changes apply in the background.':
+    'Пул: {limit} → {target}. Изменение применяется в фоне.',
+  'Pool: {limit}. Occupied by tasks: {occupied}.': 'Пул: {limit}. Занято задачами: {occupied}.',
+  'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.':
+    'Размер пула меняется в фоне. Занятые писатели завершают задачи, включая исправления после ревью.',
+  'Repository on this server': 'Репозиторий на этом сервере',
+  'Browse server folders': 'Выбрать папку на сервере',
+  'Parent folder': 'Родительская папка',
+  'Use this folder once': 'Использовать для этой задачи',
+  'Starting directory (relative)': 'Начальная папка внутри репозитория',
+  'Use project defaults': 'Как в проекте',
+  'This selection applies only to this request. Project defaults and existing tasks stay as saved.':
+    'Выбор действует только для этого запроса. Настройки проекта и существующих задач сохраняются.',
+  'Repository for this request': 'Репозиторий для этого запроса',
+  'Using project defaults': 'По настройкам проекта',
+  'Repository for next task': 'Репозиторий для следующей задачи',
+  'Send the task now. The following message will use the defaults again.':
+    'Теперь отправь задачу. Для следующего сообщения снова будут действовать настройки по умолчанию.',
+  'This selection expired. Choose the repository again.':
+    'Срок выбора истёк. Выбери репозиторий ещё раз.',
+  'You can also send /repo followed by an absolute server path.':
+    'Можно также отправить /repo и полный путь к папке на сервере.',
+  'Default changes apply to new sessions on this server. Existing sessions keep their settings.':
+    'Новые настройки действуют для новых сессий на этом сервере. Существующие сессии сохраняют свои настройки.',
+  'This ticket already has a task in another workspace. Its running work cannot be moved.':
+    'Этот тикет уже выполняется в другой рабочей копии. Начатую работу нельзя перенести.',
+  'Use /repo <path> for the next message, or /repo default to reset.':
+    '/repo <путь> — репозиторий для следующего сообщения; /repo default — сброс.',
+
   'Your Daddyloop workspace.': 'Твоё рабочее пространство Daddyloop.',
   'Previous work history': 'История прежних задач',
   'Open the topic for the session you want to continue.':

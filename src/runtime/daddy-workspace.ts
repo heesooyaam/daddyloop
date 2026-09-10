@@ -1,5 +1,6 @@
 import type { Projects } from '../core/projects.js';
-import type { ReviewGroup, Task } from '../core/types.js';
+import type { Project, ReviewGroup, Task } from '../core/types.js';
+import { createHash } from 'node:crypto';
 import { defaultPolicy, now } from '../core/types.js';
 import type { Workspaces } from './workspaces.js';
 
@@ -9,9 +10,22 @@ export class DaddyWorkspace {
     private projects: Projects,
     private workspaces: Workspaces,
   ) {}
-  async prepare(group: ReviewGroup, signal: AbortSignal) {
-    const project = this.projects.get(group.projectId!);
-    let context = this.projects.store.setting<Task>(`daddy.context:${group.id}`);
+  private selection(group: ReviewGroup, override?: Project) {
+    const project = override ?? group.project ?? this.projects.get(group.projectId!);
+    const original = group.project ?? this.projects.get(group.projectId!);
+    const signature = (value: Project) => JSON.stringify([value.repoPath, value.scope, value.base]);
+    const key =
+      signature(project) === signature(original)
+        ? group.id
+        : createHash('sha256')
+            .update(group.id + signature(project))
+            .digest('hex')
+            .slice(0, 32);
+    return { project, key };
+  }
+  async prepare(group: ReviewGroup, signal: AbortSignal, override?: Project) {
+    const { project, key } = this.selection(group, override);
+    let context = this.projects.store.setting<Task>(`daddy.context:${key}`);
     if (!context) {
       const ref = {
         kind: 'ticket' as const,
@@ -24,7 +38,7 @@ export class DaddyWorkspace {
       };
       const description = await this.workspaces.describeTicket(project.repoPath, ref, project.base);
       context = {
-        id: group.id,
+        id: key,
         ref,
         repoPath: project.repoPath,
         scope: project.scope,
@@ -53,15 +67,16 @@ export class DaddyWorkspace {
     try {
       root = await this.workspaces.prepareTicket(context, 'reviewer', signal);
     } finally {
-      this.projects.store.setSetting(`daddy.context:${group.id}`, context);
+      this.projects.store.setSetting(`daddy.context:${key}`, context);
     }
     return { cwd: this.projects.cwd(root, project.scope), context };
   }
-  async release(group: ReviewGroup) {
-    const context = this.projects.store.setting<Task>(`daddy.context:${group.id}`);
+  async release(group: ReviewGroup, override?: Project) {
+    const { key } = this.selection(group, override);
+    const context = this.projects.store.setting<Task>(`daddy.context:${key}`);
     if (context?.ref.provider === 'arcadia' && context.arcWorkspaces?.reviewer) {
       await this.workspaces.releaseArc(context, 'reviewer');
-      this.projects.store.setSetting(`daddy.context:${group.id}`, context);
+      this.projects.store.setSetting(`daddy.context:${key}`, context);
     }
   }
 }

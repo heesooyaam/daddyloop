@@ -36,6 +36,7 @@ const commands = [
   '/sessions',
   '/projects',
   '/pool',
+  '/repo',
   '/models',
   '/notifications',
   '/updates',
@@ -146,7 +147,7 @@ export function DaddyTerminal({
       return [1, 2, 3, 4, 5, 6, 7, 8].map((limit) => ({
         id: String(limit),
         label: `${limit} ${t('writers')}`,
-        detail: limit === state.board?.writers.limit ? '✓' : '',
+        detail: limit === state.board?.writers.target ? '✓' : '',
       }));
     if (menu.kind === 'notifications')
       return [
@@ -286,6 +287,17 @@ export function DaddyTerminal({
       return;
     }
     if (!state.selected) throw new Error(t('Start a Daddy session first.'));
+    if (name === '/repo') {
+      if (!argument || argument === 'default') model.workspace(undefined);
+      else {
+        await model.api('/projects/preview', {
+          sessionId: state.selected,
+          workspace: { path: argument },
+        });
+        model.workspace({ path: argument });
+      }
+      return;
+    }
     if (name === '/pool') {
       if (argument) await model.action('settings', { writerLimit: Number(argument) });
       else open('pool');
@@ -329,9 +341,7 @@ export function DaddyTerminal({
               'Ctrl+N new session · Ctrl+T sessions · Tab chat/tasks · PgUp/PgDn scroll · Ctrl+Q exit',
             ) +
             '\n\n' +
-            t(
-              'Register folders with daddy projects add <path> --name <name>, or use Projects on the website.',
-            ),
+            t('Use /repo <path> for the next message, or /repo default to reset.'),
           width,
         ),
       );
@@ -385,7 +395,12 @@ export function DaddyTerminal({
   } else if (view === 'tasks') {
     content.push(
       {
-        text: t('Writer pool') + `: ${state.board.writers.active}/${state.board.writers.limit}`,
+        text: t(
+          state.board.writers.pending
+            ? 'Pool: {limit} → {target}. Changes apply in the background.'
+            : 'Pool: {limit}. Occupied by tasks: {occupied}.',
+          state.board.writers,
+        ),
         kind: 'heading',
       },
       { text: t('Daddy decides what can run in parallel.') },
@@ -646,7 +661,13 @@ export function DaddyTerminal({
               {state.busy
                 ? '…'
                 : state.board
-                  ? t('Writers: {active} / {limit}', state.board.writers)
+                  ? (state.workspaces[state.selected]?.path ??
+                      state.board.project?.repoPath ??
+                      '') +
+                    ' · ' +
+                    (state.board.writers.pending
+                      ? `${state.board.writers.limit} → ${state.board.writers.target}`
+                      : t('Writers: {active} / {limit}', state.board.writers))
                   : t('Start a Daddy session first.')}
             </Text>
           </Box>

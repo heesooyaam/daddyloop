@@ -1,10 +1,11 @@
 import type { Daddy } from '../core/daddy.js';
 import type { Project, ReviewGroup, ResourceStatus } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
+import type { WorkspaceInput } from '../core/projects.js';
 export type DaddyBoard = ReturnType<Daddy['board']>;
 export type DaddySession = ReviewGroup & {
   project?: Project;
-  writers: { active: number; limit: number; hostLimit: number };
+  writers: DaddyBoard['writers'];
   daddyBusy: boolean;
   total: number;
   complete: number;
@@ -24,6 +25,7 @@ export interface DaddyClientState {
   board?: DaddyBoard;
   status?: DaddyStatus;
   drafts: Record<string, string>;
+  workspaces: Record<string, WorkspaceInput | undefined>;
   connected: boolean;
   busy: boolean;
   error?: string;
@@ -34,6 +36,7 @@ export class DaddyClient {
     projects: [],
     selected: '',
     drafts: {},
+    workspaces: {},
     connected: false,
     busy: false,
   };
@@ -44,7 +47,7 @@ export class DaddyClient {
   private refreshPending?: Promise<void>;
   private sequence = 0;
   private epoch = 0;
-  private messageRequests = new Map<string, { text: string; id: string }>();
+  private messageRequests = new Map<string, { text: string; key: string; id: string }>();
   private creation?: { key: string; id: string };
   constructor(
     readonly api: DaddyApi,
@@ -83,6 +86,9 @@ export class DaddyClient {
   draft(text: string) {
     if (this.value.selected)
       this.update({ drafts: { ...this.value.drafts, [this.value.selected]: text } });
+  }
+  workspace(value?: WorkspaceInput) {
+    this.update({ workspaces: { ...this.value.workspaces, [this.value.selected]: value } });
   }
   error(message: string) {
     this.update({ error: message });
@@ -139,10 +145,11 @@ export class DaddyClient {
     });
     return this.refreshPending;
   }
-  async create(projectId: string, message?: string, title?: string) {
+  async create(projectId: string, message?: string, title?: string, workspace?: WorkspaceInput) {
     if (this.value.busy) return;
     const input = {
         projectId,
+        ...(workspace ? { workspace } : {}),
         ...(message?.trim() ? { message: message.trim() } : {}),
         ...(title?.trim() ? { title: title.trim() } : {}),
       },
@@ -167,22 +174,26 @@ export class DaddyClient {
   }
   async send() {
     const id = this.value.selected,
-      text = (this.value.drafts[id] ?? '').trim();
+      text = (this.value.drafts[id] ?? '').trim(),
+      workspace = this.value.workspaces[id],
+      key = JSON.stringify({ text, workspace });
     if (!id || !text || this.value.busy) return;
     let request = this.messageRequests.get(id);
-    if (request?.text !== text) {
-      request = { text, id: crypto.randomUUID() };
+    if (request?.key !== key) {
+      request = { text, key, id: crypto.randomUUID() };
       this.messageRequests.set(id, request);
     }
     this.update({ busy: true, error: undefined });
     try {
       await this.api(
         `/daddy/sessions/${id}/chat`,
-        { text, requestId: request.id },
+        { text, requestId: request.id, ...(workspace ? { workspace } : {}) },
         this.controller.signal,
       );
       this.messageRequests.delete(id);
-      if ((this.value.drafts[id] ?? '').trim() === text)
+      const sameWorkspace = this.value.workspaces[id] === workspace;
+      if (sameWorkspace) this.update({ workspaces: { ...this.value.workspaces, [id]: undefined } });
+      if (sameWorkspace && (this.value.drafts[id] ?? '').trim() === text)
         this.update({ drafts: { ...this.value.drafts, [id]: '' } });
       await this.refresh();
     } catch (error) {

@@ -86,6 +86,8 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     expect(f.store.setting('telegram.workspace')).toMatchObject({ chatId: -10042, ownerId: 7 });
     await bot.handle(message('/new'));
     await bot.handle(click(`dad:new:${f.project.id}`));
+    const start = sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data;
+    await bot.handle(click(start));
     const group = f.daddy.sessions()[0];
     await vi.waitFor(() =>
       expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1),
@@ -109,9 +111,9 @@ it('binds a forum selected by the paired owner, creates one topic per session an
       ).toBe(true),
     );
     await bot.handle(click(`dad:pool:${group.id}:3`, -10042, 7, 17));
-    expect(f.daddy.group(group.id).writerLimit).toBe(3);
+    expect(f.daddy.group(group.id).requestedWriterLimit).toBe(3);
     await bot.handle(click(`dad:pool:${group.id}:8`, -10042, 99, 17));
-    expect(f.daddy.group(group.id).writerLimit).toBe(3);
+    expect(f.daddy.group(group.id).requestedWriterLimit).toBe(3);
     expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1);
     const task = await f.tickets.local({
       project: f.project,
@@ -163,6 +165,59 @@ it('does not recreate a topic after a lost response and lets the owner attach th
     });
     expect(await workspace.ensureTopic(group)).toMatchObject({ threadId: 51, groupId: group.id });
     expect(calls).toBe(1);
+  } finally {
+    await workspace.stop();
+    await f.close();
+  }
+});
+it('scopes a one-message repository selection to its owner and conversation, then restores defaults', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ projectId: f.project.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  vi.spyOn(f.projects, 'selection').mockImplementation(async (project, input) => ({
+    ...project,
+    repoPath: input?.path ?? project.repoPath,
+  }));
+  let id = 100;
+  const message = (text: string, userId = 7): Update => ({
+    update_id: id++,
+    message: { message_id: id, chat: { id: 7, type: 'private' }, from: { id: userId }, text },
+  });
+  const click = (data: string, userId = 7): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: userId },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await workspace.handle(message('/repo /server/another-repository'));
+    const use = sent.at(-1).buttons[0][0].callback_data;
+    await workspace.handle(click(use, 99));
+    expect(f.projects.selection).not.toHaveBeenCalled();
+    await workspace.handle(click(use));
+    expect(sent.at(-1).text).toContain('/server/another-repository');
+    const first = message('Ticket one');
+    await workspace.handle(first);
+    await workspace.handle(first); // Retried update must not consume defaults or duplicate the task.
+    await workspace.handle(message('Ticket two'));
+    expect(f.store.messages(group.id).map((message) => message.project?.repoPath)).toEqual([
+      '/server/another-repository',
+      f.project.repoPath,
+    ]);
+    expect(f.projects.get(f.project.id)).toEqual(f.project);
   } finally {
     await workspace.stop();
     await f.close();

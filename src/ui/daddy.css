@@ -1285,3 +1285,39 @@
   font-size: 11px;
   color: #7c886d !important;
 }
+/* A request can override a source folder without editing the named project. */
+.daddy-workspace-fields {
+  font-size: 12px;
+  min-width: 0;
+  margin: 8px 0;
+}
+.daddy-workspace-fields summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.daddy-workspace-fields label {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.daddy-workspace-fields input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px;
+  border-radius: 8px;
+}
+.daddy-directory-list {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+}
+.daddy-directory-list code {
+  overflow-wrap: anywhere;
+}
+.daddy-directory-list button {
+  text-align: left;
+  padding: 7px;
+}

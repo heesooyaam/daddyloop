@@ -35,6 +35,19 @@ export function registerDaddyCommands(program: Command) {
     .description('Register and choose project folders on the server');
   projects.action(async () => print(await api('/projects')));
   projects
+    .command('set')
+    .argument('<project>')
+    .argument('<path>')
+    .option('--scope <directory>')
+    .option('--base <branch>')
+    .description('Change defaults on this server for future sessions')
+    .action(async (name, path, options) => {
+      const selected = await project(name);
+      print(
+        await api(`/projects/${selected.id}/defaults`, { name: selected.name, path, ...options }),
+      );
+    });
+  projects
     .command('discover')
     .description('Find repositories on the server')
     .action(async () => print(await api('/projects/suggestions')));
@@ -72,11 +85,15 @@ export function registerDaddyCommands(program: Command) {
     .requiredOption('--project <project>')
     .option('--title <title>')
     .option('--writers <count>', 'maximum simultaneous writers', '1')
+    .option('--repo <path>', 'repository for this session only')
+    .option('--scope <directory>', 'relative starting directory for this session')
+    .option('--base <branch>', 'base branch for this session')
     .description('Give Daddy a goal in a registered project')
     .action(async (message, options) => {
       const selected = await project(options.project);
       const board = await api<DaddyBoard>('/daddy/sessions', {
         projectId: selected.id,
+        workspace: workspaceOptions(options),
         message,
         title: options.title,
         writerLimit: Number(options.writers),
@@ -91,11 +108,15 @@ export function registerDaddyCommands(program: Command) {
     .command('talk')
     .argument('<session>')
     .argument('<message>')
+    .option('--repo <path>', 'repository for this message only')
+    .option('--scope <directory>', 'relative starting directory for this message')
+    .option('--base <branch>', 'base branch for this message')
     .description('Send a goal, ticket or question to Daddy')
-    .action(async (name, text) =>
+    .action(async (name, text, options) =>
       print(
         await api(`/daddy/sessions/${(await session(name)).id}/chat`, {
           text,
+          workspace: workspaceOptions(options),
           requestId: crypto.randomUUID(),
         }),
       ),
@@ -114,4 +135,9 @@ export function registerDaddyCommands(program: Command) {
         ),
       );
     });
+}
+function workspaceOptions(options: { repo?: string; scope?: string; base?: string }) {
+  if (options.repo === undefined && options.scope === undefined && options.base === undefined)
+    return undefined;
+  return { path: options.repo, scope: options.scope, base: options.base };
 }

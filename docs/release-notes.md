@@ -1,3 +1,11 @@
+# Daddyloop 0.8.0
+
+- Server-local project defaults, immutable session snapshots, and repository / scope / base overrides for one request. Web forms, CLI flags and Telegram folder buttons let the owner choose a different source without changing project defaults or existing work.
+- Durable asynchronous writer-pool resizing. Occupied slots stay assigned through the entire task, including review fixes, checks and pauses. Shrinking retires completed tasks; growth applies on the next scheduler tick. Interfaces distinguish requested and applied capacity.
+- Request workspaces and pending resizes survive restart. Telegram choices are owner/conversation scoped, expire explicitly, and reset after one message. Existing author tasks are adopted conservatively during upgrade.
+
+SQLite remains schema 4 with additive JSON fields. Existing projects, sessions, author workspaces, model selections and bot pairing are preserved.
+
 # Daddyloop 0.7.0
 
 Reviewloop becomes Daddyloop: one conversation for project planning, writer assignment and code review.
