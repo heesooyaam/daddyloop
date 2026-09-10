@@ -2,6 +2,8 @@ import { createInterface } from 'node:readline/promises';
 import type { DaddyApi, DaddySession } from '../client/daddy.js';
 import { DaddyClient } from '../client/daddy.js';
 import { translator, type Locale } from '../i18n/index.js';
+import type { UsageView } from '../core/usage.js';
+import { usageLines } from '../client/usage.js';
 import { safeText } from '../terminal/text.js';
 export async function runDaddyPlain(api: DaddyApi, options: { id?: string; locale?: Locale } = {}) {
   const t = translator(options.locale ?? 'en');
@@ -22,12 +24,15 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
       }
   });
   model.start();
-  process.stdout.write('Daddyloop · /new, /sessions, /pool, /repo, /quit\n');
+  process.stdout.write('daddyloop · /new, /sessions, /pool, /repo, /limits, /quit\n');
   try {
     for await (const line of rl) {
       const input = line.trim();
       if (input === '/quit') break;
-      if (input === '/sessions') {
+      if (input === '/limits') {
+        const usage = await api<UsageView>('/usage?refresh=1');
+        process.stdout.write(usageLines(usage, options.locale ?? 'en').join('\n') + '\n');
+      } else if (input === '/sessions') {
         await model.refresh();
         for (const group of model.snapshot().sessions)
           process.stdout.write(`${group.id.slice(0, 8)}  ${group.title}\n`);

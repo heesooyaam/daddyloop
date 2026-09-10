@@ -4,7 +4,7 @@ import { daddyFixture } from './daddy-fixture.js';
 import type { SessionInput, AgentInput } from '../src/runtime/agent.js';
 import { profiles } from './planning-fixture.js';
 afterEach(() => vi.restoreAllMocks());
-it('creates one Daddy conversation idempotently and lets him split and dispatch work without contacting writers', async () => {
+it('creates one daddy conversation idempotently and lets him split and dispatch work without contacting writers', async () => {
   const f = daddyFixture();
   let created: string[] = [];
   f.runtime.runSession.mockImplementation(async (input) => {
@@ -168,7 +168,7 @@ it('applies growth asynchronously and lets the latest pool request supersede a p
     await f.close();
   }
 });
-it('keeps the shared Daddy thread exclusive with native review and fences tools after pause', async () => {
+it('keeps the shared daddy thread exclusive with native review and fences tools after pause', async () => {
   const f = daddyFixture();
   let current!: SessionInput, done!: () => void;
   f.runtime.runSession.mockImplementation(async (input) => {
@@ -224,7 +224,7 @@ it('enforces same-session task scope and acyclic prerequisites before dispatch',
     f.daddy.tick();
     await vi.waitFor(() => expect(current).toBeDefined());
     await expect(current.onTool('read_task', { taskId: foreign.id }, 'read')).rejects.toThrow(
-      'another Daddy',
+      'another daddy',
     );
     const a = (await current.onTool('create_task', { title: 'A', requirements: 'A' }, 'a')) as {
       taskId: string;
@@ -250,7 +250,7 @@ it('enforces same-session task scope and acyclic prerequisites before dispatch',
     await f.close();
   }
 });
-it('allows writer defaults to change while Daddy works, but preserves his active model', async () => {
+it('allows writer defaults to change while daddy works, but preserves his active model', async () => {
   const f = daddyFixture();
   let started = false,
     done!: () => void;

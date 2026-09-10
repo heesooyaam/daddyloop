@@ -2,6 +2,7 @@ import type { Daddy } from '../core/daddy.js';
 import type { Project, ReviewGroup, ResourceStatus } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import type { WorkspaceInput } from '../core/projects.js';
+import type { UsageView } from '../core/usage.js';
 export type DaddyBoard = ReturnType<Daddy['board']>;
 export type DaddySession = ReviewGroup & {
   project?: Project;
@@ -24,6 +25,7 @@ export interface DaddyClientState {
   selected: string;
   board?: DaddyBoard;
   status?: DaddyStatus;
+  usage?: UsageView;
   drafts: Record<string, string>;
   workspaces: Record<string, WorkspaceInput | undefined>;
   connected: boolean;
@@ -45,6 +47,7 @@ export class DaddyClient {
   private timer?: ReturnType<typeof setInterval>;
   private controller = new AbortController();
   private refreshPending?: Promise<void>;
+  private usagePending?: Promise<void>;
   private sequence = 0;
   private epoch = 0;
   private messageRequests = new Map<string, { text: string; key: string; id: string }>();
@@ -72,6 +75,7 @@ export class DaddyClient {
     this.stopped = false;
     this.controller = new AbortController();
     this.refreshPending = undefined;
+    this.usagePending = undefined;
     void this.refresh();
     this.timer = setInterval(() => {
       void this.refresh();
@@ -118,6 +122,7 @@ export class DaddyClient {
   refresh(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.refreshPending) return this.refreshPending;
+    this.refreshUsage();
     const epoch = this.epoch;
     this.refreshPending = (async () => {
       try {
@@ -144,6 +149,19 @@ export class DaddyClient {
       if (epoch === this.epoch) this.refreshPending = undefined;
     });
     return this.refreshPending;
+  }
+  private refreshUsage() {
+    if (this.usagePending || this.stopped) return;
+    const epoch = this.epoch;
+    const pending = this.api<UsageView>('/usage', undefined, this.controller.signal)
+      .then((usage) => {
+        if (!this.stopped && epoch === this.epoch) this.update({ usage });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (this.usagePending === pending) this.usagePending = undefined;
+      });
+    this.usagePending = pending;
   }
   async create(projectId: string, message?: string, title?: string, workspace?: WorkspaceInput) {
     if (this.value.busy) return;

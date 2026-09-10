@@ -2,12 +2,52 @@ import { Command } from 'commander';
 import { api as client } from './client.js';
 import type { Project } from '../core/types.js';
 import type { DaddyBoard, DaddySession } from '../client/daddy.js';
+import type { ResetPlan, UsageView } from '../core/usage.js';
+import { usageLines, resetOutcomeText } from '../client/usage.js';
+import { loadConfig } from './config.js';
+import { translator } from '../i18n/index.js';
 export function registerDaddyCommands(program: Command) {
   const api = <T>(path: string, body?: unknown) =>
     client<T>(path, body, { dataDir: program.opts().dataDir, url: program.opts().url });
   const print = (value: unknown) => {
     process.stdout.write(JSON.stringify(value, null, 2) + '\n');
   };
+  const limits = program
+    .command('limits')
+    .description('Show remaining Codex quotas and available resets')
+    .option('--refresh', 'read fresh limits from Codex')
+    .option('--json', 'print structured usage');
+  limits.action(async (options) => {
+    const view = await api<UsageView>('/usage' + (options.refresh ? '?refresh=1' : ''));
+    if (options.json) print(view);
+    else process.stdout.write(usageLines(view, loadConfig().locale).join('\n') + '\n');
+  });
+  limits
+    .command('reset')
+    .description('Use one earned Codex reset; retry with the same saved request ID')
+    .option('--yes', 'confirm using one reset')
+    .option('--request <id>', 'retry an existing reset request')
+    .action(async (options) => {
+      const plan = options.request
+        ? { id: options.request }
+        : await api<ResetPlan>('/usage/reset/prepare', {});
+      if (!options.yes) {
+        print(plan);
+        process.stdout.write(`\ndaddy limits reset --request ${plan.id} --yes\n`);
+        return;
+      }
+      process.stdout.write(`Reset request: ${plan.id}\n`);
+      const result = await api<{ plan: ResetPlan; usage: UsageView }>(`/usage/reset/${plan.id}`, {
+        confirmed: true,
+      });
+      const locale = loadConfig().locale;
+      process.stdout.write(
+        translator(locale)(resetOutcomeText[result.plan.outcome!]) +
+          '\n' +
+          usageLines(result.usage, locale).join('\n') +
+          '\n',
+      );
+    });
   const project = async (name: string) => {
     const matches = (await api<Project[]>('/projects')).filter(
       (project) =>
@@ -77,7 +117,7 @@ export function registerDaddyCommands(program: Command) {
     );
   program
     .command('sessions')
-    .description('List Daddy sessions and writer pools')
+    .description('List daddy sessions and writer pools')
     .action(async () => print(await api('/daddy/sessions')));
   program
     .command('new')
@@ -88,7 +128,7 @@ export function registerDaddyCommands(program: Command) {
     .option('--repo <path>', 'repository for this session only')
     .option('--scope <directory>', 'relative starting directory for this session')
     .option('--base <branch>', 'base branch for this session')
-    .description('Give Daddy a goal in a registered project')
+    .description('Give daddy a goal in a registered project')
     .action(async (message, options) => {
       const selected = await project(options.project);
       const board = await api<DaddyBoard>('/daddy/sessions', {
@@ -111,7 +151,7 @@ export function registerDaddyCommands(program: Command) {
     .option('--repo <path>', 'repository for this message only')
     .option('--scope <directory>', 'relative starting directory for this message')
     .option('--base <branch>', 'base branch for this message')
-    .description('Send a goal, ticket or question to Daddy')
+    .description('Send a goal, ticket or question to daddy')
     .action(async (name, text, options) =>
       print(
         await api(`/daddy/sessions/${(await session(name)).id}/chat`, {

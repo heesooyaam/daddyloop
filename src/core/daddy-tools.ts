@@ -37,7 +37,7 @@ export const daddySchemas = {
 };
 const descriptions: Record<keyof typeof daddySchemas, string> = {
   read_board:
-    'Read this Daddy session: tasks, dependencies, writer capacity and current jobs. Inspect before dispatching.',
+    'Read this daddy session: tasks, dependencies, writer capacity and current jobs. Inspect before dispatching.',
   list_projects:
     'List repositories the user registered on this server. Choose only these project IDs.',
   list_models:
@@ -47,13 +47,13 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   import_ticket:
     'Read a GitHub issue or Yandex Tracker ticket and add it to this session. Does not start a writer or write to the tracker.',
   attach_review:
-    'Attach an existing GitHub/GitLab/Arcadia pull request to this Daddy session for its native review/fix workflow. The project must match the native repository.',
+    'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The project must match the native repository.',
   create_task:
     'Create a concrete task from the user requirements. Choose a registered project and optional dependencies. Does not start a writer.',
   dispatch:
     'Start implementation of a ready task. Dependencies and per-session writer limits are enforced by the service. Native push/review follows the task policy.',
   message_worker:
-    'Send scoped instructions or a question to the task writer. Results return to Daddy; do not ask the user to contact workers.',
+    'Send scoped instructions or a question to the task writer. Results return to daddy; do not ask the user to contact workers.',
   set_dependencies:
     'Set same-session prerequisites before a task starts. This orders work; it does not merge branches. Keep interdependent edits in one implementation task unless their base already contains the prerequisites.',
   pause_task:
@@ -65,7 +65,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   retry_review:
     'Retry an incomplete pinned native review after inspecting task state. Does not publish, approve or merge anything.',
   set_writer_model:
-    'Choose a validated model/effort for one idle task writer. Does not change Daddy or other writers.',
+    'Choose a validated model/effort for one idle task writer. Does not change daddy or other writers.',
 };
 export const daddyTools: RuntimeTool[] = Object.entries(daddySchemas).map(([name, schema]) => ({
   name,

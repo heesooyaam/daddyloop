@@ -1489,7 +1489,7 @@ function Login({
         <span className="login-lock">
           <LockKeyhole size={25} />
         </span>
-        <h1>{tr('Your Daddyloop workspace.')}</h1>
+        <h1>{tr('Your daddyloop workspace.')}</h1>
         <p>
           {tr(' Connect to the service running on your machine. ')}
           <br />

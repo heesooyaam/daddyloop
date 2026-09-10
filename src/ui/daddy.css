@@ -1321,3 +1321,27 @@
   text-align: left;
   padding: 7px;
 }
+.daddy-usage {
+  display: grid;
+  gap: 12px;
+}
+.daddy-usage-bucket {
+  border: 1px solid var(--line);
+  padding: 16px;
+  border-radius: 12px;
+}
+.daddy-usage-bucket progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #67cbb4;
+}
+.daddy-usage-bucket small {
+  display: block;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.daddy-usage-confirm {
+  border: 1px solid var(--line);
+  padding: 16px;
+  border-radius: 12px;
+}

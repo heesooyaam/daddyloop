@@ -5,11 +5,11 @@ import type { Project, ReviewGroup } from '../core/types.js';
 export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
-      .add('👨‍💻 Daddyloop', 'bold')
+      .add('👨‍💻 daddyloop', 'bold')
       .add(
         '\n\n' +
           t(
-            'Give Daddy a goal or a ticket. He plans the work, manages writers and reviews the result.',
+            'Give daddy a goal or a ticket. He plans the work, manages writers and reviews the result.',
           ),
       );
   return {
@@ -30,6 +30,7 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
         { text: '⬆️ ' + t('Updates'), callback_data: 'updates:show' },
         { text: '🌐 ' + t('Language'), callback_data: 'language:show' },
       ],
+      [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
     ],
   };
 }
@@ -40,7 +41,7 @@ export function projectPicker(locale: Locale, projects: Project[]): TelegramCard
       .add(
         '\n\n' +
           t(
-            'Projects are folders on the server. Daddy creates separate working copies for writers.',
+            'Projects are folders on the server. daddy creates separate working copies for writers.',
           ),
       );
   return {
@@ -85,14 +86,14 @@ export function daddyBoard(
                 : task.queued
                   ? 'Queued'
                   : task.state === 'needs_input'
-                    ? 'Daddy is checking'
-                    : 'Waiting for Daddy',
+                    ? 'daddy is checking'
+                    : 'Waiting for daddy',
           ),
       );
   text.add(
     '\n\n' +
       t(
-        'Send another ticket or describe what you need in this conversation. Daddy handles the writers.',
+        'Send another ticket or describe what you need in this conversation. daddy handles the writers.',
       ),
   );
   return {
@@ -104,6 +105,7 @@ export function daddyBoard(
         { text: t('Writer pool'), callback_data: `dad:pool:${board.group.id}` },
       ],
       [{ text: t('Models'), callback_data: `dad:models:${board.group.id}` }],
+      [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
       [
         {
           text: '📁 ' + t('Repository for next task'),
@@ -112,7 +114,7 @@ export function daddyBoard(
       ],
       [
         {
-          text: t(board.group.daddyState === 'paused' ? 'Resume Daddy' : 'Pause Daddy'),
+          text: t(board.group.daddyState === 'paused' ? 'Resume daddy' : 'Pause daddy'),
           callback_data: `dad:${board.group.daddyState === 'paused' ? 'resume' : 'pause'}:${board.group.id}`,
         },
         { text: t('Refresh'), callback_data: `dad:open:${board.group.id}` },

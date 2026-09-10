@@ -57,6 +57,6 @@ Generated files:
 
 Media is committed with the README so relative image links also work in a private repository and in source checkouts. No user tokens, pairing links, corporate code or actual PR content are packaged.
 
-## Daddyloop 0.7
+## daddyloop 0.7
 
 Run `node scripts/capture-daddy.mjs` after a production build. It captures the actual browser UI and the actual CLI in a PTY against an isolated fixture server. `daddy-desktop.png`, `daddy-models.png`, `daddy-phone-*.png` and `daddy-cli*.png` contain illustrative data, not a transcript of a production task. The capture verifies terminal mode restoration and that closing the CLI does not change the server PID.

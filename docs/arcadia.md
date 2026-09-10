@@ -1,6 +1,6 @@
 # Arcadia projects
 
-Daddyloop registers the source mount as a named project. The project's relative subdirectory becomes the starting directory inside each managed workspace. Native review and submitted work stay pinned to full commit hashes.
+daddyloop registers the source mount as a named project. The project's relative subdirectory becomes the starting directory inside each managed workspace. Native review and submitted work stay pinned to full commit hashes.
 
 ## One-time setup
 
@@ -22,9 +22,9 @@ Only mounts that use the configured shared object store can be registered. Sourc
 
 ## Allocation and capacity
 
-Each active writer gets a separately leased working copy. Daddy and the native reviewer use read-only project/revision snapshots. Allocation within the service is serialized; the helper provides machine-level lease coordination.
+Each active writer gets a separately leased working copy. daddy and the native reviewer use read-only project/revision snapshots. Allocation within the service is serialized; the helper provides machine-level lease coordination.
 
-If another free slot is needed, Daddyloop may mount an unmounted, unreserved slot within the helper's configured range. It does not commandeer busy slots or expand the configured range. At least one eligible working copy stays available for Daddy/review, so writers cannot consume all review capacity.
+If another free slot is needed, daddyloop may mount an unmounted, unreserved slot within the helper's configured range. It does not commandeer busy slots or expand the configured range. At least one eligible working copy stays available for daddy/review, so writers cannot consume all review capacity.
 
 When capacity is temporarily unavailable, jobs remain queued and retry after a delay. The configured writer pool is an upper limit; actual concurrency also depends on free mounts and host resources.
 

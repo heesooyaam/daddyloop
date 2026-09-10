@@ -72,7 +72,7 @@ export class ArcWorkspaces {
           return this.prepareLocked(task, role, signal);
         throw new AppError(
           'workspace_capacity',
-          'Waiting for an Arc writer slot; one workspace is reserved for Daddy and review.',
+          'Waiting for an Arc writer slot; one workspace is reserved for daddy and review.',
           503,
         );
       }

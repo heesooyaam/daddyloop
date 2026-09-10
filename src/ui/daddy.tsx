@@ -34,22 +34,24 @@ import { NotificationsForm } from './planning.js';
 import './daddy.css';
 import type { WorkspaceInput } from '../core/projects.js';
 import { WorkspaceFields } from './workspace-fields.js';
+import { UsagePanel } from './usage.js';
+import { usageSummary } from '../client/usage.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const stateCopy: Record<string, string> = {
-  discussing: 'Waiting for Daddy',
+  discussing: 'Waiting for daddy',
   implementing: 'Writing code',
   ready_for_review: 'Ready for review',
   submitting: 'Creating PR',
   queued: 'Queued for review',
-  reviewing: 'Daddy is reviewing',
+  reviewing: 'daddy is reviewing',
   awaiting_publication: 'Review ready',
   fixing: 'Addressing feedback',
   awaiting_push: 'Waiting for submission',
   awaiting_checks: 'Waiting for CI',
   awaiting_plan_approval: 'Plan approval',
-  needs_input: 'Daddy is checking',
+  needs_input: 'daddy is checking',
   paused: 'Paused',
   complete: 'Complete',
 };
@@ -141,7 +143,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, setModal] = useState<
-      'new' | 'projects' | 'settings' | 'updates' | 'notifications' | null
+      'new' | 'projects' | 'settings' | 'updates' | 'notifications' | 'limits' | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
@@ -241,6 +243,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <RefreshCw size={17} />
             {t('CLI updates')}
           </button>
+          <button onClick={() => setModal('limits')}>
+            <RefreshCw size={17} />
+            {t('Limits')}
+            {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
+          </button>
           <a className="daddy-history-link" href="?legacy=1">
             {t('Previous work history')}
             <ArrowUpRight size={13} />
@@ -279,7 +286,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <Menu size={20} />
           </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.project?.name ?? 'Daddyloop'}</span>
+            <span className="daddy-eyebrow">{board?.project?.name ?? 'daddyloop'}</span>
             <h1>{board?.group.title ?? t('What are we building?')}</h1>
           </div>
           {board && (
@@ -313,7 +320,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <div className="daddy-mobile-tabs">
               <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>
                 <MessageSquare size={15} />
-                Daddy
+                daddy
               </button>
               <button className={pane === 'tasks' ? 'active' : ''} onClick={() => setPane('tasks')}>
                 <Users size={15} />
@@ -324,13 +331,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <div className="daddy-workspace">
               <section
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
-                aria-label={t('Conversation with Daddy')}
+                aria-label={t('Conversation with daddy')}
               >
                 <div className="daddy-chat-scroll">
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
-                      <strong>Daddy</strong>
+                      <strong>daddy</strong>
                       <p>
                         {t(
                           'Send me the goal. I will take care of the writers, reviews and follow-through.',
@@ -345,8 +352,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           {message.sender === 'user'
                             ? t('You')
                             : message.sender === 'system'
-                              ? 'Daddyloop'
-                              : 'Daddy'}
+                              ? 'daddyloop'
+                              : 'daddy'}
                         </span>
                         <time>{stamp(message.at)}</time>
                       </div>
@@ -366,7 +373,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       <span />
                       <span />
                       <span />
-                      {t('Daddy is working')}
+                      {t('daddy is working')}
                     </div>
                   )}
                   <div ref={end} />
@@ -388,9 +395,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   />
                   <textarea
                     ref={composer}
-                    aria-label={t('Message Daddy')}
+                    aria-label={t('Message daddy')}
                     placeholder={t(
-                      paused ? 'Resume Daddy to continue' : 'A goal, a ticket link, or a question…',
+                      paused ? 'Resume daddy to continue' : 'A goal, a ticket link, or a question…',
                     )}
                     value={state.drafts[state.selected] ?? ''}
                     disabled={paused}
@@ -411,7 +418,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     <span>
                       {board.writers.active
                         ? t('Writers at work: {count}', { count: board.writers.active })
-                        : t('Daddy handles the details.')}
+                        : t('daddy handles the details.')}
                     </span>
                     <button
                       type="submit"
@@ -515,7 +522,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </div>
                 {!board.tasks.length && (
                   <p className="daddy-empty-small">
-                    {t('Daddy will put the plan and work items here as you discuss the goal.')}
+                    {t('daddy will put the plan and work items here as you discuss the goal.')}
                   </p>
                 )}
                 <button
@@ -527,12 +534,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   }}
                 >
                   <Plus size={16} />
-                  {t('Add tasks through Daddy')}
+                  {t('Add tasks through daddy')}
                 </button>
                 <div className="daddy-board-bottom">
                   <span className="daddy-avatar small">d.</span>
                   <span>
-                    {t('One Daddy. Shared context.')}
+                    {t('One daddy. Shared context.')}
                     <small>
                       {board.group.reviewer.model ?? t('Codex configuration')}{' '}
                       {board.group.reviewer.effort && '· ' + board.group.reviewer.effort}
@@ -549,11 +556,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <h2>
               {t('You bring the idea.')}
               <br />
-              <span>{t('Daddy takes it from here.')}</span>
+              <span>{t('daddy takes it from here.')}</span>
             </h2>
             <p>
               {t(
-                'Choose a project and talk to one agent. Daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+                'Choose a project and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
               )}
             </p>
             <button
@@ -570,7 +577,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               </span>
               <span>
                 <MessageSquare size={18} />
-                {t('Talk to Daddy')}
+                {t('Talk to daddy')}
               </span>
               <span>
                 <Check size={18} />
@@ -581,7 +588,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         )}
       </main>
       {modal === 'new' && (
-        <Dialog title={t('New Daddy session')} onClose={() => setModal(null)}>
+        <Dialog title={t('New daddy session')} onClose={() => setModal(null)}>
           <NewSession
             projects={state.projects}
             busy={state.busy}
@@ -627,11 +634,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <UpdatesPanel api={api} />
         </Dialog>
       )}
+      {modal === 'limits' && (
+        <Dialog title={t('Limits')} onClose={() => setModal(null)}>
+          <UsagePanel api={model.api} />
+        </Dialog>
+      )}
       {modal === 'notifications' && (
         <Dialog title={t('Notifications and Telegram')} onClose={() => setModal(null)}>
           <div className="daddy-telegram-setup">
             <strong>
-              {state.status?.telegram.workspace?.title ?? t('One topic per Daddy session')}
+              {state.status?.telegram.workspace?.title ?? t('One topic per daddy session')}
             </strong>
             <p>
               {t(
@@ -731,7 +743,7 @@ function NewSession({
         {t('Register another project')}
       </button>
       <label>
-        {t('What should Daddy do?')}
+        {t('What should daddy do?')}
         <textarea
           rows={5}
           value={message}
@@ -747,7 +759,7 @@ function NewSession({
       </label>
       <p className="daddy-muted">
         {t(
-          'Starts with one writer. Change the pool size at any time; Daddy decides when to use more.',
+          'Starts with one writer. Change the pool size at any time; daddy decides when to use more.',
         )}
       </p>
       {error && (
@@ -1026,11 +1038,11 @@ function SessionSettings({
           model = models.find((model) => model.id === profile.model);
         return (
           <fieldset key={role}>
-            <legend>{role === 'reviewer' ? 'Daddy' : t('New writers')}</legend>
+            <legend>{role === 'reviewer' ? 'daddy' : t('New writers')}</legend>
             <label>
               {t('Model')}
               <select
-                aria-label={(role === 'reviewer' ? 'Daddy' : t('New writers')) + ' ' + t('Model')}
+                aria-label={(role === 'reviewer' ? 'daddy' : t('New writers')) + ' ' + t('Model')}
                 value={profile.model ?? ''}
                 onChange={(event) => {
                   const model = models.find((model) => model.id === event.target.value);
@@ -1081,7 +1093,7 @@ function SessionSettings({
       </button>
       <p className="daddy-muted">
         {t(
-          'Writer defaults apply to new tasks. Changing Daddy’s model requires his session to be idle.',
+          'Writer defaults apply to new tasks. Changing daddy’s model requires his session to be idle.',
         )}
       </p>
       {error && (
@@ -1203,7 +1215,7 @@ function TaskReport({
           <h4>{t('Read-only worker reports')}</h4>
           <p className="daddy-muted">
             {t(
-              'Discuss changes with Daddy in the main conversation. He will send the instructions to the right writer.',
+              'Discuss changes with daddy in the main conversation. He will send the instructions to the right writer.',
             )}
           </p>
           {value.messages
@@ -1211,7 +1223,7 @@ function TaskReport({
             .slice(-8)
             .map((message) => (
               <div className="daddy-report-message" key={message.id}>
-                <strong>{message.role === 'reviewer' ? 'Daddy' : t('Writer')}</strong>
+                <strong>{message.role === 'reviewer' ? 'daddy' : t('Writer')}</strong>
                 <time>{stamp(message.at)}</time>
                 <div className="daddy-prose">
                   <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>

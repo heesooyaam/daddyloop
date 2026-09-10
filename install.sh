@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-reviewloop_version="0.8.0"
+reviewloop_version="0.9.0"
 reviewloop_default_prefix="$HOME/.local/share/daddyloop"
 [[ ! -d "$HOME/.local/share/reviewloop/releases" ]] || reviewloop_default_prefix="$HOME/.local/share/reviewloop"
 reviewloop_prefix="${DADDYLOOP_INSTALL_DIR:-${REVIEWLOOP_INSTALL_DIR:-$reviewloop_default_prefix}}"
@@ -13,7 +13,7 @@ for reviewloop_arg in "$@"; do
   case "$reviewloop_arg" in
     --no-setup) reviewloop_setup=false ;;
     --yes) reviewloop_yes=true ;;
-    --help) printf 'Install Daddyloop, the daddy CLI and bundled Node/Codex/GitHub tools.\nOptions: --yes (default setup), --no-setup (files only)\n'; exit 0 ;;
+    --help) printf 'Install daddyloop, the daddy CLI and bundled Node/Codex/GitHub tools.\nOptions: --yes (default setup), --no-setup (files only)\n'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$reviewloop_arg" >&2; exit 1 ;;
   esac
 done
@@ -67,7 +67,7 @@ mv -Tf -- "$reviewloop_tmp/current" "$reviewloop_prefix/current"
 for reviewloop_command in daddy daddyloop reviewctl; do
   if [[ ! -L "$reviewloop_bin_dir/$reviewloop_command" ]]; then ln -s "$reviewloop_prefix/current/bin/reviewctl" "$reviewloop_bin_dir/$reviewloop_command"; fi
 done
-printf '\nInstalled Daddyloop %s: %s/daddy\n' "$reviewloop_version" "$reviewloop_bin_dir"
+printf '\nInstalled daddyloop %s: %s/daddy\n' "$reviewloop_version" "$reviewloop_bin_dir"
 case ":$PATH:" in *":$reviewloop_bin_dir:"*) ;; *) printf 'Add this directory to PATH in your shell profile: %s\n' "$reviewloop_bin_dir" ;; esac
 if $reviewloop_setup; then
   if command -v sudo >/dev/null && ! sudo -n true 2>/dev/null && [[ -r /dev/tty ]]; then

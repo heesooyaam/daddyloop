@@ -13,6 +13,7 @@ import { Projects } from '../../dist/server/core/projects.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFileSync, existsSync } from 'node:fs';
+import { usageFixture } from './usage-fixture.mjs';
 const dir = resolve('.reviewloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 const key = join(dir, 'test-key.pem'),
@@ -125,6 +126,7 @@ const updates = new UpdateMonitor(store, {
   fetcher: async () => new Response(JSON.stringify({ version: '0.153.5' })),
 });
 const { app } = await buildApp({
+  usage: usageFixture(),
   startUpdateCheck: false,
   store,
   projects,
@@ -185,7 +187,7 @@ const { app } = await buildApp({
       return {
         status: 'completed',
         summary: sources.length
-          ? `I added ${sources.length} ticket(s) to this session and assigned the work. Your writers share one Daddy.`
+          ? `I added ${sources.length} ticket(s) to this session and assigned the work. Your writers share one daddy.`
           : 'I have checked the current task board. The work and conversation remain in this session.',
         checkedHead: '',
       };

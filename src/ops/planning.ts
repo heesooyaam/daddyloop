@@ -110,7 +110,7 @@ export function registerPlanningCommands(program: Command) {
       }),
     );
     process.stdout.write(
-      `\nContinue with Daddy: daddy console ${group.id}\nAdd another ticket: daddy talk ${group.id} "<ticket>"\n`,
+      `\nContinue with daddy: daddy console ${group.id}\nAdd another ticket: daddy talk ${group.id} "<ticket>"\n`,
     );
   };
   flags(
@@ -122,7 +122,7 @@ export function registerPlanningCommands(program: Command) {
     .description('Start a conversation from a GitHub issue or Tracker ticket')
     .action(start);
   flags(program.command('child').argument('<parent-task>').argument('<issue-or-ticket>'))
-    .description('Add another ticket to the same Daddy session')
+    .description('Add another ticket to the same daddy session')
     .action((parent, source, options) => start(source, { ...options, parent }));
   program
     .command('models')

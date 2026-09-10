@@ -81,7 +81,7 @@ export class CodexConnection extends EventEmitter {
       this.fail(new AppError('codex_exited', `Codex exited (${code ?? signal})`, 502));
     });
     const initialized = await this.request<{ userAgent?: string }>('initialize', {
-      clientInfo: { name: 'reviewloop', title: 'Reviewloop', version: VERSION },
+      clientInfo: { name: 'reviewloop', title: 'daddyloop', version: VERSION },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: 'initialized', params: {} });

@@ -5,6 +5,7 @@ import { resolve, join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { buildApp } from '../dist/server/server/app.js';
+import { usageFixture } from '../tests/e2e/usage-fixture.mjs';
 import { configSchema } from '../dist/server/ops/config.js';
 import { Store } from '../dist/server/core/store.js';
 import { Projects } from '../dist/server/core/projects.js';
@@ -63,6 +64,7 @@ const catalogue = {
 };
 const projects = new Projects(store, [scratch], { mounts: async () => [] });
 const server = await buildApp({
+  usage: usageFixture(),
   dataDir: data,
   store,
   projects,
@@ -175,10 +177,15 @@ try {
   await expect(page.getByText('Тесты уже проверяют', { exact: false })).toBeVisible();
   await page.screenshot({ path: join(output, 'daddy-desktop.png'), animations: 'disabled' });
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
-  await expect(page.getByLabel('Daddy Модель')).toHaveValue('gpt-6-astra');
+  await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
   await page.screenshot({ path: join(output, 'daddy-models.png'), animations: 'disabled' });
   await page.getByRole('button', { name: 'Закрыть', exact: true }).click();
+  await page.getByRole('button', { name: /Лимиты/ }).click();
+  await expect(page.getByRole('dialog').getByText('Доступно сбросов: 3')).toBeVisible();
+  await page.screenshot({ path: join(output, 'daddy-limits.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: join(output, 'daddy-phone-limits.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: 'Закрыть', exact: true }).click();
   await page.screenshot({ path: join(output, 'daddy-phone-chat.png'), animations: 'disabled' });
   await page
     .locator('.daddy-mobile-tabs')
@@ -252,7 +259,7 @@ try {
     ),
   );
   console.log(
-    'Captured Daddyloop desktop, phone, model settings and real CLI screens. Terminal restored; daemon PID unchanged.',
+    'Captured daddyloop desktop, phone, model settings and real CLI screens. Terminal restored; daemon PID unchanged.',
   );
   await context.close();
 } finally {
