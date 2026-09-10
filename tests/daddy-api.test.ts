@@ -65,6 +65,10 @@ it('authenticates project/session controls, deduplicates messages and closes pub
   const headers = { authorization: 'Bearer fixture' };
   try {
     expect((await server.app.inject('/api/projects')).statusCode).toBe(401);
+    expect((await server.app.inject('/api/workspaces')).statusCode).toBe(401);
+    expect((await server.app.inject({ url: '/api/workspaces', headers })).json()).toEqual(
+      (await server.app.inject({ url: '/api/projects', headers })).json(),
+    );
     expect((await server.app.inject({ url: '/api/projects', headers })).json()).toHaveLength(1);
     const requestId = randomUUID(),
       input = { projectId: f.project.id, message: 'Start from this goal', requestId };

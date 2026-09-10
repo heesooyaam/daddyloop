@@ -285,3 +285,69 @@ it('shows shared limits and only the paired owner can confirm consuming a reset'
     await f.close();
   }
 });
+it('creates a session from a group topic and isolates its wizard from another topic', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any }[] = [];
+  let thread = 20;
+  const api = {
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method) =>
+      method === 'createForumTopic' ? { message_thread_id: thread++ } : {},
+    ),
+  } as unknown as TelegramApi;
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.workspace', { chatId: -10042, title: 'Room', ownerId: 7 });
+  const root = f.daddy.create({ projectId: f.project.id }),
+    peer = f.daddy.create({ projectId: f.project.id });
+  const a = await workspace.ensureTopic(root),
+    b = await workspace.ensureTopic(peer);
+  let id = 1000;
+  const message = (text: string, tid: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      chat: { id: -10042, type: 'supergroup' },
+      from: { id: 7 },
+      message_thread_id: tid,
+    },
+  });
+  const click = (data: string, tid: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: -10042, type: 'supergroup' }, message_thread_id: tid },
+    },
+  });
+  try {
+    await workspace.handle(message('/workspaces', a!.threadId));
+    await workspace.handle(message('This is still the original conversation', a!.threadId));
+    expect(f.store.messages(root.id).at(-1)?.text).toBe('This is still the original conversation');
+    await workspace.handle(message('/new Separate feature', a!.threadId));
+    await workspace.handle(message('Keep this in the original peer session', b!.threadId));
+    expect(f.store.messages(peer.id)[0].text).toBe('Keep this in the original peer session');
+    await workspace.handle(click(`dad:new:${f.project.id}`, a!.threadId));
+    const use = sent.at(-1)!.card.buttons[0][0].callback_data;
+    await workspace.handle(click(use, b!.threadId));
+    expect(f.daddy.sessions()).toHaveLength(2);
+    await workspace.handle(click(use, a!.threadId));
+    const created = f.daddy
+      .sessions()
+      .find((group) => group.id !== root.id && group.id !== peer.id)!;
+    expect(created.title).toBe('Separate feature');
+    expect(f.store.messages(created.id)[0].text).toBe('Separate feature');
+    expect(sent.at(-1)!.destination.threadId).toBe(a!.threadId);
+    expect(sent.at(-1)!.card.buttons[0][0].url).toContain('/22');
+    await workspace.handle(message('Old topic still belongs to the old daddy', a!.threadId));
+    expect(f.store.messages(root.id).at(-1)?.text).toBe('Old topic still belongs to the old daddy');
+  } finally {
+    await workspace.stop();
+    await f.close();
+  }
+});

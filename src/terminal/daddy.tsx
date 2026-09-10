@@ -13,7 +13,7 @@ import { resetOutcomeText, usageLines, usageSummary } from '../client/usage.js';
 
 type MenuKind =
   | 'sessions'
-  | 'projects'
+  | 'workspaces'
   | 'discover'
   | 'pool'
   | 'limits'
@@ -40,7 +40,7 @@ type MenuState = {
 const commands = [
   '/new',
   '/sessions',
-  '/projects',
+  '/workspaces',
   '/pool',
   '/limits',
   '/repo',
@@ -153,7 +153,7 @@ export function DaddyTerminal({
           label: group.title,
           detail: `${group.project?.name ?? ''} · ${group.complete}/${group.total}`,
         }));
-    if (menu.kind === 'projects')
+    if (menu.kind === 'workspaces')
       return [
         ...state.projects
           .filter((project) => project.name.toLowerCase().includes(menu.query.toLowerCase()))
@@ -162,7 +162,7 @@ export function DaddyTerminal({
             label: project.name,
             detail: project.scope || project.repoPath,
           })),
-        { id: 'discover', label: t('Find projects on the server'), detail: '' },
+        { id: 'discover', label: t('Find workspaces on the server'), detail: '' },
       ];
     if (menu.kind === 'discover')
       return (menu.items ?? [])
@@ -241,9 +241,10 @@ export function DaddyTerminal({
       if (menu.kind === 'sessions') {
         await model.select(item.id);
         setMenu(undefined);
-      } else if (menu.kind === 'projects') {
+      } else if (menu.kind === 'workspaces') {
         if (item.id === 'discover') {
-          const items = await model.api<{ name: string; path: string }[]>('/projects/suggestions');
+          const items =
+            await model.api<{ name: string; path: string }[]>('/workspaces/suggestions');
           setMenu({ ...menu, kind: 'discover', items, index: 0, query: '' });
         } else {
           await model.create(item.id, menu.message);
@@ -251,9 +252,9 @@ export function DaddyTerminal({
           setEmptyDraft('');
         }
       } else if (menu.kind === 'discover') {
-        await model.api<Project>('/projects', { name: item.label, path: item.id });
+        await model.api<Project>('/workspaces', { name: item.label, path: item.id });
         await model.refresh();
-        setMenu({ ...menu, kind: 'projects', query: '', index: 0 });
+        setMenu({ ...menu, kind: 'workspaces', query: '', index: 0 });
       } else if (menu.kind === 'pool') {
         await model.action('settings', { writerLimit: Number(item.id) });
         if (!model.snapshot().error) setMenu(undefined);
@@ -299,8 +300,8 @@ export function DaddyTerminal({
       exit();
       return;
     }
-    if (name === '/new' || name === '/projects') {
-      open('projects', argument || undefined);
+    if (name === '/new' || name === '/workspaces' || name === '/projects') {
+      open('workspaces', argument || undefined);
       return;
     }
     if (name === '/sessions') {
@@ -352,7 +353,7 @@ export function DaddyTerminal({
     if (name === '/repo') {
       if (!argument || argument === 'default') model.workspace(undefined);
       else {
-        await model.api('/projects/preview', {
+        await model.api('/workspaces/preview', {
           sessionId: state.selected,
           workspace: { path: argument },
         });
@@ -379,8 +380,8 @@ export function DaddyTerminal({
   if (menu) {
     const headings: Record<MenuKind, string> = {
       sessions: 'Sessions',
-      projects: 'Choose a project',
-      discover: 'Projects on this server',
+      workspaces: 'Choose a workspace',
+      discover: 'Workspaces on this server',
       pool: 'Writer pool',
       limits: 'Codex limits',
       help: 'daddyloop commands',
@@ -472,13 +473,13 @@ export function DaddyTerminal({
       { text: '' },
       ...markdown(
         t(
-          'Choose a project and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+          'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
         ),
         width,
       ),
       { text: '' },
       { text: '/new      ' + t('Start a session') },
-      { text: '/projects ' + t('Choose a project') },
+      { text: '/workspaces ' + t('Choose a workspace') },
       { text: '/help     ' + t('Commands and shortcuts') },
     );
   } else if (view === 'tasks') {
@@ -558,7 +559,7 @@ export function DaddyTerminal({
       return;
     }
     if (keyInfo.ctrl && input === 'n') {
-      open('projects');
+      open('workspaces');
       return;
     }
     if (keyInfo.ctrl && input === 't') {
@@ -602,7 +603,7 @@ export function DaddyTerminal({
         else void choose();
         return;
       }
-      if (['sessions', 'projects', 'discover', 'model'].includes(menu.kind)) {
+      if (['sessions', 'workspaces', 'discover', 'model'].includes(menu.kind)) {
         const query = edit(insert(emptyEditor(), menu.query), input, keyInfo).text;
         setMenu({ ...menu, query, index: 0 });
       }
@@ -612,7 +613,7 @@ export function DaddyTerminal({
       if (editor.text.startsWith('/') && !editor.literal && !editor.text.includes('\n'))
         void execute(editor.text).catch((error) => model.error(error.message));
       else if (!state.selected) {
-        open('projects', editor.text.trim() || undefined);
+        open('workspaces', editor.text.trim() || undefined);
       } else void model.send();
       return;
     }

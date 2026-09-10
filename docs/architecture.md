@@ -154,3 +154,13 @@ Project defaults are local to a server installation. A session pins a `Project` 
 An explicit reset creates an expiring, caller-bound plan with an account fingerprint and optional backend credit ID. Confirmation re-reads the active account over the same app-server connection before writing. Intent and idempotency key are persisted before `account/rateLimitResetCredit/consume`; the same key is reused for recovery. A pending operation blocks another logical reset until resolved. Completion is stored before refreshing quotas. An uncertain last-credit redemption remains recoverable when the available count reaches zero. The scheduler never infers permission to resume from percentages or reset times, and earned resets are never consumed automatically.
 
 The protocol was checked against the installed Codex 0.154.0 schema and [official app-server documentation](https://learn.chatgpt.com/docs/app-server#auth-endpoints).
+
+## Workspaces, group sessions and voice (0.10)
+
+Source repositories are called workspaces in product copy and commands. `/api/workspaces` aliases the preserved project registry; serialized `projectId` and snapshots retain their identity. Telegram creation drafts are scoped to owner/chat/topic. Browsing workspaces does not hijack the next conversation message. New sessions create new topics and link back to their origin.
+
+`create_session` is a user-triggered, idempotent orchestration action; it inherits the current models/policy and preserves the original session. Coordination tool signatures start a fresh native context when tool schemas change; old thread IDs and the saved conversation remain available, with `read_conversation` for earlier user requirements. Native review threads are unchanged.
+
+SQLite schema 5 adds `voice_jobs`. Owner verification precedes any download. The inbox captures the session, generation, workspace override and language at receipt time; voice and following text use the same receipt identity as ordinary chat. It stages input before acknowledging Telegram, resumes interrupted recognition and rejects stale destinations/generations. Downloads stay on Telegram's fixed origin, are bounded to 10 MB and do not follow redirects. Only transcripts enter daddy's conversation.
+
+The bundled, checksum-pinned Whisper Small ONNX model runs in a disposable child with two CPU inference threads, a bounded V8 heap, a timeout and resource checks. Opus decoding is incremental with channel/duration/size guards. Raw audio is removed after processing; recognition has no API key or network dependency. Package validation runs an offline speech fixture on both release architectures.

@@ -1,4 +1,44 @@
 export const daddyRu: Record<string, string> = {
+  'Voice message was not sent to daddy': 'Голосовое не передано daddy',
+  'Recognized voice message': 'Распознано голосовое',
+  'Voice recognition is unavailable on this server.':
+    'Распознавание голосовых недоступно на этом сервере.',
+  'Start a daddy session in a workspace, then send the voice message.':
+    'Сначала создай сессию daddy в воркспейсе, затем отправь голосовое.',
+  'Voice messages can be at most 5 minutes and 10 MB.':
+    'Голосовое должно быть не длиннее 5 минут и не больше 10 МБ.',
+  'Voice messages can be at most 5 minutes long': 'Голосовое должно быть не длиннее 5 минут.',
+  'Voice messages can be at most 10 MB': 'Голосовое должно быть не больше 10 МБ.',
+  'Voice message queued. Recognition language: {language}.':
+    'Голосовое в очереди. Язык распознавания: {language}.',
+  'The voice inbox is full. Wait for the previous messages.':
+    'Очередь голосовых заполнена. Дождись обработки предыдущих сообщений.',
+  'The voice message belongs to a previous Telegram connection.':
+    'Голосовое относится к прежнему подключению Telegram.',
+  'The session changed while recognizing the voice. Send it again to continue.':
+    'Пока шло распознавание, сессия изменилась. Пришли голосовое ещё раз.',
+  'Voice recognition failed': 'Не удалось распознать голосовое.',
+  'Unsupported voice recording': 'Поддерживаются обычные голосовые Telegram в формате OGG/Opus.',
+  'Invalid voice recording': 'Не удалось прочитать запись. Пришли голосовое ещё раз.',
+  'No audible speech in the recording': 'В записи не слышно речи.',
+  'Could not recognize a clear voice message':
+    'Не удалось разобрать речь. Пришли голосовое ещё раз.',
+  'Voice recognition timed out. Send a shorter recording.':
+    'Распознавание заняло слишком много времени. Пришли запись покороче.',
+  'Voice recognition was interrupted; the recording is preserved.':
+    'Распознавание прервано; запись сохранена.',
+  'Could not download the voice message': 'Не удалось скачать голосовое из Telegram.',
+  'Install the release with voice support, or run npm run speech:prepare for a source checkout.':
+    'Установи релиз с голосовыми. При запуске из исходников выполни npm run speech:prepare.',
+  'New session created: {title}': 'Создана новая сессия: {title}',
+  'Open session': 'Открыть сессию',
+  'Language updated.': 'Язык изменён.',
+  'Open the private bot chat for CLI updates.': 'Для обновления CLI открой личный чат с ботом.',
+  'Open private chat': 'Открыть личный чат',
+  'Send /group in the private bot chat to connect a Telegram group.':
+    'Для подключения группы отправь /group в личном чате с ботом.',
+  'Group selection expired. Send /group again.': 'Выбор группы истёк. Отправь /group ещё раз.',
+
   'Codex currently blocks included usage.':
     'Codex сейчас ограничивает использование включённой квоты.',
   'Resolve pending reset': 'Завершить ожидающий сброс',
@@ -67,11 +107,11 @@ export const daddyRu: Record<string, string> = {
   'Parent folder': 'Родительская папка',
   'Use this folder once': 'Использовать для этой задачи',
   'Starting directory (relative)': 'Начальная папка внутри репозитория',
-  'Use project defaults': 'Как в проекте',
-  'This selection applies only to this request. Project defaults and existing tasks stay as saved.':
-    'Выбор действует только для этого запроса. Настройки проекта и существующих задач сохраняются.',
+  'Use workspace defaults': 'Как в воркспейсе',
+  'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.':
+    'Выбор действует только для этого запроса. Настройки воркспейса и существующих задач сохраняются.',
   'Repository for this request': 'Репозиторий для этого запроса',
-  'Using project defaults': 'По настройкам проекта',
+  'Using workspace defaults': 'По настройкам воркспейса',
   'Repository for next task': 'Репозиторий для следующей задачи',
   'Send the task now. The following message will use the defaults again.':
     'Теперь отправь задачу. Для следующего сообщения снова будут действовать настройки по умолчанию.',
@@ -90,7 +130,7 @@ export const daddyRu: Record<string, string> = {
   'Previous work history': 'История прежних задач',
   'Open the topic for the session you want to continue.':
     'Открой тему сессии, которую хочешь продолжить.',
-  'New sessions and settings': 'Новые сессии и настройки',
+  'Private setup and CLI updates': 'Подключение и обновления CLI в личке',
   'This model selection expired. Open Models again.': 'Выбор модели истёк. Открой модели ещё раз.',
   'One conversation. A whole team.': 'Один разговор. Целая команда.',
   'New session': 'Новая сессия',
@@ -98,9 +138,9 @@ export const daddyRu: Record<string, string> = {
   'YOUR SESSIONS': 'ТВОИ СЕССИИ',
   Sessions: 'Сессии',
   done: 'готово',
-  'Your next project starts with a conversation.': 'Следующий проект начинается с разговора.',
-  Projects: 'Проекты',
-  Project: 'Проект',
+  'Your next workspace starts with a conversation.': 'Следующий воркспейс начинается с разговора.',
+  Projects: 'Воркспейсы',
+  Project: 'Воркспейс',
   Notifications: 'Уведомления',
   'CLI updates': 'Обновления CLI',
   'Running on your server': 'Работает на твоём сервере',
@@ -131,23 +171,23 @@ export const daddyRu: Record<string, string> = {
   'Meet your coding team': 'ТВОЯ КОМАНДА ДЛЯ РАЗРАБОТКИ',
   'You bring the idea.': 'С тебя идея.',
   'daddy takes it from here.': 'Дальше займётся daddy.',
-  'Choose a project and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.':
-    'Выбери проект и общайся с одним агентом. daddy разложит цель на задачи, распределит работу между писателями и проверит результат.',
+  'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.':
+    'Выбери воркспейс и общайся с одним агентом. daddy разложит цель на задачи, распределит работу между писателями и проверит результат.',
   'Start a session': 'Начать сессию',
-  'Add your first project': 'Добавить первый проект',
-  'Choose a project': 'Выбрать проект',
+  'Add your first workspace': 'Добавить первый воркспейс',
+  'Choose a workspace': 'Выбрать воркспейс',
   'Talk to daddy': 'Обсудить с daddy',
   'Review the result': 'Посмотреть результат',
   'New daddy session': 'Новая сессия daddy',
-  'Projects on this server': 'Проекты на сервере',
+  'Workspaces on this server': 'Воркспейсы на сервере',
   'Notifications and Telegram': 'Уведомления и Telegram',
   'One topic per daddy session': 'Своя тема для каждой сессии daddy',
-  'Send /workspace to your bot to connect a group with topics. Each session gets a topic automatically.':
-    'Отправь боту /workspace, чтобы подключить группу с темами. Для каждой сессии тема создаётся автоматически.',
+  'Send /group to your bot to connect a group with topics. Each session gets a topic automatically.':
+    'Отправь боту /group, чтобы подключить группу с темами. Для каждой сессии тема создаётся автоматически.',
   'Open Telegram': 'Открыть Telegram',
   'Work item': 'Задача',
-  'Add a project first': 'Сначала добавь проект',
-  'Register another project': 'Зарегистрировать ещё проект',
+  'Add a workspace first': 'Сначала добавь воркспейс',
+  'Register another workspace': 'Зарегистрировать ещё воркспейс',
   'What should daddy do?': 'Что поручим daddy?',
   'Describe the goal or paste one or more ticket links. You can start with a discussion.':
     'Опиши цель или вставь ссылки на тикеты. Можно начать с обсуждения.',
@@ -166,11 +206,11 @@ export const daddyRu: Record<string, string> = {
   'No subdirectories': 'Нет вложенных папок',
   'Only the first 150 folders are shown. Enter a more specific path above.':
     'Показаны первые 150 папок. Выше можно указать более точный путь.',
-  'Project name': 'Название проекта',
+  'Workspace name': 'Название воркспейса',
   'Base branch (optional)': 'Базовая ветка (необязательно)',
   'Selecting a subdirectory sets the agent’s starting folder inside each working copy.':
     'Выбранная подпапка станет стартовой папкой агента внутри каждой рабочей копии.',
-  'Save project': 'Сохранить проект',
+  'Save workspace': 'Сохранить воркспейс',
   'New writers': 'Новые писатели',
   Model: 'Модель',
   'Reasoning effort': 'Уровень рассуждений',
@@ -199,10 +239,10 @@ export const daddyRu: Record<string, string> = {
   Working: 'В работе',
   'Give daddy a goal or a ticket. He plans the work, manages writers and reviews the result.':
     'Отправь daddy цель или тикет. Он составит план, распределит работу между писателями и проверит результат.',
-  'Telegram workspace': 'Группа с темами',
-  'Projects are folders on the server. daddy creates separate working copies for writers.':
-    'Проекты — это папки на сервере. daddy создаёт отдельные рабочие копии для писателей.',
-  'Find projects on the server': 'Найти проекты на сервере',
+  'Telegram group': 'Группа с темами',
+  'Workspaces are folders on the server. daddy creates separate working copies for writers.':
+    'Воркспейсы — это папки на сервере. daddy создаёт отдельные рабочие копии для писателей.',
+  'Find workspaces on the server': 'Найти воркспейсы на сервере',
   'Writers: {active} / {limit}': 'Писатели: {active} / {limit}',
   'Completed: {done} / {total}': 'Готово: {done} / {total}',
   'Send another ticket or describe what you need in this conversation. daddy handles the writers.':
@@ -214,7 +254,7 @@ export const daddyRu: Record<string, string> = {
   'Choose the maximum number of writers working at once. daddy decides which tasks can run in parallel. Existing work finishes when the limit is reduced.':
     'Выбери максимум одновременно работающих писателей. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
   Back: 'Назад',
-  'Telegram workspace connected': 'Группа подключена',
+  'Telegram group connected': 'Группа подключена',
   'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.':
     'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Telegram сможет добавить бота с правом управления темами. У каждой сессии daddy будет своя тема.',
   'Choose a group with topics': 'Выбрать группу с темами',
@@ -224,18 +264,19 @@ export const daddyRu: Record<string, string> = {
     'Включи «Темы» и назначь бота администратором с правом управления темами, затем выбери группу ещё раз.',
   'Workspace connected: {name}': 'Группа подключена: {name}',
   'Create a new session from the private bot chat.': 'Создай новую сессию в личном чате с ботом.',
-  'Manage projects in the private bot chat.': 'Управлять проектами можно в личном чате с ботом.',
+  'Manage workspaces in the private bot chat.':
+    'Управлять воркспейсами можно в личном чате с ботом.',
   'Choose a repository to register it. You can choose a subdirectory and base branch on the website.':
     'Выбери репозиторий для регистрации. На сайте также можно выбрать подпапку и базовую ветку.',
-  'This selection expired. Open Projects again.': 'Выбор истёк. Открой проекты ещё раз.',
+  'This selection expired. Open Workspaces again.': 'Выбор истёк. Открой воркспейсы ещё раз.',
   'This selection expired. Start a new session again.':
     'Выбор истёк. Начни создание сессии ещё раз.',
   'Send a ticket link, several tickets, or a description of the next task. daddy will add it to this session.':
     'Отправь ссылку на тикет, несколько тикетов или описание следующей задачи. daddy добавит работу в эту сессию.',
   'Write to daddy here. He sends instructions to the writers.':
     'Пиши здесь daddy. Он сам передаст инструкции писателям.',
-  'Open a daddy session topic, or create a new session in the private bot chat.':
-    'Открой тему сессии daddy или создай новую сессию в личном чате с ботом.',
+  'Open a session topic, or send /new here to create one.':
+    'Открой тему сессии или отправь здесь /new, чтобы создать новую.',
   'The topic may already exist. Open it and send /attach {id} to reconnect this session.':
     'Тема уже могла быть создана. Открой её и отправь /attach {id}, чтобы подключить к этой сессии.',
   'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.':
@@ -251,8 +292,8 @@ export const daddyRu: Record<string, string> = {
     'Общайся с daddy обычным текстом. Отправляй цели и ссылки на тикеты; писателями занимается он.',
   'Ctrl+N new session · Ctrl+T sessions · Tab chat/tasks · PgUp/PgDn scroll · Ctrl+Q exit':
     'Ctrl+N — новая сессия · Ctrl+T — сессии · Tab — чат/задачи · PgUp/PgDn — прокрутка · Ctrl+Q — выход',
-  'Register folders with daddy projects add <path> --name <name>, or use Projects on the website.':
-    'Зарегистрировать папку можно командой daddy projects add <path> --name <name> или в разделе «Проекты» на сайте.',
+  'Register folders with daddy workspaces add <path> --name <name>, or use Workspaces on the website.':
+    'Зарегистрировать папку можно командой daddy workspaces add <path> --name <name> или в разделе «Воркспейсы» на сайте.',
   'Install or roll back Codex from /updates in Telegram, or use daddy runtime update --yes.':
     'Обновить или откатить Codex можно через /updates в Telegram или командой daddy runtime update --yes.',
   '↑ ↓ choose · Enter confirm · Esc back': '↑ ↓ — выбрать · Enter — подтвердить · Esc — назад',
@@ -264,21 +305,22 @@ export const daddyRu: Record<string, string> = {
     'Консоль daddyloop закрыта. Работа продолжается на сервере.',
   'Run daddy in a terminal, or use daddy --help for commands.':
     'Запусти daddy в терминале или используй daddy --help для списка команд.',
-  'Choose a registered project.': 'Выбери зарегистрированный проект.',
+  'Choose a registered workspace.': 'Выбери зарегистрированный воркспейс.',
   'Only important updates': 'Только важные уведомления',
   'All updates': 'Все уведомления',
   'Mute notifications': 'Выключить уведомления',
   'One daddy, a pool of writers, and persistent work on your server':
     'Один daddy, пул писателей и непрерывная работа на твоём сервере',
-  'Register and choose project folders on the server':
-    'Регистрация и выбор папок проектов на сервере',
+  'Register and choose workspace folders on the server':
+    'Регистрация и выбор папок воркспейсов на сервере',
   'Find repositories on the server': 'Найти репозитории на сервере',
   'Browse server directories': 'Посмотреть папки на сервере',
-  'Register a project once for phone, web and CLI':
-    'Зарегистрировать проект для телефона, сайта и CLI',
+  'Register a workspace once for phone, web and CLI':
+    'Зарегистрировать воркспейс для телефона, сайта и CLI',
   'List daddy sessions and writer pools': 'Показать сессии daddy и пулы писателей',
   'maximum simultaneous writers': 'максимум одновременно работающих писателей',
-  'Give daddy a goal in a registered project': 'Поручить daddy цель в зарегистрированном проекте',
+  'Give daddy a goal in a registered workspace':
+    'Поручить daddy цель в зарегистрированном воркспейсе',
   'Send a goal, ticket or question to daddy': 'Отправить daddy цель, тикет или вопрос',
   'Inspect or resize a session’s writer pool': 'Посмотреть или изменить пул писателей сессии',
   'Send instructions to daddy; writers receive tasks only from him':
@@ -289,10 +331,10 @@ export const daddyRu: Record<string, string> = {
   'Choose between 1 and 8 writers': 'Выбери от 1 до 8 писателей',
   'Use a relative directory inside the repository': 'Укажи относительную папку внутри репозитория',
   'Choose an absolute directory on the server': 'Выбери абсолютный путь к папке на сервере',
-  'Choose a directory inside a configured project root':
-    'Выбери папку внутри настроенных каталогов проектов',
+  'Choose a directory inside a configured workspace root':
+    'Выбери папку внутри настроенных каталогов воркспейсов',
   'Choose a Git or mounted Arcadia repository': 'Выбери Git-репозиторий или смонтированную Arcadia',
-  'Add a GitHub or GitLab remote before registering this project':
+  'Add a GitHub or GitLab remote before registering this workspace':
     'Перед регистрацией добавь в репозиторий remote GitHub или GitLab',
   'Waiting for a free, clean Arc workspace. Existing source checkouts and writer changes are preserved.':
     'Ожидаем свободную чистую рабочую копию Arcadia. Исходные папки и изменения писателей сохранены.',

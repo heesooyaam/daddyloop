@@ -47,12 +47,12 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
             .snapshot()
             .projects.find((project) => project.name === name || project.id.startsWith(name));
         if (project) await model.create(project.id);
-        else process.stdout.write(t('Choose a registered project.') + '\n');
+        else process.stdout.write(t('Choose a registered workspace.') + '\n');
       } else if (input === '/repo' || input.startsWith('/repo ')) {
         const path = input.slice(5).trim();
         model.workspace(path && path !== 'default' ? { path } : undefined);
         process.stdout.write(
-          path && path !== 'default' ? safeText(path) + '\n' : t('Using project defaults') + '\n',
+          path && path !== 'default' ? safeText(path) + '\n' : t('Using workspace defaults') + '\n',
         );
       } else if (input.startsWith('/pool '))
         await model.action('settings', { writerLimit: Number(input.slice(6)) });

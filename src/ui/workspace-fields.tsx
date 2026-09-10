@@ -36,7 +36,7 @@ export function WorkspaceFields({
     const at = ++sequence.current;
     try {
       const next = await api<NonNullable<typeof listing>>(
-        '/projects/directories' + (path ? '?path=' + encodeURIComponent(path) : ''),
+        '/workspaces/directories' + (path ? '?path=' + encodeURIComponent(path) : ''),
       );
       if (at === sequence.current) {
         setListing(next);
@@ -109,12 +109,12 @@ export function WorkspaceFields({
             setListing(undefined);
           }}
         >
-          {t('Use project defaults')}
+          {t('Use workspace defaults')}
         </button>
       )}
       <p className="daddy-muted">
         {t(
-          'This selection applies only to this request. Project defaults and existing tasks stay as saved.',
+          'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.',
         )}
       </p>
       {error && <p role="alert">{t(error)}</p>}
@@ -123,7 +123,7 @@ export function WorkspaceFields({
   return (
     <details className="daddy-workspace-fields" open={compact ? undefined : true}>
       <summary>
-        {t(value ? 'Repository for this request' : 'Using project defaults')} ·{' '}
+        {t(value ? 'Repository for this request' : 'Using workspace defaults')} ·{' '}
         {value?.path ?? project.repoPath}
       </summary>
       {fields}

@@ -6,38 +6,41 @@ import { profilesSchema } from '../core/agents.js';
 import { AppError } from '../core/types.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
-  app.get('/api/projects', async () => daddy.projects.list());
+
   app.post('/api/daddy/adopt', async (request) => {
     const input = z.object({ taskId: id, projectId: id }).strict().parse(request.body);
     return daddy.adopt(input.taskId, input.projectId);
   });
-  app.get('/api/projects/suggestions', async () => daddy.projects.suggestions());
-  app.get<{ Querystring: { path?: string } }>('/api/projects/directories', async (request) =>
-    daddy.projects.browse(request.query.path),
-  );
-  app.post('/api/projects', async (request, reply) =>
-    reply.code(201).send(await daddy.projects.register(projectInput.parse(request.body))),
-  );
-  app.post<{ Params: { id: string } }>('/api/projects/:id/defaults', async (request) =>
-    daddy.projects.register(projectInput.parse(request.body), id.parse(request.params.id)),
-  );
-  app.post('/api/projects/preview', async (request) => {
-    const input = z
-      .object({
-        projectId: id.optional(),
-        sessionId: id.optional(),
-        workspace: workspaceInput.optional(),
-      })
-      .strict()
-      .refine((input) => !!input.projectId !== !!input.sessionId)
-      .parse(request.body);
-    return daddy.projects.selection(
-      input.sessionId
-        ? daddy.board(input.sessionId).project!
-        : daddy.projects.get(input.projectId!),
-      input.workspace,
+  for (const prefix of ['/api/workspaces', '/api/projects']) {
+    app.get(prefix, async () => daddy.projects.list());
+    app.get(`${prefix}/suggestions`, async () => daddy.projects.suggestions());
+    app.get<{ Querystring: { path?: string } }>(`${prefix}/directories`, async (request) =>
+      daddy.projects.browse(request.query.path),
     );
-  });
+    app.post(prefix, async (request, reply) =>
+      reply.code(201).send(await daddy.projects.register(projectInput.parse(request.body))),
+    );
+    app.post<{ Params: { id: string } }>(`${prefix}/:id/defaults`, async (request) =>
+      daddy.projects.register(projectInput.parse(request.body), id.parse(request.params.id)),
+    );
+    app.post(`${prefix}/preview`, async (request) => {
+      const input = z
+        .object({
+          projectId: id.optional(),
+          sessionId: id.optional(),
+          workspace: workspaceInput.optional(),
+        })
+        .strict()
+        .refine((input) => !!input.projectId !== !!input.sessionId)
+        .parse(request.body);
+      return daddy.projects.selection(
+        input.sessionId
+          ? daddy.board(input.sessionId).project!
+          : daddy.projects.get(input.projectId!),
+        input.workspace,
+      );
+    });
+  }
   app.get('/api/daddy/sessions', async () =>
     daddy.sessions().map((group) => {
       const board = daddy.board(group.id);

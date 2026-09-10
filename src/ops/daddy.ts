@@ -49,14 +49,14 @@ export function registerDaddyCommands(program: Command) {
       );
     });
   const project = async (name: string) => {
-    const matches = (await api<Project[]>('/projects')).filter(
+    const matches = (await api<Project[]>('/workspaces')).filter(
       (project) =>
         project.id === name ||
         project.id.startsWith(name) ||
         project.name.toLowerCase() === name.toLowerCase(),
     );
     if (matches.length !== 1)
-      throw new Error('Choose a unique project name or ID from daddy projects');
+      throw new Error('Choose a unique workspace name or ID from daddy workspaces');
     return matches[0];
   };
   const session = async (name: string) => {
@@ -71,12 +71,13 @@ export function registerDaddyCommands(program: Command) {
     return matches[0];
   };
   const projects = program
-    .command('projects')
-    .description('Register and choose project folders on the server');
-  projects.action(async () => print(await api('/projects')));
+    .command('workspaces')
+    .alias('projects')
+    .description('Register and choose workspace folders on the server');
+  projects.action(async () => print(await api('/workspaces')));
   projects
     .command('set')
-    .argument('<project>')
+    .argument('<workspace>')
     .argument('<path>')
     .option('--scope <directory>')
     .option('--base <branch>')
@@ -84,19 +85,21 @@ export function registerDaddyCommands(program: Command) {
     .action(async (name, path, options) => {
       const selected = await project(name);
       print(
-        await api(`/projects/${selected.id}/defaults`, { name: selected.name, path, ...options }),
+        await api(`/workspaces/${selected.id}/defaults`, { name: selected.name, path, ...options }),
       );
     });
   projects
     .command('discover')
     .description('Find repositories on the server')
-    .action(async () => print(await api('/projects/suggestions')));
+    .action(async () => print(await api('/workspaces/suggestions')));
   projects
     .command('browse')
     .argument('[path]')
     .description('Browse server directories')
     .action(async (path) =>
-      print(await api('/projects/directories' + (path ? '?path=' + encodeURIComponent(path) : ''))),
+      print(
+        await api('/workspaces/directories' + (path ? '?path=' + encodeURIComponent(path) : '')),
+      ),
     );
   projects
     .command('add')
@@ -104,10 +107,10 @@ export function registerDaddyCommands(program: Command) {
     .requiredOption('--name <name>')
     .option('--scope <directory>')
     .option('--base <branch>')
-    .description('Register a project once for phone, web and CLI')
+    .description('Register a workspace once for phone, web and CLI')
     .action(async (path, options) =>
       print(
-        await api('/projects', {
+        await api('/workspaces', {
           path,
           name: options.name,
           ...(options.scope !== undefined ? { scope: options.scope } : {}),
@@ -122,15 +125,20 @@ export function registerDaddyCommands(program: Command) {
   program
     .command('new')
     .argument('[message]')
-    .requiredOption('--project <project>')
+    .option('--workspace <name>', 'workspace to use')
+    .option('--project <name>', 'compatibility alias for --workspace')
     .option('--title <title>')
     .option('--writers <count>', 'maximum simultaneous writers', '1')
     .option('--repo <path>', 'repository for this session only')
     .option('--scope <directory>', 'relative starting directory for this session')
     .option('--base <branch>', 'base branch for this session')
-    .description('Give daddy a goal in a registered project')
+    .description('Give daddy a goal in a registered workspace')
     .action(async (message, options) => {
-      const selected = await project(options.project);
+      if (!options.workspace && !options.project)
+        throw new Error('Choose a workspace with --workspace');
+      if (options.workspace && options.project && options.workspace !== options.project)
+        throw new Error('Choose one workspace');
+      const selected = await project(options.workspace ?? options.project);
       const board = await api<DaddyBoard>('/daddy/sessions', {
         projectId: selected.id,
         workspace: workspaceOptions(options),

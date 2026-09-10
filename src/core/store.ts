@@ -25,7 +25,7 @@ export class Store {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
-    if (version > 4) {
+    if (version > 5) {
       this.db.close();
       throw new AppError(
         'schema_newer',
@@ -57,7 +57,8 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS one_running_daddy ON daddy_jobs(group_id) WHERE status='running';
       CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
       CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
-      PRAGMA user_version=4;
+      CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
+      PRAGMA user_version=5;
     `);
     this.changes.setMaxListeners(100);
   }

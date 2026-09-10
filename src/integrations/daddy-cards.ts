@@ -23,8 +23,8 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
           { text: group.title.slice(0, 55), callback_data: `dad:open:${group.id}` },
         ]),
       [
-        { text: '📁 ' + t('Projects'), callback_data: 'dad:projects' },
-        { text: '🧵 ' + t('Telegram workspace'), callback_data: 'dad:workspace' },
+        { text: '📁 ' + t('Workspaces'), callback_data: 'dad:workspaces' },
+        { text: '🧵 ' + t('Telegram group'), callback_data: 'dad:group' },
       ],
       [
         { text: '⬆️ ' + t('Updates'), callback_data: 'updates:show' },
@@ -37,11 +37,11 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
 export function projectPicker(locale: Locale, projects: Project[]): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
-      .add('📁 ' + t('Choose a project'), 'bold')
+      .add('📁 ' + t('Choose a workspace'), 'bold')
       .add(
         '\n\n' +
           t(
-            'Projects are folders on the server. daddy creates separate working copies for writers.',
+            'Workspaces are folders on the server. daddy creates separate working copies for writers.',
           ),
       );
   return {
@@ -50,7 +50,7 @@ export function projectPicker(locale: Locale, projects: Project[]): TelegramCard
       ...projects
         .slice(0, 20)
         .map((project) => [{ text: project.name, callback_data: `dad:new:${project.id}` }]),
-      [{ text: '＋ ' + t('Find projects on the server'), callback_data: 'dad:discover' }],
+      [{ text: '＋ ' + t('Find workspaces on the server'), callback_data: 'dad:discover' }],
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
   };
@@ -63,7 +63,7 @@ export function daddyBoard(
   const t = translator(locale),
     text = new TelegramText()
       .add('👨‍💻 ' + board.group.title, 'bold')
-      .add('\n' + (board.project?.name ?? t('Project')))
+      .add('\n' + (board.project?.name ?? t('Workspace')))
       .add('\n' + (board.project?.repoPath ?? ''), 'code')
       .add('\n\n' + t('Writers: {active} / {limit}', board.writers))
       .add(

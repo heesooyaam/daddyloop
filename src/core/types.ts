@@ -91,6 +91,9 @@ export interface ReviewGroup {
   summary?: string;
   autoTurns?: number;
   daddyThreadId?: string;
+  daddyToolSignature?: string;
+  parentGroupId?: string;
+  createdByAction?: string;
   defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
 }
 export interface Project {
