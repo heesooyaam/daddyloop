@@ -3,6 +3,11 @@ import { translator, localeNames, type Locale } from '../i18n/index.js';
 import type { AgentProfiles } from '../core/types.js';
 import type { ModelOption, ModelCatalogueInfo } from '../core/agents.js';
 import type { UpdateNotice, UpdateStatus } from '../core/updates.js';
+import type {
+  CodexUpdatePlan,
+  CodexUpdateOperation,
+  CodexUpdaterStatus,
+} from '../core/codex-updater.js';
 export function languageCard(locale: Locale): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
@@ -96,7 +101,7 @@ export function updateCard(locale: Locale, notice: UpdateNotice): TelegramCard {
     .add(
       t(
         tool.source === 'bundled'
-          ? 'The bundled CLI updates with Reviewloop. A system CLI update does not change this copy.'
+          ? 'Open Updates to install Codex directly on this server.'
           : 'No running session has been restarted.',
       ),
     );
@@ -108,7 +113,11 @@ export function updateCard(locale: Locale, notice: UpdateNotice): TelegramCard {
     ],
   };
 }
-export function updatesCard(locale: Locale, status: UpdateStatus): TelegramCard {
+export function updatesCard(
+  locale: Locale,
+  status: UpdateStatus,
+  updater?: CodexUpdaterStatus,
+): TelegramCard {
   const t = translator(locale),
     text = new TelegramText().add('⬆️ ' + t('Updates'), 'bold');
   if (!status.checkedAt) text.add('\n\n' + t('Not checked yet'));
@@ -123,7 +132,9 @@ export function updatesCard(locale: Locale, status: UpdateStatus): TelegramCard 
               ? 'Bundled with Reviewloop'
               : tool.source === 'missing'
                 ? 'Not installed'
-                : 'External CLI',
+                : tool.source === 'managed'
+                  ? 'Managed by Reviewloop'
+                  : 'External CLI',
           ),
       );
     if (!tool.supported) text.add('\n' + t('Integration not available'));
@@ -154,9 +165,27 @@ export function updatesCard(locale: Locale, status: UpdateStatus): TelegramCard 
         { hours: status.intervalHours },
       ),
   );
+  if (updater?.busy) text.add('\n\n⏳ ' + t('Codex update in progress'));
+  if (updater?.operation?.phase === 'failed')
+    text.add('\n\n⚠️ ' + t('Last update failed') + '\n' + t(updater.operation.error ?? ''));
   return {
     ...text,
     buttons: [
+      ...(updater?.enabled &&
+      !updater.busy &&
+      status.tools.some((tool) => tool.id === 'codex' && tool.updateAvailable)
+        ? [[{ text: '⬆️ ' + t('Update Codex'), callback_data: 'codex:install' }]]
+        : []),
+      ...(updater?.enabled && !updater.busy && updater.rollback
+        ? [
+            [
+              {
+                text: '↩️ ' + t('Roll back to {version}', { version: updater.rollback }),
+                callback_data: 'codex:rollback',
+              },
+            ],
+          ]
+        : []),
       [{ text: '↻ ' + t('Check now'), callback_data: 'updates:check' }],
       [
         {
@@ -167,4 +196,70 @@ export function updatesCard(locale: Locale, status: UpdateStatus): TelegramCard 
       [{ text: '🌐 ' + t('Language'), callback_data: 'language:show' }],
     ],
   };
+}
+export function codexConfirmationCard(locale: Locale, plan: CodexUpdatePlan): TelegramCard {
+  const t = translator(locale),
+    text = new TelegramText()
+      .add(
+        (plan.action === 'install' ? '⬆️ ' : '↩️ ') +
+          t(plan.action === 'install' ? 'Update Codex' : 'Roll back Codex'),
+        'bold',
+      )
+      .add('\n\n')
+      .add(plan.from.version, 'code')
+      .add(' → ')
+      .add(plan.target.version, 'code')
+      .add(
+        '\n\n' +
+          t(
+            'The server will validate this version before switching. Running agents finish on their current version; subsequent turns use the selected version.',
+          ),
+      )
+      .add(
+        '\n\n' +
+          t(
+            'Your models, chats and login stay in place. The previous CLI remains available for rollback.',
+          ),
+      )
+      .add('\n\n' + t('This confirmation is valid for 10 minutes.'));
+  return {
+    ...text,
+    buttons: [
+      [{ text: '✅ ' + t('Confirm'), callback_data: `codex:confirm:${plan.id}` }],
+      [{ text: t('Back to updates'), callback_data: 'updates:show' }],
+    ],
+  };
+}
+export function codexOperationCard(locale: Locale, operation: CodexUpdateOperation): TelegramCard {
+  const t = translator(locale),
+    complete = operation.phase === 'complete',
+    failed = operation.phase === 'failed';
+  const text = new TelegramText()
+    .add(
+      (complete ? '✅ ' : failed ? '⚠️ ' : '⏳ ') +
+        t(
+          complete
+            ? 'Codex version selected'
+            : failed
+              ? 'Codex update failed'
+              : 'Codex update started',
+        ),
+      'bold',
+    )
+    .add('\n\n')
+    .add(operation.from.version, 'code')
+    .add(' → ')
+    .add(operation.target.version, 'code')
+    .add(
+      '\n\n' +
+        t(
+          complete
+            ? 'New agent turns will use this version. Running agents were not interrupted.'
+            : failed
+              ? 'The selected CLI was preserved. Open Updates to try again.'
+              : 'Download and validation run on the server. You can close Telegram; the bot will report the result.',
+        ),
+    );
+  if (operation.error) text.add('\n\n' + t(operation.error));
+  return { ...text, buttons: [[{ text: t('Updates'), callback_data: 'updates:show' }]] };
 }

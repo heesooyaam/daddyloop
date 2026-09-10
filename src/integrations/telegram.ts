@@ -26,7 +26,15 @@ import { preferences, setLocale } from '../core/preferences.js';
 import type { Locale } from '../i18n/index.js';
 import type { Catalogue } from '../server/planning.js';
 import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
-import { languageCard, modelsCard, updateCard, updatesCard } from './telegram-meta.js';
+import type { CodexUpdater, CodexUpdateOperation } from '../core/codex-updater.js';
+import {
+  codexConfirmationCard,
+  codexOperationCard,
+  languageCard,
+  modelsCard,
+  updateCard,
+  updatesCard,
+} from './telegram-meta.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type User = { id: number; is_bot?: boolean };
 type Chat = { id: number; type: string };
@@ -196,8 +204,8 @@ export class Telegram {
   private controller?: AbortController;
   private polling?: Promise<void>;
   private notices = Promise.resolve();
-  private integrations?: { catalogue: Catalogue; updates: UpdateMonitor };
-  configure(value: { catalogue: Catalogue; updates: UpdateMonitor }) {
+  private integrations?: { catalogue: Catalogue; updates: UpdateMonitor; updater?: CodexUpdater };
+  configure(value: { catalogue: Catalogue; updates: UpdateMonitor; updater?: CodexUpdater }) {
     this.integrations = value;
   }
   private locale(): Locale {
@@ -245,6 +253,10 @@ export class Telegram {
     this.currentUpdates();
   }
   private onEvent = (event: Event) => {
+    if (event.type === 'runtime.update_finished') {
+      this.codexResult(event.data as CodexUpdateOperation);
+      return;
+    }
     if (['runtime.update_available', 'runtime.version_changed'].includes(event.type)) {
       this.updateNotice(event.data as UpdateNotice);
       return;
@@ -498,6 +510,23 @@ export class Telegram {
     await this.api.send(chatId, publishCard(task, snapshot, id, this.locale()));
   }
   private async navigate(data: string, chatId: number): Promise<boolean> {
+    if (data.startsWith('codex:')) {
+      const updater = this.integrations?.updater,
+        pair = this.paired();
+      if (!updater || !pair) throw new Error('Codex updates are unavailable');
+      const audience = `telegram:${pair.chatId}:${pair.userId}`;
+      if (data === 'codex:install' || data === 'codex:rollback') {
+        const plan = await updater.prepare(
+          data === 'codex:install' ? 'install' : 'rollback',
+          audience,
+        );
+        await this.api.send(chatId, codexConfirmationCard(this.locale(), plan));
+      } else if (/^codex:confirm:[A-Za-z0-9_-]{24}$/.test(data)) {
+        const operation = updater.confirm(data.slice('codex:confirm:'.length), audience);
+        await this.api.send(chatId, codexOperationCard(this.locale(), operation));
+      } else throw new Error('Invalid Codex update action');
+      return true;
+    }
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
       if (language[1] !== 'show') setLocale(this.engine.store, language[1] as Locale);
@@ -569,9 +598,14 @@ export class Telegram {
     const status = refresh
       ? await this.integrations.updates.check(true)
       : this.integrations.updates.status();
-    await this.api.send(chatId, updatesCard(this.locale(), status));
+    await this.api.send(
+      chatId,
+      updatesCard(this.locale(), status, this.integrations.updater?.status()),
+    );
   }
   private currentUpdates() {
+    const operation = this.integrations?.updater?.status().operation;
+    if (operation && ['complete', 'failed'].includes(operation.phase)) this.codexResult(operation);
     const status = this.integrations?.updates.status();
     if (!status?.checkedAt) return;
     for (const tool of status.tools) {
@@ -580,6 +614,21 @@ export class Telegram {
       if (tool.changedFrom)
         this.updateNotice({ kind: 'changed', tool, checkedAt: status.checkedAt });
     }
+  }
+  private codexResult(operation: CodexUpdateOperation) {
+    const store = this.engine.store;
+    this.notices = this.notices
+      .then(async () => {
+        const pair = this.paired();
+        if (this.stopped || !pair) return;
+        const id = `telegram:codex-update:${operation.id}`;
+        if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+        store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
+        await this.api.send(pair.chatId, codexOperationCard(this.locale(), operation));
+        store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+      })
+      .catch((error) => store.setSetting('telegram.error', redact(String(error))));
+    void this.integrations?.updates.check(true).catch(() => {});
   }
   private updateNotice(notice: UpdateNotice) {
     if (!notice.tool.supported || !this.paired()) return;

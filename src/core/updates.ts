@@ -4,6 +4,8 @@ import {
   executablePath,
   isNewerVersion,
   versionNumber,
+  selectedExecutable,
+  type Executable,
 } from '../runtime/executable.js';
 import { redact } from './security.js';
 import type { Store } from './store.js';
@@ -13,7 +15,7 @@ export interface ToolVersion {
   name: string;
   supported: boolean;
   executable?: string;
-  source: 'bundled' | 'external' | 'missing';
+  source: 'bundled' | 'external' | 'managed' | 'missing';
   installed?: string;
   latest?: string;
   updateAvailable: boolean;
@@ -57,7 +59,8 @@ export class UpdateMonitor {
   constructor(
     private store: Store,
     private options: {
-      codex?: string;
+      codex?: Executable;
+      managedRoot?: string;
       claude?: string;
       intervalHours?: number;
       fetcher?: typeof fetch;
@@ -111,7 +114,11 @@ export class UpdateMonitor {
       root = bundledRoot();
     if (!path) return { source: 'missing' as const };
     const source =
-      root && path.startsWith(root + '/') ? ('bundled' as const) : ('external' as const);
+      this.options.managedRoot && path.startsWith(this.options.managedRoot + '/')
+        ? ('managed' as const)
+        : root && path.startsWith(root + '/')
+          ? ('bundled' as const)
+          : ('external' as const);
     try {
       const result = await command(path, ['--version'], {
         timeoutMs: 10000,
@@ -130,11 +137,12 @@ export class UpdateMonitor {
     }
   }
   private async load(): Promise<UpdateStatus> {
+    const executable = selectedExecutable(this.options.codex);
     const previous = this.status(),
       checkedAt = new Date().toISOString();
     const entries = await Promise.all(
       tools.map(async (tool) => {
-        const local = await this.probe(this.options[tool.id] ?? tool.id);
+        const local = await this.probe(selectedExecutable(this.options[tool.id] ?? tool.id));
         const result: ToolVersion = {
           id: tool.id,
           name: tool.name,
@@ -170,6 +178,7 @@ export class UpdateMonitor {
         return result;
       }),
     );
+    if (!this.stopped && executable !== selectedExecutable(this.options.codex)) return this.load();
     const result: UpdateStatus = {
       checkedAt,
       intervalHours: previous.intervalHours,

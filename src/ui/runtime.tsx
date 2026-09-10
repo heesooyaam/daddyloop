@@ -51,7 +51,9 @@ export function UpdatesPanel({ api }: { api: Api }) {
                 ? 'Bundled with Reviewloop'
                 : tool.source === 'missing'
                   ? 'Not installed'
-                  : 'External CLI',
+                  : tool.source === 'managed'
+                    ? 'Managed by Reviewloop'
+                    : 'External CLI',
             )}
           </span>
           {!tool.supported && <p>{t('Integration not available')}</p>}

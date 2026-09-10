@@ -1,5 +1,8 @@
 import { accessSync, constants, realpathSync, existsSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+export type Executable = string | (() => string | undefined) | undefined;
+export const selectedExecutable = (value: Executable): string =>
+  (typeof value === 'function' ? value() : value) ?? 'codex';
 export function executablePath(command: string): string | undefined {
   for (const candidate of command.includes('/')
     ? [resolve(command)]

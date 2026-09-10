@@ -4,6 +4,51 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { CodexRuntime } from '../src/runtime/codex.js';
 import { fixture } from './helpers.js';
+it('captures the executable for a running turn and reads the new selection only on the next turn', async () => {
+  const f = await fixture();
+  let executable = process.execPath,
+    entered!: () => void,
+    finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const runtime = new CodexRuntime({
+    executable: () => executable,
+    args: [resolve('tests/fixtures/fake-codex.mjs'), 'tool'],
+    timeoutMs: 5000,
+  });
+  const input = {
+    task: f.task,
+    job: f.job(),
+    cwd: process.cwd(),
+    prompt: 'Test',
+    signal: new AbortController().signal,
+    onSession: (thread: string) => {
+      f.task.reviewerThreadId = thread;
+    },
+    onEvent: () => {},
+    onTool: async () => {
+      entered();
+      await gate;
+      return {};
+    },
+  };
+  try {
+    const running = runtime.run(input);
+    await ready;
+    executable = '/nonexistent/new-codex';
+    finish();
+    expect((await running).status).toBe('completed');
+    expect(f.task.reviewerThreadId).toBe('thread-fixture');
+    await expect(runtime.run(input)).rejects.toThrow();
+  } finally {
+    finish();
+    f.store.close();
+  }
+});
 it.each(['happy', 'tool'])(
   'handles Codex completion ordering and bidirectional tools (%s)',
   async (mode) => {

@@ -1,11 +1,12 @@
-# Reviewloop 0.5.0
+# Reviewloop 0.6.0
 
-English and Russian are now selectable across the website, terminal workspace and Telegram. Interface preferences persist without changing task content, agent profiles or drafts.
+Update Codex directly from the paired Telegram bot: `/updates` → **Update Codex** → **Confirm**. The server downloads and validates the selected version, reports the result, and offers rollback. Closing Telegram or disconnecting the laptop does not stop the update.
 
-- Visible model provenance: the selected Codex CLI provides model/list, with a five-minute cache, retrieval/version metadata and explicit refresh controls.
-- Author and reviewer model/effort choices remain independent; model names and supported effort values come from the CLI rather than a maintained name list.
-- CLI version checks run every six hours and can be requested immediately. Telegram update alerts are deduplicated, with a separate notification preference.
-- Diagnostics distinguish the bundled Codex from external CLI installations. Explicit local runtime selection validates the app-server catalogue, requires an idle queue and preserves updater-compatible launcher paths.
-- Claude installation/version diagnostics are available; the Claude agent runtime is still not implemented.
+- Separate immutable Codex installations, verified against the official npm package's SHA-512 checksum. System CLI installations and Reviewloop release files remain intact.
+- Candidate version, app-server initialization, model catalogue and saved profiles are checked before activation. Each running agent finishes its current turn; subsequent turns use the selected CLI.
+- One-use expiring confirmations, durable recovery after service interruption, validated rollback and deduplicated completion messages.
+- Download size, time, disk and memory limits; temporary archives are removed after the operation.
+- Remote CLI controls: `reviewctl runtime update --yes`, `runtime update-status`, and `runtime rollback --yes`.
+- English and Russian Telegram cards and a distinct label for Codex versions installed by Reviewloop.
 
-Existing tasks, accounts, pairing, policies and model defaults are preserved. The updater does not install new binaries or restart running agents automatically.
+Existing tasks, model defaults, conversations, accounts and Telegram pairing are preserved. Updates require confirmation. Claude remains diagnostic only.
