@@ -56,7 +56,7 @@ export interface AgentProfiles {
   reviewer: AgentProfile;
 }
 export interface TicketSource {
-  kind: 'github_issue' | 'tracker';
+  kind: 'github_issue' | 'tracker' | 'local';
   key: string;
   url: string;
   title: string;
@@ -78,6 +78,42 @@ export interface ReviewGroup {
   generation: number;
   createdAt: string;
   updatedAt: string;
+  projectId?: string;
+  orchestrated?: boolean;
+  writerLimit?: number;
+  writer?: AgentProfile;
+  daddyState?: 'active' | 'paused' | 'needs_input' | 'archived';
+  summary?: string;
+  autoTurns?: number;
+  daddyThreadId?: string;
+  defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
+}
+export interface Project {
+  id: string;
+  name: string;
+  repoPath: string;
+  scope: string;
+  vcs: 'git' | 'arcadia';
+  provider: 'github' | 'gitlab' | 'arcadia';
+  host: string;
+  repo: string;
+  base?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface DaddyJob {
+  id: string;
+  groupId: string;
+  generation: number;
+  trigger: 'user' | 'worker' | 'recovery';
+  input: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  profile: AgentProfile;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+  notBefore?: string;
 }
 export interface Revision {
   head: string;
@@ -136,6 +172,10 @@ export interface Task {
   source?: TicketSource;
   groupId?: string;
   parentTaskId?: string;
+  projectId?: string;
+  scope?: string;
+  dependsOn?: string[];
+  createdByAction?: string;
   agents?: AgentProfiles;
   ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
@@ -231,6 +271,8 @@ export interface Job {
   startedAt?: string;
   finishedAt?: string;
   createdAt: string;
+  actionId?: string;
+  notBefore?: string;
 }
 export interface AgentResult {
   status: 'completed' | 'needs_input' | 'incomplete';
@@ -261,6 +303,20 @@ export class AppError extends Error {
   }
 }
 export const now = () => new Date().toISOString();
+export interface ExpectedTask {
+  head: string;
+  generation: number;
+  groupId?: string;
+}
+export function assertTaskVersion(task: Task, expected?: ExpectedTask) {
+  if (
+    expected &&
+    (task.revision?.head !== expected.head ||
+      task.generation !== expected.generation ||
+      (expected.groupId !== undefined && task.groupId !== expected.groupId))
+  )
+    throw new AppError('stale_task', 'The task changed. Refresh it before confirming this action.');
+}
 export const isTicket = (task: Task) => task.ref.kind === 'ticket';
 export function prRef(task: Task): PRRef {
   if (task.ref.kind === 'ticket')

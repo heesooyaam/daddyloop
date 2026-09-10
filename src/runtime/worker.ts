@@ -6,6 +6,9 @@ import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
 import { buildContext } from './context.js';
+import { projectScope } from '../core/projects.js';
+import { realpathSync } from 'node:fs';
+import { join, sep } from 'node:path';
 
 export class Worker {
   private active = new Map<string, AbortController>();
@@ -17,6 +20,20 @@ export class Worker {
   private lastPoll = 0;
   private tickDone: Promise<void> = Promise.resolve();
   private lastCleanup = 0;
+  private lastArcRelease = 0;
+  private reservedGroups = new Set<string>();
+  reserveGroup(id: string) {
+    if (
+      this.reservedGroups.has(id) ||
+      [...this.runningJobs.values()].some((job) => job.role === 'reviewer' && job.groupId === id)
+    )
+      return false;
+    this.reservedGroups.add(id);
+    return true;
+  }
+  releaseGroup(id: string) {
+    this.reservedGroups.delete(id);
+  }
   autoCleanup?: () => Promise<unknown>;
   autoSubmit?: (id: string) => Promise<unknown>;
   constructor(
@@ -51,6 +68,37 @@ export class Worker {
     try {
       const store = this.engine.store;
       const resources = this.resourceCheck();
+      if (Date.now() - this.lastArcRelease > 15000) {
+        this.lastArcRelease = Date.now();
+        for (const task of store.tasks())
+          if (
+            task.ref.provider === 'arcadia' &&
+            task.ref.kind !== 'ticket' &&
+            task.arcWorkspaces?.author &&
+            !store.busy(task.id) &&
+            task.pendingAuthorHead === task.revision?.head &&
+            task.pr?.head === task.revision?.head
+          ) {
+            try {
+              await this.engine.lock(task.id, async () => {
+                const current = store.getTask(task.id);
+                if (
+                  store.busy(current.id) ||
+                  current.ref.kind === 'ticket' ||
+                  !current.arcWorkspaces?.author ||
+                  current.pendingAuthorHead !== current.revision?.head ||
+                  current.pr?.head !== current.revision?.head
+                )
+                  return;
+                await this.workspaces.releaseArc(current, 'author');
+                store.saveTask(current);
+                store.event(current.id, 'author.workspace_released');
+              });
+            } catch (error) {
+              store.event(task.id, 'author.workspace_preserved', { error: redact(String(error)) });
+            }
+          }
+      }
       if (!resources.ok && this.active.size) {
         for (const id of this.active.keys())
           await this.engine.interruptTask(
@@ -157,6 +205,24 @@ export class Worker {
         const job = store.claim(
           (candidate) =>
             !this.active.has(candidate.taskId) &&
+            (!candidate.groupId ||
+              (() => {
+                const group = store.getGroup(candidate.groupId!);
+                if (group.daddyState === 'paused' || group.daddyState === 'archived') return false;
+                if (candidate.role === 'reviewer') return !this.reservedGroups.has(group.id);
+                if (
+                  group.orchestrated &&
+                  [...this.runningJobs.values()].filter(
+                    (job) => job.role === 'author' && job.groupId === group.id,
+                  ).length >= (group.writerLimit ?? 1)
+                )
+                  return false;
+                const task = store.getTask(candidate.taskId);
+                return (
+                  candidate.kind === 'chat' ||
+                  !(task.dependsOn ?? []).some((id) => store.getTask(id).state !== 'complete')
+                );
+              })()) &&
             !(
               candidate.role === 'reviewer' &&
               candidate.groupId &&
@@ -272,10 +338,16 @@ export class Worker {
         store.saveTask(task);
         store.event(task.id, 'author.feedback_snapshot', actual, job.id);
       }
+      let agentCwd = cwd;
+      if (task.scope && !demo) {
+        agentCwd = realpathSync(join(cwd, projectScope(task.scope)));
+        if (!agentCwd.startsWith(realpathSync(cwd) + sep))
+          throw new Error('The starting directory escaped its managed workspace');
+      }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
-        cwd,
+        cwd: agentCwd,
         prompt: buildContext(store, task, job),
         signal: abort.signal,
         onSession: (threadId, turnId) => {
@@ -360,9 +432,12 @@ export class Worker {
       if (!abort.signal.aborted) await this.engine.completeJob(job, result);
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
-      job.status = abort.signal.aborted ? 'cancelled' : 'failed';
+      const capacity =
+        error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
+      job.status = capacity ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
-      if (!abort.signal.aborted) this.engine.failJob(job, error);
+      if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
+      else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
       if (job.role === 'reviewer') {
         const task = store.getTask(job.taskId);

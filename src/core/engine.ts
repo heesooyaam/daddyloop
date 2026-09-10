@@ -3,6 +3,8 @@ import { Store } from './store.js';
 import { Broker } from './broker.js';
 import {
   AppError,
+  assertTaskVersion,
+  type ExpectedTask,
   prRef,
   isTicket,
   type AgentProfiles,
@@ -60,6 +62,10 @@ export class Engine {
     authorThreadId?: string;
     agents?: AgentProfiles;
     groupId?: string;
+    projectId?: string;
+    scope?: string;
+    createdByAction?: string;
+    groupGeneration?: number;
   }) {
     const pr = await this.provider(input.ref).getPR(input.ref);
     if (pr.state !== 'open')
@@ -78,6 +84,11 @@ export class Engine {
     )
       throw new AppError('thread_in_use', 'This Codex thread is already assigned to another task');
     const group = input.groupId ? this.store.getGroup(input.groupId) : undefined;
+    if (group && input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
+      throw new AppError(
+        'stale_daddy',
+        'The Daddy session changed while the pull request was being attached',
+      );
     const task: PRTask = {
       id: randomUUID(),
       title: input.title || pr.title,
@@ -87,7 +98,7 @@ export class Engine {
       repoPath: input.repoPath,
       state: 'queued',
       reason: 'Ready for independent review',
-      policy: { ...defaultPolicy, ...input.policy },
+      policy: { ...defaultPolicy, ...group?.defaultPolicy, ...input.policy },
       generation: 1,
       contextVersion: 1,
       round: 0,
@@ -100,8 +111,12 @@ export class Engine {
       authorThreadId: input.authorThreadId,
       planTaskId: input.planTaskId,
       groupId: group?.id,
+      projectId: input.projectId ?? group?.projectId,
+      scope: input.scope,
+      createdByAction: input.createdByAction,
       agents: {
         ...this.defaultAgents(),
+        ...(group?.writer ? { author: group.writer } : {}),
         ...input.agents,
         ...(group ? { reviewer: group.reviewer } : {}),
       },
@@ -127,6 +142,10 @@ export class Engine {
       };
     }
     this.store.transaction(() => {
+      if (group && !group.rootTaskId) {
+        group.rootTaskId = task.id;
+        this.store.saveGroup(group);
+      }
       this.store.saveTask(task);
       this.store.event(task.id, 'task.created', {
         kind: task.kind,
@@ -349,9 +368,10 @@ export class Engine {
       );
     }
   }
-  async publish(id: string) {
+  async publish(id: string, expected?: ExpectedTask) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      assertTaskVersion(task, expected);
       if (task.state !== 'awaiting_publication' || !task.reviewFinished || this.store.busy(id))
         throw new AppError(
           'publication_unavailable',
@@ -361,7 +381,7 @@ export class Engine {
       return this.reconcileLocked(id);
     });
   }
-  async chat(id: string, role: 'author' | 'reviewer', text: string) {
+  async chat(id: string, role: 'author' | 'reviewer', text: string, actionId?: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (task.state === 'paused' || task.state === 'complete')
@@ -371,7 +391,7 @@ export class Engine {
         );
       this.store.transaction(() => {
         this.store.message(id, role, 'user', text);
-        this.store.enqueue(task, role, 'chat', text);
+        this.store.enqueue(task, role, 'chat', text, actionId);
       });
       return task;
     });
@@ -555,9 +575,11 @@ export class Engine {
     id: string,
     action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen',
     reason = '',
+    expected?: ExpectedTask,
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      assertTaskVersion(task, expected);
       if (action === 'pause') {
         task.resumeState = task.state;
         task.generation++;
@@ -773,6 +795,13 @@ export class Engine {
     agents?: AgentProfiles;
     publication?: 'auto' | 'human';
     autoPush?: boolean;
+    groupId?: string;
+    groupGeneration?: number;
+    projectId?: string;
+    scope?: string;
+    createdByAction?: string;
+    dependsOn?: string[];
+    id?: string;
   }) {
     if (
       this.store
@@ -790,7 +819,16 @@ export class Engine {
         throw new AppError('already_attached', 'This ticket already has an active task');
       const parent = input.parentTaskId ? this.store.getTask(input.parentTaskId) : undefined;
       let group: ReviewGroup;
-      if (parent?.groupId) group = this.store.getGroup(parent.groupId);
+      if (input.groupId) {
+        group = this.store.getGroup(input.groupId);
+        if (input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
+          throw new AppError(
+            'stale_daddy',
+            'The Daddy session changed while the ticket was being imported',
+          );
+        if (parent?.groupId && parent.groupId !== group.id)
+          throw new AppError('wrong_session', 'The parent belongs to another Daddy session');
+      } else if (parent?.groupId) group = this.store.getGroup(parent.groupId);
       else if (parent) {
         if (this.store.busy(parent.id))
           throw new AppError(
@@ -823,7 +861,7 @@ export class Engine {
           updatedAt: now(),
         };
       if (
-        parent &&
+        (parent || input.groupId) &&
         input.agents?.reviewer &&
         (['engine', 'model', 'effort'] as const).some(
           (key) => input.agents!.reviewer[key] !== group.reviewer[key],
@@ -834,7 +872,7 @@ export class Engine {
           'Child tickets inherit the group reviewer; change it in the group model settings',
         );
       const task: Task = {
-        id: randomUUID(),
+        id: input.id ?? randomUUID(),
         title: input.source.title,
         kind: 'code',
         ref: input.ref,
@@ -844,17 +882,24 @@ export class Engine {
         requirements: input.requirements ?? (input.source.body || input.source.title),
         parentTaskId: parent?.id,
         groupId: group.id,
+        projectId: input.projectId ?? group.projectId,
+        scope: input.scope,
+        createdByAction: input.createdByAction,
+        dependsOn: input.dependsOn,
         agents: {
-          author: input.agents?.author ?? this.defaultAgents().author,
+          author: input.agents?.author ?? group.writer ?? this.defaultAgents().author,
           reviewer: group.reviewer,
         },
         policy: {
           ...defaultPolicy,
-          publication: input.publication ?? defaultPolicy.publication,
-          autoPush: input.autoPush ?? defaultPolicy.autoPush,
+          publication:
+            input.publication ?? group.defaultPolicy?.publication ?? defaultPolicy.publication,
+          autoPush: input.autoPush ?? group.defaultPolicy?.autoPush ?? defaultPolicy.autoPush,
         },
         state: 'discussing',
-        reason: 'Ticket imported. The author is reading it before implementation.',
+        reason: group.orchestrated
+          ? 'Waiting for Daddy to assign this task.'
+          : 'Ticket imported. The author is reading it before implementation.',
         generation: 1,
         contextVersion: 1,
         round: 0,
@@ -879,18 +924,19 @@ export class Engine {
           groupId: group.id,
           parentTaskId: parent?.id,
         });
-        this.store.enqueue(
-          task,
-          'author',
-          'chat',
-          'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
-        );
+        if (!group.orchestrated)
+          this.store.enqueue(
+            task,
+            'author',
+            'chat',
+            'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
+          );
       });
       return task;
     };
     return parent ? this.lock(parent.id, create) : create();
   }
-  async implement(id: string) {
+  async implement(id: string, actionId?: string, instruction?: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (!isTicket(task))
@@ -918,7 +964,9 @@ export class Engine {
         task,
         'author',
         'implement',
-        'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
+        instruction ??
+          'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
+        actionId,
       );
       return task;
     });

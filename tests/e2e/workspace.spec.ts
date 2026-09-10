@@ -5,7 +5,7 @@ test('discusses a draft, publishes it, runs corrections, and verifies the final 
 }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await page.goto('/?legacy=1');
   await page
     .getByLabel('Local access token')
     .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
@@ -51,7 +51,7 @@ test('mobile layout has no horizontal overflow and the create form validates inp
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+  await page.goto('/?legacy=1');
   await page
     .getByLabel('Local access token')
     .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
@@ -86,13 +86,14 @@ test('a paired phone uses HTTPS and remains connected after the laptop browser c
   try {
     const page = await phone.newPage();
     await page.goto(url);
-    await expect(page.getByRole('heading', { name: 'Review workspace' })).toBeVisible();
+    await expect(page.locator('.daddy-app')).toBeVisible();
     expect(page.url()).not.toContain('#pair/');
     expect((await phone.cookies()).find((c) => c.name === 'reviewloop_session')?.secure).toBe(true);
     await laptop.close();
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Review workspace' })).toBeVisible();
-    await page.getByRole('button', { name: 'Devices and connections', exact: true }).click();
+    await expect(page.locator('.daddy-app')).toBeVisible();
+    await page.getByRole('button', { name: 'Sessions', exact: true }).click();
+    await page.getByRole('button', { name: /Projects/ }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     expect(
       (
@@ -112,7 +113,7 @@ test('starts ticket conversations with separate models, adds a child and saves p
   const issue = Date.now();
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await page.goto('/?legacy=1');
   await page
     .getByLabel('Local access token')
     .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
@@ -154,7 +155,7 @@ test('switches both interface languages, preserves task text, refreshes models a
 }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await page.goto('/?legacy=1');
   await page
     .getByLabel('Local access token')
     .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
@@ -193,7 +194,7 @@ test('switches both interface languages, preserves task text, refreshes models a
 });
 
 test('keeps the language chosen before login after connection and reload', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?legacy=1');
   await page.getByLabel('Interface language').selectOption('ru');
   await page
     .getByLabel('Локальный токен доступа')

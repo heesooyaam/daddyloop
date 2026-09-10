@@ -32,6 +32,11 @@ import { preferences, preferenceInput, setLocale } from '../core/preferences.js'
 import { UpdateMonitor } from '../core/updates.js';
 import { CodexUpdater } from '../core/codex-updater.js';
 import { executablePath } from '../runtime/executable.js';
+import { Projects } from '../core/projects.js';
+import { Daddy } from '../core/daddy.js';
+import { registerDaddy } from './daddy.js';
+import type { SessionRuntime } from '../runtime/agent.js';
+import type { DaddyWorkspace } from '../runtime/daddy-workspace.js';
 
 const policySchema = z
   .object({
@@ -59,6 +64,9 @@ const createSchema = z
   })
   .strict();
 export interface ServerOptions {
+  projects?: Projects;
+  daddyRuntime?: SessionRuntime;
+  daddyWorkspace?: Pick<DaddyWorkspace, 'prepare' | 'release'>;
   codexUpdater?: CodexUpdater;
   updateMonitor?: UpdateMonitor;
   startUpdateCheck?: boolean;
@@ -140,6 +148,13 @@ export async function buildApp(options: ServerOptions) {
         const profiles = [
           engine.defaultAgents(),
           ...store
+            .groups()
+            .filter((group) => group.orchestrated)
+            .map((group) => ({
+              reviewer: group.reviewer,
+              author: group.writer ?? engine.defaultAgents().author,
+            })),
+          ...store
             .tasks()
             .filter((task) => task.state !== 'complete')
             .map((task) => engine.effectiveAgents(task)),
@@ -176,6 +191,23 @@ export async function buildApp(options: ServerOptions) {
     config.maxConcurrentAgents,
   );
   worker.autoSubmit = (id) => tickets.submit(id);
+  const projects = options.projects ?? new Projects(store, config.projects.roots);
+  workspaces.protectSources(() =>
+    projects
+      .list()
+      .filter((project) => project.vcs === 'arcadia')
+      .map((project) => project.repoPath),
+  );
+  const daddy = new Daddy(
+    engine,
+    projects,
+    tickets,
+    worker,
+    options.daddyRuntime ?? new CodexRuntime({ executable }),
+    getResources,
+    catalogue,
+    options.daddyWorkspace,
+  );
   if (config.cache.auto) worker.autoCleanup = () => cache.prune(true);
   const token = options.token ?? accessToken(dataDir);
   const access = new Access(store, token);
@@ -254,6 +286,7 @@ export async function buildApp(options: ServerOptions) {
     return payload;
   });
   app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
+  registerDaddy(app, daddy);
   app.post('/api/session', async (request, reply) => {
     const input = z
       .object({ token: z.string().min(1).max(256) })
@@ -361,6 +394,7 @@ export async function buildApp(options: ServerOptions) {
     };
     return {
       version: VERSION,
+      application: 'Daddyloop',
       preferences: preferences(store),
       instanceId: store.setting('server.instanceId'),
       runtime: {
@@ -373,7 +407,9 @@ export async function buildApp(options: ServerOptions) {
       },
       updates: updates.status(),
       codexUpdater: updater.status(),
-      queuedJobs: store.jobs().filter((job) => job.status === 'queued').length,
+      queuedJobs:
+        store.jobs().filter((job) => job.status === 'queued').length +
+        store.daddyJobs().filter((job) => job.status === 'queued').length,
       publicOrigin: publicOrigin ?? null,
       telegram: telegram?.status() ?? {
         configured: false,
@@ -385,7 +421,9 @@ export async function buildApp(options: ServerOptions) {
         github: connection('github'),
         gitlab: connection('gitlab'),
       },
-      activeJobs: store.jobs().filter((j) => j.status === 'running').length,
+      activeJobs:
+        store.jobs().filter((j) => j.status === 'running').length +
+        store.daddyJobs().filter((job) => job.status === 'running').length,
     };
   });
   app.get('/api/tasks', async () => store.tasks());
@@ -530,6 +568,15 @@ export async function buildApp(options: ServerOptions) {
       })
       .strict()
       .parse(request.body);
+    if (role === 'author')
+      throw new AppError(
+        'contact_daddy',
+        'Send instructions to Daddy; writers receive tasks only from him',
+        403,
+      );
+    const task = store.getTask(request.params.id);
+    if (task.groupId && store.getGroup(task.groupId).orchestrated)
+      return daddy.chat(task.groupId, text);
     return engine.chat(request.params.id, role, text);
   });
   app.post<{ Params: { id: string } }>('/api/tasks/:id/policy', async (request) => {
@@ -613,6 +660,7 @@ export async function buildApp(options: ServerOptions) {
     if (!options.store) store.close();
   });
   app.addHook('preClose', async () => {
+    await daddy.stop();
     store.changes.off('event', refreshRuntime);
     await updater.stop();
     await updates.stop();
@@ -644,7 +692,7 @@ export async function buildApp(options: ServerOptions) {
         .then((instance) => {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
-          telegram.configure({ catalogue, updates, updater });
+          telegram.configure({ catalogue, updates, updater, daddy });
           store.setSetting('telegram.error', null);
           telegram.start();
         })
@@ -654,6 +702,9 @@ export async function buildApp(options: ServerOptions) {
         });
     }
   });
-  if (options.startWorker !== false) worker.start();
-  return { app, engine, worker, store };
+  if (options.startWorker !== false) {
+    worker.start();
+    daddy.start();
+  }
+  return { app, engine, worker, store, daddy, projects };
 }

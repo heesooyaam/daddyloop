@@ -81,7 +81,7 @@ export function registerOperations(program: Command) {
       if (!options.yes && process.stdin.isTTY) {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
         try {
-          output('Reviewloop setup · the service and both agents run on this machine.');
+          output('Daddyloop setup · Daddy and the writers run on this machine.');
           const port = await rl.question(`Local port [${config.port}]: `);
           if (port.trim()) config.port = Number(port);
           const memory = await rl.question(
@@ -89,7 +89,7 @@ export function registerOperations(program: Command) {
           );
           if (memory.trim()) config.memoryMax = memory.trim();
           const cache = await rl.question(
-            'Automatically remove only safe Reviewloop cache artifacts under disk pressure? [y/N]: ',
+            'Automatically remove only safe Daddyloop cache artifacts under disk pressure? [y/N]: ',
           );
           config.cache.auto = /^y(es)?$/i.test(cache.trim());
         } finally {
@@ -113,7 +113,7 @@ export function registerOperations(program: Command) {
         );
       }
       output(
-        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse reviewctl auth codex / github / gitlab to connect accounts.\nUse reviewctl web and reviewctl phone to connect your browser and phone.\nUse reviewctl telegram setup to connect your bot.`,
+        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse daddy auth codex / github / gitlab to connect accounts.\nUse daddy web and daddy phone to connect your browser and phone.\nUse daddy telegram setup to connect your bot.`,
       );
     });
   program
@@ -169,7 +169,7 @@ export function registerOperations(program: Command) {
     .command('connect')
     .argument('<url>')
     .option('--token-file <path>')
-    .description('Connect this CLI to a Reviewloop server')
+    .description('Connect this CLI to a Daddyloop server')
     .action(async (url, options) => {
       const origin = validateServerUrl(url),
         token = options.tokenFile
@@ -248,7 +248,7 @@ export function registerOperations(program: Command) {
     output(
       config.publicOrigin
         ? `Permanent address: ${config.publicOrigin}\nThe service runs on the host independently of SSH.`
-        : 'Local access only. Configure a permanent HTTPS address with reviewctl web origin <https-url>, or reviewctl web tailscale. An SSH tunnel stops when the laptop disconnects.',
+        : 'Local access only. Configure a permanent HTTPS address with daddy web origin <https-url>, or daddy web tailscale. An SSH tunnel stops when the laptop disconnects.',
     );
   });
   web
@@ -324,7 +324,7 @@ export function registerOperations(program: Command) {
     .action(async (id) => output(await api(`/devices/${encodeURIComponent(id)}/revoke`, {})));
   const cache = program
     .command('cache')
-    .description('Inspect and prune only verified Reviewloop-owned caches');
+    .description('Inspect and prune only verified Daddyloop-owned caches');
   cache.command('status', { isDefault: true }).action(async () => output(await api('/cache')));
   cache
     .command('prune')

@@ -93,6 +93,13 @@ export class TicketReader {
     private trackerCredential = trackerToken,
     private githubCredential = (host: string) => credential('github', host),
   ) {}
+  gitlab(address: { host: string }) {
+    return new ProviderHttp(
+      `https://${address.host}/api/v4`,
+      { 'PRIVATE-TOKEN': credential('gitlab', address.host) },
+      this.fetcher,
+    );
+  }
   github(address: Pick<TicketAddress, 'host'>) {
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',

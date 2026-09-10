@@ -3,9 +3,12 @@ import { join } from 'node:path';
 import { privateWrite } from '../ops/config.js';
 import { randomUUID } from 'node:crypto';
 import type { Task, Role } from '../core/types.js';
+import { AppError } from '../core/types.js';
 import { ArcBridge, type ArcLease } from '../integrations/arcadia.js';
 type Saved = ArcLease & { initialHash: string; initialBranch: string; baseHead: string };
 export class ArcWorkspaces {
+  protectedSources: () => string[] = () => [];
+  private allocation = Promise.resolve();
   constructor(
     private dataDir: string,
     private bridge = new ArcBridge(),
@@ -23,6 +26,20 @@ export class ArcWorkspaces {
     return match.path;
   }
   async prepare(task: Task, role: Role, signal?: AbortSignal): Promise<string> {
+    const previous = this.allocation;
+    let release!: () => void;
+    this.allocation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      signal?.throwIfAborted();
+      return await this.prepareLocked(task, role, signal);
+    } finally {
+      release();
+    }
+  }
+  private async prepareLocked(task: Task, role: Role, signal?: AbortSignal): Promise<string> {
     if (!task.revision) throw new Error('A pinned revision is required');
     task.arcWorkspaces ??= {};
     let saved = task.arcWorkspaces[role] as Saved | undefined;
@@ -39,9 +56,27 @@ export class ArcWorkspaces {
           'The previous Arc workspace lease is unavailable. Its work was preserved; inspect it before continuing.',
         );
     } else {
-      for (const candidate of (await this.bridge.mounts()).filter(
-        (m) => m.claimable && m.object_store_ok && m.path !== task.repoPath,
-      )) {
+      const candidates = (await this.bridge.mounts()).filter(
+        (m) =>
+          m.claimable &&
+          m.object_store_ok &&
+          m.path !== task.repoPath &&
+          !this.protectedSources().includes(m.path),
+      );
+      // Leave one mount available for Daddy/review so a full writer pool cannot deadlock.
+      if (role === 'author' && candidates.length <= 1) {
+        if (
+          typeof this.bridge.provision === 'function' &&
+          (await this.bridge.provision(task.repoPath))
+        )
+          return this.prepareLocked(task, role, signal);
+        throw new AppError(
+          'workspace_capacity',
+          'Waiting for an Arc writer slot; one workspace is reserved for Daddy and review.',
+          503,
+        );
+      }
+      for (const candidate of candidates) {
         let lease: ArcLease;
         try {
           lease = await this.bridge.claim(
@@ -69,7 +104,14 @@ export class ArcWorkspaces {
           privateWrite(journal, JSON.stringify(saved));
           if (role === 'author')
             await this.bridge.native(
-              ['checkout', '-b', `reviewloop/${task.id}`, task.revision.head],
+              [
+                'checkout',
+                '-b',
+                task.ref.kind === 'ticket'
+                  ? `reviewloop/${task.id}`
+                  : `reviewloop/${task.id}-g${task.generation}-${randomUUID().slice(0, 8)}`,
+                task.revision.head,
+              ],
               saved.mount,
               signal,
             );
@@ -80,10 +122,18 @@ export class ArcWorkspaces {
           throw error;
         }
       }
-      if (!saved)
-        throw new Error(
-          'No free, clean Arc mount is available. Supply separate leased mounts for author and reviewer; the user source checkout was preserved.',
+      if (!saved) {
+        if (
+          typeof this.bridge.provision === 'function' &&
+          (await this.bridge.provision(task.repoPath))
+        )
+          return this.prepareLocked(task, role, signal);
+        throw new AppError(
+          'workspace_capacity',
+          'Waiting for a free, clean Arc workspace. Existing source checkouts and writer changes are preserved.',
+          503,
         );
+      }
     }
     const info = JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal)) as {
       hash: string;
@@ -231,10 +281,13 @@ export class ArcWorkspaces {
     if (!owned) throw new Error('This task no longer owns the Arc lease');
     const info = JSON.parse(await this.bridge.native(['info', '--json'], saved.mount)) as {
       hash: string;
+      branch: string;
     };
     if (
       (await this.bridge.native(['status', '--short'], saved.mount)) ||
-      (role === 'reviewer' && info.hash !== saved.baseHead) ||
+      (role === 'reviewer' &&
+        info.hash !== saved.baseHead &&
+        !(info.hash === saved.initialHash && info.branch === saved.initialBranch)) ||
       (role === 'author' && info.hash !== task.revision?.head)
     )
       throw new Error(

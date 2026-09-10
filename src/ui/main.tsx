@@ -3,6 +3,7 @@ import { localeNames, type Locale } from '../i18n/index.js';
 import type { Preferences } from '../core/preferences.js';
 import type { UpdateStatus } from '../core/updates.js';
 import { UpdatesPanel } from './runtime.js';
+import { DaddyWorkspace } from './daddy.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Markdown from 'react-markdown';
@@ -90,7 +91,7 @@ class ApiError extends Error {
     super(message);
   }
 }
-async function api<T>(path: string, body?: unknown): Promise<T> {
+async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const result = await fetch(`/api${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: {
@@ -98,6 +99,7 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
       'X-Reviewloop-Request': '1',
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   const data = await result.json();
   if (!result.ok) throw new ApiError(data.error?.message ?? 'Request failed', result.status);
@@ -173,7 +175,7 @@ function Brand() {
         <RefreshCw size={21} />
       </span>
       <span>
-        reviewloop<span className="brand-period">.</span>
+        daddyloop<span className="brand-period">.</span>
       </span>
     </div>
   );
@@ -349,6 +351,8 @@ function App() {
         }}
       />
     );
+  if (!new URLSearchParams(location.search).has('legacy') && !location.hash.startsWith('#task/'))
+    return <DaddyWorkspace api={api} />;
   const task = detail?.task.id === selected ? detail.task : undefined;
   const attentionCount = tasks.filter((t) => needsAttention(t.state)).length;
   const runningCount = tasks.filter((t) => isRunning(t.state)).length;
@@ -991,7 +995,9 @@ function App() {
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
                         rows={3}
-                        disabled={task.state === 'paused' || task.state === 'complete'}
+                        disabled={
+                          tab === 'author' || task.state === 'paused' || task.state === 'complete'
+                        }
                         onKeyDown={(e) => {
                           if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                             e.preventDefault();
@@ -1010,6 +1016,7 @@ function App() {
                           className="button primary icon-send"
                           aria-label={tr('Send message')}
                           disabled={
+                            tab === 'author' ||
                             busy ||
                             !draft.trim() ||
                             task.state === 'paused' ||
@@ -1482,12 +1489,12 @@ function Login({
         <span className="login-lock">
           <LockKeyhole size={25} />
         </span>
-        <h1>{tr('Your review workspace.')}</h1>
+        <h1>{tr('Your Daddyloop workspace.')}</h1>
         <p>
           {tr(' Connect to the service running on your machine. ')}
           <br />
           {tr(' Find your access token with ')}
-          <code>{tr('reviewctl token')}</code>.
+          <code>daddy token</code>.
         </p>
         <form
           onSubmit={async (e) => {

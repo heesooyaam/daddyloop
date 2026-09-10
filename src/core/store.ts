@@ -13,6 +13,8 @@ import {
   type Decision,
   type ReviewGroup,
   type AgentProfiles,
+  type Project,
+  type DaddyJob,
 } from './types.js';
 
 export class Store {
@@ -23,7 +25,7 @@ export class Store {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
-    if (version > 3) {
+    if (version > 4) {
       this.db.close();
       throw new AppError(
         'schema_newer',
@@ -50,7 +52,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_actions (id TEXT PRIMARY KEY, data TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, status TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS review_groups (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      PRAGMA user_version=3;
+      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS daddy_jobs (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS one_running_daddy ON daddy_jobs(group_id) WHERE status='running';
+      CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
+      CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
+      PRAGMA user_version=4;
     `);
     this.changes.setMaxListeners(100);
   }
@@ -117,7 +124,7 @@ export class Store {
         at: row.at as string,
       }));
   }
-  enqueue(task: Task, role: Job['role'], kind: Job['kind'], input: string): Job {
+  enqueue(task: Task, role: Job['role'], kind: Job['kind'], input: string, actionId?: string): Job {
     const group = task.groupId ? this.getGroup(task.groupId) : undefined;
     const defaults = this.setting<AgentProfiles>('agents.defaults');
     const job: Job = {
@@ -133,6 +140,7 @@ export class Store {
         role === 'reviewer' && group ? group.reviewer : (task.agents?.[role] ?? defaults?.[role]),
       groupId: group?.id,
       groupGeneration: group?.generation,
+      actionId,
     };
     this.saveJob(job);
     this.event(task.id, 'job.queued', { role, kind }, job.id);
@@ -168,6 +176,7 @@ export class Store {
           continue;
         }
         if (!eligible(job)) continue;
+        if (job.notBefore && job.notBefore > now()) continue;
         if (
           job.role === 'reviewer' &&
           job.groupId &&
@@ -196,6 +205,52 @@ export class Store {
       .prepare('SELECT data FROM review_groups ORDER BY rowid DESC')
       .all()
       .map((row) => JSON.parse(row.data as string));
+  }
+  projects(): Project[] {
+    return this.db
+      .prepare('SELECT data FROM projects ORDER BY rowid')
+      .all()
+      .map((row) => JSON.parse(row.data as string));
+  }
+  project(id: string): Project {
+    const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(id);
+    if (!row) throw new AppError('project_missing', 'Project not found', 404);
+    return JSON.parse(row.data as string);
+  }
+  saveProject(project: Project) {
+    project.updatedAt = now();
+    this.db
+      .prepare('INSERT INTO projects VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
+      .run(project.id, JSON.stringify(project));
+  }
+  daddyJobs(groupId?: string): DaddyJob[] {
+    const rows = groupId
+      ? this.db.prepare('SELECT data FROM daddy_jobs WHERE group_id=? ORDER BY rowid').all(groupId)
+      : this.db.prepare('SELECT data FROM daddy_jobs ORDER BY rowid').all();
+    return rows.map((row) => JSON.parse(row.data as string));
+  }
+  saveDaddyJob(job: DaddyJob) {
+    this.db
+      .prepare(
+        'INSERT INTO daddy_jobs VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data',
+      )
+      .run(job.id, job.groupId, job.status, JSON.stringify(job));
+  }
+  daddyMessage(groupId: string, sender: Message['sender'], text: string, runId?: string) {
+    const message: Message = {
+      id: randomUUID(),
+      taskId: groupId,
+      role: 'reviewer',
+      sender,
+      text,
+      runId,
+      at: now(),
+    };
+    this.db
+      .prepare('INSERT INTO messages VALUES(?,?,?)')
+      .run(message.id, groupId, JSON.stringify(message));
+    this.event(groupId, 'daddy.message', { messageId: message.id, sender }, runId);
+    return message;
   }
   getGroup(id: string): ReviewGroup {
     const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);

@@ -50,6 +50,9 @@ export class Workspaces {
   constructor(readonly dataDir: string) {
     this.arc = new ArcWorkspaces(dataDir);
   }
+  protectSources(paths: () => string[]) {
+    this.arc.protectedSources = paths;
+  }
   async validate(path: string, provider?: string) {
     if (provider === 'arcadia') return this.arc.validate(path);
     if (!path || !existsSync(path))
@@ -263,7 +266,11 @@ export class Workspaces {
     if (
       !['https:', 'ssh:'].includes(url.protocol) ||
       url.hostname !== input.host ||
-      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+      !(
+        input.provider === 'gitlab'
+          ? /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/
+          : /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+      ).test(repo) ||
       url.password ||
       url.port
     )

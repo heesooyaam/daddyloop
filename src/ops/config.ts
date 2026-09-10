@@ -18,6 +18,7 @@ export const configSchema = z.object({
   serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
   demo: z.boolean().default(true),
   locale: z.enum(['en', 'ru']).default('en'),
+  projects: z.object({ roots: z.array(z.string().min(1)).min(1).max(20).optional() }).default({}),
   codex: z.object({ executable: z.string().min(1).optional() }).default({}),
   updates: z
     .object({

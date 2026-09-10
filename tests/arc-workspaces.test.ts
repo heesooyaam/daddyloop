@@ -12,6 +12,7 @@ class MountFixture extends ArcBridge {
   branch = 'trunk';
   status = '';
   failCheckout = false;
+  control = true;
   override async mounts() {
     return [
       { path: '/fake/arc-source', claimable: true, object_store_ok: true },
@@ -21,6 +22,9 @@ class MountFixture extends ArcBridge {
         object_store_ok: true,
         lease_owner_id: this.owner,
       },
+      ...(this.control
+        ? [{ path: '/fake/arc-control', claimable: true, object_store_ok: true }]
+        : []),
     ];
   }
   override async claim(ownerId: string, mount?: string): Promise<ArcLease> {
@@ -69,6 +73,27 @@ it('retains the named author branch when its pushed head becomes the next review
   } finally {
     f.store.close();
     rmSync(dir, { recursive: true });
+  }
+});
+it('keeps a control workspace available when the writer pool would consume the last Arc mount', async () => {
+  const f = await fixture({
+    repoPath: '/fake/arc-source',
+    revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-capacity-')),
+    bridge = new MountFixture();
+  bridge.control = false;
+  const workspaces = new ArcWorkspaces(dir, bridge);
+  try {
+    await expect(workspaces.prepare(f.task, 'author')).rejects.toMatchObject({
+      code: 'workspace_capacity',
+    });
+    expect(bridge.owner).toBeUndefined();
+    expect(bridge.calls).toEqual([]);
+    expect(await workspaces.prepare(f.task, 'reviewer')).toBe('/fake/arc-worker');
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 it('recovers the lease journal after interrupted checkout and refuses to start an author on trunk', async () => {

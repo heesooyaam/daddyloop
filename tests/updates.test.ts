@@ -2,6 +2,38 @@ import { it, expect, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { isNewerVersion } from '../src/runtime/executable.js';
+it('marks the exact managed version transition once while retaining notices for later external changes', async () => {
+  const store = new Store(':memory:');
+  let installed = '1.0.0';
+  const monitor = new UpdateMonitor(store, {
+    probe: async (command) =>
+      command === 'codex'
+        ? { source: 'managed', path: process.execPath, version: installed }
+        : { source: 'missing' },
+    fetcher: async () => new Response('{"version":"2.0.0"}'),
+  });
+  try {
+    await monitor.check(true);
+    store.setSetting('codex.update.operation', {
+      id: 'managed-update',
+      action: 'install',
+      phase: 'complete',
+      from: { version: '1.0.0', executable: '/old' },
+      target: { version: '2.0.0', executable: process.execPath },
+      finishedAt: new Date().toISOString(),
+    });
+    installed = '2.0.0';
+    const managed = await monitor.check(true);
+    expect(managed.tools[0].managedOperationId).toBe('managed-update');
+    installed = '1.0.0';
+    await monitor.check(true);
+    installed = '2.0.0';
+    expect((await monitor.check(true)).tools[0].managedOperationId).toBeUndefined();
+  } finally {
+    await monitor.stop();
+    store.close();
+  }
+});
 it('compares numeric CLI versions and recognizes a stable release after a prerelease', () => {
   expect(isNewerVersion('0.154.0', '0.153.4')).toBe(true);
   expect(isNewerVersion('1.10.0', '1.9.9')).toBe(true);

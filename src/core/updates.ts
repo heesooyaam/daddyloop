@@ -9,6 +9,7 @@ import {
 } from '../runtime/executable.js';
 import { redact } from './security.js';
 import type { Store } from './store.js';
+import type { CodexUpdateOperation } from './codex-updater.js';
 
 export interface ToolVersion {
   id: 'codex' | 'claude';
@@ -20,6 +21,7 @@ export interface ToolVersion {
   latest?: string;
   updateAvailable: boolean;
   changedFrom?: string;
+  managedOperationId?: string;
   error?: string;
   releaseUrl: string;
 }
@@ -157,6 +159,19 @@ export class UpdateMonitor {
         if (!local.version || this.stopped) return result;
         const before = previous.tools.find((item) => item.id === tool.id)?.installed;
         if (before && before !== local.version) result.changedFrom = before;
+        const operation = this.store.setting<CodexUpdateOperation>('codex.update.operation');
+        if (
+          tool.id === 'codex' &&
+          result.changedFrom &&
+          operation?.phase === 'complete' &&
+          operation.from.version === result.changedFrom &&
+          operation.target.version === local.version &&
+          executablePath(operation.target.executable ?? '') === local.path &&
+          operation.finishedAt &&
+          operation.finishedAt >= (previous.checkedAt ?? '') &&
+          operation.id !== this.store.setting<string>('updates.accountedOperation')
+        )
+          result.managedOperationId = operation.id;
         try {
           const response = await (this.options.fetcher ?? fetch)(
             `https://registry.npmjs.org/${encodeURIComponent(tool.package)}/latest`,
@@ -187,6 +202,8 @@ export class UpdateMonitor {
     };
     if (!this.stopped) {
       this.store.setSetting('updates.status', result);
+      const managed = entries.find((tool) => tool.managedOperationId)?.managedOperationId;
+      if (managed) this.store.setSetting('updates.accountedOperation', managed);
       for (const tool of entries) {
         // Unsupported engines are visible for clarity but do not send irrelevant alerts.
         if (!tool.supported) continue;

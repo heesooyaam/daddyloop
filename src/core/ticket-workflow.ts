@@ -1,7 +1,19 @@
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Engine } from './engine.js';
-import { AppError, isTicket, type AgentProfiles, type PRRef, type Task } from './types.js';
+import { randomUUID } from 'node:crypto';
+import {
+  AppError,
+  assertTaskVersion,
+  type ExpectedTask,
+  isTicket,
+  now,
+  type AgentProfiles,
+  type PRRef,
+  type Task,
+  type Project,
+  type TicketRef,
+} from './types.js';
 import { TicketReader } from '../integrations/tickets.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 import { Workspaces } from '../runtime/workspaces.js';
@@ -24,6 +36,11 @@ export class TicketWorkflow {
     agents?: AgentProfiles;
     publication?: 'auto' | 'human';
     autoPush?: boolean;
+    groupId?: string;
+    groupGeneration?: number;
+    projectId?: string;
+    scope?: string;
+    createdByAction?: string;
   }) {
     const parent = input.parentTaskId ? this.engine.store.getTask(input.parentTaskId) : undefined;
     const path = input.repoPath ?? parent?.repoPath;
@@ -39,12 +56,61 @@ export class TicketWorkflow {
       agents: input.agents,
       publication: input.publication,
       autoPush: input.autoPush,
+      groupId: input.groupId,
+      groupGeneration: input.groupGeneration,
+      projectId: input.projectId,
+      scope: input.scope,
+      createdByAction: input.createdByAction,
     });
     return task;
   }
-  async submit(id: string): Promise<Task> {
+  async local(input: {
+    project: Project;
+    groupId: string;
+    groupGeneration: number;
+    title: string;
+    requirements: string;
+    createdByAction: string;
+    dependsOn?: string[];
+  }) {
+    const id = randomUUID(),
+      project = input.project;
+    const url = `https://${project.host}/${project.provider === 'arcadia' ? 'arc' : project.repo}#daddyloop-${id}`;
+    const ref: TicketRef = {
+      kind: 'ticket',
+      provider: project.provider,
+      host: project.host,
+      repo: project.repo,
+      number: 0,
+      key: `DADDY-${id.slice(0, 8)}`,
+      url,
+    };
+    const repository = await this.workspaces.describeTicket(project.repoPath, ref, project.base);
+    return this.engine.createTicket({
+      ...repository,
+      id,
+      groupId: input.groupId,
+      groupGeneration: input.groupGeneration,
+      projectId: project.id,
+      scope: project.scope,
+      createdByAction: input.createdByAction,
+      dependsOn: input.dependsOn,
+      requirements: input.requirements,
+      source: {
+        kind: 'local',
+        key: ref.key,
+        title: input.title,
+        body: input.requirements,
+        url,
+        state: 'open',
+        fetchedAt: now(),
+      },
+    });
+  }
+  async submit(id: string, expected?: ExpectedTask): Promise<Task> {
     const result = await this.engine.lock(id, async () => {
       const task = this.engine.store.getTask(id);
+      assertTaskVersion(task, expected);
       if (
         !isTicket(task) ||
         !task.ticketRepository ||
@@ -77,12 +143,17 @@ export class TicketWorkflow {
             ? String(
                 (await this.reader.github(task.ref).request<{ id: number }>('GET', '/user')).id,
               )
-            : (await this.assertArc(task)).user_login;
+            : task.ref.provider === 'gitlab'
+              ? String(
+                  (await this.reader.gitlab(task.ref).request<{ id: number }>('GET', '/user')).id,
+                )
+              : (await this.assertArc(task)).user_login;
         if (!owner || owner === 'undefined')
           throw new Error('Could not verify the PR author identity');
         // A normal Git push is idempotent for the same head and cannot replace
         // concurrent commits. Native PR creation has its own durable outbox.
-        if (task.ref.provider === 'github') await this.workspaces.pushTicket(task);
+        if (task.ref.provider === 'github' || task.ref.provider === 'gitlab')
+          await this.workspaces.pushTicket(task);
         else await this.assertArc(task);
         const ref = await this.engine.broker.outbox.perform<PRRef>(
           id,
@@ -156,6 +227,28 @@ export class TicketWorkflow {
     return info;
   }
   private async createPR(task: Task, title: string, body: string): Promise<PRRef> {
+    if (task.ref.provider === 'gitlab') {
+      const mr = await this.reader
+        .gitlab(task.ref)
+        .request<{ iid: number; web_url: string }>(
+          'POST',
+          `/projects/${encodeURIComponent(task.ref.repo)}/merge_requests`,
+          {
+            source_branch: task.ticketRepository!.branch,
+            target_branch: task.ticketRepository!.baseBranch,
+            title: `Draft: ${title}`,
+            description: body,
+            remove_source_branch: false,
+          },
+        );
+      return {
+        provider: 'gitlab',
+        host: task.ref.host,
+        repo: task.ref.repo,
+        number: mr.iid,
+        url: mr.web_url,
+      };
+    }
     if (task.ref.provider === 'github') {
       const pr = await this.reader
         .github(task.ref)
@@ -212,6 +305,40 @@ export class TicketWorkflow {
     }
   }
   private async findPR(task: Task, marker: string, owner: string): Promise<PRRef | undefined> {
+    if (task.ref.provider === 'gitlab') {
+      const api = this.reader.gitlab(task.ref),
+        path = `/projects/${encodeURIComponent(task.ref.repo)}`;
+      const project = await api.request<{ id: number }>('GET', path);
+      const pulls = await api.pages<{
+        iid: number;
+        web_url: string;
+        description?: string;
+        author: { id: number };
+        source_branch: string;
+        source_project_id: number;
+      }>(
+        `${path}/merge_requests?scope=all&state=all&source_branch=${encodeURIComponent(task.ticketRepository!.branch)}`,
+      );
+      const matches = pulls.filter(
+        (mr) =>
+          String(mr.author.id) === owner &&
+          mr.source_project_id === project.id &&
+          mr.source_branch === task.ticketRepository!.branch &&
+          mr.description?.includes(`<!-- ${marker} -->`),
+      );
+      if (matches.length > 1)
+        throw new Error('Multiple merge requests match this task; inspect them before continuing');
+      const mr = matches[0];
+      return mr
+        ? {
+            provider: 'gitlab',
+            host: task.ref.host,
+            repo: task.ref.repo,
+            number: mr.iid,
+            url: mr.web_url,
+          }
+        : undefined;
+    }
     if (task.ref.provider === 'github') {
       const branch = encodeURIComponent(
         `${task.ref.repo.split('/')[0]}:${task.ticketRepository!.branch}`,

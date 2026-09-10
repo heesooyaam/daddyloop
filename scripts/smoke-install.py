@@ -62,7 +62,7 @@ try:
                 if readable: captured.extend(os.read(master, 65536))
                 if b'\x1b[?2004h' in captured: break
                 if child.poll() is not None: break
-            assert b'\x1b[?1049h' in captured and b'reviewloop.' in captured, 'Bundled TUI did not render'
+            assert b'\x1b[?1049h' in captured and b'daddyloop.' in captured, 'Bundled TUI did not render'
             os.write(master, b'\x11')
             deadline = time.monotonic() + 10
             while child.poll() is None and time.monotonic() < deadline:

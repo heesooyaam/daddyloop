@@ -18,11 +18,12 @@ import { consoleUI } from './ops/console.js';
 import { VERSION } from './version.js';
 import { registerPlanningCommands } from './ops/planning.js';
 import { registerEnvironmentCommands } from './ops/environment.js';
+import { registerDaddyCommands } from './ops/daddy.js';
 import { normalizeLocale, translator } from './i18n/index.js';
 
 const program = new Command()
-  .name('reviewctl')
-  .description('Persistent author/reviewer workflow for GitHub, GitLab and Arcadia')
+  .name('daddy')
+  .description('One Daddy, a pool of writers, and persistent work on your server')
   .version(VERSION)
   .option('--plain', 'use the basic line-oriented console')
   .addOption(
@@ -180,7 +181,7 @@ for (const action of [
     );
 }
 program
-  .command('chat')
+  .command('chat', { hidden: true })
   .argument('<task>')
   .requiredOption('--role <role>', 'author or reviewer')
   .argument('<message>')
@@ -279,7 +280,7 @@ program
 program
   .command('create-remotes')
   .description('Create private GitHub/GitLab project repositories when credentials are available')
-  .option('--name <name>', 'repository name', 'reviewloop')
+  .option('--name <name>', 'repository name', 'daddyloop')
   .option('--push', 'push the local main branch after creating remotes', false)
   .action(async (options) => {
     if (!/^[a-zA-Z0-9._-]+$/.test(options.name)) throw new Error('Invalid repository name');
@@ -367,6 +368,7 @@ program
 registerOperations(program);
 registerPlanningCommands(program);
 registerEnvironmentCommands(program);
+registerDaddyCommands(program);
 let cachedCliLocale: Locale | undefined;
 const cliText = (value: string) => {
   if (!cachedCliLocale) {

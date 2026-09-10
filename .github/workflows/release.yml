@@ -48,4 +48,4 @@ jobs:
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Reviewloop $GITHUB_REF_NAME" --notes-file docs/release-notes.md install.sh release-assets/*
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Daddyloop $GITHUB_REF_NAME" --notes-file docs/release-notes.md install.sh release-assets/*

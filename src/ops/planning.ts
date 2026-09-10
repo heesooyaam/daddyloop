@@ -1,7 +1,14 @@
 import { Command, Option } from 'commander';
-import { resolve } from 'node:path';
+import { basename } from 'node:path';
 import { api as client } from './client.js';
-import type { AgentProfiles, AgentProfile, Role, Task } from '../core/types.js';
+import type {
+  AgentProfiles,
+  AgentProfile,
+  Role,
+  Task,
+  Project,
+  ReviewGroup,
+} from '../core/types.js';
 export function registerPlanningCommands(program: Command) {
   const api = <T>(path: string, body?: unknown) =>
     client<T>(path, body, { dataDir: program.opts().dataDir, url: program.opts().url });
@@ -32,26 +39,78 @@ export function registerPlanningCommands(program: Command) {
       .option('--no-auto-push', 'save implementation locally until explicit submit');
   const start = async (source: string, options: Record<string, string | boolean | undefined>) => {
     const settings = await api<{ defaults: AgentProfiles }>('/agents');
-    let reviewer = settings.defaults.reviewer;
-    if (options.parent)
-      reviewer = (
-        await api<{ agents: AgentProfiles }>(`/tasks/${encodeURIComponent(String(options.parent))}`)
-      ).agents.reviewer;
-    const task = await api<Task>('/tickets', {
-      source,
-      ...(options.repo ? { repoPath: resolve(String(options.repo)) } : {}),
-      ...(options.parent ? { parentTaskId: options.parent } : {}),
-      ...(options.base ? { base: options.base } : {}),
-      agents: {
-        author: profile(settings.defaults.author, options, 'author'),
-        reviewer: profile(reviewer, options, 'reviewer'),
-      },
-      publication: options.manualPublish ? 'human' : 'auto',
-      autoPush: options.autoPush !== false,
-    });
-    print(task);
+    const parent = options.parent
+      ? await api<{ task: Task; group?: ReviewGroup }>(
+          `/tasks/${encodeURIComponent(String(options.parent))}`,
+        )
+      : undefined;
+    let projects = await api<Project[]>('/projects');
+    const path = options.repo ? String(options.repo) : parent?.task.repoPath;
+    let project = projects.find(
+      (item) => item.id === parent?.task.projectId || item.repoPath === path,
+    );
+    if (!project && path) {
+      project = await api<Project>('/projects', {
+        path,
+        name: basename(path),
+        ...(options.base ? { base: String(options.base) } : {}),
+      });
+      projects = [...projects, project];
+    }
+    project ??= projects.length === 1 ? projects[0] : undefined;
+    if (!project)
+      throw new Error(
+        'Choose a project with daddy new --project <name>, or supply --repo once to register it',
+      );
+    let group: ReviewGroup;
+    if (parent)
+      group = parent.group?.orchestrated
+        ? parent.group
+        : (
+            await api<{ group: ReviewGroup }>('/daddy/adopt', {
+              taskId: parent.task.id,
+              projectId: project.id,
+            })
+          ).group;
+    else
+      group = (
+        await api<{ group: ReviewGroup }>('/daddy/sessions', {
+          projectId: project.id,
+          title: source.slice(0, 100),
+          publication: options.manualPublish ? 'human' : 'auto',
+          autoPush: options.autoPush !== false,
+          requestId: crypto.randomUUID(),
+        })
+      ).group;
+    if (
+      !parent &&
+      (options.authorModel ||
+        options.authorEffort ||
+        options.reviewerModel ||
+        options.reviewerEffort)
+    ) {
+      group = (
+        await api<{ group: ReviewGroup }>(`/daddy/sessions/${group.id}/settings`, {
+          profiles: {
+            author: profile(settings.defaults.author, options, 'author'),
+            reviewer: profile(group.reviewer, options, 'reviewer'),
+          },
+        })
+      ).group;
+    }
+    const instruction =
+      source +
+      (parent && (options.authorModel || options.authorEffort)
+        ? `\nFor this ticket use writer model ${options.authorModel ?? group.writer?.model ?? 'Codex default'} with effort ${options.authorEffort ?? 'default'}.`
+        : '');
+    print(
+      await api(`/daddy/sessions/${group.id}/chat`, {
+        text: instruction,
+        requestId: crypto.randomUUID(),
+      }),
+    );
     process.stdout.write(
-      `\nContinue the author conversation: reviewctl console ${task.id} --role author\nStart implementation: reviewctl implement ${task.id}\n`,
+      `\nContinue with Daddy: daddy console ${group.id}\nAdd another ticket: daddy talk ${group.id} "<ticket>"\n`,
     );
   };
   flags(
@@ -63,7 +122,7 @@ export function registerPlanningCommands(program: Command) {
     .description('Start a conversation from a GitHub issue or Tracker ticket')
     .action(start);
   flags(program.command('child').argument('<parent-task>').argument('<issue-or-ticket>'))
-    .description('Give a child ticket its own author and the parent’s shared reviewer')
+    .description('Add another ticket to the same Daddy session')
     .action((parent, source, options) => start(source, { ...options, parent }));
   program
     .command('models')

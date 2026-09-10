@@ -16,13 +16,9 @@ export async function consoleUI(
     !process.stdout.isTTY ||
     process.env.TERM === 'dumb'
   ) {
-    const { consoleUI: plain } = await import('./console-plain.js');
-    return plain(
-      api,
-      options.id ? { id: options.id, role: options.role ?? 'reviewer' } : undefined,
-      options.locale,
-    );
+    const { runDaddyPlain } = await import('./daddy-plain.js');
+    return runDaddyPlain(api, options);
   }
-  const { runTerminal } = await import('../terminal/run.js');
-  return runTerminal(api, options);
+  const { runDaddyTerminal } = await import('../terminal/daddy.js');
+  return runDaddyTerminal(api, options);
 }

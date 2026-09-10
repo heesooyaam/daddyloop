@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-reviewloop_version="0.6.1"
-reviewloop_prefix="${REVIEWLOOP_INSTALL_DIR:-$HOME/.local/share/reviewloop}"
-reviewloop_bin_dir="${REVIEWLOOP_BIN_DIR:-$HOME/.local/bin}"
-reviewloop_base="${REVIEWLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/reviewloop/releases/download/v$reviewloop_version}"
+reviewloop_version="0.7.0"
+reviewloop_default_prefix="$HOME/.local/share/daddyloop"
+[[ ! -d "$HOME/.local/share/reviewloop/releases" ]] || reviewloop_default_prefix="$HOME/.local/share/reviewloop"
+reviewloop_prefix="${DADDYLOOP_INSTALL_DIR:-${REVIEWLOOP_INSTALL_DIR:-$reviewloop_default_prefix}}"
+reviewloop_bin_dir="${DADDYLOOP_BIN_DIR:-${REVIEWLOOP_BIN_DIR:-$HOME/.local/bin}}"
+reviewloop_base="${DADDYLOOP_DOWNLOAD_BASE:-${REVIEWLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/daddyloop/releases/download/v$reviewloop_version}}"
 reviewloop_setup=true
 reviewloop_yes=false
 for reviewloop_arg in "$@"; do
   case "$reviewloop_arg" in
     --no-setup) reviewloop_setup=false ;;
     --yes) reviewloop_yes=true ;;
-    --help) printf 'Install Reviewloop, its CLI and bundled Node/Codex/GitHub tools.\nOptions: --yes (default setup), --no-setup (files only)\n'; exit 0 ;;
+    --help) printf 'Install Daddyloop, the daddy CLI and bundled Node/Codex/GitHub tools.\nOptions: --yes (default setup), --no-setup (files only)\n'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$reviewloop_arg" >&2; exit 1 ;;
   esac
 done
@@ -54,14 +56,18 @@ else
   printf '%s\n' "$reviewloop_expected" > "$reviewloop_payload/.archive-sha256"
   mv -- "$reviewloop_payload" "$reviewloop_destination"
 fi
-if [[ -e "$reviewloop_bin_dir/reviewctl" || -L "$reviewloop_bin_dir/reviewctl" ]]; then
-  [[ -L "$reviewloop_bin_dir/reviewctl" && "$(readlink "$reviewloop_bin_dir/reviewctl")" = "$reviewloop_prefix/current/bin/reviewctl" ]] || { printf 'Existing reviewctl command preserved; choose another REVIEWLOOP_BIN_DIR.\n' >&2; exit 1; }
-fi
+for reviewloop_command in daddy daddyloop reviewctl; do
+  if [[ -e "$reviewloop_bin_dir/$reviewloop_command" || -L "$reviewloop_bin_dir/$reviewloop_command" ]]; then
+    [[ -L "$reviewloop_bin_dir/$reviewloop_command" && "$(readlink "$reviewloop_bin_dir/$reviewloop_command")" = "$reviewloop_prefix/current/bin/reviewctl" ]] || { printf 'Existing %s command preserved; choose another DADDYLOOP_BIN_DIR.\n' "$reviewloop_command" >&2; exit 1; }
+  fi
+done
 if [[ -e "$reviewloop_prefix/current" && ! -L "$reviewloop_prefix/current" ]]; then printf 'Existing non-symlink current directory preserved.\n' >&2; exit 1; fi
 ln -s "$reviewloop_destination" "$reviewloop_tmp/current"
 mv -Tf -- "$reviewloop_tmp/current" "$reviewloop_prefix/current"
-if [[ ! -L "$reviewloop_bin_dir/reviewctl" ]]; then ln -s "$reviewloop_prefix/current/bin/reviewctl" "$reviewloop_bin_dir/reviewctl"; fi
-printf '\nInstalled Reviewloop %s: %s/reviewctl\n' "$reviewloop_version" "$reviewloop_bin_dir"
+for reviewloop_command in daddy daddyloop reviewctl; do
+  if [[ ! -L "$reviewloop_bin_dir/$reviewloop_command" ]]; then ln -s "$reviewloop_prefix/current/bin/reviewctl" "$reviewloop_bin_dir/$reviewloop_command"; fi
+done
+printf '\nInstalled Daddyloop %s: %s/daddy\n' "$reviewloop_version" "$reviewloop_bin_dir"
 case ":$PATH:" in *":$reviewloop_bin_dir:"*) ;; *) printf 'Add this directory to PATH in your shell profile: %s\n' "$reviewloop_bin_dir" ;; esac
 if $reviewloop_setup; then
   if command -v sudo >/dev/null && ! sudo -n true 2>/dev/null && [[ -r /dev/tty ]]; then

@@ -1,6 +1,6 @@
 # Architecture
 
-Reviewloop is a local, single-user service. Workflow decisions are deterministic code. Models supply code, review comments, reasoning summaries and explicit outcomes. Native review systems remain the source of truth for the published feedback.
+Daddyloop is a local, single-user service. Workflow decisions are deterministic code. Models supply code, review comments, reasoning summaries and explicit outcomes. Native review systems remain the source of truth for the published feedback.
 
 ```mermaid
 flowchart LR
@@ -124,3 +124,19 @@ Workspace preferences store an `en`/`ru` locale and a monotonically increasing v
 `CodexUpdater` installs a separately managed Codex through a confirmed Telegram or authenticated API/CLI action. One expiring plan pins the caller, source executable/version and official platform artifact with SHA-512 integrity. A durable operation consumes the plan before doing work. Downloads are bounded and cancellable; archive members go through stdout into private files, preventing archive paths or links from directing filesystem writes. Each candidate gets a unique directory outside immutable Reviewloop releases and external CLI installations.
 
 Before activation, the candidate must report the pinned version and pass app-server initialization, model listing and saved-profile checks. The source executable is re-probed and configuration changes are fenced. Atomic config replacement and the live executable selection happen synchronously, preserving concurrent changes to other config fields. Each agent turn captures the selected executable once; active processes are untouched. A catalogue request that finishes after selection changed reloads from the new executable. The activation journal reconciles a crash immediately before or after config replacement. Failed installations preserve the selected CLI and clean their private directory; completed installations retain the previous selection for validated rollback. Telegram completion delivery is durable and deduplicated; an ambiguous send is not blindly retried.
+
+## Daddyloop sessions (0.7)
+
+The primary entry points now send user messages to a `Daddy` session. A registered `Project` identifies the source repository, VCS, base and relative working directory. Existing `ReviewGroup` records are extended with orchestration settings, a writer limit and a separate coordination thread ID. SQLite schema 4 adds projects, durable Daddy jobs and Telegram topic bindings.
+
+`Daddy` coalesces queued input and wakes on worker outcomes. Its scoped tools read state, import tickets, create work items, attach existing reviews, assign writers, manage prerequisites and reconcile native submissions. Public writer chat is rejected. A writer profile is frozen in each queued job; session defaults apply to future tasks. The per-session pool defaults to one writer, with a maximum of eight and the existing resource checks.
+
+The coordination thread and native review thread are separate contexts under the same Daddy profile. They are serialized per group. Coordination receives worker reports and published review feedback, not private reviewer chat or draft comments. This preserves the original publication boundary while allowing Daddy to direct writers. Native review remains a pinned child-task job with the existing broker and revision/generation checks.
+
+`Projects` checks Arcadia markers before Git commands and bounds directory browsing to configured roots. Writers use existing managed-workspace implementations. An Arc allocator retains a control/review slot, waits when capacity is unavailable and may provision only eligible slots within the configured helper range. Clean author leases whose exact head is confirmed in the native PR can be released; unpublished or dirty work is preserved. Source mounts registered as projects are excluded from allocation.
+
+`DaddyClient` shares API/state behavior between the browser and terminal, including session selection fencing, independent drafts and idempotent message retries. Browser and CLI now display one Daddy conversation and a read-only task/report board. The old interface remains available for existing native workflow history; its writer composer is disabled.
+
+`TelegramWorkspace` binds an owner-selected forum room and maps each Daddy session to a topic. It verifies user and topic scope on every control, records topic creation through the outbox, and sends replies into the mapped thread. A topic whose creation result is uncertain can be attached explicitly by the owner. Native version-change notices identify managed updates so Telegram emits only the operation's completion message for those transitions.
+
+Renaming keeps compatibility boundaries deliberate: existing state directories, native markers, service identity and archive layout retain legacy identifiers, while the product and primary commands are Daddyloop / `daddy`. `reviewctl` remains an executable alias. Upgrading the SQLite schema requires a pre-upgrade backup for a rollback to an older server.
