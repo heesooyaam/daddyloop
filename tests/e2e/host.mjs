@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdirSync, readFileSync, chmodSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { resolve, join } from 'node:path';
 import https from 'node:https';
@@ -85,6 +85,10 @@ workspaces.describeTicket = async (repoPath, ref) => ({
   },
 });
 workspaces.prepareTicket = async () => dir;
+// This fixed directory belongs exclusively to the offline browser fixture.
+// Do not let previous test sessions make selectors ambiguous on a repeated run.
+for (const suffix of ['', '-wal', '-shm'])
+  rmSync(join(dir, 'reviewloop.sqlite' + suffix), { force: true });
 const store = new Store(join(dir, 'reviewloop.sqlite'));
 const projectRoot = join(dir, 'fixture-repository');
 mkdirSync(join(projectRoot, 'src'), { recursive: true });
@@ -97,6 +101,14 @@ if (!existsSync(join(projectRoot, '.git'))) {
   run(['add', '.']);
   run(['commit', '-m', 'fixture']);
   run(['remote', 'add', 'origin', 'https://github.com/fixture/planning.git']);
+}
+const alternateRoot = join(dir, 'fixture-repository-alternate');
+if (!existsSync(join(alternateRoot, '.git'))) {
+  execFileSync('git', ['clone', '--shared', projectRoot, alternateRoot], { stdio: 'ignore' });
+  execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/fixture/planning.git'], {
+    cwd: alternateRoot,
+    stdio: 'ignore',
+  });
 }
 const projects = new Projects(store, [dir], { mounts: async () => [] });
 await projects.register({ name: 'Fixture project', path: projectRoot });

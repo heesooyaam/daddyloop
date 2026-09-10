@@ -81,6 +81,11 @@ export interface ReviewGroup {
   projectId?: string;
   orchestrated?: boolean;
   writerLimit?: number;
+  requestedWriterLimit?: number;
+  /** Occupied slots survive author turns, review, pauses and restarts. */
+  writerTasks?: string[];
+  /** Snapshot: later edits to project defaults affect new sessions only. */
+  project?: Project;
   writer?: AgentProfile;
   daddyState?: 'active' | 'paused' | 'needs_input' | 'archived';
   summary?: string;
@@ -109,6 +114,7 @@ export interface DaddyJob {
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
+  project?: Project;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -237,6 +243,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  project?: Project;
   id: string;
   taskId: string;
   role: Role;

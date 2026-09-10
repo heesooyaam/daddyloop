@@ -9,6 +9,7 @@ import { buildContext } from './context.js';
 import { projectScope } from '../core/projects.js';
 import { realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
+import { assignWriter, canAssignWriter, reconcileWriterPools } from '../core/writer-pool.js';
 
 export class Worker {
   private active = new Map<string, AbortController>();
@@ -197,6 +198,7 @@ export class Worker {
           }
         }
       // Authors may be independent; each shared reviewer thread has one writer.
+      reconcileWriterPools(store);
       const limit = Math.max(
         1,
         Math.min(8, store.setting<number>('worker.maxAgents') ?? this.maxAgents),
@@ -210,12 +212,7 @@ export class Worker {
                 const group = store.getGroup(candidate.groupId!);
                 if (group.daddyState === 'paused' || group.daddyState === 'archived') return false;
                 if (candidate.role === 'reviewer') return !this.reservedGroups.has(group.id);
-                if (
-                  group.orchestrated &&
-                  [...this.runningJobs.values()].filter(
-                    (job) => job.role === 'author' && job.groupId === group.id,
-                  ).length >= (group.writerLimit ?? 1)
-                )
+                if (group.orchestrated && !canAssignWriter(store, group, candidate.taskId))
                   return false;
                 const task = store.getTask(candidate.taskId);
                 return (
@@ -230,6 +227,12 @@ export class Worker {
                 (active) => active.role === 'reviewer' && active.groupId === candidate.groupId,
               )
             ),
+          (claimed) => {
+            if (claimed.role === 'author' && claimed.groupId) {
+              const group = store.getGroup(claimed.groupId);
+              if (group.orchestrated) assignWriter(store, group, claimed.taskId);
+            }
+          },
         );
         if (job) {
           const running = this.run(job);

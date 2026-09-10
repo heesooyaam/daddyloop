@@ -193,10 +193,19 @@ export async function buildApp(options: ServerOptions) {
   worker.autoSubmit = (id) => tickets.submit(id);
   const projects = options.projects ?? new Projects(store, config.projects.roots);
   workspaces.protectSources(() =>
-    projects
-      .list()
+    [
+      ...projects.list(),
+      ...store.groups().flatMap((group) => (group.project ? [group.project] : [])),
+      ...store.daddyJobs().flatMap((job) => (job.project ? [job.project] : [])),
+    ]
       .filter((project) => project.vcs === 'arcadia')
-      .map((project) => project.repoPath),
+      .map((project) => project.repoPath)
+      .concat(
+        store
+          .tasks()
+          .filter((task) => task.ref.provider === 'arcadia')
+          .map((task) => task.repoPath),
+      ),
   );
   const daddy = new Daddy(
     engine,

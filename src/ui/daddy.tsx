@@ -32,6 +32,8 @@ import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
 import { NotificationsForm } from './planning.js';
 import './daddy.css';
+import type { WorkspaceInput } from '../core/projects.js';
+import { WorkspaceFields } from './workspace-fields.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -349,6 +351,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                         <time>{stamp(message.at)}</time>
                       </div>
                       <div className="daddy-prose">
+                        {message.project && (
+                          <small className="daddy-muted">
+                            {message.project.repoPath}
+                            {message.project.scope ? '/' + message.project.scope : ''}
+                          </small>
+                        )}
                         <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
                       </div>
                     </article>
@@ -370,6 +378,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     void model.send();
                   }}
                 >
+                  <WorkspaceFields
+                    key={board.group.id}
+                    api={model.api}
+                    project={board.project!}
+                    value={state.workspaces[state.selected]}
+                    onChange={(value) => model.workspace(value)}
+                    compact
+                  />
                   <textarea
                     ref={composer}
                     aria-label={t('Message Daddy')}
@@ -428,7 +444,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   {t('Maximum writers')}
                   <select
                     aria-label={t('Maximum writers')}
-                    value={board.writers.limit}
+                    value={board.writers.target}
                     disabled={state.busy}
                     onChange={(event) =>
                       void model.action('settings', { writerLimit: Number(event.target.value) })
@@ -441,7 +457,19 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     ))}
                   </select>
                 </label>
-                <p className="daddy-pool-hint">{t('Daddy decides what can run in parallel.')}</p>
+                <p className="daddy-pool-hint" role="status">
+                  {t(
+                    board.writers.pending
+                      ? 'Pool: {limit} → {target}. Changes apply in the background.'
+                      : 'Pool: {limit}. Occupied by tasks: {occupied}.',
+                    board.writers,
+                  )}
+                </p>
+                <p className="daddy-pool-hint">
+                  {t(
+                    'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.',
+                  )}
+                </p>
                 <div className="daddy-section-label">
                   {t('Tasks')}
                   <span>
@@ -558,8 +586,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             projects={state.projects}
             busy={state.busy}
             onProjects={() => setModal('projects')}
-            onCreate={async (projectId, message, title) => {
-              await model.create(projectId, message, title);
+            api={model.api}
+            onCreate={async (projectId, message, title, workspace) => {
+              await model.create(projectId, message, title, workspace);
               setModal(null);
               setPane('chat');
               setMenu(false);
@@ -637,16 +666,24 @@ function NewSession({
   busy,
   onCreate,
   onProjects,
+  api,
 }: {
   projects: Project[];
   busy: boolean;
-  onCreate: (projectId: string, message?: string, title?: string) => Promise<void>;
+  onCreate: (
+    projectId: string,
+    message?: string,
+    title?: string,
+    workspace?: WorkspaceInput,
+  ) => Promise<void>;
+  api: DaddyApi;
   onProjects: () => void;
 }) {
   const { t } = useLocale(),
     [project, setProject] = useState(projects[0]?.id ?? ''),
     [message, setMessage] = useState(''),
     [title, setTitle] = useState(''),
+    [workspace, setWorkspace] = useState<WorkspaceInput>(),
     [error, setError] = useState('');
   return (
     <form
@@ -658,12 +695,20 @@ function NewSession({
           project,
           message,
           title || message.split('\n')[0].slice(0, 80) || undefined,
+          workspace,
         ).catch((error) => setError(error.message));
       }}
     >
       <label>
         {t('Project')}
-        <select value={project} onChange={(event) => setProject(event.target.value)} required>
+        <select
+          value={project}
+          onChange={(event) => {
+            setProject(event.target.value);
+            setWorkspace(undefined);
+          }}
+          required
+        >
           {!projects.length && <option value="">{t('Add a project first')}</option>}
           {projects.map((project) => (
             <option key={project.id} value={project.id}>
@@ -672,6 +717,15 @@ function NewSession({
           ))}
         </select>
       </label>
+      {project && (
+        <WorkspaceFields
+          key={project}
+          api={api}
+          project={projects.find((item) => item.id === project)!}
+          value={workspace}
+          onChange={setWorkspace}
+        />
+      )}
       <button type="button" className="daddy-text-button" onClick={onProjects}>
         <Plus size={15} />
         {t('Register another project')}
@@ -725,6 +779,7 @@ function ProjectManager({
 }) {
   const { t } = useLocale(),
     [suggestions, setSuggestions] = useState<{ name: string; path: string }[]>([]),
+    [editing, setEditing] = useState<string>(),
     [listing, setListing] = useState<DirectoryList>(),
     [path, setPath] = useState(''),
     [name, setName] = useState(''),
@@ -732,7 +787,7 @@ function ProjectManager({
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const sequence = useRef(0);
-  const browse = async (value: string) => {
+  const browse = async (value: string, keepName = false) => {
     const at = ++sequence.current;
     setBusy(true);
     setError('');
@@ -743,7 +798,7 @@ function ProjectManager({
       if (at !== sequence.current) return;
       setListing(next);
       setPath(next.path);
-      if (next.path) setName(next.path.split('/').at(-1) ?? '');
+      if (next.path && !editing && !keepName) setName(next.path.split('/').at(-1) ?? '');
     } catch (error) {
       if (at === sequence.current) setError((error as Error).message);
     } finally {
@@ -763,7 +818,11 @@ function ProjectManager({
     setBusy(true);
     setError('');
     try {
-      await api('/projects', { name, path, ...(base ? { base } : {}) });
+      await api(editing ? `/projects/${editing}/defaults` : '/projects', {
+        name,
+        path,
+        ...(base ? { base } : {}),
+      });
       onSaved();
       setError('');
     } catch (error) {
@@ -785,7 +844,8 @@ function ProjectManager({
             <button
               key={project.id}
               onClick={() => {
-                void browse(project.repoPath + (project.scope ? '/' + project.scope : ''));
+                void browse(project.repoPath + (project.scope ? '/' + project.scope : ''), true);
+                setEditing(project.id);
                 setName(project.name);
                 setBase(project.base ?? '');
               }}
@@ -867,6 +927,23 @@ function ProjectManager({
           void save();
         }}
       >
+        {editing && (
+          <p className="daddy-muted">
+            {t(
+              'Default changes apply to new sessions on this server. Existing sessions keep their settings.',
+            )}{' '}
+            <button
+              type="button"
+              className="daddy-text-button"
+              onClick={() => {
+                setEditing(undefined);
+                setName('');
+              }}
+            >
+              {t('Register another project')}
+            </button>
+          </p>
+        )}
         <div className="daddy-form-columns">
           <label>
             {t('Project name')}

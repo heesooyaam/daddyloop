@@ -63,6 +63,7 @@ export function daddyBoard(
     text = new TelegramText()
       .add('👨‍💻 ' + board.group.title, 'bold')
       .add('\n' + (board.project?.name ?? t('Project')))
+      .add('\n' + (board.project?.repoPath ?? ''), 'code')
       .add('\n\n' + t('Writers: {active} / {limit}', board.writers))
       .add(
         '\n' +
@@ -105,6 +106,12 @@ export function daddyBoard(
       [{ text: t('Models'), callback_data: `dad:models:${board.group.id}` }],
       [
         {
+          text: '📁 ' + t('Repository for next task'),
+          callback_data: `dad:repository:${board.group.id}`,
+        },
+      ],
+      [
+        {
           text: t(board.group.daddyState === 'paused' ? 'Resume Daddy' : 'Pause Daddy'),
           callback_data: `dad:${board.group.daddyState === 'paused' ? 'resume' : 'pause'}:${board.group.id}`,
         },
@@ -114,7 +121,8 @@ export function daddyBoard(
     ],
   };
 }
-export function poolCard(locale: Locale, group: ReviewGroup): TelegramCard {
+export function poolCard(locale: Locale, board: ReturnType<Daddy['board']>): TelegramCard {
+  const { group, writers } = board;
   const t = translator(locale),
     text = new TelegramText()
       .add('⚙️ ' + t('Writer pool'), 'bold')
@@ -122,14 +130,23 @@ export function poolCard(locale: Locale, group: ReviewGroup): TelegramCard {
       .add(
         '\n\n' +
           t(
-            'Choose the maximum number of writers working at once. Daddy decides which tasks can run in parallel. Existing work finishes when the limit is reduced.',
+            writers.pending
+              ? 'Pool: {limit} → {target}. Changes apply in the background.'
+              : 'Pool: {limit}. Occupied by tasks: {occupied}.',
+            writers,
+          ),
+      )
+      .add(
+        '\n\n' +
+          t(
+            'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.',
           ),
       );
   return {
     ...text,
     buttons: [
       [1, 2, 3, 4, 6, 8].map((limit) => ({
-        text: ((group.writerLimit ?? 1) === limit ? '✓ ' : '') + limit,
+        text: (writers.target === limit ? '✓ ' : '') + limit,
         callback_data: `dad:pool:${group.id}:${limit}`,
       })),
       [{ text: t('Back'), callback_data: `dad:open:${group.id}` }],

@@ -22,7 +22,7 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
       }
   });
   model.start();
-  process.stdout.write('Daddyloop · /new, /sessions, /pool, /quit\n');
+  process.stdout.write('Daddyloop · /new, /sessions, /pool, /repo, /quit\n');
   try {
     for await (const line of rl) {
       const input = line.trim();
@@ -43,9 +43,26 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
             .projects.find((project) => project.name === name || project.id.startsWith(name));
         if (project) await model.create(project.id);
         else process.stdout.write(t('Choose a registered project.') + '\n');
+      } else if (input === '/repo' || input.startsWith('/repo ')) {
+        const path = input.slice(5).trim();
+        model.workspace(path && path !== 'default' ? { path } : undefined);
+        process.stdout.write(
+          path && path !== 'default' ? safeText(path) + '\n' : t('Using project defaults') + '\n',
+        );
       } else if (input.startsWith('/pool '))
         await model.action('settings', { writerLimit: Number(input.slice(6)) });
-      else {
+      else if (input === '/pool') {
+        const pool = model.snapshot().board?.writers;
+        if (pool)
+          process.stdout.write(
+            t(
+              pool.pending
+                ? 'Pool: {limit} → {target}. Changes apply in the background.'
+                : 'Pool: {limit}. Occupied by tasks: {occupied}.',
+              pool,
+            ) + '\n',
+          );
+      } else {
         model.draft(line);
         await model.send();
       }

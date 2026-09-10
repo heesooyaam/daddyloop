@@ -7,10 +7,21 @@ import { TelegramText, type TelegramCard } from './telegram-text.js';
 import { daddyHome, projectPicker, daddyBoard, poolCard } from './daddy-cards.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
+import type { Project } from '../core/types.js';
+import type { WorkspaceInput } from '../core/projects.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
 type Destination = { chatId: number; threadId?: number };
+type RepoChoice = {
+  destination: Destination;
+  ownerId: number;
+  project: Project;
+  groupId?: string;
+  input?: WorkspaceInput;
+  expiresAt: string;
+  creationExpiresAt?: string;
+};
 export class TelegramWorkspace {
   private pending = Promise.resolve();
   private stopped = false;
@@ -326,7 +337,7 @@ export class TelegramWorkspace {
     });
     await this.api.send(destination, { ...text, buttons });
   }
-  private async newSession(projectId: string, destination: Destination) {
+  private async newSession(projectId: string, destination: Destination, project?: Project) {
     if (destination.threadId)
       throw new Error(this.t('Create a new session from the private bot chat.'));
     const pending = this.store.setting<{ text?: string; expiresAt: string }>(
@@ -337,6 +348,7 @@ export class TelegramWorkspace {
     const text = pending && pending.expiresAt > now() ? pending.text : undefined;
     const group = this.daddy.create({
       projectId,
+      project,
       title: text?.split('\n')[0].slice(0, 80),
       requirements: text,
     });
@@ -348,6 +360,117 @@ export class TelegramWorkspace {
       destination,
       daddyBoard(this.locale(), this.daddy.board(group.id), topic ? this.link(topic) : undefined),
     );
+  }
+  private repoKey(destination: Destination, groupId: string) {
+    return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
+  }
+  private async repository(choice: RepoChoice, browse = false) {
+    if (choice.groupId) this.authorize(choice.destination, choice.groupId);
+    this.store.db
+      .prepare(
+        "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
+      )
+      .run(now());
+    const button = (text: string, next: RepoChoice, action: 'use' | 'browse') => {
+      const id = randomBytes(12).toString('base64url');
+      this.store.setSetting(`telegram.repo:${id}`, next);
+      return { text, callback_data: `dad:repo:${id}:${action}` };
+    };
+    const title = new TelegramText()
+      .add('📁 ' + this.t('Repository for this request'), 'bold')
+      .add('\n\n' + choice.project.name)
+      .add(
+        '\n' +
+          (choice.input?.path ??
+            choice.project.repoPath + (choice.project.scope ? '/' + choice.project.scope : '')),
+        'code',
+      )
+      .add(
+        '\n\n' +
+          this.t(
+            'This selection applies only to this request. Project defaults and existing tasks stay as saved.',
+          ),
+      );
+    const buttons = [
+      [
+        button(
+          this.t(
+            choice.groupId
+              ? choice.input
+                ? 'Use this folder once'
+                : 'Use project defaults'
+              : 'Start session',
+          ),
+          choice,
+          'use',
+        ),
+      ],
+      ...(choice.input
+        ? [[button(this.t('Use project defaults'), { ...choice, input: undefined }, 'use')]]
+        : []),
+    ];
+    if (browse) {
+      const listing = await this.daddy.projects.browse(
+        choice.input?.path ?? choice.project.repoPath,
+      );
+      if (listing.parent)
+        buttons.push([
+          button(
+            '↑ ' + this.t('Parent folder'),
+            { ...choice, input: { path: listing.parent } },
+            'browse',
+          ),
+        ]);
+      for (const entry of listing.directories.slice(0, 30))
+        buttons.push([
+          button(entry.name + ' →', { ...choice, input: { path: entry.path } }, 'browse'),
+        ]);
+      title.add('\n\n' + this.t('You can also send /repo followed by an absolute server path.'));
+    } else buttons.push([button(this.t('Browse server folders'), choice, 'browse')]);
+    await this.api.send(choice.destination, { ...title, buttons });
+  }
+  private async repositoryCallback(data: string, destination: Destination) {
+    const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse)$/);
+    if (!match) return false;
+    const key = `telegram.repo:${match[1]}`,
+      choice = this.store.setting<RepoChoice>(key);
+    if (
+      !choice ||
+      choice.expiresAt <= now() ||
+      choice.ownerId !== this.pair()?.userId ||
+      choice.destination.chatId !== destination.chatId ||
+      choice.destination.threadId !== destination.threadId
+    )
+      throw new Error(this.t('This selection expired. Choose the repository again.'));
+    if (choice.groupId) this.authorize(destination, choice.groupId);
+    else if (
+      !choice.creationExpiresAt ||
+      this.store.setting<{ expiresAt: string }>('telegram.pendingDaddy')?.expiresAt !==
+        choice.creationExpiresAt
+    )
+      throw new Error(this.t('This selection expired. Start a new session again.'));
+    if (match[2] === 'browse') await this.repository(choice, true);
+    else {
+      const selected = await this.daddy.projects.selection(choice.project, choice.input);
+      if (choice.groupId) {
+        this.store.setSetting(this.repoKey(destination, choice.groupId), {
+          project: selected,
+          expiresAt: choice.expiresAt,
+        });
+        await this.api.send(
+          destination,
+          new TelegramText()
+            .add('📁 ' + this.t('Repository for next task'), 'bold')
+            .add('\n\n' + selected.repoPath + (selected.scope ? '/' + selected.scope : ''), 'code')
+            .add(
+              '\n\n' +
+                this.t('Send the task now. The following message will use the defaults again.'),
+            ),
+        );
+      } else await this.newSession(choice.project.id, destination, selected);
+      this.store.setSetting(key, null);
+    }
+    return true;
   }
   private async discover(destination: Destination) {
     if (destination.chatId !== this.pair()?.chatId)
@@ -378,6 +501,19 @@ export class TelegramWorkspace {
     });
   }
   async callback(data: string, destination: Destination): Promise<boolean> {
+    if (await this.repositoryCallback(data, destination)) return true;
+    const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);
+    if (repo) {
+      this.authorize(destination, repo[1]);
+      await this.repository({
+        destination,
+        ownerId: this.pair()!.userId,
+        groupId: repo[1],
+        project: this.daddy.board(repo[1]).project!,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      });
+      return true;
+    }
     const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2}))?$/);
     if (modelAction) {
       const key = 'dad-model:' + modelAction[1],
@@ -475,7 +611,19 @@ export class TelegramWorkspace {
     if (!match) throw new Error('Unknown Daddy action');
     const [, action, id, limit] = match;
     if (action === 'new') {
-      await this.newSession(id, destination);
+      if (destination.threadId)
+        throw new Error(this.t('Create a new session from the private bot chat.'));
+      const pending = this.store.setting<{ expiresAt: string }>('telegram.pendingDaddy');
+      if (!pending || pending.expiresAt <= now())
+        throw new Error(this.t('This selection expired. Start a new session again.'));
+      this.store.setSetting('telegram.pendingDaddy', { ...pending, projectId: id });
+      await this.repository({
+        destination,
+        project: this.daddy.projects.get(id),
+        ownerId: this.pair()!.userId,
+        expiresAt: pending.expiresAt,
+        creationExpiresAt: pending.expiresAt,
+      });
       return true;
     }
     if (
@@ -494,7 +642,7 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, id);
     if (action === 'pool') {
       if (limit) await this.daddy.settings(id, { writerLimit: Number(limit) });
-      await this.api.send(destination, poolCard(this.locale(), this.daddy.group(id)));
+      await this.api.send(destination, poolCard(this.locale(), this.daddy.board(id)));
       return true;
     }
     if (action === 'pause') await this.daddy.pause(id);
@@ -582,6 +730,33 @@ export class TelegramWorkspace {
         ? this.store.setting<string>('telegram.currentDaddy')
         : this.groupAt(destination);
       const pool = text.match(/^\/pool(?:\s+([1-8]))?$/);
+      const repo = text.match(/^\/repo(?:\s+(.+))?$/);
+      if (repo) {
+        const pending = privateChat
+          ? this.store.setting<{ projectId?: string; expiresAt: string }>('telegram.pendingDaddy')
+          : undefined;
+        const creating = pending && pending.expiresAt > now() && pending.projectId;
+        if (repo[1] === 'default' && groupId && !creating) {
+          this.authorize(destination, groupId);
+          this.store.setSetting(this.repoKey(destination, groupId), null);
+          await this.api.send(destination, this.t('Using project defaults'));
+          return true;
+        }
+        if (!creating && !groupId) throw new Error(this.t('Start a Daddy session first.'));
+        if (!creating) this.authorize(destination, groupId!);
+        await this.repository({
+          destination,
+          ownerId: pair.userId,
+          groupId: creating ? undefined : groupId,
+          project: creating
+            ? this.daddy.projects.get(creating)
+            : this.daddy.board(groupId!).project!,
+          input: repo[1] && repo[1] !== 'default' ? { path: repo[1] } : undefined,
+          creationExpiresAt: creating ? pending!.expiresAt : undefined,
+          expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+        });
+        return true;
+      }
       if (text === '/models' && groupId) {
         await this.models(groupId, destination);
         return true;
@@ -628,11 +803,16 @@ export class TelegramWorkspace {
         return true;
       }
       this.authorize(destination, groupId);
-      this.daddy.chat(
-        groupId,
-        text,
-        `telegram:${chat.id}:${message?.message_id ?? update.update_id}`,
-      );
+      const receipt = `telegram:${chat.id}:${message?.message_id ?? update.update_id}`;
+      if (this.store.setting(`daddy.receipt:${receipt}`)) return true;
+      const nextKey = this.repoKey(destination, groupId),
+        next = this.store.setting<{ project: Project; expiresAt: string }>(nextKey);
+      if (next && next.expiresAt <= now()) {
+        this.store.setSetting(nextKey, null);
+        throw new Error(this.t('This selection expired. Choose the repository again.'));
+      }
+      this.daddy.chat(groupId, text, receipt, next?.project);
+      if (next) this.store.setSetting(nextKey, null);
       return true;
     } catch (error) {
       const message =

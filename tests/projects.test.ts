@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Store } from '../src/core/store.js';
 import { Projects, projectScope } from '../src/core/projects.js';
 import type { ArcBridge } from '../src/integrations/arcadia.js';
@@ -39,6 +40,14 @@ it('registers a named Git project with a relative working directory without chan
     writeFileSync(join(repo, 'src/file.txt'), 'user changes');
     const projects = new Projects(store, [dir], { mounts: async () => [] } as unknown as ArcBridge);
     const project = await projects.register({ name: 'My app', path: join(repo, 'src') });
+    const selected = await projects.selection(project, { path: repo, base: 'release' });
+    expect(selected).toMatchObject({ repoPath: repo, scope: '', base: 'release' });
+    expect(selected.id).not.toBe(project.id);
+    expect((await projects.selection(project, { path: repo, base: 'release' })).id).toBe(
+      selected.id,
+    );
+    expect(projects.get(project.id)).toEqual(project);
+    expect(projects.list()).toHaveLength(1);
     expect(project).toMatchObject({
       repoPath: repo,
       scope: 'src',
@@ -59,6 +68,23 @@ it('registers a named Git project with a relative working directory without chan
       projects.register({ name: 'Escape', path: repo, scope: 'escape' }),
     ).rejects.toThrow('outside');
     expect(() => projectScope('../outside')).toThrow('relative');
+    const saved = projects.get(project.id),
+      groupId = randomUUID();
+    store.saveGroup({
+      id: groupId,
+      rootTaskId: '',
+      title: 'Old session',
+      requirements: '',
+      projectId: saved.id,
+      orchestrated: true,
+      reviewer: { engine: 'codex' },
+      generation: 1,
+      createdAt: saved.createdAt,
+      updatedAt: saved.updatedAt,
+    });
+    await projects.register({ name: saved.name, path: repo, base: 'release' }, saved.id);
+    expect(store.getGroup(groupId).project).toEqual(saved);
+    expect(projects.get(saved.id)).toMatchObject({ repoPath: repo, scope: '', base: 'release' });
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -73,14 +99,28 @@ it('detects Arcadia before Git and uses the configured shared-store mounts', asy
     mounts = vi.fn(async () => [{ path: dir, object_store_ok: true, claimable: false }]);
   try {
     const projects = new Projects(store, [dir], { mounts } as unknown as ArcBridge);
-    expect(await projects.register({ name: 'Work', path: join(dir, 'alice') })).toMatchObject({
+    const project = await projects.register({ name: 'Work', path: join(dir, 'alice') });
+    expect(project).toMatchObject({
       vcs: 'arcadia',
       repoPath: dir,
       scope: 'alice',
       base: 'trunk',
     });
     expect(git).not.toHaveBeenCalled();
-    expect(mounts).toHaveBeenCalledOnce();
+    const other = join(dir, 'other');
+    mkdirSync(other);
+    writeFileSync(join(other, '.arcignore'), '');
+    mounts.mockResolvedValue([
+      { path: dir, object_store_ok: true, claimable: false },
+      { path: other, object_store_ok: true, claimable: false },
+    ]);
+    expect(await projects.selection(project, { path: other })).toMatchObject({
+      repoPath: other,
+      scope: '',
+      base: 'trunk',
+    });
+    expect(projects.get(project.id)).toEqual(project);
+    expect(git).not.toHaveBeenCalled();
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

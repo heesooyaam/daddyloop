@@ -123,3 +123,47 @@ it('can remount after cleanup without reusing an aborted read controller', async
   expect(signals.at(-1)?.aborted).toBe(false);
   model.stop();
 });
+it('keeps a changed repository draft during an uncertain send and binds retry identity to the whole request', async () => {
+  const f = daddyFixture(),
+    group = f.daddy.create({ projectId: f.project.id });
+  const requests: any[] = [];
+  let finish!: () => void;
+  const api: DaddyApi = async <T>(path: string, body?: unknown) => {
+    if (path.endsWith('/chat')) {
+      requests.push(body);
+      if (requests.length === 1) throw new Error('response lost');
+      if (requests.length === 2)
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      return {} as T;
+    }
+    if (path === '/projects') return [f.project] as T;
+    if (path === '/daddy/sessions') return [] as T;
+    if (path === '/status') return {} as T;
+    return f.daddy.board(group.id) as T;
+  };
+  const model = new DaddyClient(api, group.id);
+  try {
+    model.draft('A task');
+    model.workspace({ path: '/server/a' });
+    await model.send();
+    const retry = model.send();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    model.workspace({ path: '/server/b' });
+    finish();
+    await retry;
+    expect(requests[0]).toEqual(requests[1]);
+    expect(model.snapshot().drafts[group.id]).toBe('A task');
+    expect(model.snapshot().workspaces[group.id]?.path).toBe('/server/b');
+    await model.send();
+    expect(requests[2].requestId).not.toBe(requests[1].requestId);
+    expect(requests[2].workspace.path).toBe('/server/b');
+    expect(model.snapshot().workspaces[group.id]).toBeUndefined();
+    expect(model.snapshot().drafts[group.id]).toBe('');
+  } finally {
+    finish?.();
+    model.stop();
+    await f.close();
+  }
+});

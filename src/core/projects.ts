@@ -2,7 +2,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { AppError, now, type Project } from './types.js';
 import type { Store } from './store.js';
@@ -17,6 +17,8 @@ export const projectInput = z
     base: z.string().max(200).optional(),
   })
   .strict();
+export const workspaceInput = projectInput.omit({ name: true }).partial({ path: true });
+export type WorkspaceInput = z.infer<typeof workspaceInput>;
 export function projectScope(value: string) {
   if (
     isAbsolute(value) ||
@@ -83,7 +85,7 @@ export class Projects {
       truncated: candidates.length > 150,
     };
   }
-  async register(input: z.infer<typeof projectInput>): Promise<Project> {
+  private async inspect(input: z.infer<typeof projectInput>): Promise<Project> {
     input = projectInput.parse(input);
     const path = this.path(input.path);
     let root = path,
@@ -162,11 +164,8 @@ export class Projects {
     }
     if (input.base && (!/^[A-Za-z0-9_./-]+$/.test(input.base) || input.base.startsWith('-')))
       throw new Error('Invalid base branch');
-    const existing = this.store
-      .projects()
-      .find((project) => project.repoPath === root && project.scope === scope);
-    const project: Project = {
-      id: existing?.id ?? randomUUID(),
+    return {
+      id: randomUUID(),
       name: input.name,
       repoPath: root,
       scope,
@@ -174,17 +173,53 @@ export class Projects {
       provider,
       host,
       repo,
-      base: input.base ?? (vcs === 'arcadia' ? 'trunk' : undefined),
-      createdAt: existing?.createdAt ?? now(),
+      base: input.base || (vcs === 'arcadia' ? 'trunk' : undefined),
+      createdAt: now(),
       updatedAt: now(),
     };
-    if (existing && this.store.groups().some((group) => group.projectId === existing.id)) {
-      if (existing.base !== project.base)
-        throw new AppError(
-          'project_in_use',
-          'Create a separate project to change the base branch of existing sessions',
-          409,
-        );
+  }
+  async selection(project: Project, input?: WorkspaceInput): Promise<Project> {
+    if (!input || !Object.keys(input).length) return { ...project };
+    input = workspaceInput.parse(input);
+    const selected = await this.inspect({
+      name: project.name,
+      path: input.path ?? project.repoPath,
+      scope: input.scope ?? (input.path ? undefined : project.scope),
+      // A different repository must not inherit a branch name from another VCS.
+      base: input.base ?? (input.path ? undefined : project.base),
+    });
+    const identity = (value: Project) => [
+      value.repoPath,
+      value.scope,
+      value.base ?? '',
+      value.host,
+      value.repo,
+    ];
+    const changed = JSON.stringify(identity(selected)) !== JSON.stringify(identity(project));
+    const hash = createHash('sha256')
+      .update(JSON.stringify([project.id, ...identity(selected)]))
+      .digest('hex');
+    const id = changed
+      ? `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`
+      : project.id;
+    return { ...selected, id, createdAt: project.createdAt };
+  }
+  async register(input: z.infer<typeof projectInput>, id?: string): Promise<Project> {
+    const project = await this.inspect(input);
+    const existing = id
+      ? this.get(id)
+      : this.store
+          .projects()
+          .find((saved) => saved.repoPath === project.repoPath && saved.scope === project.scope);
+    if (existing) {
+      project.id = existing.id;
+      project.createdAt = existing.createdAt;
+      // Pin pre-snapshot sessions before changing any default.
+      for (const group of this.store.groups())
+        if (group.projectId === existing.id && !group.project) {
+          group.project = existing;
+          this.store.saveGroup(group);
+        }
     }
     this.store.saveProject(project);
     this.store.event('_system', 'project.saved', { id: project.id, name: project.name });

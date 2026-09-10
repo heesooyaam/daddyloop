@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -40,7 +41,41 @@ test('starts from a registered project, adds N+1 tickets to Daddy and exposes wo
   await expect(page.getByRole('dialog').locator('textarea')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByLabel('Maximum writers')).toHaveValue('2');
+  await expect(
+    page.locator('.daddy-pool-hint').filter({ hasText: 'Occupied by tasks: 2' }),
+  ).toBeVisible();
+  await page.getByLabel('Maximum writers').selectOption('1');
+  await expect(
+    page.getByText('Pool: 2 → 1. Changes apply in the background.', { exact: true }),
+  ).toBeVisible();
   expect(errors).toEqual([]);
+});
+test('uses a one-request repository from a phone and resets the composer without changing project defaults', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Per-task workspace', Date.now());
+  await page.setViewportSize({ width: 390, height: 844 });
+  const fields = page.locator('.daddy-composer .daddy-workspace-fields');
+  await fields.locator('summary').click();
+  const alternate = resolve('.reviewloop/e2e/fixture-repository-alternate');
+  await fields.getByLabel('Repository on this server').fill(alternate);
+  const sent = page.waitForResponse(
+    (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
+  );
+  await page
+    .getByLabel('Message Daddy')
+    .fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const response = await sent;
+  expect(response.status()).toBe(200);
+  const board = await response.json();
+  expect(board.messages.at(-1).project.repoPath).toBe(alternate);
+  expect(board.project.repoPath).toBe(resolve('.reviewloop/e2e/fixture-repository'));
+  await expect(fields.getByLabel('Repository on this server')).toHaveValue(board.project.repoPath);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await expect(page.locator('.daddy-work-item')).toHaveCount(2);
 });
 test('keeps separate conversation drafts when changing Daddy sessions', async ({ page }) => {
   await login(page);

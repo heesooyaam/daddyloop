@@ -57,3 +57,11 @@ daddy runtime rollback --yes
 For phone browser access, configure persistent HTTPS with `daddy web tailscale` or `daddy web origin https://…`, then pair with `daddy phone`. Telegram uses the server's outgoing connection independently of the laptop.
 
 Check storage with `daddy cache status`; preview cleanup with `daddy cache prune`. Adding `--apply` removes only verified eligible artifacts. Author changes, credentials and workflow history are preserved. Native review Markdown and revision fences remain authoritative. Automatic publication follows task policy; PRs are not automatically merged.
+
+## Project defaults and per-task repositories
+
+Projects are local to the server. `Work` can point to `~/arcadia2` on one machine and `~/arcadia` on another. A new Daddy session pins that server's project defaults. Changing defaults with `daddy projects set Work ~/arcadia` affects future sessions only.
+
+Use `daddy new --project Work --repo ~/arcadia2 "Goal"` to override an entire new session, or `daddy talk SESSION_ID "Next ticket" --repo ~/arcadia2 --scope alice` for a single request. The web composer has the same folder, scope and base controls. In Telegram use **Repository for next task** or `/repo <path>`, confirm the folder, then send your task. The next message returns to the session defaults. Existing tasks retain their own workspaces; uncommitted source changes are not copied into managed checkouts.
+
+Pool changes are asynchronous: `daddy pool SESSION_ID 1` requests one slot. Busy writers finish the whole task, including review fixes and required checks, before excess slots retire. Paused or failed work still owns its slot. The requested/applied sizes and task ownership survive service restarts.

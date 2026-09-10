@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
-import { projectInput } from '../core/projects.js';
+import { projectInput, workspaceInput } from '../core/projects.js';
 import { profilesSchema } from '../core/agents.js';
 import { AppError } from '../core/types.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
@@ -18,6 +18,26 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.post('/api/projects', async (request, reply) =>
     reply.code(201).send(await daddy.projects.register(projectInput.parse(request.body))),
   );
+  app.post<{ Params: { id: string } }>('/api/projects/:id/defaults', async (request) =>
+    daddy.projects.register(projectInput.parse(request.body), id.parse(request.params.id)),
+  );
+  app.post('/api/projects/preview', async (request) => {
+    const input = z
+      .object({
+        projectId: id.optional(),
+        sessionId: id.optional(),
+        workspace: workspaceInput.optional(),
+      })
+      .strict()
+      .refine((input) => !!input.projectId !== !!input.sessionId)
+      .parse(request.body);
+    return daddy.projects.selection(
+      input.sessionId
+        ? daddy.board(input.sessionId).project!
+        : daddy.projects.get(input.projectId!),
+      input.workspace,
+    );
+  });
   app.get('/api/daddy/sessions', async () =>
     daddy.sessions().map((group) => {
       const board = daddy.board(group.id);
@@ -35,6 +55,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const input = z
       .object({
         projectId: id,
+        workspace: workspaceInput.optional(),
         title: z.string().trim().min(1).max(200).optional(),
         message: z.string().trim().min(1).max(20000).optional(),
         writerLimit: z.number().int().min(1).max(8).optional(),
@@ -44,7 +65,9 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       })
       .strict()
       .parse(request.body);
-    const group = daddy.create({ ...input, requirements: input.message });
+    const { workspace, ...options } = input;
+    const project = await daddy.projects.selection(daddy.projects.get(input.projectId), workspace);
+    const group = daddy.create({ ...options, project, requirements: input.message });
     return reply.code(201).send(daddy.board(group.id));
   });
   app.get<{ Params: { id: string } }>('/api/daddy/sessions/:id', async (request) =>
@@ -55,14 +78,20 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       .object({
         text: z.string().trim().min(1).max(20000),
         requestId: z.string().uuid().optional(),
+        workspace: workspaceInput.optional(),
       })
       .strict()
       .parse(request.body);
     const sessionId = id.parse(request.params.id);
+    const project = await daddy.projects.selection(
+      daddy.board(sessionId).project!,
+      input.workspace,
+    );
     return daddy.chat(
       sessionId,
       input.text,
       input.requestId ? `api:${sessionId}:${input.requestId}` : undefined,
+      project,
     );
   });
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/settings', async (request) =>
