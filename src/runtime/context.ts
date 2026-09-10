@@ -15,6 +15,14 @@ export function buildContext(store: Store, task: Task, job: Job): string {
       round: task.round,
     },
     approvedPlan: task.approvedPlan,
+    pullRequest: task.pr
+      ? {
+          title: task.pr.title,
+          body: task.pr.body,
+          branch: task.pr.branch,
+          targetBranch: task.pr.targetBranch,
+        }
+      : undefined,
     source: task.source,
     ...(group
       ? {

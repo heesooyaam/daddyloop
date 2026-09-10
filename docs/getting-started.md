@@ -1,186 +1,21 @@
-# Подробная установка и работа с Reviewloop
+# Getting started with Daddyloop
 
-Сервис для постоянных сессий автора и ревьюера вокруг GitHub PR, GitLab MR и Arcanum PR. Начни с GitHub issue или тикета Tracker, либо подключи готовый PR. Ревьюер автоматически публикует завершённое ревью — автор получает комментарии, исправляет код и возвращает новую ревизию на проверку.
-
-**Сервер и оба агента работают на одной Linux-машине.** CLI, сайт и Telegram управляют этим сервисом. Закрытие терминала или отключение ноутбука не останавливает работу; tmux не нужен.
-
-![Review workspace](media/workspace.png)
-
-Эта страница содержит полные инструкции. Краткая презентация и демонстрация — в [README](../README.md).
-
-## Установить одной командой
-
-На машине, где будут работать агенты:
+Install the managed Linux service from the current release, authenticate Codex and the review provider, then register a source project:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/reviewloop/releases/download/v0.5.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.7.0/install.sh | bash
+daddy auth codex
+daddy auth github
+daddy projects add ~/projects/app --name App
+daddy
 ```
 
-Релиз содержит UI, Node 24, Codex CLI и GitHub CLI. Установщик проверяет SHA-256, устанавливает `reviewctl` в `~/.local/bin` и настраивает systemd. Нужны Linux с systemd, curl и tar; отсутствующий Git установится через apt/sudo, если они доступны. Архивы: x64 и arm64. Доступ к приватному релизу ограничен владельцем до изменения видимости репозитория.
+In the terminal, choose `/new`, select the project and describe the goal or paste a ticket. On the website, use **Projects** to browse the server's folders, then **New session**. A project records its source repository, optional starting subdirectory and base branch. Each writer receives an isolated working copy.
 
-При необходимости установщик попросит пароль sudo для настройки постоянного сервиса. Приложение и агенты работают от вашего обычного пользователя. Системный Node не заменяется. Пакеты лежат в `~/.local/share/reviewloop/releases/`, данные — отдельно от версии приложения. Повторная установка сохраняет задачи и рабочие копии.
+A session has one Daddy conversation and a pool of writers. It starts with one writer; change the limit with `/pool` or the website's pool control. Daddy assigns work and reviews results. Send additional tickets in the same session to add work to its pool. Writer reports are readable; user instructions go through Daddy.
 
-Если `~/.local/bin` отсутствует в PATH, добавь его в профиль shell:
+For Telegram, run `daddy telegram setup`, pair the bot, then send `/workspace` in the private chat. Choose a group with Topics enabled and give the bot permission to manage them. New Daddy sessions get topics automatically.
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+The service survives client/SSH disconnects. A phone browser needs persistent HTTPS; use `daddy web tailscale` or `daddy web origin <https-url>`, then `daddy phone`. Telegram connects from the server independently of the laptop.
 
-Подключи нужные аккаунты:
-
-```bash
-reviewctl auth codex        # вход с кодом устройства, подходит для SSH
-reviewctl auth github      # вход через браузер; использует SSH для Git
-reviewctl auth gitlab       # скрытый ввод личного токена с api
-reviewctl doctor
-reviewctl
-```
-
-Установщик подхватывает существующий GitHub-вход через `gh`. Codex использует авторизацию аккаунта на этом хосте. Внешние аккаунты требуют вашего однократного входа. Для демонстрации авторизация не нужна: в консоли введи `/demo` или нажми **Try a demo loop** на сайте.
-
-## CLI
-
-`reviewctl` без аргументов открывает полноэкранный терминальный интерфейс. Tab переключает роли, Ctrl+T выбирает задачу, Ctrl+J добавляет строку, PgUp/PgDn прокручивают переписку. `reviewctl --theme light` включает светлую тему, `reviewctl --plain` возвращает простой построчный режим. [Полное руководство](terminal.md).
-
-Команды внутри интерфейса:
-
-```text
-/tasks
-/use <id-prefix>
-/role reviewer
-Объясни, при каких условиях воспроизводится первый баг
-/publish
-/role author
-/status
-/quit
-```
-
-`/attach` спросит ссылку на PR, путь к репозиторию **на сервере** и исходные требования. Отдельные команды подходят для скриптов:
-
-```bash
-reviewctl attach https://github.com/owner/repo/pull/42 \
-  --repo /absolute/path/to/repo --requirements /path/to/requirements.md
-reviewctl list
-reviewctl chat <task-id> --role reviewer 'Объясни первое замечание'
-reviewctl publish <task-id>
-reviewctl pause <task-id>
-reviewctl resume <task-id>
-reviewctl retry <task-id>
-reviewctl logs <task-id> --follow
-```
-
-Публикация завершённых ревью автоматическая по умолчанию. `--manual-publish` включает ожидание человека. Сохранённые политики старых задач остаются прежними; встроенное демо показывает ручную публикацию. Автор получает фактически опубликованный Markdown; приватная переписка с ревьюером остаётся отдельно. Исходная рабочая копия пользователя не переключается. Сервис использует собственные рабочие копии и обычный push без force; `--no-auto-push` сохраняет изменения локально.
-
-Для Markdown-плана подключи отдельный PR с `--kind plan`, после ревью и CI выполни `reviewctl approve-plan <id>`. Затем подключи PR реализации с `--plan <id>`: в задачу попадут конкретная принятая ревизия и полный текст плана. Автоматического merge нет.
-
-## Начать с тикета и выбрать модели
-
-Открой `reviewctl`: `/defaults` настраивает новые задачи, `/new` запускает мастер импорта GitHub issue или Tracker тикета. После обсуждения `/implement` запускает реализацию и создание PR. `/models` меняет модели выбранной задачи; `/child` создаёт отдельного автора для дочернего тикета, сохраняя общего ревьюера.
-
-На сайте: **New from ticket → Import ticket and start chat → Start implementation**. Настройки — **Agents & models** или **Models** у выбранной задачи. [Полный пример большого тикета и его детей →](tickets.md)
-
-## Язык, модели и версии CLI
-
-`reviewctl language ru` / `reviewctl language en` сохраняет язык рабочего пространства. В TUI есть `/language`, на сайте — переключатель вверху, в Telegram — `/language` с кнопками. Для одного запуска клиента: `reviewctl --language en`.
-
-Модели приходят из `codex app-server` через `model/list` и кешируются до пяти минут. `/models refresh`, `reviewctl models --refresh` или кнопка **Обновить список моделей** делает новый запрос. Автор и ревьюер настраиваются отдельно через `/models` / `/defaults` или сайт.
-
-`reviewctl updates --check` проверяет версии CLI сейчас; автоматически сервис делает это раз в шесть часов. `/updates` доступна в TUI и боте. Текущий путь CLI показан в диагностике. Для выбора внешнего Codex на сервере: `reviewctl runtime use system`; для возврата к встроенному: `reviewctl runtime use bundled`. Это явный перезапуск свободного сервиса, а не автоматическое обновление работающих агентов.
-
-[Детали и ограничения](models-and-updates.md). Движок Claude пока не реализован.
-
-## Сайт и телефон
-
-Локальный сайт: **http://127.0.0.1:4317**. `reviewctl token` выдаёт локальный административный токен входа.
-
-Для доступа с телефона нужен постоянный маршрут **телефон → сервер**. Настройка через Tailscale:
-
-```bash
-reviewctl web tailscale
-reviewctl phone
-```
-
-Первая команда установит отдельный сетевой сервис на сервере и покажет ссылку для входа в Tailscale. При первом включении HTTPS может потребоваться разрешить сертификаты в аккаунте. Установи Tailscale на телефон и войди в ту же сеть. Вторая команда выдаст одноразовую ссылку входа в Reviewloop на 5 минут. Её также можно получить в **Devices & connections** на сайте.
-
-Tailscale и Reviewloop работают под systemd. Ноутбук не участвует в этом соединении. Сайт доступен, пока сервер включён, его сервисы работают, а телефон подключён к сети Tailscale.
-
-Если уже есть домен и HTTPS-прокси на сервере:
-
-```bash
-reviewctl web origin https://review.example.com
-reviewctl restart
-reviewctl phone
-```
-
-Прокси должен передавать исходный Host, поддерживать длительные SSE-соединения и направлять трафик на `http://127.0.0.1:4317`. Пример конфигурации — в [эксплуатации](operations.md). Произвольные Origin не разрешены. Браузеры получают отдельные отзываемые сессии: `reviewctl devices`, `reviewctl revoke-device <id>`.
-
-SSH-туннель пригоден для временного доступа с ноутбука; он перестаёт работать при отключении SSH. Для постоянного доступа телефона используй один из вариантов выше.
-
-## Telegram
-
-Создай отдельного бота через @BotFather, затем на сервере:
-
-```bash
-reviewctl telegram setup
-```
-
-Команда скрыто спросит токен и выдаст ссылку для привязки личного чата. Также поддерживается `--token-file /path/to/token`; по умолчанию читается `~/.tokens/reviewloop-telegram`. Бот использует long polling: отдельный домен или входящий webhook ему не нужен.
-
-Карточки содержат понятный статус, название задачи, результат и кнопки. Длинные ответы сохраняют форматирование и продолжаются в следующих сообщениях. Кнопки позволяют открыть задачу или выбрать режим уведомлений. [Подробнее об интерфейсе бота](telegram.md).
-
-Доступны `/tasks`, `/status <id>`, `/reviewer <id> текст`, `/author <id> текст`, `/pause <id>`, `/resume <id>`, `/retry <id>`, `/publish <id>` и `/web`. По умолчанию после привязки бот сообщает о завершении и ситуациях, требующих внимания. `/notifications all` включает промежуточные ответы, `/notifications off` выключает уведомления, `/notifications on` возвращает тихий режим. Настройки также доступны через `/notifications` в TUI, колокольчик на сайте и `reviewctl notifications on --events attention`. Ручная команда `/publish` требует отдельной кнопки подтверждения; смена ревизии или текста ревью делает старую кнопку недействительной. Посторонние чаты и группы не получают данные.
-
-## Память и очистка
-
-По умолчанию одновременно работает один агент; `/concurrency 2` или `reviewctl agents defaults --max-agents 2` разрешает независимым авторам работать вместе. Один ревьюер группы всё равно проверяет детей последовательно. Весь сервис с дочерними процессами ограничен 8 ГБ RAM. Сервис проверяет доступную память хоста, свой лимит и диск; при нехватке ресурсов прерывает работу с сохранением состояния.
-
-```bash
-reviewctl status
-reviewctl cache status
-reviewctl cache prune          # только показать кандидатов
-reviewctl cache prune --apply  # удалить проверенные старые артефакты
-reviewctl cache auto on
-reviewctl restart
-```
-
-Очистка удаляет только старые, чистые, зарегистрированные копии ревьюера и помеченные временные файлы Reviewloop. Сохраняются активные копии, авторские изменения, история SQLite, токены и общие хранилища. Для общей Arc-сборки мусора есть `reviewctl cache arcadia-gc` (dry run) и `--apply` (обычный `arc gc`). Очистка `ya`, чужих проектов и `arc gc --truncate` не выполняется.
-
-## Arcadia / Arcanum
-
-На корпоративном хосте нужны уже установленные `arc`, `arcanum-cli`, настроенный `arcadia-mount-lease`, корпоративный CA и авторизация Arc. Эти внутренние инструменты не входят в публичный релиз.
-
-```bash
-reviewctl arcadia setup --workspace ~/arcadia2
-reviewctl arcadia mounts
-reviewctl attach https://a.yandex-team.ru/review/11111111 \
-  --repo ~/arcadia2 --requirements /path/to/requirements.md
-```
-
-Нужны отдельные свободные чистые mounts для автора и ревьюера. Сервис получает аренды через helper и проверяет общее object store. Исходный mount пользователя остаётся на своей ветке. Ревью привязано к полным SHA и версии diff; публикуются только явно отслеживаемые черновики. После завершения задачи: `reviewctl arcadia release <id> --role reviewer` и аналогично для автора.
-
-Поддержка Arc проверена чтением настоящего PR и CI; записи и изменения рабочих копий проверены на fixtures. Живой цикл публикации/commit/push требует отдельного тестового PR.
-
-## Управление и разработка
-
-```bash
-reviewctl service status
-reviewctl service logs --follow
-reviewctl restart
-reviewctl down
-reviewctl up
-```
-
-Сервис запускается при загрузке хоста. После перезапуска незавершённая агентская работа требует `retry` или `resume`; готовый результат не подменяет прерванный. `reviewctl service uninstall` удаляет сервис, сохраняя данные.
-
-Из исходников:
-
-```bash
-./scripts/bootstrap.sh
-./scripts/reviewctl.mjs serve --demo
-npm run check
-npx playwright install --with-deps chromium
-npm run test:e2e
-npm run release:build
-```
-
-[Архитектура](architecture.md) · [Эксплуатация и ограничения](operations.md) · [Ревью 0.2](review-v0.2.md) · [Ревью первой версии](review.md)
+[Full guide](../README.md) · [English quickstart](quickstart-en.md) · [CLI](terminal.md) · [Arcadia](arcadia.md) · [Telegram](telegram.md)

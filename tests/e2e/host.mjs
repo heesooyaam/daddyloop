@@ -9,6 +9,10 @@ import { Workspaces } from '../../dist/server/runtime/workspaces.js';
 import { Store } from '../../dist/server/core/store.js';
 import { UpdateMonitor } from '../../dist/server/core/updates.js';
 import { configSchema } from '../../dist/server/ops/config.js';
+import { Projects } from '../../dist/server/core/projects.js';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { writeFileSync, existsSync } from 'node:fs';
 const dir = resolve('.reviewloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 const key = join(dir, 'test-key.pem'),
@@ -82,6 +86,21 @@ workspaces.describeTicket = async (repoPath, ref) => ({
 });
 workspaces.prepareTicket = async () => dir;
 const store = new Store(join(dir, 'reviewloop.sqlite'));
+const projectRoot = join(dir, 'fixture-repository');
+mkdirSync(join(projectRoot, 'src'), { recursive: true });
+if (!existsSync(join(projectRoot, '.git'))) {
+  const run = (args) => execFileSync('git', args, { cwd: projectRoot, stdio: 'ignore' });
+  run(['init']);
+  run(['config', 'user.name', 'Browser fixture']);
+  run(['config', 'user.email', 'fixture@example.test']);
+  writeFileSync(join(projectRoot, 'src', 'index.txt'), 'Fixture source\n');
+  run(['add', '.']);
+  run(['commit', '-m', 'fixture']);
+  run(['remote', 'add', 'origin', 'https://github.com/fixture/planning.git']);
+}
+const projects = new Projects(store, [dir], { mounts: async () => [] });
+await projects.register({ name: 'Fixture project', path: projectRoot });
+workspaces.commitTicket = async () => 'b'.repeat(40);
 store.setSetting('preferences', {
   locale: 'en',
   version: (store.setting('preferences')?.version ?? 0) + 1,
@@ -96,6 +115,7 @@ const updates = new UpdateMonitor(store, {
 const { app } = await buildApp({
   startUpdateCheck: false,
   store,
+  projects,
   updateMonitor: updates,
   ticketReader: reader,
   workspaces,
@@ -119,11 +139,43 @@ const { app } = await buildApp({
   },
   liveRuntime: {
     run: async (input) => {
+      if (input.job.kind === 'implement') await delay(500);
       input.onSession(`fixture-${input.job.role}-${input.task.id}`);
       return {
         status: 'completed',
         summary: 'I have read the ticket. Discuss the requirements or start implementation.',
         checkedHead: input.task.revision.head,
+      };
+    },
+  },
+  daddyWorkspace: { prepare: async () => ({ cwd: dir, context: {} }), release: async () => {} },
+  daddyRuntime: {
+    runSession: async (input) => {
+      input.onSession(input.threadId ?? `fixture-daddy-${randomUUID()}`);
+      const context = JSON.parse(input.prompt),
+        sources = [
+          ...new Set(
+            context.currentInstruction.match(
+              /https:\/\/github\.com\/fixture\/planning\/issues\/\d+/g,
+            ) ?? [],
+          ),
+        ];
+      let index = 0;
+      for (const source of sources) {
+        const result = await input.onTool('import_ticket', { source }, `import-${index}`);
+        const task = store.getTask(result.taskId);
+        task.policy.autoPush = false;
+        store.saveTask(task);
+        if (task.state === 'discussing' && !store.busy(task.id))
+          await input.onTool('dispatch', { taskId: task.id }, `dispatch-${index}`);
+        index++;
+      }
+      return {
+        status: 'completed',
+        summary: sources.length
+          ? `I added ${sources.length} ticket(s) to this session and assigned the work. Your writers share one Daddy.`
+          : 'I have checked the current task board. The work and conversation remain in this session.',
+        checkedHead: '',
       };
     },
   },

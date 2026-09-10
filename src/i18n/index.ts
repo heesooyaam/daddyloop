@@ -1,4 +1,5 @@
 import { ru } from './ru.js';
+import { daddyRu } from './daddy-ru.js';
 export type Locale = 'en' | 'ru';
 export const locales: Locale[] = ['en', 'ru'];
 export const localeNames = { en: 'English', ru: 'Русский' };
@@ -10,7 +11,7 @@ export function normalizeLocale(value: unknown, fallback: Locale = 'en'): Locale
       : fallback;
 }
 type Values = Record<string, unknown>;
-const dictionary: Readonly<Record<string, string>> = ru;
+const dictionary: Readonly<Record<string, string>> = { ...ru, ...daddyRu };
 const english = new Map(Object.entries(dictionary).map(([key, value]) => [value, key]));
 const format = (text: string, values: Values) =>
   text.replace(/\{([A-Za-z0-9_]+)\}/g, (match, name: string) =>

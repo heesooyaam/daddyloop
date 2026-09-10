@@ -52,7 +52,7 @@ try {
   await mkdir(tools);
   execFileSync(
     'npm',
-    ['install', '--prefix', tools, '--no-audit', '--no-fund', '@openai/codex@0.153.4'],
+    ['install', '--prefix', tools, '--no-audit', '--no-fund', '@openai/codex@0.154.0'],
     { env, stdio: 'inherit' },
   );
   const ghVersion = '2.100.0',
@@ -92,7 +92,7 @@ try {
         platform: process.platform,
         arch: process.arch,
         node: nodeVersion,
-        codex: '0.153.4',
+        codex: '0.154.0',
         gh: ghVersion,
       },
       null,

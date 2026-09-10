@@ -6,6 +6,7 @@ import { command } from '../ops/process.js';
 import { loadConfig } from '../ops/config.js';
 import { credential } from '../core/security.js';
 import { AppError } from '../core/types.js';
+import { resources } from '../core/resources.js';
 
 export interface ArcLease {
   mount: string;
@@ -49,7 +50,29 @@ export class ArcBridge {
       claimable: boolean;
       object_store_ok: boolean;
       lease_owner_id?: string;
+      mounted?: boolean;
+      number?: number;
+      reserved?: boolean;
+      claim_blockers?: string[];
     }[];
+  }
+  async provision(exclude?: string): Promise<boolean> {
+    const candidate = (await this.mounts()).find(
+      (mount) =>
+        mount.path !== exclude &&
+        mount.mounted === false &&
+        !mount.reserved &&
+        Number.isInteger(mount.number) &&
+        mount.claim_blockers?.length === 1 &&
+        mount.claim_blockers[0] === 'unmounted',
+    );
+    if (!candidate) return false;
+    const status = resources(homedir(), loadConfig().resources);
+    if (!status.ok) throw new AppError('resource_limit', status.reasons.join('; '), 422);
+    await command(leaseHelper(), ['--json', 'mount', String(candidate.number)], {
+      timeoutMs: 120000,
+    });
+    return true;
   }
   async claim(ownerId: string, mount?: string): Promise<ArcLease> {
     const result = await command(leaseHelper(), [

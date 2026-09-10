@@ -1,14 +1,12 @@
-# Reviewloop 0.6.1
+# Daddyloop 0.7.0
 
-Patch: complete Russian translations for the Codex update confirmation button and the new CLI help text.
+Reviewloop becomes Daddyloop: one conversation for project planning, writer assignment and code review.
 
-Update Codex directly from the paired Telegram bot: `/updates` → **Update Codex** → **Confirm**. The server downloads and validates the selected version, reports the result, and offers rollback. Closing Telegram or disconnecting the laptop does not stop the update.
+- Named server projects, directory selection and optional starting subdirectories. Git uses managed worktrees; Arcadia uses leased shared-store mounts with capacity waiting and a reserved control/review slot.
+- Persistent Daddy conversations, a durable coordination queue, task dependencies and a writer pool of 1–8 simultaneous writers. New tickets join the existing session. Direct public writer chat is disabled; reports remain readable.
+- Telegram forum workspaces: owner-selected groups, automatic per-session topics, natural-language task messages, pool controls and model selection. Lost topic-creation responses are not blindly retried.
+- New browser and full-screen CLI experiences, with English/Russian copy and independent session drafts. Primary commands are `daddy` and `daddyloop`; `reviewctl` remains an alias.
+- One completion notification for a managed Codex update, with external CLI-version changes reported separately.
+- GitLab submission and recovery for locally described tasks; GitHub issues, Tracker tickets and existing native PR/MR review remain supported.
 
-- Separate immutable Codex installations, verified against the official npm package's SHA-512 checksum. System CLI installations and Reviewloop release files remain intact.
-- Candidate version, app-server initialization, model catalogue and saved profiles are checked before activation. Each running agent finishes its current turn; subsequent turns use the selected CLI.
-- One-use expiring confirmations, durable recovery after service interruption, validated rollback and deduplicated completion messages.
-- Download size, time, disk and memory limits; temporary archives are removed after the operation.
-- Remote CLI controls: `reviewctl runtime update --yes`, `runtime update-status`, and `runtime rollback --yes`.
-- English and Russian Telegram cards and a distinct label for Codex versions installed by Reviewloop.
-
-Existing tasks, model defaults, conversations, accounts and Telegram pairing are preserved. Updates require confirmation. Claude remains diagnostic only.
+Existing state, models, tokens, Codex selection and native review identifiers are preserved. SQLite advances to schema 4; use the pre-upgrade database backup when restoring an older server release. Archive names and selected internal paths/markers retain the Reviewloop spelling for compatibility.

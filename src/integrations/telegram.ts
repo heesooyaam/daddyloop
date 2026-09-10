@@ -27,6 +27,9 @@ import type { Locale } from '../i18n/index.js';
 import type { Catalogue } from '../server/planning.js';
 import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
 import type { CodexUpdater, CodexUpdateOperation } from '../core/codex-updater.js';
+import type { Daddy } from '../core/daddy.js';
+import { TelegramWorkspace } from './telegram-workspace.js';
+import { daddyHome } from './daddy-cards.js';
 import {
   codexConfirmationCard,
   codexOperationCard,
@@ -37,11 +40,23 @@ import {
 } from './telegram-meta.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type User = { id: number; is_bot?: boolean };
-type Chat = { id: number; type: string };
+type Chat = { id: number; type: string; title?: string; is_forum?: boolean };
 export interface Update {
   update_id: number;
-  message?: { text?: string; chat: Chat; from?: User };
-  callback_query?: { id: string; data?: string; from: User; message?: { chat: Chat } };
+  message?: {
+    text?: string;
+    chat: Chat;
+    from?: User;
+    message_thread_id?: number;
+    message_id?: number;
+    chat_shared?: { request_id: number; chat_id: number; title?: string };
+  };
+  callback_query?: {
+    id: string;
+    data?: string;
+    from: User;
+    message?: { chat: Chat; message_thread_id?: number; message_id?: number };
+  };
 }
 type Pairing = { chatId: number; userId: number; username: string };
 type Confirmation = {
@@ -108,7 +123,14 @@ export class TelegramApi {
     const requestSignal = signal
       ? AbortSignal.any([signal, AbortSignal.timeout(40000)])
       : AbortSignal.timeout(40000);
-    const readOnly = ['getMe', 'getWebhookInfo', 'getUpdates'].includes(method);
+    const readOnly = [
+      'getMe',
+      'getWebhookInfo',
+      'getUpdates',
+      'getChat',
+      'getChatMember',
+      'getChatMemberCount',
+    ].includes(method);
     for (let attempt = 0; ; attempt++) {
       try {
         const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
@@ -179,7 +201,12 @@ export class TelegramApi {
       }
     }
   }
-  async send(chatId: number, content: string | TelegramCard, buttons?: TelegramButton[][]) {
+  async send(
+    destination: number | { chatId: number; threadId?: number },
+    content: string | TelegramCard,
+    buttons?: TelegramButton[][],
+  ) {
+    const chatId = typeof destination === 'number' ? destination : destination.chatId;
     const value = typeof content === 'string' ? new TelegramText().add(content) : content;
     const chunks = splitTelegramText(value);
     const keyboard = buttons ?? (value as TelegramCard).buttons;
@@ -188,6 +215,9 @@ export class TelegramApi {
       const chunk = chunks[i];
       result = await this.call('sendMessage', {
         chat_id: chatId,
+        ...(typeof destination !== 'number' && destination.threadId !== undefined
+          ? { message_thread_id: destination.threadId }
+          : {}),
         text: chunk.text,
         ...(chunk.entities.length ? { entities: chunk.entities } : {}),
         link_preview_options: { is_disabled: true },
@@ -204,9 +234,24 @@ export class Telegram {
   private controller?: AbortController;
   private polling?: Promise<void>;
   private notices = Promise.resolve();
-  private integrations?: { catalogue: Catalogue; updates: UpdateMonitor; updater?: CodexUpdater };
-  configure(value: { catalogue: Catalogue; updates: UpdateMonitor; updater?: CodexUpdater }) {
+  private workspace?: TelegramWorkspace;
+  private integrations?: {
+    catalogue: Catalogue;
+    updates: UpdateMonitor;
+    updater?: CodexUpdater;
+    daddy?: Daddy;
+  };
+  configure(value: {
+    catalogue: Catalogue;
+    updates: UpdateMonitor;
+    updater?: CodexUpdater;
+    daddy?: Daddy;
+  }) {
     this.integrations = value;
+    if (value.daddy)
+      this.workspace = new TelegramWorkspace(value.daddy, this.api, this.username, () =>
+        this.locale(),
+      );
   }
   private locale(): Locale {
     return this.engine.store.setting('preferences') ? preferences(this.engine.store).locale : 'ru';
@@ -230,6 +275,7 @@ export class Telegram {
       configured: true,
       bot: this.username,
       paired: !!this.engine.store.setting('telegram.pairing'),
+      workspace: this.workspace?.room(),
       error:
         this.engine.store.setting('telegram.error') ??
         this.engine.store.setting('telegram.pollError') ??
@@ -251,8 +297,10 @@ export class Telegram {
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
     this.currentUpdates();
+    this.workspace?.replay();
   }
   private onEvent = (event: Event) => {
+    if (this.workspace?.onEvent(event)) return;
     if (event.type === 'runtime.update_finished') {
       this.codexResult(event.data as CodexUpdateOperation);
       return;
@@ -266,6 +314,7 @@ export class Telegram {
     const state = (event.data as { state?: string }).state;
     if (event.type !== 'task.state' && event.type !== 'message.created') return;
     const snapshot = this.engine.store.getTask(event.taskId);
+    if (snapshot.groupId && this.engine.store.getGroup(snapshot.groupId).orchestrated) return;
     const milestone =
       event.type === 'task.state' &&
       state &&
@@ -329,7 +378,11 @@ export class Telegram {
       callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
-    if (!chat || chat.type !== 'private' || !from || from.is_bot) return;
+    if (!chat || !from || from.is_bot) return;
+    if (chat.type !== 'private') {
+      await this.workspace?.handle(update);
+      return;
+    }
     let pair = this.paired();
     const code = message?.text?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
     const expected = store.setting<{ hash: string; expiresAt: string }>('telegram.pairCode');
@@ -340,11 +393,17 @@ export class Telegram {
         store.setSetting('telegram.pairCode', null);
         store.db.prepare('DELETE FROM bot_actions').run();
       });
-      await this.api.send(chat.id, welcomeCard(this.locale()));
+      await this.api.send(
+        chat.id,
+        this.integrations?.daddy
+          ? daddyHome(this.locale(), this.integrations.daddy.sessions())
+          : welcomeCard(this.locale()),
+      );
       this.currentUpdates();
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
+    if (await this.workspace?.handle(update)) return;
     try {
       if (callback) {
         await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
@@ -631,6 +690,8 @@ export class Telegram {
     void this.integrations?.updates.check(true).catch(() => {});
   }
   private updateNotice(notice: UpdateNotice) {
+    // The managed operation already has its own durable completion message.
+    if (notice.kind === 'changed' && notice.tool.managedOperationId) return;
     if (!notice.tool.supported || !this.paired()) return;
     const store = this.engine.store;
     const enabled = () =>
@@ -687,6 +748,7 @@ export class Telegram {
     this.engine.store.changes.off('event', this.onEvent);
     await this.polling;
     await this.notices;
+    await this.workspace?.stop();
   }
   static async create(
     engine: Engine,
