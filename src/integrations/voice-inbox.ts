@@ -30,7 +30,7 @@ export interface VoiceJob {
 export class VoiceInbox {
   private timer?: NodeJS.Timeout;
   private active?: { abort: AbortController; done: Promise<void> };
-  private stopped = false;
+  private stopped = true;
   constructor(
     private store: Store,
     private dataDir: string,
@@ -79,6 +79,8 @@ export class VoiceInbox {
     return true;
   }
   start() {
+    if (this.timer) return;
+    this.stopped = false;
     for (const job of this.rows())
       if (job.status === 'running') {
         job.status = 'queued';
@@ -155,6 +157,7 @@ export class VoiceInbox {
   async stop() {
     this.stopped = true;
     clearInterval(this.timer);
+    this.timer = undefined;
     this.active?.abort.abort();
     await this.active?.done;
   }

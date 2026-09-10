@@ -51,6 +51,7 @@ it('checks the owner before downloading, preserves message ordering and cleans p
     ),
   };
   f.workspace.configureVoice(f.dir, speech, healthy);
+  f.workspace.start();
   try {
     await f.workspace.handle(f.voice(99));
     expect(f.downloadVoice).not.toHaveBeenCalled();
@@ -88,6 +89,7 @@ it('keeps the selected workspace and does not dispatch an old recording after a 
     },
     healthy,
   );
+  f.workspace.start();
   try {
     f.store.setSetting(`telegram.nextRepo:7:7:0:${f.group.id}`, {
       project: { ...f.project, repoPath: '/other/workspace' },
@@ -140,6 +142,7 @@ it('replays preserved voice input after interruption and honors the memory guard
     },
     () => ({ ...healthy(), memoryAvailableGiB: available ? 8 : 3 }),
   );
+  f.workspace.start();
   try {
     await f.workspace.handle(f.voice());
     expect(f.downloadVoice).not.toHaveBeenCalled();
@@ -149,6 +152,7 @@ it('replays preserved voice input after interruption and honors the memory guard
     expect(f.store.db.prepare('SELECT status FROM voice_jobs').get()!.status).toBe('queued');
     const restarted = new TelegramWorkspace(f.daddy, f.api, 'test_bot', () => 'en');
     restarted.configureVoice(f.dir, { transcribe: async () => 'Recovered speech' }, healthy);
+    restarted.start();
     await vi.waitFor(() =>
       expect(f.store.messages(f.group.id)[0]?.text).toBe('🎙️ Recovered speech'),
     );

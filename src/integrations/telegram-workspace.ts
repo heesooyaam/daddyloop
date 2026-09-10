@@ -66,7 +66,10 @@ export class TelegramWorkspace {
       },
       resources,
     );
-    this.voice.start();
+  }
+  start() {
+    this.voice?.start();
+    this.replay();
   }
   private voiceRoute(destination: Destination): VoiceRoute | undefined {
     const pair = this.pair();

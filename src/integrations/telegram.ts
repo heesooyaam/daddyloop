@@ -368,7 +368,7 @@ export class Telegram {
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
     this.currentUpdates();
-    this.workspace?.replay();
+    this.workspace?.start();
   }
   private onEvent = (event: Event) => {
     if (this.workspace?.onEvent(event)) return;
