@@ -14,6 +14,8 @@ async function login(page: Page) {
 test('the reported weekly/Spark/zero-credit layout explains balances and opens the clicked provider', async ({
   page,
 }) => {
+  // Exercise the empty dashboard, independent of sessions created by earlier scenarios.
+  await page.route('**/api/daddy/sessions', (route) => route.fulfill({ json: [] }));
   await page.route('**/api/usage*', (route) =>
     route.fulfill({
       json: {
