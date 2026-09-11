@@ -1,6 +1,10 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.13.0
+# daddyloop 0.13.1
+
+Refines the Russian idle-chat prompt to natural wording.
+
+## 0.13.0
 
 - Claude module: real CLI/SDK execution, dynamic models/efforts, scoped MCP tools, resume and cancellation, API-key setup and optional CLI packaging.
 - Usage belongs to agent adapters. Independent model buckets, weekly-only accounts, credit-only plans, unknown/stale readings and confirmed resets share one interface.
