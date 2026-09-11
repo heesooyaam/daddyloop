@@ -351,6 +351,7 @@ export class Worker {
         task,
         job,
         cwd: agentCwd,
+        readPaths: demo ? [] : this.workspaces.readPaths?.(task),
         prompt: buildContext(store, task, job),
         signal: abort.signal,
         onSession: (threadId, turnId) => {

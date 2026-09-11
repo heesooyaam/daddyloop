@@ -1,22 +1,26 @@
 # daddyloop
 
-**English** · [Русский](README.ru.md) · [Documentation](docs/index/en.md)
+**English** · [Русский](README.ru.md) · [All guides](docs/index/en.md)
 
-**Your task. My crew.**
+**Leave the job with daddy. He’ll handle the crew.**
 
-Give daddy a goal or a ticket. He splits the work, assigns workers, follows up and reviews the result. You keep one conversation; the service keeps working on your server after you close the laptop.
+A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he assigns the work, keeps everyone moving, checks the result and brings it back to you. Talk in the terminal, on the web or in Telegram. Close the laptop — daddy’s still on duty.
 
-![The daddy conversation, worker pool and live usage](docs/media/en/daddy-desktop.png)
+![daddyloop in Mint: conversation, worker pool and remaining quotas](docs/media/en/theme-mint.png)
 
-## Start
+[Install](#put-daddy-to-work) · [Telegram](#daddy-in-telegram) · [Laptop access](#open-the-website-from-your-laptop) · [Models](#pick-your-crew) · [Backups](#moving-house-take-daddy-with-you)
 
-Run this **on the Linux server**:
+## Put daddy to work
+
+You need a **Linux server** with access to your repositories and an account for your chosen agent. Run this on that server:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.12.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.13.0/install.sh | bash
 ```
 
-Choose modules using arrows and Space. Codex and GitHub are selected initially; GitLab and Arcadia are optional. The installer downloads the selected CLI packages, bundles Node and speech recognition, and starts a persistent service. No manual tmux sessions.
+Arrows select a module; Space checks it. Codex and GitHub start checked. Add Claude, GitLab or Arcadia if you need them. The installer provides the selected engines, the `daddy` CLI, local voice recognition and a persistent background service. No manual tmux setup.
+
+For Codex and GitHub:
 
 ```bash
 daddy auth agent codex
@@ -25,63 +29,123 @@ daddy workspaces add ~/work/app --name App
 daddy
 ```
 
-In the console: **`/new` → App → your task**. Or:
+In the CLI: **`/new` → App → your task**. Or hand it over directly:
 
 ```bash
-daddy new --workspace App "Fix duplicate payments and cover retries with tests"
+daddy new --workspace App "Fix duplicate charges. Test repeated requests."
 ```
 
-[Full installation guide](docs/start/en.md) · [Workspace paths and overrides](docs/workspaces/en.md)
+A **workspace** is a familiar repository folder, such as App. A **session** is one job for daddy: one conversation with its own crew. You can create many sessions in App. Workers receive separate working copies; choosing another folder for one task keeps your workspace defaults intact.
 
-## Open the site on your computer
+[Installation walkthrough](docs/start/en.md) · [Workspaces and folders](docs/workspaces/en.md) · [Your first task](docs/tasks/en.md)
 
-Run this **on your laptop**, using your usual SSH destination:
+## daddy in Telegram
+
+Don’t feel like opening a terminal? Drop the ticket in chat. Tired of typing? Send a voice note. daddy will hear you out and put the crew to work.
+
+![Illustrative conversation with daddy in a Telegram topic](docs/media/en/daddy-telegram.png)
+
+1. Create a dedicated bot with **@BotFather**.
+2. Run `daddy telegram setup` on the server, paste the token into the hidden prompt and open the resulting link.
+3. Press **Start** to pair the bot with your Telegram account.
+4. For separate conversations, create a group with **Topics**, add the bot as an administrator with Manage Topics permission, then send **`/group`** in the private bot chat and select that group.
+
+**One job, one topic.** `/new` creates a daddy session and its topic. Send more tickets inside that topic to add work to the same crew. daddy handles the worker conversations.
+
+| You want to…                               | Send the bot…                            |
+| ------------------------------------------ | ---------------------------------------- |
+| Hand over work                             | Text, a ticket link or a voice note      |
+| Start a separate daddy session             | `/new`                                   |
+| Choose daddy and worker models             | `/models`                                |
+| Grow the crew to three                     | `/pool 3`                                |
+| Check remaining usage and available resets | `/limits`                                |
+| Receive only results and questions         | `/notifications` → quiet mode            |
+| Open the website on your phone             | `/web` in private chat after HTTPS setup |
+
+The bot runs on the server. Your laptop, SSH tunnel and browser tab can all be closed. Voice recognition runs locally, in English and Russian.
+
+[Telegram walkthrough](docs/telegram/en.md) · [Voice notes](docs/voice/en.md)
+
+## Open the website from your laptop
+
+**On the server:** `daddy up`.
+
+**On your laptop**, in its local terminal:
 
 ```bash
-ssh -N -L 4317:127.0.0.1:4317 user@server
+ssh -N -o ExitOnForwardFailure=yes -L 4317:127.0.0.1:4317 user@server
 ```
 
-Open [http://127.0.0.1:4317](http://127.0.0.1:4317) in the laptop browser. Run `daddy token` **on the server** and paste it into the login form. Closing the tunnel disconnects the browser; it does not stop the workers.
+Use your usual SSH destination. Leave the command running and open **[http://127.0.0.1:4317](http://127.0.0.1:4317) in your laptop’s browser**. Run `daddy token` on the server and paste the token into the login form.
 
-For access that also works on your phone with the laptop off, configure `daddy web tailscale` or your own HTTPS proxy. [Computer and phone instructions](docs/web/en.md).
+Disconnect SSH and the browser loses its connection. Reconnect and pick up the conversation. daddy and the crew keep running on the server throughout.
 
-## Make it yours
+**For a phone and a permanent address:** run `daddy web tailscale` on the server, complete sign-in and connect the phone to the same Tailscale network. Then `daddy phone` generates a login link. The laptop isn’t part of that connection.
 
-Eight themes, including four dark palettes. Usage is always visible: quota windows, percentage remaining, reset times and available resets. Colors are a browser preference; tasks and models keep running.
+[Connection diagrams, alternate ports and troubleshooting](docs/web/en.md)
 
-![Theme choices](docs/media/en/daddy-themes.png)
+## Pick your crew
 
-![Dark theme](docs/media/en/daddy-dark.png)
-
-[Themes and usage](docs/appearance/en.md) · [CLI](docs/terminal/en.md)
-
-## One daddy, a crew of workers
-
-- Add more tickets in the same conversation to keep the same daddy.
-- Set the pool with `/pool 3`. Reductions wait for whole tasks to finish, including review and fixes.
-- Choose independent engine/model profiles for daddy and workers. Model lists come from the selected engine.
-- Work in named server workspaces. Each task uses an isolated copy; one-request folder overrides preserve defaults.
-- Chat in Telegram forum topics or send voice messages. Recognition is local, in English or Russian.
-- Native reviews publish automatically by default. Exact revisions, incomplete work, CI and explicit decisions still gate completion. There is no automatic merge.
+**Codex and Claude** use the same agent contract. Pick an engine, model and effort independently for daddy and workers, through `/models` or the CLI:
 
 ```bash
+daddy models --refresh
 daddy agents defaults \
   --worker-engine codex --worker-model gpt-5.6-sol --worker-effort max \
   --daddy-engine codex --daddy-model gpt-6-astra --daddy-effort max
 ```
 
-Use models your `daddy models --refresh` response offers. The currently shipped agent module is Codex; Claude is not a working adapter yet.
+To use Claude, select its module during installation and run `daddy auth agent claude` to save an API key through the hidden prompt. Then choose a model from its catalogue. The integration drives Claude Code CLI through the official Agent SDK; API access is billed separately from a Claude subscription.
 
-[Tasks and pools](docs/tasks/en.md) · [Models and updates](docs/agents/en.md) · [Telegram](docs/telegram/en.md) · [Voice](docs/voice/en.md)
+Models and effort levels come from the CLI, not a hand-maintained daddyloop list. Quotas belong to the adapters too: Codex reports account windows, extra model buckets and available resets; Claude provides usage observations through events. If a provider hasn’t reported a remaining allowance, daddy won’t make up a percentage.
 
-## Built to extend
+![The daddyloop CLI with a conversation and worker pool](docs/media/en/daddy-cli.png)
 
-Agents and repositories have explicit module contracts. daddy dispatches a worker through `AgentRegistry`, without interpreting its model or speaking its CLI protocol. Repository modules own native review and PR submission; the common workflow owns policy, revision checks and recovery.
+[Agents, limits and updates](docs/agents/en.md) · [CLI commands](docs/terminal/en.md) · [Claude setup](docs/claude/en.md)
 
-[Module selection and interfaces](docs/modules/en.md) · [Architecture](docs/architecture/en.md) · [Contributing](docs/contributing/en.md)
+## What daddy takes off your hands
 
-Every documentation topic has `en.md` and `ru.md`; both are checked along with their local links. Screenshots use isolated illustrative data. [How the images are made](docs/media-guide/en.md).
+- Assigning work and following up with workers. You have one conversation with daddy.
+- Importing GitHub issues, Tracker tickets, PRs/MRs and plain task descriptions.
+- Managing the crew. Reducing the pool lets busy workers finish their whole task, including review fixes.
+- Publishing review comments automatically by default and checking the fixes. You make the merge decision.
+- Checking resources and pruning verified application caches: `daddy cache status`, `daddy cache prune --apply`.
 
-daddyloop started as **reviewloop**, an author/reviewer loop. It grew into a coordinator with a worker pool.
+## Moving house? Take daddy with you
 
-[Release 0.12.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.12.0) · [CI](https://github.com/heesooyaam/daddyloop/actions) · [Operations and cleanup](docs/operations/en.md)
+```bash
+daddy down
+daddy backup create ~/daddy-backup.tar.gz
+daddy up
+```
+
+The archive preserves sessions, messages, decisions, results, local Git commits and working files. On another machine:
+
+```bash
+daddy backup inspect ~/daddy-backup.tar.gz
+daddy backup restore ~/daddy-backup.tar.gz --to ~/daddy-restored
+export DADDYLOOP_CONFIG=~/daddy-restored/restored-config.json
+daddy up
+```
+
+Restored work starts paused. Authenticate the accounts, check the workspaces, then resume. daddyloop conversations survive; native agent contexts start afresh from the saved task and results. Arcadia transfers patches and changed files that must be applied to a new mount. Application account credentials and device access do not transfer.
+
+[What a backup contains and how to resume work](docs/backups/en.md)
+
+## Make yourself comfortable
+
+Eight themes: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest and Plum. Four dark choices. Remaining quotas sit above the conversation. English and Russian throughout.
+
+![The dark Graphite theme](docs/media/en/daddy-dark.png)
+
+[Appearance](docs/appearance/en.md) · [Operations](docs/operations/en.md)
+
+## Bring your own module
+
+Agents share execution, model catalogue and usage contracts. Repository modules own reviews, submissions, tickets and exports of external working copies. daddy delegates through these interfaces without guessing what model powers a worker.
+
+[Module selection](docs/modules/en.md) · [Write an adapter](docs/module-development/en.md) · [Architecture](docs/architecture/en.md) · [Contributing](docs/contributing/en.md)
+
+Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/media-guide/en.md).
+
+[Release 0.13.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.13.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

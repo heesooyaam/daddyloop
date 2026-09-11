@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { CodexUsage } from '../src/core/usage.js';
+import { CodexUsage } from '../src/modules/agents/codex/usage.js';
 import { Store } from '../src/core/store.js';
 import { usageLines } from '../src/client/usage.js';
 function fixture() {
@@ -87,7 +87,7 @@ it('reads actual quota windows, keeps unknown/stale data distinct and caches bac
       durationMinutes: 10080,
     });
     expect(view.ordinaryUsageAllowed).toBe(false); // Percentages do not imply permission to resume work.
-    expect(usageLines(view, 'ru').join('\n')).toContain('7 дн.: осталось 19%');
+    expect(usageLines({ agents: [view] }, 'ru').join('\n')).toContain('7 дн.: осталось 19%');
     await usage.read();
     expect(f.calls).toHaveLength(1);
     f.failRead();
@@ -216,6 +216,53 @@ it('cannot replace fresh post-reset limits with a delayed pre-reset read', async
     release(snapshot);
     expect((await old).buckets[0].windows[0].remainingPercent).toBe(100);
     expect((await usage.read()).buckets[0].windows[0].remainingPercent).toBe(100);
+  } finally {
+    store.close();
+  }
+});
+it('keeps the weekly-only account bucket alongside model-specific windows and prefers matching map entries', async () => {
+  const store = new Store(':memory:');
+  let raw: any = {
+    rateLimits: {
+      limitId: 'codex',
+      planType: 'pro',
+      primary: null,
+      secondary: { usedPercent: 12, windowDurationMins: 10080 },
+    },
+    rateLimitsByLimitId: {
+      future_model: {
+        limitName: 'Provider-supplied model name',
+        primary: { usedPercent: 30, windowDurationMins: 73 },
+        secondary: { usedPercent: 4, windowDurationMins: 10080 },
+      },
+    },
+    rateLimitResetCredits: { availableCount: 9, credits: null },
+  };
+  const usage = new CodexUsage(store, '/fixture', () => ({
+    start: async () => ({}),
+    close() {},
+    request: async <T>() => raw as T,
+  }));
+  try {
+    const view = await usage.read();
+    expect(view.buckets.map((bucket) => bucket.id)).toEqual(['codex', 'future_model']);
+    expect(view.buckets[0].windows).toEqual([
+      { remainingPercent: 88, durationMinutes: 10080, resetsAt: undefined },
+    ]);
+    expect(view.buckets[1].windows[0].durationMinutes).toBe(73);
+    expect(view.resets.availableCount).toBe(9);
+    raw = {
+      rateLimits: { limitId: 'codex', primary: { usedPercent: 99 } },
+      rateLimitsByLimitId: {
+        codex: { limitId: 'codex', primary: { usedPercent: 11, windowDurationMins: 1440 } },
+      },
+    };
+    expect((await usage.read(true)).buckets).toHaveLength(1);
+    expect((await usage.read()).buckets[0].windows[0].remainingPercent).toBe(89);
+    raw = {
+      rateLimitsByLimitId: { weekly: { primary: { usedPercent: 14, windowDurationMins: 10080 } } },
+    };
+    expect((await usage.read(true)).buckets[0].id).toBe('weekly');
   } finally {
     store.close();
   }

@@ -95,7 +95,6 @@ export const ru: Record<string, string> = {
     'Эти настройки применяются к новым задачам. Запущенные задания сохраняют свою модель.',
   'The model list is provided by your CLI and account, not maintained in daddyloop.':
     'Список моделей предоставляет твой CLI и аккаунт. В daddyloop он не задаётся вручную.',
-  'Claude integration is not implemented yet.': 'Интеграция с Claude пока не реализована.',
   'Review workspace': 'Рабочее пространство',
   'Your review workspace': 'Твоё рабочее пространство',
   'New from ticket': 'Новая задача из тикета',

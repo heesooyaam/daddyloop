@@ -24,7 +24,11 @@ export class DaddyWorkspace {
             .slice(0, 32);
     return { workspace, key };
   }
-  async prepare(group: ReviewGroup, signal: AbortSignal, override?: Workspace) {
+  async prepare(
+    group: ReviewGroup,
+    signal: AbortSignal,
+    override?: Workspace,
+  ): Promise<{ cwd: string; context: Task; readPaths?: string[] }> {
     const { workspace, key } = this.selection(group, override);
     let context = this.workspaces.store.setting<Task>(`daddy.context:${key}`);
     if (!context) {
@@ -74,7 +78,11 @@ export class DaddyWorkspace {
     } finally {
       this.workspaces.store.setSetting(`daddy.context:${key}`, context);
     }
-    return { cwd: this.workspaces.cwd(root, workspace.scope), context };
+    return {
+      cwd: this.workspaces.cwd(root, workspace.scope),
+      context,
+      readPaths: this.checkouts.readPaths?.(context),
+    };
   }
   async release(group: ReviewGroup, override?: Workspace) {
     const { key } = this.selection(group, override);

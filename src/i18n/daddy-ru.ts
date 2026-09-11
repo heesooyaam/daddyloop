@@ -1,4 +1,29 @@
 export const daddyRu: Record<string, string> = {
+  'Connect a Claude API key with daddy auth agent claude on the service host':
+    'Подключи API-ключ Claude командой daddy auth agent claude на сервере.',
+  'Claude did not return a complete structured result; the workflow was not advanced':
+    'Claude не вернул корректный полный результат. Задача не продвинута дальше.',
+  'Claude exited without a result; the workflow was not advanced':
+    'Claude завершился без результата. Задача не продвинута дальше.',
+  'Choose a model returned by the installed Claude CLI':
+    'Выбери модель из каталога установленного Claude CLI.',
+  'This module does not offer quota resets': 'Этот модуль не предоставляет сброс квот.',
+  'Choose an agent with reset support': 'Выбери агента с поддержкой сбросов.',
+
+  'Last agent turn: {input} in / {output} out · ~${cost}':
+    'Последний ход: {input} вх. / {output} вых. · ~${cost}',
+  'Provider reports a quota restriction': 'Провайдер сообщил об ограничении квоты',
+  'Agent usage': 'Лимиты агентов',
+  'daddy and workers share their provider account limits.':
+    'Папочка и бригада расходуют общие лимиты подключённого аккаунта.',
+  'This provider has no current quota readings.': 'Провайдер пока не передал показания лимитов.',
+  'The provider currently blocks included usage.':
+    'Провайдер сейчас ограничивает включённую квоту.',
+  'Use one available reset for the selected provider account? Existing conversations and files are kept.':
+    'Использовать один доступный сброс для выбранного аккаунта? Разговоры и файлы сохранятся.',
+  'Claude has not reported quota data. API billing is separate; no percentage is estimated.':
+    'Claude пока не сообщил лимиты. У API отдельная оплата; процент остатка не вычисляется наугад.',
+
   'Voice message was not sent to daddy': 'Голосовое не передано daddy',
   'Recognized voice message': 'Распознано голосовое',
   'Voice recognition is unavailable on this server.':
@@ -69,13 +94,13 @@ export const daddyRu: Record<string, string> = {
     'Использовать один доступный сброс лимитов аккаунта Codex на этом сервере? Существующие разговоры и файлы сохранятся.',
   'If the response is lost, retry this same operation. It will not spend a second reset.':
     'Если ответ потеряется, повтори эту же операцию. Второй сброс не спишется.',
-  'One reset was used. Limits were requested again from Codex.':
-    'Использован один сброс. Данные лимитов заново запрошены у Codex.',
+  'One reset was used. Limits were requested again from the provider.':
+    'Использован один сброс. Данные лимитов заново запрошены у провайдера.',
   'This reset was already applied. No second reset was requested.':
     'Этот сброс уже применён. Повторного списания не было.',
-  'Codex reports no eligible limit to reset.':
-    'Codex сообщил, что сейчас нет подходящего лимита для сброса.',
-  'Codex reports no available resets.': 'Codex сообщил, что доступных сбросов нет.',
+  'The provider reports no eligible limit to reset.':
+    'Провайдер сообщил, что сейчас нет подходящего лимита для сброса.',
+  'The provider reports no available resets.': 'Провайдер сообщил, что доступных сбросов нет.',
   'Usage controls are unavailable on this server.':
     'Управление лимитами недоступно на этом сервере.',
   'Rate-limit reset': 'Сброс лимитов',
@@ -129,7 +154,7 @@ export const daddyRu: Record<string, string> = {
     'Открой тему сессии, которую хочешь продолжить.',
   'Private setup and CLI updates': 'Подключение и обновления CLI в личке',
   'This model selection expired. Open Models again.': 'Выбор модели истёк. Открой модели ещё раз.',
-  'One conversation. A whole team.': 'Один разговор. Целая команда.',
+  'One daddy. No babysitting.': 'Папочка один. Заботы — его.',
   'New session': 'Новая сессия',
   'Your sessions': 'Твои сессии',
   'YOUR SESSIONS': 'ТВОИ СЕССИИ',
@@ -147,14 +172,14 @@ export const daddyRu: Record<string, string> = {
   'What are we building?': 'Что будем делать?',
   'Session settings': 'Настройки сессии',
   'Conversation with daddy': 'Разговор с daddy',
-  'Send me the goal. I will take care of the workers, reviews and follow-through.':
-    'Расскажи, что нужно сделать. Я займусь воркерами, ревью и доведу работу до результата.',
+  'Leave the job with daddy. I’ll get it moving and check the result myself.':
+    'Оставь дело папочке. Запущу работу и сам проверю результат.',
   'daddy is working': 'daddy работает',
   'Message daddy': 'Написать daddy',
   'Resume daddy to continue': 'Сними паузу, чтобы продолжить',
   'A goal, a ticket link, or a question…': 'Задача, ссылка на тикет или вопрос…',
   'Workers at work: {count}': 'Работают воркеры: {count}',
-  'daddy handles the details.': 'Деталями занимается daddy.',
+  'daddy has the details covered.': 'С мелочами папочка разберётся.',
   'Enter to send · Shift+Enter for a new line · Closing this page keeps work running':
     'Enter — отправить · Shift+Enter — новая строка · Можно закрыть страницу: работа продолжится',
   'Your team': 'Твоя команда',
@@ -162,8 +187,7 @@ export const daddyRu: Record<string, string> = {
   'Maximum workers': 'Максимум воркеров',
   'daddy decides what can run in parallel.': 'daddy сам решает, что можно выполнять параллельно.',
   'Prerequisites: {count}': 'Зависимостей: {count}',
-  'daddy will put the plan and work items here as you discuss the goal.':
-    'Здесь появятся задачи, которые daddy выделит во время обсуждения.',
+  'The crew is ready. Give daddy something to handle.': 'Бригада наготове. Кидай папочке задачу.',
   'Add tasks through daddy': 'Добавить задачи через daddy',
   'One daddy. Shared context.': 'Один daddy. Общий контекст.',
   'Meet your coding team': 'ТВОЯ КОМАНДА ДЛЯ РАЗРАБОТКИ',
@@ -243,8 +267,8 @@ export const daddyRu: Record<string, string> = {
   'Find workspaces on the server': 'Найти воркспейсы на сервере',
   'Workers: {active} / {limit}': 'Воркеры: {active} / {limit}',
   'Completed: {done} / {total}': 'Готово: {done} / {total}',
-  'Send another ticket or describe what you need in this conversation. daddy handles the workers.':
-    'Присылай сюда новые тикеты или описывай, что нужно сделать. Воркерами занимается daddy.',
+  'Got another ticket? Drop it here. daddy will make room for it.':
+    'Есть ещё тикет? Кидай сюда. Папочка пристроит его в работу.',
   'Open session topic': 'Открыть тему сессии',
   'Add tasks': 'Добавить задачи',
   'Resume daddy': 'Продолжить с daddy',
@@ -269,10 +293,9 @@ export const daddyRu: Record<string, string> = {
   'This selection expired. Open Workspaces again.': 'Выбор истёк. Открой воркспейсы ещё раз.',
   'This selection expired. Start a new session again.':
     'Выбор истёк. Начни создание сессии ещё раз.',
-  'Send a ticket link, several tickets, or a description of the next task. daddy will add it to this session.':
-    'Отправь ссылку на тикет, несколько тикетов или описание следующей задачи. daddy добавит работу в эту сессию.',
-  'Write to daddy here. He sends instructions to the workers.':
-    'Пиши здесь daddy. Он сам передаст инструкции воркерам.',
+  'More work for daddy? Send the ticket or tell me what needs doing. I’ll add it to this crew’s list.':
+    'Ещё дело для папочки? Присылай тикет или расскажи, что нужно. Добавлю в работу этой бригаде.',
+  'Tell daddy. I’ll deal with the crew.': 'Скажи папочке. С бригадой я разберусь.',
   'Open a session topic, or send /new here to create one.':
     'Открой тему сессии или отправь здесь /new, чтобы создать новую.',
   'The topic may already exist. Open it and send /attach {id} to reconnect this session.':
@@ -286,8 +309,8 @@ export const daddyRu: Record<string, string> = {
   'daddyloop commands': 'Команды daddyloop',
   'Choose a role': 'Чью модель настроить?',
   'Choose a model': 'Выбрать модель',
-  'Talk to daddy in plain language. Paste goals or ticket links; he handles the workers.':
-    'Общайся с daddy обычным текстом. Отправляй цели и ссылки на тикеты; воркерами занимается он.',
+  'Tell daddy what you need. A goal or a ticket is enough; I’ll handle the crew.':
+    'Расскажи папочке, что нужно. Хватит задачи или тикета — с бригадой разберусь.',
   'Ctrl+N new session · Ctrl+T sessions · Tab chat/tasks · PgUp/PgDn scroll · Ctrl+Q exit':
     'Ctrl+N — новая сессия · Ctrl+T — сессии · Tab — чат/задачи · PgUp/PgDn — прокрутка · Ctrl+Q — выход',
   'Register folders with daddy workspaces add <path> --name <name>, or use Workspaces on the website.':
@@ -339,18 +362,18 @@ export const daddyRu: Record<string, string> = {
   'Waiting for an Arc worker slot; one workspace is reserved for daddy and review.':
     'Ожидаем свободный слот Arcadia для воркера; одна рабочая копия зарезервирована для daddy и ревью.',
   'What’s the job?': 'Что берём в работу?',
-  'Meet the crew': 'Команда daddy',
-  'Your task.': 'Твоя задача.',
-  'My crew.': 'Моя команда.',
+  'Leave it with daddy': 'Папочка на связи',
+  'Hand it over.': 'Отдавай задачу.',
+  'daddy’s got it.': 'Папочка порешает.',
   'No sessions yet. Send the first job.': 'Пока тихо. Давай команде первую задачу.',
-  'Drop the task here. I’ll get the crew moving and check the work myself.':
-    'Кидай задачу. Раздам работу, проверю результат. Халтура не пройдёт.',
-  'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.':
-    'Выбирай воркспейс и кидай задачу. Соберу команду, спрошу за результат и принесу всё сюда.',
-  'The crew is my problem. The goal is yours.': 'Команда на мне. С тебя — задача.',
+  'Hand it to daddy. I’ll get the crew moving, check their work and bring you the result.':
+    'Отдавай задачу папочке. Раздам работу, спрошу с каждого и принесу результат.',
+  'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.':
+    'Выбери воркспейс и скажи папочке, что нужно. Бригада, проверки и «ну что там?» — это уже моя забота.',
+  'You set the goal. daddy handles the headaches.': 'С тебя задача. Головная боль — папочкина.',
   'A task, a ticket or a wild idea…': 'Задачу, тикет или смелую идею — сюда…',
-  'One worker to start. Set the crew size; I’ll handle the assignments.':
-    'Начнём с одного воркера. Ты задаёшь размер команды, я раздаю работу.',
+  'One worker to start. Pick the crew size; daddy will put everyone to work.':
+    'Начнём с одного воркера. Выбери размер бригады — папочка найдёт каждому дело.',
   'Bring it to daddy in the main chat. I’ll get the right worker on it.':
     'Неси в основной чат. Нужного воркера я подключу сам.',
   'Worker on it': 'Воркер работает',
@@ -393,5 +416,6 @@ export const daddyRu: Record<string, string> = {
   'Choose at least one agent and one repository module.':
     'Выбери хотя бы один модуль агента и один модуль репозитория.',
   'Refresh queries the enabled agent modules.': 'Обновление запрашивает включённые модули агентов.',
-  'Drop a task or ticket. I’ll take it from here.': 'Кидай задачу или тикет. Дальше на мне.',
+  'A task, a ticket, a voice note. daddy’s listening.':
+    'Задача, тикет, голосовое. Папочка слушает.',
 };

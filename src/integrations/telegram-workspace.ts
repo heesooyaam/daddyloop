@@ -618,7 +618,7 @@ export class TelegramWorkspace {
           .add(
             '\n\n' +
               this.t(
-                'Use one available reset for the Codex account on this server? Existing conversations and files are kept.',
+                'Use one available reset for the selected provider account? Existing conversations and files are kept.',
               ),
           )
           .add(
@@ -645,17 +645,21 @@ export class TelegramWorkspace {
       result = await this.usage.consume(match[2], owner);
     }
     const usage = result?.usage ?? (await this.usage.read(true));
-    const text = new TelegramText().add('📊 ' + this.t('Codex limits'), 'bold');
+    const text = new TelegramText().add('📊 ' + this.t('Agent usage'), 'bold');
     if (result?.plan.outcome) text.add('\n\n' + this.t(resetOutcomeText[result.plan.outcome]));
     text.add('\n\n' + usageLines(usage, this.locale()).join('\n'));
     await this.api.send(destination, {
       ...text,
       buttons: [
-        ...(usage.resets.canUse
+        ...(usage.agents.some((agent) => agent.resets.canUse)
           ? [
               [
                 {
-                  text: this.t(usage.resets.pending ? 'Resolve pending reset' : 'Use a reset'),
+                  text: this.t(
+                    usage.agents.some((agent) => agent.resets.pending)
+                      ? 'Resolve pending reset'
+                      : 'Use a reset',
+                  ),
                   callback_data: 'dad:limits:prepare',
                 },
               ],
@@ -862,7 +866,7 @@ export class TelegramWorkspace {
       await this.api.send(
         destination,
         this.t(
-          'Send a ticket link, several tickets, or a description of the next task. daddy will add it to this session.',
+          'More work for daddy? Send the ticket or tell me what needs doing. I’ll add it to this crew’s list.',
         ),
       );
       return true;
@@ -1060,10 +1064,7 @@ export class TelegramWorkspace {
         return true;
       }
       if (/^\/(author|reviewer)\b/.test(text)) {
-        await this.api.send(
-          destination,
-          this.t('Write to daddy here. He sends instructions to the workers.'),
-        );
+        await this.api.send(destination, this.t('Tell daddy. I’ll deal with the crew.'));
         return true;
       }
       if (text.startsWith('/')) return !privateChat;

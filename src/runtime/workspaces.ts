@@ -88,6 +88,11 @@ export class Workspaces {
       GIT_CONFIG_VALUE_1: '',
     };
   }
+  readPaths(task: Task): string[] {
+    return task.ref.provider === 'arcadia'
+      ? []
+      : [join(this.dataDir, 'workspaces', task.id, 'objects.git')];
+  }
   async prepare(task: Task, role: Role, signal?: AbortSignal): Promise<string> {
     if (task.ref.provider === 'arcadia') return this.arc.prepare(task, role, signal);
     const run = (args: string[], cwd: string, env: NodeJS.ProcessEnv = {}) =>

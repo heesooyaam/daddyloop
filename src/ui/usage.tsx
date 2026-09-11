@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import type { DaddyApi } from '../client/daddy.js';
-import type { UsageView, ResetPlan } from '../core/usage.js';
+import type { UsageView, AgentUsageView, ResetPlan } from '../core/usage.js';
 import { resetOutcomeText, usageDate, windowLabel } from '../client/usage.js';
 import { useLocale } from './i18n.js';
 
-export function UsageStrip({
+function AgentStrip({
   usage,
   connected,
   onDetails,
 }: {
-  usage?: UsageView;
+  usage?: AgentUsageView;
   connected: boolean;
   onDetails: () => void;
 }) {
@@ -25,7 +25,7 @@ export function UsageStrip({
       aria-label={t('Current usage')}
     >
       <div className="daddy-usage-caption">
-        <strong>Codex</strong>
+        <strong>{usage?.name ?? t('Current usage')}</strong>
         <span>{t('Shared account · remaining')}</span>
         {stale && <small role="status">{t('Last known usage')}</small>}
         {usage?.ordinaryUsageAllowed === false && (
@@ -35,25 +35,31 @@ export function UsageStrip({
       <div className="daddy-usage-windows">
         {!usage ? (
           <span className="daddy-muted">{t('Reading usage…')}</span>
-        ) : !usage.available || !usage.buckets.some((bucket) => bucket.windows.length) ? (
+        ) : !usage.available ? (
           <span className="daddy-muted">{t('Usage unavailable')}</span>
         ) : (
-          usage.buckets.flatMap((bucket) =>
-            bucket.windows.map((window, index) => (
+          usage.buckets.flatMap((bucket) => [
+            ...bucket.windows.map((window, index) => (
               <div className="daddy-usage-window" key={bucket.id + ':' + index}>
                 <div>
                   <span>
-                    {bucket.name} · {windowLabel(window.durationMinutes, locale)}
+                    {bucket.name} · {window.label ?? windowLabel(window.durationMinutes, locale)}
                   </span>
-                  <strong>{Math.round(window.remainingPercent)}%</strong>
+                  <strong>
+                    {window.remainingPercent == null ? '—' : Math.round(window.remainingPercent)}%
+                  </strong>
                 </div>
                 <progress
                   aria-label={t('{window}: {remaining}% remaining', {
-                    window: bucket.name + ' ' + windowLabel(window.durationMinutes, locale),
-                    remaining: Math.round(window.remainingPercent),
+                    window:
+                      bucket.name +
+                      ' ' +
+                      (window.label ?? windowLabel(window.durationMinutes, locale)),
+                    remaining:
+                      window.remainingPercent == null ? '—' : Math.round(window.remainingPercent),
                   })}
                   max={100}
-                  value={window.remainingPercent}
+                  value={window.remainingPercent ?? undefined}
                 />
                 {window.resetsAt && (
                   <time dateTime={window.resetsAt}>
@@ -62,9 +68,37 @@ export function UsageStrip({
                 )}
               </div>
             )),
-          )
+            ...(bucket.credits?.unlimited || bucket.credits?.balance != null
+              ? [
+                  <div className="daddy-usage-window" key={bucket.id + ':credits'}>
+                    <span>{bucket.name}</span>
+                    <strong>
+                      {bucket.credits.unlimited
+                        ? t('Credits: unlimited')
+                        : t('Credit balance: {balance}', { balance: bucket.credits.balance! })}
+                    </strong>
+                  </div>,
+                ]
+              : []),
+            ...(bucket.blocked
+              ? [
+                  <small role="status" key={bucket.id + ':blocked'}>
+                    {bucket.name}: {t('Provider reports a quota restriction')} ({bucket.blocked})
+                  </small>,
+                ]
+              : []),
+          ])
         )}
       </div>
+      {usage?.activity && (
+        <small className="daddy-muted">
+          {t('Last agent turn: {input} in / {output} out · ~${cost}', {
+            input: usage.activity.inputTokens,
+            output: usage.activity.outputTokens,
+            cost: usage.activity.costUSD.toFixed(4),
+          })}
+        </small>
+      )}
       <button
         className="daddy-usage-details"
         onClick={onDetails}
@@ -80,6 +114,19 @@ export function UsageStrip({
     </section>
   );
 }
+export function UsageStrip(props: {
+  usage?: UsageView;
+  connected: boolean;
+  onDetails: () => void;
+}) {
+  return (
+    <>
+      {props.usage?.agents.map((agent) => (
+        <AgentStrip key={agent.engine} {...props} usage={agent} />
+      )) ?? <AgentStrip connected={props.connected} onDetails={props.onDetails} />}
+    </>
+  );
+}
 export function UsagePanel({
   api,
   onUpdate,
@@ -88,8 +135,10 @@ export function UsagePanel({
   onUpdate?: (usage: UsageView) => void;
 }) {
   const { t, locale } = useLocale();
-  const [usage, setUsage] = useState<UsageView>(),
+  const [overview, setUsage] = useState<UsageView>(),
+    [engine, setEngine] = useState<string>(),
     [plan, setPlan] = useState<ResetPlan>();
+  const usage = overview?.agents.find((agent) => agent.engine === engine) ?? overview?.agents[0];
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [notice, setNotice] = useState('');
@@ -113,7 +162,8 @@ export function UsagePanel({
     setNotice('');
     try {
       if (kind === 'refresh') accept(await api<UsageView>('/usage?refresh=1'));
-      if (kind === 'prepare') setPlan(await api<ResetPlan>('/usage/reset/prepare', {}));
+      if (kind === 'prepare')
+        setPlan(await api<ResetPlan>('/usage/reset/prepare', { engine: usage?.engine }));
       if (kind === 'consume' && plan) {
         const result = await api<{ usage: UsageView; plan: ResetPlan }>(`/usage/reset/${plan.id}`, {
           confirmed: true,
@@ -130,34 +180,61 @@ export function UsagePanel({
   };
   return (
     <div className="daddy-usage">
-      <p className="daddy-muted">
-        {t('daddy and workers share the Codex account limits on this server.')}
-      </p>
-      {usage && !usage.available && (
-        <p>{t('Limits are unavailable. Sign in to Codex and refresh.')}</p>
+      <select
+        aria-label={t('Agent usage')}
+        value={usage?.engine ?? ''}
+        disabled={busy || !!plan}
+        onChange={(event) => setEngine(event.target.value)}
+      >
+        {overview?.agents.map((agent) => (
+          <option key={agent.engine} value={agent.engine}>
+            {agent.name}
+          </option>
+        ))}
+      </select>
+      <p className="daddy-muted">{t('daddy and workers share their provider account limits.')}</p>
+      {usage && !usage.available && <p>{t('This provider has no current quota readings.')}</p>}
+      {usage?.activity && (
+        <p>
+          {t('Last agent turn: {input} in / {output} out · ~${cost}', {
+            input: usage.activity.inputTokens,
+            output: usage.activity.outputTokens,
+            cost: usage.activity.costUSD.toFixed(4),
+          })}{' '}
+          · {usageDate(usage.activity.at, locale)}
+        </p>
       )}
+      {usage?.error && <p className="daddy-muted">{t(usage.error)}</p>}
       {usage?.stale && (
         <p role="status">{t('These readings are outdated. Refresh before using a reset.')}</p>
       )}
       {usage?.ordinaryUsageAllowed === false && (
-        <p role="status">{t('Codex currently blocks included usage.')}</p>
+        <p role="status">{t('The provider currently blocks included usage.')}</p>
       )}
       {usage?.buckets.map((bucket) => (
         <section key={bucket.id} className="daddy-usage-bucket">
           <strong>{bucket.name}</strong>
           {bucket.plan && <small> · {bucket.plan}</small>}
+          {bucket.blocked && (
+            <p role="status">
+              {t('Provider reports a quota restriction')}: {bucket.blocked}
+            </p>
+          )}
           {bucket.windows.map((window, i) => (
             <div key={i}>
               <p>
                 {t('{window}: {remaining}% remaining', {
-                  window: windowLabel(window.durationMinutes, locale),
-                  remaining: Math.round(window.remainingPercent),
+                  window: window.label ?? windowLabel(window.durationMinutes, locale),
+                  remaining:
+                    window.remainingPercent == null ? '—' : Math.round(window.remainingPercent),
                 })}
               </p>
               <progress
-                aria-label={bucket.name + ' ' + windowLabel(window.durationMinutes, locale)}
+                aria-label={
+                  bucket.name + ' ' + (window.label ?? windowLabel(window.durationMinutes, locale))
+                }
                 max={100}
-                value={window.remainingPercent}
+                value={window.remainingPercent ?? undefined}
               />
               {window.resetsAt && (
                 <small>{t('Resets: {time}', { time: usageDate(window.resetsAt, locale) })}</small>
@@ -197,7 +274,7 @@ export function UsagePanel({
           <strong>{t(plan.title)}</strong>
           <p>
             {t(
-              'Use one available reset for the Codex account on this server? Existing conversations and files are kept.',
+              'Use one available reset for the selected provider account? Existing conversations and files are kept.',
             )}
           </p>
           <button

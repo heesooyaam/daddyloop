@@ -11,6 +11,15 @@ export const moduleCatalogue = [
     browserLogin: ['login'],
   },
   {
+    id: 'claude',
+    name: 'Claude',
+    kind: 'agent',
+    recommended: false,
+    artifact: 'claude',
+    command: 'claude',
+    apiKeyFile: 'anthropic',
+  },
+  {
     id: 'github',
     name: 'GitHub',
     kind: 'repository',

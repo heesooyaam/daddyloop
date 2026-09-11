@@ -1,11 +1,17 @@
-import type { ResetOutcome, UsageView } from '../core/usage.js';
+import type { ResetOutcome, UsageView, AgentUsageView } from '../core/usage.js';
 import { translator, type Locale } from '../i18n/index.js';
 export function usageSummary(usage?: UsageView) {
-  if (!usage?.available || usage.stale) return undefined;
-  const bucket = usage.buckets.find((bucket) => bucket.id === 'codex') ?? usage.buckets[0];
-  return bucket?.windows.length
-    ? Math.round(Math.min(...bucket.windows.map((window) => window.remainingPercent))) + '%'
-    : undefined;
+  const readings = usage?.agents
+    .filter((agent) => agent.available && !agent.stale)
+    .flatMap((agent) =>
+      agent.buckets.flatMap((bucket) => {
+        const windows = bucket.windows.flatMap((window) =>
+          window.remainingPercent == null ? [] : [window.remainingPercent],
+        );
+        return windows.length ? [bucket.name + ' ' + Math.round(Math.min(...windows)) + '%'] : [];
+      }),
+    );
+  return readings?.length ? readings.join(' · ') : undefined;
 }
 export function windowLabel(minutes: number | null | undefined, locale: Locale) {
   const t = translator(locale);
@@ -27,24 +33,37 @@ export function usageDate(value: string, locale: Locale) {
   });
 }
 export const resetOutcomeText: Record<ResetOutcome, string> = {
-  reset: 'One reset was used. Limits were requested again from Codex.',
+  reset: 'One reset was used. Limits were requested again from the provider.',
   alreadyRedeemed: 'This reset was already applied. No second reset was requested.',
-  nothingToReset: 'Codex reports no eligible limit to reset.',
-  noCredit: 'Codex reports no available resets.',
+  nothingToReset: 'The provider reports no eligible limit to reset.',
+  noCredit: 'The provider reports no available resets.',
 };
-export function usageLines(usage: UsageView, locale: Locale) {
+function agentUsageLines(usage: AgentUsageView, locale: Locale) {
   const t = translator(locale),
-    lines = [t('daddy and workers share the Codex account limits on this server.')];
-  if (!usage.available) lines.push(t('Limits are unavailable. Sign in to Codex and refresh.'));
+    lines = [usage.name, t('daddy and workers share their provider account limits.')];
+  if (usage.activity)
+    lines.push(
+      t('Last agent turn: {input} in / {output} out · ~${cost}', {
+        input: usage.activity.inputTokens,
+        output: usage.activity.outputTokens,
+        cost: usage.activity.costUSD.toFixed(4),
+      }) +
+        ' · ' +
+        usageDate(usage.activity.at, locale),
+    );
+  if (!usage.available) lines.push(t('This provider has no current quota readings.'));
   if (usage.stale) lines.push(t('These readings are outdated. Refresh before using a reset.'));
-  if (usage.ordinaryUsageAllowed === false) lines.push(t('Codex currently blocks included usage.'));
+  if (usage.ordinaryUsageAllowed === false)
+    lines.push(t('The provider currently blocks included usage.'));
   for (const bucket of usage.buckets) {
     lines.push('', bucket.name);
+    if (bucket.blocked)
+      lines.push(t('Provider reports a quota restriction') + ': ' + bucket.blocked);
     for (const window of bucket.windows) {
       lines.push(
         t('{window}: {remaining}% remaining', {
-          window: windowLabel(window.durationMinutes, locale),
-          remaining: Math.round(window.remainingPercent),
+          window: window.label ?? windowLabel(window.durationMinutes, locale),
+          remaining: window.remainingPercent == null ? '—' : Math.round(window.remainingPercent),
         }),
       );
       if (window.resetsAt)
@@ -71,4 +90,8 @@ export function usageLines(usage: UsageView, locale: Locale) {
   if (usage.retrievedAt)
     lines.push('', t('Checked: {time}', { time: usageDate(usage.retrievedAt, locale) }));
   return lines;
+}
+
+export function usageLines(usage: UsageView, locale: Locale) {
+  return usage.agents.flatMap((agent) => [...agentUsageLines(agent, locale), '']);
 }

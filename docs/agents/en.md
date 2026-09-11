@@ -4,7 +4,7 @@
 
 An **engine** is an installed agent module. A **model** and its reasoning effort belong to that engine. daddy and workers can use independent profiles. The scheduler dispatches work through `AgentRuntime` / `SessionRuntime`; it does not interpret model names or speak a CLI's protocol.
 
-The working agent module currently shipped is **Codex**. A Claude adapter is not shipped. The shared [module contract](../modules/en.md) allows another engine to be added without implementing a second orchestration loop.
+The shipped agent modules are **Codex and Claude**. Both use the shared [module contract](../modules/en.md); daddy can coordinate a worker running a different engine. [Set up Claude](../claude/en.md).
 
 ```bash
 daddy models --refresh
@@ -30,3 +30,11 @@ In Telegram use `/updates`. A confirmed update pins a version and verifies its a
 To select a host-installed Codex CLI use `daddy runtime use /absolute/path/to/codex`; this validates the CLI and restarts an idle service. `daddy runtime use bundled` selects the installed Codex module. These management commands are Codex-specific capabilities, separate from generic agent dispatch.
 
 See [appearance and usage](../appearance/en.md) for account quotas and confirmed resets.
+
+## Actual account quotas
+
+`daddy limits --refresh` and the always-visible web strip combine enabled adapters. The Codex module calls `account/rateLimits/read`: it uses `rateLimitsByLimitId` and retains an additional base bucket when needed. It renders only returned windows, their `windowDurationMins`, `usedPercent`, `resetsAt`, provider label, plan and credits. A weekly-only account stays weekly-only. Model-specific buckets, including Spark when returned, are independent. There is no subscription-to-window table.
+
+The available reset count comes from `availableCount`; missing detail rows do not imply zero credits. Reset requests still require confirmation and reuse an idempotency key. Claude usage follows its documented event capability; unknown and stale observations remain clearly marked. See the [official Codex protocol](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt) and [Claude limits](../claude/en.md).
+
+A breaking CLI protocol change can make usage unavailable. The adapter reports the error and marks cached data stale; it does not infer a fresh percentage or offer a reset against stale data. Protocol updates belong in the adapter.

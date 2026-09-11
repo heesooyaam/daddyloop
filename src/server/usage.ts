@@ -6,10 +6,11 @@ export function registerUsage(app: FastifyInstance, usage: UsageBackend) {
     usage.read(request.query.refresh === '1'),
   );
   app.post('/api/usage/reset/prepare', async (request) => {
-    z.object({})
+    const input = z
+      .object({ engine: z.string().optional() })
       .strict()
       .parse(request.body ?? {});
-    return usage.prepare('api');
+    return usage.prepare('api', input.engine);
   });
   app.post<{ Params: { id: string } }>('/api/usage/reset/:id', async (request) => {
     z.object({ confirmed: z.literal(true) })

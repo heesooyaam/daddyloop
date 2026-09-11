@@ -160,7 +160,9 @@ export class DaddyClient {
       })
       .catch(() => {
         if (!this.stopped && epoch === this.epoch && this.value.usage)
-          this.update({ usage: { ...this.value.usage, stale: true } });
+          this.update({
+            usage: { agents: this.value.usage.agents.map((agent) => ({ ...agent, stale: true })) },
+          });
       })
       .finally(() => {
         if (this.usagePending === pending) this.usagePending = undefined;

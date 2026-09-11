@@ -49,7 +49,7 @@ const tools = [
     id: 'claude' as const,
     name: 'Claude Code',
     package: '@anthropic-ai/claude-code',
-    supported: false,
+    supported: true,
     releaseUrl: 'https://code.claude.com/docs/en/changelog',
   },
 ];

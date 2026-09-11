@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-daddyloop_version="0.12.0"
+daddyloop_version="0.13.0"
 daddyloop_prefix="${DADDYLOOP_INSTALL_DIR:-$HOME/.local/share/daddyloop}"
 daddyloop_bin_dir="${DADDYLOOP_BIN_DIR:-$HOME/.local/bin}"
 daddyloop_base="${DADDYLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/daddyloop/releases/download/v$daddyloop_version}"
@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
     --yes) daddyloop_yes=true; shift ;;
     --modules) [[ $# -gt 1 ]] || { printf 'Missing module list\n' >&2; exit 1; }; daddyloop_modules="$2"; shift 2 ;;
     --modules=*) daddyloop_modules="${1#*=}"; shift ;;
-    --help) printf 'Install daddyloop.\nOptions: --yes, --no-setup, --modules codex,github,gitlab,arcadia\nWithout --yes, choose modules with arrows and Space.\n'; exit 0 ;;
+    --help) printf 'Install daddyloop.\nOptions: --yes, --no-setup, --modules codex,claude,github,gitlab,arcadia\nWithout --yes, choose modules with arrows and Space.\n'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
   esac
 done
@@ -23,12 +23,17 @@ done
 case "$(uname -m)" in x86_64) daddyloop_arch=x64 ;; aarch64|arm64) daddyloop_arch=arm64 ;; *) printf 'Unsupported architecture\n' >&2; exit 1 ;; esac
 command -v curl >/dev/null
 command -v tar >/dev/null
-if ! command -v git >/dev/null; then
-  if command -v apt-get >/dev/null && command -v sudo >/dev/null; then
+daddyloop_system_packages() {
+  command -v apt-get >/dev/null || { printf 'Install these system packages and rerun: %s\n' "$*" >&2; exit 1; }
+  if [[ "$EUID" = 0 ]]; then
+    apt-get update
+    apt-get install -y --no-install-recommends "$@"
+  elif command -v sudo >/dev/null; then
     sudo apt-get update
-    sudo apt-get install -y --no-install-recommends git ca-certificates
-  else printf 'Install Git using the system package manager and rerun this command.\n' >&2; exit 1; fi
-fi
+    sudo apt-get install -y --no-install-recommends "$@"
+  else printf 'Install these system packages and rerun: %s\n' "$*" >&2; exit 1; fi
+}
+if ! command -v git >/dev/null; then daddyloop_system_packages git ca-certificates; fi
 mkdir -p "$daddyloop_prefix/releases" "$daddyloop_bin_dir"
 daddyloop_lock="$daddyloop_prefix/.install-lock"
 mkdir "$daddyloop_lock" 2>/dev/null || { printf 'An installation lock exists: %s\n' "$daddyloop_lock" >&2; exit 1; }
@@ -78,6 +83,11 @@ while IFS=$'\t' read -r daddyloop_id daddyloop_artifact daddyloop_command; do
   mv -- "$daddyloop_addon" "$daddyloop_payload/modules/$daddyloop_id"
 done < "$daddyloop_tmp/modules"
 cp -- "$daddyloop_tmp/selection.json" "$daddyloop_payload/installed-modules.json"
+if [[ -d "$daddyloop_payload/modules/claude" ]]; then
+  if ! command -v bwrap >/dev/null || ! command -v socat >/dev/null; then
+    daddyloop_system_packages bubblewrap socat
+  fi
+fi
 cat "$daddyloop_tmp/selection.json" >> "$daddyloop_tmp/components"
 daddyloop_signature="$(sha256sum "$daddyloop_tmp/components")"; daddyloop_signature="${daddyloop_signature%% *}"
 daddyloop_destination="$daddyloop_prefix/releases/$daddyloop_version-${daddyloop_signature:0:12}"

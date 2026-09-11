@@ -58,6 +58,19 @@ try {
   await writeFile(archive, bytes);
   await mkdir(join(payload, 'node'));
   execFileSync('tar', ['-xzf', archive, '-C', join(payload, 'node'), '--strip-components=1']);
+  const claude = join(stage, 'module-claude', 'daddyloop-module');
+  await mkdir(join(claude, 'bin'), { recursive: true });
+  const claudePackage = join(
+    app,
+    'node_modules/@anthropic-ai',
+    `claude-agent-sdk-linux-${process.arch}`,
+  );
+  await cp(join(claudePackage, 'claude'), join(claude, 'bin/claude'));
+  for (const name of ['README.md', 'LICENSE.md'])
+    await cp(join(claudePackage, name), join(claude, name));
+  // The SDK transport stays in core; its native engine is an optional install component.
+  await rm(claudePackage, { recursive: true });
+  execFileSync(join(claude, 'bin/claude'), ['--version'], { stdio: 'inherit', env });
   const tools = join(stage, 'module-codex', 'daddyloop-module');
   await mkdir(tools, { recursive: true });
   execFileSync(
@@ -145,8 +158,30 @@ try {
     stdio: 'inherit',
   });
   if (!(await lstat(join(github, 'bin/gh'))).isFile()) throw new Error('Missing GitHub CLI');
+  const claudeModels = execFileSync(
+    runtime,
+    [
+      '--input-type=module',
+      '-e',
+      `import { ClaudeCatalogue } from './dist/server/modules/agents/claude/models.js'; const c = new ClaudeCatalogue(process.env.CLAUDE_TEST_BIN); const models = await c.list(); console.log(JSON.stringify(models.map(({id,efforts})=>({id,efforts}))));`,
+    ],
+    {
+      cwd: app,
+      encoding: 'utf8',
+      timeout: 30000,
+      env: {
+        ...env,
+        CLAUDE_TEST_BIN: join(claude, 'bin/claude'),
+        DADDYLOOP_CLAUDE_API_KEY_FILE: join(stage, 'no-api-key'),
+      },
+    },
+  );
+  if (!JSON.parse(claudeModels).length)
+    throw new Error('Packaged Claude catalogue did not initialize');
+
   for (const [id, directory, cliVersion] of [
     ['codex', tools, '0.154.0'],
+    ['claude', claude, '2.1.268'],
     ['github', github, ghVersion],
   ]) {
     await writeFile(

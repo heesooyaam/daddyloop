@@ -45,6 +45,8 @@ try:
             return result
         install()
         assert sorted(p.name for p in bin_dir.iterdir()) == ['daddy'], 'Only the daddy executable is installed'
+        assert not any('daddyloop-claude-linux-' in path for path in requested_assets), 'An unselected Claude CLI must not be downloaded'
+        assert not list((prefix/'current/app/node_modules/@anthropic-ai').glob('claude-agent-sdk-linux-*')), 'Core must not contain the optional native Claude engine'
         cli = bin_dir / 'daddy'
         version = subprocess.check_output([str(cli), '--version'], text=True).strip()
         assert version == json.loads((root / 'package.json').read_text())['version']
@@ -93,6 +95,17 @@ try:
         assert (data/'keep.txt').read_text() == 'user state'
         install()
         assert os.readlink(prefix/'current') == target, 'Reusing the same selection must select the original variant'
+        install(modules='claude,gitlab')
+        assert sorted(p.name for p in (prefix/'current/modules').iterdir()) == ['claude']
+        claude_config = Path(temporary) / 'claude-config.json'
+        claude_data = Path(temporary) / 'claude-data'
+        claude_config.write_text(json.dumps({'version': 3, 'dataDir': str(claude_data), 'modules': ['claude','gitlab']}))
+        subprocess.run([str(cli), 'init', '--yes', '--no-service', '--modules', 'claude,gitlab'], env={**env, 'DADDYLOOP_CONFIG': str(claude_config)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        profiles = json.loads(claude_config.read_text())['agents']
+        assert profiles['worker']['engine'] == profiles['daddy']['engine'] == 'claude', 'Claude-only installs must not retain Codex defaults'
+        install()
+        assert os.readlink(prefix/'current') == target
+
         corrupt_checksum = True
         failure = install(False)
         assert 'checksum mismatch' in failure.stderr

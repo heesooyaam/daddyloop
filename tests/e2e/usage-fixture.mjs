@@ -1,5 +1,7 @@
 export function usageFixture() {
   const view = {
+    engine: 'codex',
+    name: 'Codex',
     source: 'codex-app-server:account/rateLimits/read',
     available: true,
     stale: false,
@@ -31,7 +33,9 @@ export function usageFixture() {
   };
   const plans = new Map();
   return {
-    read: async () => ({ ...structuredClone(view), retrievedAt: new Date().toISOString() }),
+    read: async () => ({
+      agents: [{ ...structuredClone(view), retrievedAt: new Date().toISOString() }],
+    }),
     prepare: async (owner) => {
       const plan = {
         id: crypto.randomUUID(),
@@ -55,7 +59,7 @@ export function usageFixture() {
         for (const bucket of view.buckets)
           for (const window of bucket.windows) window.remainingPercent = 100;
       }
-      return { plan: { ...plan }, usage: structuredClone(view) };
+      return { plan: { ...plan }, usage: { agents: [structuredClone(view)] } };
     },
   };
 }

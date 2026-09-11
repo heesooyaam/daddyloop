@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerBackupCommands } from './ops/backup/commands.js';
 import { Command, Option, Help } from 'commander';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -298,6 +299,7 @@ registerPlanningCommands(program);
 registerEnvironmentCommands(program);
 registerDaddyCommands(program);
 registerModuleCommands(program);
+registerBackupCommands(program);
 let cachedCliLocale: Locale | undefined;
 const cliText = (value: string) => {
   if (!cachedCliLocale) {

@@ -54,3 +54,9 @@ A client disconnect does not stop the service. Systemd owns its lifetime and res
 The browser uses an HttpOnly cookie, CSRF headers and Host/Origin checks. Phone pairing links expire and are single-use. Telegram validates the paired owner, group and topic before processing input. Voice staging is durable and ordered with following text; recognition is a bounded local child process and stale destinations are rejected.
 
 Browser themes are local preferences. Usage reads do not mutate tasks; resets are separately confirmed and idempotent. Current data formats are config 3 / SQLite 7, with no runtime migration or retired command aliases.
+
+## Portable state and provider usage
+
+Agent modules own quota reads and optional resets. The UI receives independent provider readings, including unknown and stale states. Claude uses the Agent SDK with scoped MCP tools and a required command sandbox; API billing observations do not imply a subscription quota. See [module development](../module-development/en.md).
+
+Portable backups require the service lock, preserve SQLite workflow evidence and managed working copies, and restore into a fresh directory. Device/account identity is excluded. Restored incomplete work is paused; native context handles are cleared and workflow state is never promoted to success by recovery. See [backups](../backups/en.md).

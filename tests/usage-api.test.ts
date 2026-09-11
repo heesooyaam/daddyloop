@@ -8,7 +8,7 @@ it('authenticates quota reads and requires explicit reset confirmation', async (
   const f = daddyFixture(),
     id = randomUUID();
   const usage: UsageBackend = {
-    read: vi.fn(async () => ({ available: false }) as UsageView),
+    read: vi.fn(async () => ({ agents: [] }) as UsageView),
     prepare: vi.fn(async () => ({
       id,
       title: 'Full reset',
