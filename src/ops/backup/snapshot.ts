@@ -4,6 +4,7 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import {
   readdir,
+  realpath,
   mkdir,
   mkdtemp,
   rm,
@@ -35,11 +36,18 @@ const inside = (parent: string, path: string) => {
   const r = relative(parent, path);
   return !isAbsolute(r) && r !== '..' && !r.startsWith('../');
 };
-async function walk(root: string, visit: (path: string, rel: string) => Promise<void>, rel = '') {
+async function walk(
+  root: string,
+  visit: (path: string, rel: string) => Promise<void>,
+  rel = '',
+  directory?: (path: string) => void,
+) {
   for (const item of await readdir(join(root, rel), { withFileTypes: true })) {
     const path = join(rel, item.name);
-    if (item.isDirectory()) await walk(root, visit, path);
-    else await visit(join(root, path), path);
+    if (item.isDirectory()) {
+      directory?.(path);
+      await walk(root, visit, path, directory);
+    } else await visit(join(root, path), path);
   }
 }
 const git = async (cwd: string, args: string[]) =>
@@ -154,6 +162,7 @@ export async function createBackup(dataDir: string, output: string, config: Conf
     await chmod(stage, 0o700);
     const builder = new ArchiveBuilder(stage, dataDir, maxGiB * gib, config.resources.minDiskGiB);
     builder.manifest.config = portableConfig(config);
+    builder.manifest.sourceRealDataDir = await realpath(dataDir);
     const original = new DatabaseSync(join(dataDir, 'daddyloop.sqlite'), { readOnly: true });
     const file = join(stage, 'snapshot.sqlite');
     try {
@@ -331,8 +340,15 @@ export async function createBackup(dataDir: string, output: string, config: Conf
       // Managed Git object stores and all their working files are private to daddyloop.
       for (const name of ['workspaces', 'artifacts', 'voice']) {
         const root = join(dataDir, name);
-        if (existsSync(root))
-          await walk(root, (path, rel) => builder.add(path, `data/${name}/${rel}`));
+        if (existsSync(root)) {
+          builder.addDirectory(`data/${name}`);
+          await walk(
+            root,
+            (path, rel) => builder.add(path, `data/${name}/${rel}`),
+            '',
+            (rel) => builder.addDirectory(`data/${name}/${rel}`),
+          );
+        }
       }
       for (const source of builder.manifest.sources)
         if (source.warning)
@@ -386,7 +402,8 @@ export async function restoreBackup(
       throw error;
     },
   );
-  const paths = new Map([[manifest.sourceDataDir, target]]);
+  const dataRoots = [...new Set([manifest.sourceDataDir, manifest.sourceRealDataDir])];
+  const paths = new Map(dataRoots.map((root) => [root, target]));
   try {
     await chmod(destination, 0o700);
     if (manifest.appVersion !== VERSION)
@@ -414,6 +431,8 @@ export async function restoreBackup(
         return join(destination, 'restored-sources', path.slice(13));
       return join(destination, 'recovery', path);
     };
+    for (const directory of manifest.directories)
+      await mkdir(outputPath(directory), { recursive: true, mode: 0o700 });
     for (const file of manifest.files.filter((file) => file.blob)) {
       const out = outputPath(file.path);
       await mkdir(dirname(out), { recursive: true, mode: 0o700 });
@@ -544,13 +563,13 @@ export async function restoreBackup(
       await walk(workspaces, async (file, rel) => {
         if (
           /(^|\/)\.git$/.test(rel) ||
-          /objects\.git\/worktrees\/[^/]+\/gitdir$/.test(rel) ||
+          /objects\.git\/worktrees\/[^/]+\/(?:gitdir|commondir|config.worktree)$/.test(rel) ||
           /(^|\/)owner\.json$/.test(rel)
         ) {
           let body = await readFile(file, 'utf8');
           body = /(^|\/)owner\.json$/.test(rel)
             ? JSON.stringify(remapData(JSON.parse(body), paths))
-            : body.split(manifest.sourceDataDir + '/').join(target + '/');
+            : dataRoots.reduce((text, old) => text.split(old + '/').join(target + '/'), body);
           await writeFile(file, body, { mode: 0o600 });
         }
       });

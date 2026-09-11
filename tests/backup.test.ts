@@ -1,5 +1,15 @@
 import { it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  lstatSync,
+  rmSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBackup, restoreBackup, inspectBackup } from '../src/ops/backup/snapshot.js';
@@ -11,7 +21,7 @@ const git = (...args: Parameters<typeof runGit>) =>
   runGit(...args).catch((error) => {
     const info: Record<string, unknown> = {};
     const cwd = args[1];
-    if (cwd && existsSync(join(cwd, '.git'))) {
+    if (cwd && existsSync(join(cwd, '.git')) && lstatSync(join(cwd, '.git')).isFile()) {
       const marker = readFileSync(join(cwd, '.git'), 'utf8');
       info.marker = marker;
       const directory = marker.replace(/^gitdir: /, '').trim();
@@ -79,6 +89,8 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     expect((await inspectBackup(archive, 1, 0)).files).toBeGreaterThan(4);
     const result = await restoreBackup(archive, target, {}, 1, 0);
     expect(result.paused).toBe(true);
+    renameSync(data, join(root, 'offline-data'));
+    renameSync(repo, join(root, 'offline-source'));
     const restored = new Store(join(target, 'daddyloop.sqlite'));
     try {
       const next = restored.getTask(task.id);
@@ -121,7 +133,9 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     }
     expect(existsSync(join(target, 'access-token'))).toBe(false);
     await expect(restoreBackup(archive, target, {}, 1, 0)).rejects.toThrow('must not exist');
-    expect(readFileSync(join(repo, 'task.txt'), 'utf8')).toBe('staged source change');
+    expect(readFileSync(join(root, 'offline-source', 'task.txt'), 'utf8')).toBe(
+      'staged source change',
+    );
   } finally {
     try {
       store.close();
@@ -166,6 +180,8 @@ it('rejects tampered blobs and archive symlinks before exposing a restored direc
       appVersion: '0.13.0',
       createdAt: new Date().toISOString(),
       sourceDataDir: '/old',
+      sourceRealDataDir: '/old',
+      directories: [],
       nativeContexts: 'restart-from-saved-work',
       config: {},
       sources: [],

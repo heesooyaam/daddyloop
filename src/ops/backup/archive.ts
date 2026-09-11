@@ -41,6 +41,7 @@ export const manifestSchema = z
     appVersion: z.string(),
     createdAt: z.string(),
     sourceDataDir: z.string(),
+    sourceRealDataDir: z.string(),
     nativeContexts: z.literal('restart-from-saved-work'),
     config: z.record(z.string(), z.unknown()),
     sources: z.array(
@@ -62,6 +63,7 @@ export const manifestSchema = z
       }),
     ),
     warnings: z.array(z.string()),
+    directories: z.array(safePath).max(200000),
     files: z
       .array(
         z.object({
@@ -103,12 +105,22 @@ export class ArchiveBuilder {
       appVersion: VERSION,
       createdAt: new Date().toISOString(),
       sourceDataDir,
+      sourceRealDataDir: sourceDataDir,
       nativeContexts: 'restart-from-saved-work',
       config: {},
       sources: [],
+      directories: [],
       files: [],
       warnings: [],
     };
+  }
+  addDirectory(path: string) {
+    safePath.parse(path);
+    if (this.paths.has(path)) throw new Error('Duplicate snapshot path: ' + path);
+    if (this.manifest.directories.length >= 200000)
+      throw new Error('Too many snapshot directories');
+    this.paths.add(path);
+    this.manifest.directories.push(path);
   }
   get remainingBytes() {
     return this.maxBytes - this.bytes;
@@ -237,6 +249,14 @@ export async function readArchive(file: string, maxBytes: number, reserveGiB: nu
     for (const source of manifest.sources)
       if (source.bundle && (source.bundle !== `source-bundles/${source.id}.bundle` || !source.head))
         throw new Error('Invalid source bundle');
+    const directories = new Set(manifest.directories);
+    if (
+      directories.size !== manifest.directories.length ||
+      manifest.directories.some(
+        (path) => !/^data\/(?:workspaces|artifacts|voice)(?:\/|$)/.test(path),
+      )
+    )
+      throw new Error('Invalid snapshot directory');
     const paths = new Set<string>();
     const blobs = new Set<string>();
     for (const entry of manifest.files) {
@@ -249,7 +269,11 @@ export async function readArchive(file: string, maxBytes: number, reserveGiB: nu
         !(sourceFile && sourceIds.has(sourceFile[1]))
       )
         throw new Error('Unexpected snapshot payload path: ' + entry.path);
-      if (paths.has(entry.path) || !!entry.blob === (entry.link != null))
+      if (
+        directories.has(entry.path) ||
+        paths.has(entry.path) ||
+        !!entry.blob === (entry.link != null)
+      )
         throw new Error('Invalid backup file manifest');
       paths.add(entry.path);
       if (entry.blob) {
@@ -269,7 +293,7 @@ export async function readArchive(file: string, maxBytes: number, reserveGiB: nu
           throw new Error('Unsafe backup symlink');
       }
     }
-    for (const path of paths)
+    for (const path of [...paths, ...directories])
       for (let parent = posix.dirname(path); parent !== '.'; parent = posix.dirname(parent))
         if (paths.has(parent)) throw new Error('Backup file is used as a parent directory');
     return { stage, manifest };
