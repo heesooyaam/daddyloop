@@ -21,7 +21,7 @@ The panel below the header shows each enabled adapter separately: quota windows,
 
 Window names come from their returned durations, so a weekly quota is not mislabeled as a five-hour quota. Cached, unreachable or stale readings are labeled; missing usage is never shown as zero remaining. Codex reads are cached for one minute. Claude displays event observations when available; refreshing does not invent a fresh quota response. Opening details allows an explicit refresh.
 
-**Details and reset** opens the full account view. Preparing a reset does not spend it: a separate confirmation is required. Retries use the same request ID. The app does not buy credits or automatically consume earned resets, and it does not infer permission to resume an agent from a percentage alone.
+**View details**, the provider name or a period card opens that provider’s limits. Preparing a reset does not spend it: a separate confirmation is required. Retries use the same request ID. The app does not buy credits or automatically consume earned resets, and it does not infer permission to resume an agent from a percentage alone.
 
 ```bash
 daddy limits
@@ -30,3 +30,7 @@ daddy limits reset --request REQUEST_ID --yes
 ```
 
 Existing conversations and files remain in place after an account quota reset.
+
+Zero additional credits stay in the detailed view with an explanation instead of occupying space beside quota percentages. Credits are a separate provider payment balance; zero credits do not mean the included quotas are exhausted. A provider reporting only a credit balance keeps that balance visible in the main panel.
+
+The home page uses **Your dashboard**, separate from the **Agent limits** section. Providers without readings occupy a compact row with a details action. Quota percentages remain visible without extra clicks.

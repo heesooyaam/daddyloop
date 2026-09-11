@@ -95,12 +95,12 @@ test('shows all quota windows without a click and marks last-known readings afte
   await page.setViewportSize({ width: 390, height: 844 });
   const strip = page.getByRole('region', { name: 'Current usage' });
   await expect(strip.getByRole('progressbar')).toHaveCount(2);
-  await expect(strip.getByText('68%', { exact: true })).toBeVisible();
-  await expect(strip.getByText('27%', { exact: true })).toBeVisible();
+  await expect(strip.getByText('68% left', { exact: true })).toBeVisible();
+  await expect(strip.getByText('27% left', { exact: true })).toBeVisible();
   await expect(strip.getByText('Resets available: 3')).toBeVisible();
   await page.route('**/api/usage', (route) => route.abort());
   await expect(strip.getByText('Last known usage')).toBeVisible({ timeout: 10000 });
-  await expect(strip.getByText('27%', { exact: true })).toBeVisible();
+  await expect(strip.getByText('27% left', { exact: true })).toBeVisible();
 });
 test('renders provider-specific buckets and credit-only plans while another adapter has no quota data', async ({
   page,
@@ -157,11 +157,16 @@ test('renders provider-specific buckets and credit-only plans while another adap
   const strips = page.getByRole('region', { name: 'Current usage' });
   await expect(strips).toHaveCount(2);
   await expect(strips.nth(0).getByRole('progressbar')).toHaveCount(3);
-  await expect(strips.nth(0).getByText('Credit balance: 42')).toBeVisible();
-  await expect(strips.nth(1).getByText('Usage unavailable')).toBeVisible();
+  await expect(
+    strips
+      .nth(0)
+      .getByRole('button', { name: 'About Codex credits' })
+      .getByText('42', { exact: true }),
+  ).toBeVisible();
+  await expect(strips.nth(1).getByText('No quota readings yet')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await strips.nth(1).getByRole('button', { name: 'Usage details and resets' }).click();
+  await strips.nth(1).getByRole('button', { name: 'Usage details for Claude' }).click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByLabel('Agent usage').selectOption('claude');
+  await expect(dialog.getByLabel('Agent usage')).toHaveValue('claude');
   await expect(dialog.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
 });

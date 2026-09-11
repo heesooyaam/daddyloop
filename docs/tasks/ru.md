@@ -2,7 +2,7 @@
 
 # Задачи и пул воркеров
 
-Начни с `/new` в CLI, кнопки **Новая сессия** на сайте или `/new` у бота. Выбери воркспейс и опиши цель. Можно прислать GitHub issue, тикет Tracker или существующий PR в GitHub, GitLab или Arcadia.
+Начни с `/new` в CLI, кнопки **Новая сессия** на сайте или `/new` у бота. На сайте сначала опиши цель, затем выбери воркспейс; обычно его папку менять не нужно. В CLI и Telegram следуй шагам `/new`. Можно прислать GitHub issue, тикет Tracker или существующий PR в GitHub, GitLab или Arcadia.
 
 ```bash
 daddy new --workspace App "https://github.com/acme/app/issues/42"

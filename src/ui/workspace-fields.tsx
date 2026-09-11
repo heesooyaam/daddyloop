@@ -1,132 +1,257 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
+import { Check, ChevronDown, FolderGit2, FolderOpen, LoaderCircle, RotateCcw } from 'lucide-react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { Workspace } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import { useLocale } from './i18n.js';
+import { FolderBrowser } from './folder-browser.js';
 
-/** The value belongs to this draft. Choosing a directory never edits workspace defaults. */
+/** Local editing is separate from the submitted draft and from saved workspace defaults. */
 export function WorkspaceFields({
   api,
   workspace,
   value,
   onChange,
   compact = false,
+  sessionId,
+  onEditingChange,
 }: {
   api: DaddyApi;
   workspace: Workspace;
   value?: RepositorySelection;
   onChange: (value?: RepositorySelection) => void;
   compact?: boolean;
+  sessionId?: string;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const { t } = useLocale();
-  const [listing, setListing] = useState<{
-    path: string;
-    parent: string | null;
-    directories: { name: string; path: string }[];
-  }>();
-  const [error, setError] = useState('');
-  const sequence = useRef(0);
-  useEffect(
-    () => () => {
-      sequence.current++;
-    },
-    [],
-  );
-  const browse = async (path?: string) => {
-    const at = ++sequence.current;
+  const [editing, setEditing] = useState(false),
+    [picking, setPicking] = useState(false);
+  const [draft, setDraft] = useState<RepositorySelection>({});
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState('');
+  const request = useRef<AbortController | undefined>(undefined);
+  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => {
+    onEditingChange?.(editing);
+    return () => onEditingChange?.(false);
+  }, [editing, onEditingChange]);
+  useEffect(() => {
+    if (!value) {
+      request.current?.abort();
+      setEditing(false);
+      setPicking(false);
+      setBusy(false);
+      setError('');
+    }
+  }, [value]);
+  const path = value?.path ?? workspace.repoPath;
+  const scope = value?.scope ?? (value?.path ? '' : workspace.scope);
+  const base = value?.base ?? (value?.path ? '' : (workspace.base ?? ''));
+  const begin = () => {
+    setDraft({ path, scope, base, provider: value?.provider ?? workspace.provider });
+    setError('');
+    setEditing(true);
+  };
+  const cancel = () => {
+    request.current?.abort();
+    setBusy(false);
+    setEditing(false);
+    setPicking(false);
+    setError('');
+  };
+  const apply = async () => {
+    if (busy || picking) return;
+    const controller = new AbortController();
+    request.current?.abort();
+    request.current = controller;
+    setBusy(true);
+    setError('');
     try {
-      const next = await api<NonNullable<typeof listing>>(
-        '/workspaces/directories' + (path ? '?path=' + encodeURIComponent(path) : ''),
+      const selected = await api<Workspace>(
+        '/workspaces/preview',
+        { ...(sessionId ? { sessionId } : { workspaceId: workspace.id }), repository: draft },
+        controller.signal,
       );
-      if (at === sequence.current) {
-        setListing(next);
-        setError('');
-      }
+      if (controller.signal.aborted) return;
+      const same =
+        selected.repoPath === workspace.repoPath &&
+        selected.scope === workspace.scope &&
+        (selected.base ?? '') === (workspace.base ?? '') &&
+        selected.provider === workspace.provider;
+      onChange(
+        same
+          ? undefined
+          : {
+              path: selected.repoPath,
+              scope: selected.scope,
+              base: selected.base,
+              provider: selected.provider,
+            },
+      );
+      setEditing(false);
+      setPicking(false);
     } catch (error) {
-      if (at === sequence.current) setError((error as Error).message);
+      if (!controller.signal.aborted) setError((error as Error).message);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
-  const fields = (
-    <>
-      <label>
-        {t('Repository on this server')}
-        <input
-          aria-label={t('Repository on this server')}
-          value={value?.path ?? workspace.repoPath}
-          onChange={(event) =>
-            onChange({ ...value, path: event.target.value, scope: undefined, base: undefined })
-          }
-        />
-      </label>
-      <button type="button" className="daddy-text-button" onClick={() => void browse()}>
-        {t('Browse server folders')}
-      </button>
-      {listing && (
-        <div className="daddy-directory-list">
-          <code>{listing.path}</code>
-          <button type="button" onClick={() => void browse(listing.parent ?? undefined)}>
-            ↑ {t('Parent folder')}
-          </button>
-          {listing.directories.map((entry) => (
-            <button type="button" key={entry.path} onClick={() => void browse(entry.path)}>
-              {entry.name} →
-            </button>
-          ))}
-          {listing.path && (
+  return (
+    <div className={'daddy-workspace-fields' + (compact ? ' compact' : '')}>
+      {!editing && (
+        <div className="daddy-repository-summary">
+          <FolderGit2 size={18} />
+          <div>
+            <span>
+              {t(
+                value
+                  ? compact
+                    ? 'Folder for the next message'
+                    : 'Folder for this session'
+                  : 'Workspace folder',
+              )}
+            </span>
+            <code>
+              {path}
+              {scope ? '/' + scope : ''}
+            </code>
+            {base && <small>{t('Starting branch: {branch}', { branch: base })}</small>}
+          </div>
+          {!editing && (
             <button
               type="button"
-              onClick={() => {
-                onChange({ path: listing.path });
-                setListing(undefined);
-              }}
+              className="daddy-button quiet"
+              onClick={begin}
+              aria-label={t(
+                compact ? 'Change folder for the next message' : 'Change folder for this session',
+              )}
+              aria-expanded={false}
             >
-              {t('Use this folder once')}
+              {t('Change')}
             </button>
           )}
         </div>
       )}
-      <label>
-        {t('Starting directory (relative)')}
-        <input
-          value={value?.scope ?? (value?.path ? '' : workspace.scope)}
-          placeholder={t('Repository root')}
-          onChange={(event) => onChange({ ...value, scope: event.target.value })}
-        />
-      </label>
-      <label>
-        {t('Base branch (optional)')}
-        <input
-          value={value?.base ?? (value?.path ? '' : (workspace.base ?? ''))}
-          onChange={(event) => onChange({ ...value, base: event.target.value })}
-        />
-      </label>
-      {value && (
-        <button
-          type="button"
-          className="daddy-text-button"
-          onClick={() => {
-            onChange(undefined);
-            setListing(undefined);
-          }}
-        >
-          {t('Use workspace defaults')}
-        </button>
+      {!editing && value && (
+        <div className="daddy-repository-override">
+          <span>
+            {t(
+              compact
+                ? 'Only the next message uses this folder.'
+                : 'Only this session uses these settings.',
+            )}
+          </span>
+          <button type="button" className="daddy-text-button" onClick={() => onChange(undefined)}>
+            <RotateCcw size={13} />
+            {t('Use workspace defaults')}
+          </button>
+        </div>
       )}
-      <p className="daddy-muted">
-        {t(
-          'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.',
-        )}
-      </p>
-      {error && <p role="alert">{t(error)}</p>}
-    </>
-  );
-  return (
-    <details className="daddy-workspace-fields" open={compact ? undefined : true}>
-      <summary>
-        {t(value ? 'Repository for this request' : 'Using workspace defaults')} ·{' '}
-        {value?.path ?? workspace.repoPath}
-      </summary>
-      {fields}
-    </details>
+      {editing && (
+        <>
+          <fieldset
+            className="daddy-repository-editor"
+            disabled={busy}
+            onKeyDown={(event) => {
+              if (
+                event.key === 'Enter' &&
+                !event.defaultPrevented &&
+                event.target instanceof HTMLInputElement
+              ) {
+                event.preventDefault();
+                void apply();
+              }
+            }}
+          >
+            <legend>
+              {t(compact ? 'Settings for the next message' : 'Settings for this session')}
+            </legend>
+            <p className="daddy-muted">
+              {t(
+                compact
+                  ? 'Choose where daddy should handle your next message. Following messages use the session folder again.'
+                  : 'Choose another source for this session. The saved workspace stays as it is.',
+              )}
+            </p>
+            <label style={picking ? { display: 'none' } : undefined}>
+              {t('Repository folder')}
+              <input
+                aria-label={t('Repository on this server')}
+                value={draft.path ?? ''}
+                onChange={(event) => setDraft({ path: event.target.value })}
+              />
+            </label>
+            {!picking && (
+              <button
+                type="button"
+                className="daddy-button outline"
+                onClick={() => setPicking(true)}
+              >
+                <FolderOpen size={16} />
+                {t('Browse server folders')}
+              </button>
+            )}
+            {picking && (
+              <FolderBrowser
+                api={api}
+                initialPath={draft.path}
+                onSelect={(path) => {
+                  setDraft({ path });
+                  setPicking(false);
+                }}
+                onCancel={() => setPicking(false)}
+              />
+            )}
+            <details className="daddy-advanced-settings">
+              <summary>
+                <ChevronDown size={15} />
+                {t('Subfolder and starting branch')}
+              </summary>
+              <label>
+                {t('Subfolder (optional)')}
+                <input
+                  aria-label={t('Starting directory (relative)')}
+                  value={draft.scope ?? ''}
+                  placeholder={t('Leave empty for the whole repository')}
+                  onChange={(event) => setDraft({ ...draft, scope: event.target.value })}
+                />
+                <small>{t('A path inside the repository, for example services/api.')}</small>
+              </label>
+              <label>
+                {t('Base branch (optional)')}
+                <input
+                  value={draft.base ?? ''}
+                  placeholder={t('Repository default')}
+                  onChange={(event) => setDraft({ ...draft, base: event.target.value })}
+                />
+                <small>
+                  {t('The branch daddy starts from. Leave it empty to use the repository default.')}
+                </small>
+              </label>
+            </details>
+            {error && (
+              <p role="alert" className="daddy-field-error">
+                {t(error)}
+              </p>
+            )}
+          </fieldset>
+          <div className="daddy-form-actions">
+            <button
+              type="button"
+              disabled={busy || picking}
+              className="daddy-button primary"
+              onClick={() => void apply()}
+            >
+              {busy ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}
+              {t('Apply settings')}
+            </button>
+            <button type="button" className="daddy-button quiet" onClick={cancel}>
+              {t('Cancel')}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }

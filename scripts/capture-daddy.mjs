@@ -23,6 +23,8 @@ const scratch = mkdtempSync(join(base, 'capture-')),
   repo = join(scratch, 'payments');
 mkdirSync(data);
 mkdirSync(repo);
+for (const child of ['services/api', 'services/web', 'docs', 'tests'])
+  mkdirSync(join(repo, child), { recursive: true });
 const store = new Store(join(data, 'daddyloop.sqlite')),
   token = randomBytes(24).toString('hex');
 writeFileSync(join(data, 'access-token'), token, { mode: 0o600 });
@@ -39,6 +41,19 @@ const workspace = {
   updatedAt: new Date().toISOString(),
 };
 store.saveWorkspace(workspace);
+const arcExample = join(scratch, 'arcadia');
+mkdirSync(arcExample);
+store.saveWorkspace({
+  ...workspace,
+  id: randomUUID(),
+  name: 'Work',
+  repoPath: arcExample,
+  vcs: 'arcadia',
+  provider: 'arcadia',
+  host: 'a.yandex-team.ru',
+  repo: 'arcadia',
+  base: 'trunk',
+});
 const profiles = {
   worker: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
   daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
@@ -68,8 +83,15 @@ const catalogue = {
   }),
 };
 const workspaces = new WorkspaceRegistry(store, [scratch], { mounts: async () => [] });
+const mediaUsage = usageFixture();
+const readUsage = mediaUsage.read;
+mediaUsage.read = async () => {
+  const value = await readUsage();
+  value.agents[0].buckets[0].credits = { hasCredits: false, unlimited: false, balance: '0' };
+  return value;
+};
 const server = await buildApp({
-  usage: usageFixture(),
+  usage: mediaUsage,
   dataDir: data,
   store,
   workspaces,
@@ -243,11 +265,45 @@ try {
   await page.getByRole('radio', { name: t('Glacier'), exact: true }).click();
   await page.getByRole('button', { name: t('Close'), exact: true }).click();
 
+  await page.getByRole('button', { name: t('New session'), exact: true }).click();
+  await page
+    .getByLabel(t('What should daddy do?'))
+    .fill(
+      locale === 'ru'
+        ? 'Почини повторные списания. Проверь потерю ответа и параллельные запросы.'
+        : 'Fix duplicate charges. Cover lost responses and concurrent requests.',
+    );
+  await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
+  await page.screenshot({ path: join(output, 'daddy-new-session.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Change folder for this session') }).click();
+  await page.getByRole('button', { name: t('Browse server folders') }).click();
+  await expect(page.getByRole('button', { name: t('Select this folder') })).toBeEnabled();
+  await page
+    .getByRole('button', { name: t('Open folder {name}', { name: 'services' }), exact: true })
+    .click();
+  await expect(page.getByRole('button', { name: t('Select this folder') })).toBeEnabled();
+  await page
+    .getByRole('region', { name: t('Choose a folder on this server') })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(output, 'daddy-folder-picker.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+  await page
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: t('Workspaces'), exact: false })
+    .click();
+  await expect(
+    page.getByRole('button', { name: t('Edit workspace {name}', { name: 'Work' }) }),
+  ).toBeVisible();
+  await page.screenshot({ path: join(output, 'daddy-workspaces.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
   await page.getByRole('button', { name: t('Session settings') }).click();
   await expect(page.getByLabel('daddy ' + t('Model'))).toHaveValue('gpt-6-astra');
   await page.screenshot({ path: join(output, 'daddy-models.png'), animations: 'disabled' });
   await page.getByRole('button', { name: t('Close'), exact: true }).click();
-  await page.getByRole('button', { name: t('Limits'), exact: false }).click();
+  await page
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: t('Limits'), exact: false })
+    .click();
   await expect(
     page.getByRole('dialog').getByText(t('Available resets: {count}', { count: 3 })),
   ).toBeVisible();

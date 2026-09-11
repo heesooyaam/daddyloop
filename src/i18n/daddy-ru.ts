@@ -1,4 +1,96 @@
 export const daddyRu: Record<string, string> = {
+  'Choose a folder on this server': 'Выбор папки на сервере',
+  'Folders on this server': 'Папки на сервере',
+  'Open folders to explore. Select the current folder with the button below.':
+    'Открой нужную папку. Кнопка внизу выберет ту, которую ты сейчас просматриваешь.',
+  'Close folder browser': 'Закрыть выбор папки',
+  'Open folder': 'Открыть папку',
+  Browsing: 'Сейчас открыта',
+  'Server folders': 'Доступные папки',
+  'All server folders': 'К списку папок',
+  'Loading folders…': 'Загружаю папки…',
+  'Open folder {name}': 'Открыть папку {name}',
+  'This folder has no subfolders. You can select it below.':
+    'Вложенных папок нет. Эту папку можно выбрать кнопкой внизу.',
+  'Folder to use': 'Будет выбран этот путь',
+  'Open a folder first': 'Сначала открой папку',
+  'Select this folder': 'Выбрать эту папку',
+  'Folder for the next message': 'Папка для следующего сообщения',
+  'Folder for this session': 'Папка этой сессии',
+  'Workspace folder': 'Папка воркспейса',
+  'Starting branch: {branch}': 'Ветка: {branch}',
+  'Change folder for the next message': 'Изменить папку для следующего сообщения',
+  'Change folder for this session': 'Изменить папку для этой сессии',
+  Change: 'Изменить',
+  'Only the next message uses this folder.': 'Эта папка выбрана только для следующего сообщения.',
+  'Only this session uses these settings.': 'Эти настройки действуют только в этой сессии.',
+  'Settings for the next message': 'Настройки следующего сообщения',
+  'Settings for this session': 'Настройки этой сессии',
+  'Choose where daddy should handle your next message. Following messages use the session folder again.':
+    'Выбери папку для следующего поручения. После отправки снова будет выбрана папка сессии.',
+  'Choose another source for this session. The saved workspace stays as it is.':
+    'Можно выбрать другую папку для этой сессии. Настройки самого воркспейса сохранятся.',
+  'Repository folder': 'Папка репозитория',
+  'Subfolder and starting branch': 'Подпапка и начальная ветка',
+  'Subfolder (optional)': 'Подпапка (необязательно)',
+  'Leave empty for the whole repository': 'Пусто — весь репозиторий',
+  'A path inside the repository, for example services/api.':
+    'Путь внутри репозитория, например services/api.',
+  'Repository default': 'По умолчанию в репозитории',
+  'The branch daddy starts from. Leave it empty to use the repository default.':
+    'С какой ветки папочка начнёт работу. Можно оставить пустым.',
+  'Apply settings': 'Применить настройки',
+  'Apply or cancel folder settings before sending.':
+    'Примени или отмени настройки папки перед отправкой.',
+  'Apply or cancel folder settings before starting the session.':
+    'Примени или отмени настройки папки перед началом сессии.',
+  'Tell daddy the goal, paste a ticket, or start with a question.':
+    'Кидай папочке задачу или ссылку на тикет. Можно начать с вопроса.',
+  'A workspace is a saved source folder. daddy prepares separate working copies for the task.':
+    'Воркспейс — сохранённая папка с исходниками. Для работы папочка подготовит отдельные копии.',
+  'Add another workspace': 'Добавить другой воркспейс',
+  'From the first line of your task': 'Возьмём первую строку задачи',
+  'Start with one worker. Choose models in session settings and crew size beside the task list.':
+    'Начнём с одного воркера. Модели меняются в настройках сессии, размер бригады — рядом со списком задач.',
+  'Save a folder under a familiar name, then choose it when giving daddy a task.':
+    'Сохрани папку под удобным именем, чтобы потом выбирать её для задач папочки.',
+  'Edit workspace {name}': 'Настроить воркспейс {name}',
+  'Add workspace': 'Добавить воркспейс',
+  'Edit workspace defaults': 'Настройки воркспейса',
+  'Back to workspaces': 'К списку воркспейсов',
+  'These defaults apply to new sessions. Existing sessions keep their folders.':
+    'Эти настройки действуют для новых сессий. Уже начатые сессии сохраняют свои папки.',
+  'Choose a source repository or a subfolder. daddy will leave your original checkout in place.':
+    'Выбери репозиторий или подпапку в нём. Твою рабочую копию папочка переключать не будет.',
+  'Choose from detected repositories': 'Выбрать из найденных репозиториев',
+  'For example Work or My app': 'Например Work или Моё приложение',
+  'Source folder': 'Папка воркспейса',
+  'Starting branch (advanced)': 'Начальная ветка — дополнительная настройка',
+  'Your dashboard': 'Рабочий стол',
+  'No sessions yet. Give daddy the first task.': 'Пока тихо. Кидай папочке первую задачу.',
+  'View {provider} limits': 'Лимиты {provider}',
+  'Usage details for {provider}': 'Подробнее о лимитах {provider}',
+  'Remaining quota': 'Остаток квоты',
+  'Account balance': 'Баланс аккаунта',
+  'No quota readings yet': 'Нет данных о лимитах',
+  'Details: {provider}, {window}': 'Подробнее: {provider}, {window}',
+  'No reading': 'Нет данных',
+  '{remaining}% left': '{remaining}% осталось',
+  'About {provider} credits': 'О кредитах {provider}',
+  'Additional credits': 'Дополнительные кредиты',
+  'Provider credits': 'Кредиты провайдера',
+  Unlimited: 'Без ограничений',
+  'Separate from quota percentages': 'Отдельно от квот в процентах',
+  'View details': 'Подробнее',
+  'Agent limits': 'Лимиты агентов',
+  'Readings reported by providers': 'Данные провайдеров',
+  'These limits belong to the {provider} account connected on this server. daddy and its workers use this account together.':
+    'Это лимиты аккаунта {provider}, в который выполнен вход на этом сервере. Папочка и воркеры расходуют их вместе.',
+  'Percentages show how much of each quota is left. Each period renews at its own time.':
+    'Проценты показывают остаток каждой квоты. У каждого периода своё время обновления.',
+  'Credit balance is not reported': 'Провайдер не сообщил баланс кредитов',
+  'Credits are a separate payment balance held by the provider. A zero credit balance does not mean your quota percentages are exhausted.':
+    'Кредиты — отдельный баланс для оплаты работы у провайдера. Ноль кредитов не означает, что квоты в процентах закончились.',
   'Connect a Claude API key with daddy auth agent claude on the service host':
     'Подключи API-ключ Claude командой daddy auth agent claude на сервере.',
   'Claude did not return a complete structured result; the workflow was not advanced':
@@ -210,7 +302,7 @@ export const daddyRu: Record<string, string> = {
   'Work item': 'Задача',
   'Add a workspace first': 'Сначала добавь воркспейс',
   'Register another workspace': 'Зарегистрировать ещё воркспейс',
-  'What should daddy do?': 'Что поручим daddy?',
+  'What should daddy do?': 'Что поручим папочке?',
   'Describe the goal or paste one or more ticket links. You can start with a discussion.':
     'Опиши цель или вставь ссылки на тикеты. Можно начать с обсуждения.',
   'Session name (optional)': 'Название сессии (необязательно)',
@@ -365,7 +457,6 @@ export const daddyRu: Record<string, string> = {
   'Leave it with daddy': 'Папочка на связи',
   'Hand it over.': 'Отдавай задачу.',
   'daddy’s got it.': 'Папочка порешает.',
-  'No sessions yet. Send the first job.': 'Пока тихо. Давай команде первую задачу.',
   'Hand it to daddy. I’ll get the crew moving, check their work and bring you the result.':
     'Отдавай задачу папочке. Раздам работу, спрошу с каждого и принесу результат.',
   'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.':
@@ -396,7 +487,6 @@ export const daddyRu: Record<string, string> = {
   Forest: 'Хвоя',
   Plum: 'Слива',
   'Current usage': 'Текущий usage',
-  'Shared account · remaining': 'Общий аккаунт · осталось',
   'Last known usage': 'Последние данные',
   'Included usage is blocked': 'Codex ограничил использование',
   'Reading usage…': 'Смотрю лимиты…',
