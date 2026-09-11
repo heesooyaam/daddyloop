@@ -1,6 +1,12 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.14.0
+# daddyloop 0.14.1
+
+The sidebar logo is plain branding instead of a link that does nothing. The sidebar tagline and home-page prompt use simpler English/Russian copy, with refreshed screenshots including the empty home page. Addresses items 8–10 in [issue #19](https://github.com/heesooyaam/daddyloop/issues/19).
+
+Configuration 3 and SQLite 7 are unchanged. Reload open web pages after upgrading.
+
+## 0.14.0
 
 - The dashboard separates task intake from clearly labelled, clickable provider quotas. Credit balances have their own explanation; zero extra credits no longer clutter percentage windows.
 - Workspace cards separate names, VCS labels and source paths. One folder browser distinguishes navigation from selection and protects pending requests.

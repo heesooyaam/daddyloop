@@ -115,13 +115,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   return (
     <div className="daddy-app">
       <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
-        <a className="daddy-brand" href="#" onClick={(event) => event.preventDefault()}>
+        <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
           <span>
             daddyloop<span className="daddy-brand-dot">.</span>
           </span>
-        </a>
-        <p className="daddy-kicker">{t('One daddy. No babysitting.')}</p>
+        </div>
+        <p className="daddy-kicker">{t('daddy will handle it.')}</p>
         <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
           <Plus size={17} />
           {t('New session')}
@@ -516,11 +516,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               <br />
               <span>{t('daddy’s got it.')}</span>
             </h2>
-            <p>
-              {t(
-                'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.',
-              )}
-            </p>
+            <p>{t('Describe the task or drop a ticket link. daddy will take it from here.')}</p>
             <button
               className="daddy-button primary"
               onClick={() => {

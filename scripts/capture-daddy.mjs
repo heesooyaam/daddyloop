@@ -317,6 +317,21 @@ try {
     .getByRole('button', { name: t('Tasks'), exact: false })
     .click();
   await page.screenshot({ path: join(output, 'daddy-phone-tasks.png'), animations: 'disabled' });
+
+  // The empty home page has its own fixture so its copy is visible in the guides.
+  const home = await context.newPage();
+  await home.route('**/api/daddy/sessions', (route) => route.fulfill({ json: [] }));
+  await home.goto(origin);
+  await expect(home.getByRole('heading', { name: t('Your dashboard') })).toBeVisible();
+  await expect(
+    home.getByText(t('Describe the task or drop a ticket link. daddy will take it from here.')),
+  ).toBeVisible();
+  await home.getByRole('button', { name: t('Change theme') }).click();
+  await home.getByRole('radio', { name: t('Mint'), exact: true }).click();
+  await home.getByRole('button', { name: t('Close'), exact: true }).click();
+  await home.screenshot({ path: join(output, 'daddy-home.png'), animations: 'disabled' });
+  await home.close();
+
   const recording = join(scratch, 'terminal.json');
   await command('python3', [
     join(root, 'scripts/capture-daddy-cli.py'),
@@ -372,6 +387,7 @@ try {
         fixtureData: true,
         terminalVerified: capture.verified,
         screens: [
+          'daddy-home',
           'daddy-desktop',
           'daddy-models',
           'daddy-phone-chat',

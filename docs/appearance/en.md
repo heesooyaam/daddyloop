@@ -34,3 +34,5 @@ Existing conversations and files remain in place after an account quota reset.
 Zero additional credits stay in the detailed view with an explanation instead of occupying space beside quota percentages. Credits are a separate provider payment balance; zero credits do not mean the included quotas are exhausted. A provider reporting only a credit balance keeps that balance visible in the main panel.
 
 The home page uses **Your dashboard**, separate from the **Agent limits** section. Providers without readings occupy a compact row with a details action. Quota percentages remain visible without extra clicks.
+
+![The home page in Mint](../media/en/daddy-home.png)

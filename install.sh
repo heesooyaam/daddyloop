@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-daddyloop_version="0.14.0"
+daddyloop_version="0.14.1"
 daddyloop_prefix="${DADDYLOOP_INSTALL_DIR:-$HOME/.local/share/daddyloop}"
 daddyloop_bin_dir="${DADDYLOOP_BIN_DIR:-$HOME/.local/bin}"
 daddyloop_base="${DADDYLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/daddyloop/releases/download/v$daddyloop_version}"
