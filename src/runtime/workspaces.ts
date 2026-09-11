@@ -102,7 +102,7 @@ export class Workspaces {
       writeFileSync(
         join(root, 'owner.json'),
         JSON.stringify({
-          application: 'reviewloop',
+          application: 'daddyloop',
           taskId: task.id,
           source: task.repoPath,
         }),
@@ -196,9 +196,9 @@ export class Workspaces {
       await run(['add', '--all', '--', '.']);
       await run([
         '-c',
-        'user.name=Reviewloop',
+        'user.name=daddyloop',
         '-c',
-        'user.email=reviewloop@localhost',
+        'user.email=daddyloop@localhost',
         'commit',
         '-m',
         message,
@@ -332,7 +332,7 @@ export class Workspaces {
       await run(['init', '--bare', bare]);
       writeFileSync(
         join(root, 'owner.json'),
-        JSON.stringify({ application: 'reviewloop', taskId: task.id, source: task.repoPath }),
+        JSON.stringify({ application: 'daddyloop', taskId: task.id, source: task.repoPath }),
         { mode: 0o600 },
       );
     }
@@ -375,7 +375,7 @@ export class Workspaces {
     const head = await run(['rev-parse', 'HEAD'], target);
     if (role === 'author') {
       if ((await run(['symbolic-ref', '--short', 'HEAD'], target)) !== task.ticketRepository.branch)
-        throw new Error('The author branch changed outside Reviewloop; it was preserved');
+        throw new Error('The author branch changed outside daddyloop; it was preserved');
       await run(['merge-base', '--is-ancestor', task.revision.head, head], target);
       task.authorWorktree = target;
       task.authorBaseHead = head;
@@ -402,16 +402,16 @@ export class Workspaces {
     )
       throw new Error('The author workspace belongs to another repository');
     if ((await run(['symbolic-ref', '--short', 'HEAD'])) !== task.ticketRepository.branch)
-      throw new Error('The author branch changed outside Reviewloop');
+      throw new Error('The author branch changed outside daddyloop');
     await run(['merge-base', '--is-ancestor', task.revision.head, 'HEAD']);
     if (await run(['status', '--porcelain'])) {
       await run(['diff', '--check']);
       await run(['add', '--all', '--', '.']);
       await run([
         '-c',
-        'user.name=Reviewloop',
+        'user.name=daddyloop',
         '-c',
-        'user.email=reviewloop@localhost',
+        'user.email=daddyloop@localhost',
         'commit',
         '-m',
         message,
@@ -431,7 +431,7 @@ export class Workspaces {
       (await git(['symbolic-ref', '--short', 'HEAD'], cwd, {}, signal)) !==
       task.ticketRepository.branch
     )
-      throw new Error('The author branch changed outside Reviewloop');
+      throw new Error('The author branch changed outside daddyloop');
     const common = realpathSync(await git(['rev-parse', '--git-common-dir'], cwd, {}, signal));
     if (common !== realpathSync(join(root, 'objects.git')))
       throw new Error('The author workspace belongs to another repository');

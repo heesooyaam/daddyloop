@@ -45,7 +45,7 @@ export class ArcWorkspaces {
     let saved = task.arcWorkspaces[role] as Saved | undefined;
     const journal = join(this.dataDir, 'arc-leases', `${task.id}-${role}.json`);
     if (!saved && existsSync(journal)) saved = JSON.parse(readFileSync(journal, 'utf8')) as Saved;
-    if (saved && !saved.ownerId.startsWith(`reviewloop-${task.id}-${role}-`))
+    if (saved && !saved.ownerId.startsWith(`daddyloop-${task.id}-${role}-`))
       throw new Error('Arc lease journal does not belong to this task');
     if (saved) {
       const owned = (await this.bridge.mounts()).find(
@@ -80,7 +80,7 @@ export class ArcWorkspaces {
         let lease: ArcLease;
         try {
           lease = await this.bridge.claim(
-            `reviewloop-${task.id}-${role}-${randomUUID()}`,
+            `daddyloop-${task.id}-${role}-${randomUUID()}`,
             candidate.path,
           );
         } catch {
@@ -108,8 +108,8 @@ export class ArcWorkspaces {
                 'checkout',
                 '-b',
                 task.ref.kind === 'ticket'
-                  ? `reviewloop/${task.id}`
-                  : `reviewloop/${task.id}-g${task.generation}-${randomUUID().slice(0, 8)}`,
+                  ? `daddyloop/${task.id}`
+                  : `daddyloop/${task.id}-g${task.generation}-${randomUUID().slice(0, 8)}`,
                 task.revision.head,
               ],
               saved.mount,
@@ -151,7 +151,7 @@ export class ArcWorkspaces {
       if (info.hash !== task.revision.head)
         await this.bridge.native(
           role === 'author'
-            ? ['checkout', '-b', `reviewloop/${task.id}-g${task.generation}`, task.revision.head]
+            ? ['checkout', '-b', `daddyloop/${task.id}-g${task.generation}`, task.revision.head]
             : ['checkout', task.revision.head],
           saved.mount,
           signal,
@@ -174,7 +174,7 @@ export class ArcWorkspaces {
         await this.bridge.native(['info', '--json'], saved.mount, signal),
       ) as { hash: string; branch: string };
       if (
-        !current.branch?.startsWith(`reviewloop/${task.id}`) ||
+        !current.branch?.startsWith(`daddyloop/${task.id}`) ||
         (await this.bridge.native(
           ['merge-base', '--leftmost', task.revision.head, current.hash],
           saved.mount,
@@ -182,7 +182,7 @@ export class ArcWorkspaces {
         )) !== task.revision.head
       )
         throw new Error(
-          'The Arc author checkout was interrupted or changed outside Reviewloop. Inspect the saved lease before continuing; no agent was started.',
+          'The Arc author checkout was interrupted or changed outside daddyloop. Inspect the saved lease before continuing; no agent was started.',
         );
       if (task.ref.kind === 'ticket') {
         task.revision = { ...task.revision, head: current.hash };
@@ -208,7 +208,7 @@ export class ArcWorkspaces {
       await this.bridge.native(['info', '--json'], saved.mount, signal),
     ) as { hash: string; branch: string };
     if (
-      !before.branch?.startsWith(`reviewloop/${task.id}`) ||
+      !before.branch?.startsWith(`daddyloop/${task.id}`) ||
       (await this.bridge.native(
         ['merge-base', '--leftmost', task.revision.head, before.hash],
         saved.mount,
@@ -216,7 +216,7 @@ export class ArcWorkspaces {
       )) !== task.revision.head
     )
       throw new Error(
-        'The Arc author branch changed outside Reviewloop; no commit or push was performed',
+        'The Arc author branch changed outside daddyloop; no commit or push was performed',
       );
     const status = await this.bridge.native(['status', '--short'], saved.mount, signal);
     if (status) {

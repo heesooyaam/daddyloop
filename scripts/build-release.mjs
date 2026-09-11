@@ -10,9 +10,9 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch))
   throw new Error('Build releases on Linux x64 or arm64.');
-const out = resolve(process.env.REVIEWLOOP_RELEASE_DIR ?? join(root, '.reviewloop/releases'));
+const out = resolve(process.env.DADDYLOOP_RELEASE_DIR ?? join(root, '.daddyloop/releases'));
 const stage = join(out, `stage-${process.pid}`),
-  payload = join(stage, 'reviewloop'),
+  payload = join(stage, 'daddyloop'),
   app = join(payload, 'app');
 await mkdir(app, { recursive: true });
 try {
@@ -92,7 +92,7 @@ try {
     `${ghName.slice(0, -7)}/bin/gh`,
   ]);
   await mkdir(join(payload, 'bin'));
-  await cp(join(root, 'scripts/reviewctl-launcher.sh'), join(payload, 'bin/reviewctl'));
+  await cp(join(root, 'scripts/daddy-launcher.sh'), join(payload, 'bin/daddy'));
   await writeFile(
     join(payload, 'release.json'),
     JSON.stringify(
@@ -108,7 +108,7 @@ try {
       2,
     ),
   );
-  const launcher = join(payload, 'bin/reviewctl');
+  const launcher = join(payload, 'bin/daddy');
   execFileSync('chmod', ['755', launcher]);
   const runtime = join(payload, 'node/bin/node');
   const result = execFileSync(runtime, [join(app, 'dist/server/cli.js'), '--version'], {
@@ -141,9 +141,9 @@ try {
     stdio: 'inherit',
   });
   if (!(await lstat(join(tools, 'bin/gh'))).isFile()) throw new Error('Missing GitHub CLI');
-  const filename = `reviewloop-linux-${process.arch}.tar.gz`,
+  const filename = `daddyloop-linux-${process.arch}.tar.gz`,
     target = join(out, filename);
-  execFileSync('tar', ['-czf', target, '-C', stage, 'reviewloop']);
+  execFileSync('tar', ['-czf', target, '-C', stage, 'daddyloop']);
   const digest = createHash('sha256')
     .update(await readFile(target))
     .digest('hex');

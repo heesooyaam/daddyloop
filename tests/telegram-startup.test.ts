@@ -8,7 +8,7 @@ import { Telegram, TelegramApi } from '../src/integrations/telegram.js';
 import { AppError } from '../src/core/types.js';
 import { healthy } from './planning-fixture.js';
 it('keeps the website available during a Telegram outage and connects without restarting it', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-telegram-start-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-telegram-start-'));
   const start = vi.fn(),
     stop = vi.fn(async () => {});
   let attempts = 0;
@@ -60,7 +60,7 @@ it('keeps the website available during a Telegram outage and connects without re
   expect(stop).toHaveBeenCalledOnce();
 });
 it('cancels a pending startup reconnect during service shutdown', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-telegram-stop-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-telegram-stop-'));
   const factory = vi
     .fn()
     .mockRejectedValue(new AppError('telegram_unreachable', 'Temporary outage'));

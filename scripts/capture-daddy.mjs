@@ -2,27 +2,28 @@
 import { chromium, expect } from '@playwright/test';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { buildApp } from '../dist/server/server/app.js';
 import { usageFixture } from '../tests/e2e/usage-fixture.mjs';
 import { configSchema } from '../dist/server/ops/config.js';
 import { Store } from '../dist/server/core/store.js';
-import { Projects } from '../dist/server/core/projects.js';
+import { WorkspaceRegistry } from '../dist/server/core/workspace-registry.js';
 const root = resolve(import.meta.dirname, '..'),
   output = join(root, 'docs/media');
 mkdirSync(output, { recursive: true });
-const base = join(root, '.reviewloop/daddy-media');
+const base = join(tmpdir(), 'daddyloop-media');
 mkdirSync(base, { recursive: true, mode: 0o700 });
 const scratch = mkdtempSync(join(base, 'capture-')),
   data = join(scratch, 'data'),
   repo = join(scratch, 'payments');
 mkdirSync(data);
 mkdirSync(repo);
-const store = new Store(join(data, 'reviewloop.sqlite')),
+const store = new Store(join(data, 'daddyloop.sqlite')),
   token = randomBytes(24).toString('hex');
 writeFileSync(join(data, 'access-token'), token, { mode: 0o600 });
-const project = {
+const workspace = {
   id: randomUUID(),
   name: 'Payments',
   repoPath: repo,
@@ -34,16 +35,16 @@ const project = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
-store.saveProject(project);
+store.saveWorkspace(workspace);
 const profiles = {
-  author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
-  reviewer: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 const config = configSchema.parse({
   dataDir: data,
   locale: 'ru',
   agents: profiles,
-  projects: { roots: [scratch] },
+  workspaces: { roots: [scratch] },
   telegram: { enabled: false },
 });
 const catalogue = {
@@ -53,7 +54,7 @@ const catalogue = {
       name: profile.model,
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
-      isDefault: profile === profiles.reviewer,
+      isDefault: profile === profiles.daddy,
     })),
   validate: async () => {},
   metadata: () => ({
@@ -62,12 +63,12 @@ const catalogue = {
     cliVersion: '0.154.0',
   }),
 };
-const projects = new Projects(store, [scratch], { mounts: async () => [] });
+const workspaces = new WorkspaceRegistry(store, [scratch], { mounts: async () => [] });
 const server = await buildApp({
   usage: usageFixture(),
   dataDir: data,
   store,
-  projects,
+  workspaces,
   config,
   token,
   startWorker: false,
@@ -75,7 +76,7 @@ const server = await buildApp({
   catalogue,
 });
 const group = server.daddy.create({
-  projectId: project.id,
+  workspaceId: workspace.id,
   title: 'Платежи без повторных списаний',
   writerLimit: 3,
 });
@@ -106,7 +107,7 @@ for (const [index, title] of [
 ].entries()) {
   const task = await server.engine.createTicket({
     groupId: group.id,
-    projectId: project.id,
+    workspaceId: workspace.id,
     ref: {
       kind: 'ticket',
       provider: 'github',
@@ -145,7 +146,7 @@ for (const [index, title] of [
       generation: task.generation,
       role: index === 1 ? 'reviewer' : 'author',
       kind: index === 1 ? 'review' : 'implement',
-      profile: index === 1 ? profiles.reviewer : profiles.author,
+      profile: index === 1 ? profiles.daddy : profiles.writer,
       input: 'Illustrative fixture',
       status: 'running',
       createdAt: new Date().toISOString(),

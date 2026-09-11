@@ -11,8 +11,8 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 it('authenticates update controls, activates atomically without changing the server PID, and persists across restart', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-updater-api-test-'));
-  vi.stubEnv('REVIEWLOOP_CONFIG', join(dir, 'config.json'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-updater-api-test-'));
+  vi.stubEnv('DADDYLOOP_CONFIG', join(dir, 'config.json'));
   const previous = join(dir, 'old-codex'),
     next = join(dir, 'new-codex');
   writeFileSync(previous, '#!/bin/sh\necho codex-cli 1.0.0\n', { mode: 0o700 });

@@ -42,4 +42,4 @@ export async function prepareSpeech(directory) {
   await writeFile(join(directory, 'daddyloop-model.json'), JSON.stringify(manifest, null, 2));
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url)
-  await prepareSpeech(resolve(process.argv[2] ?? '.reviewloop/speech/whisper-small'));
+  await prepareSpeech(resolve(process.argv[2] ?? '.daddyloop/speech/whisper-small'));

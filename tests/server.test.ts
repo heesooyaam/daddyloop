@@ -7,7 +7,7 @@ let server: Awaited<ReturnType<typeof buildApp>>;
 let dir: string;
 const token = 'test-only-token-not-a-real-secret';
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'reviewloop-server-test-'));
+  dir = mkdtempSync(join(tmpdir(), 'daddyloop-server-test-'));
   server = await buildApp({
     dataDir: dir,
     token,
@@ -65,7 +65,7 @@ it('uses an HttpOnly session cookie and requires CSRF headers for cookie-authent
       await server.app.inject({
         method: 'POST',
         url: '/api/demo',
-        headers: { cookie, 'x-reviewloop-request': '1' },
+        headers: { cookie, 'x-daddyloop-request': '1' },
         payload: {},
       })
     ).statusCode,
@@ -74,30 +74,12 @@ it('uses an HttpOnly session cookie and requires CSRF headers for cookie-authent
 it('rejects invalid workflow actions and returns a clear error envelope', async () => {
   const result = await server.app.inject({
     method: 'POST',
-    url: '/api/tasks/none/actions',
+    url: '/api/daddy/sessions/none/task-action',
     headers: { Authorization: `Bearer ${token}` },
     payload: { action: 'merge_everything' },
   });
   expect(result.statusCode).toBe(400);
   expect(result.json().error.code).toBe('validation_error');
-});
-it('keeps demo mode explicit and records human policy changes', async () => {
-  const create = await server.app.inject({
-    method: 'POST',
-    url: '/api/demo',
-    headers: { Authorization: `Bearer ${token}` },
-    payload: {},
-  });
-  const task = create.json();
-  expect(task.ref.provider).toBe('demo');
-  const change = await server.app.inject({
-    method: 'POST',
-    url: `/api/tasks/${task.id}/policy`,
-    headers: { Authorization: `Bearer ${token}` },
-    payload: { policy: { publication: 'auto' } },
-  });
-  expect(change.statusCode).toBe(200);
-  expect(server.store.events(task.id).some((e) => e.type === 'human.policy_changed')).toBe(true);
 });
 it('rejects a DNS-rebinding Host header even with a correct token', async () => {
   expect(

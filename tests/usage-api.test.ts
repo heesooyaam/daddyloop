@@ -21,8 +21,8 @@ it('authenticates quota reads and requires explicit reset confirmation', async (
   const server = await buildApp({
     dataDir: f.dir,
     store: f.store,
-    projects: f.projects,
     workspaces: f.workspaces,
+    checkouts: f.checkouts,
     daddyRuntime: f.runtime,
     daddyWorkspace: f.context,
     catalogue,

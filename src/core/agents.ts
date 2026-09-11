@@ -14,7 +14,7 @@ export const profileSchema = z
       .regex(/^[a-z][a-z0-9_-]{0,39}$/)
       .refine(
         (value) => value !== 'ultra',
-        'Ultra delegation is not supported by the managed single-reviewer workflow',
+        'Ultra delegation is not supported by the managed single-daddy workflow',
       )
       .optional(),
   })
@@ -23,10 +23,10 @@ export const profileSchema = z
     (value) => !value.effort || !!value.model,
     'Choose a model before setting its reasoning effort',
   );
-export const profilesSchema = z.object({ author: profileSchema, reviewer: profileSchema }).strict();
+export const profilesSchema = z.object({ writer: profileSchema, daddy: profileSchema }).strict();
 export const inheritedProfiles = () => ({
-  author: { engine: 'codex' as const },
-  reviewer: { engine: 'codex' as const },
+  writer: { engine: 'codex' as const },
+  daddy: { engine: 'codex' as const },
 });
 export interface ModelOption {
   id: string;

@@ -1,7 +1,7 @@
 import { TelegramText, type TelegramCard } from './telegram-text.js';
 import { translator, type Locale } from '../i18n/index.js';
 import type { Daddy } from '../core/daddy.js';
-import type { Project, ReviewGroup } from '../core/types.js';
+import type { Workspace, ReviewGroup } from '../core/types.js';
 export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
@@ -34,7 +34,7 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
     ],
   };
 }
-export function projectPicker(locale: Locale, projects: Project[]): TelegramCard {
+export function workspacePicker(locale: Locale, workspaces: Workspace[]): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
       .add('📁 ' + t('Choose a workspace'), 'bold')
@@ -47,9 +47,9 @@ export function projectPicker(locale: Locale, projects: Project[]): TelegramCard
   return {
     ...text,
     buttons: [
-      ...projects
+      ...workspaces
         .slice(0, 20)
-        .map((project) => [{ text: project.name, callback_data: `dad:new:${project.id}` }]),
+        .map((workspace) => [{ text: workspace.name, callback_data: `dad:new:${workspace.id}` }]),
       [{ text: '＋ ' + t('Find workspaces on the server'), callback_data: 'dad:discover' }],
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
@@ -63,8 +63,8 @@ export function daddyBoard(
   const t = translator(locale),
     text = new TelegramText()
       .add('👨‍💻 ' + board.group.title, 'bold')
-      .add('\n' + (board.project?.name ?? t('Workspace')))
-      .add('\n' + (board.project?.repoPath ?? ''), 'code')
+      .add('\n' + (board.workspace?.name ?? t('Workspace')))
+      .add('\n' + (board.workspace?.repoPath ?? ''), 'code')
       .add('\n\n' + t('Writers: {active} / {limit}', board.writers))
       .add(
         '\n' +

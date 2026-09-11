@@ -1,7 +1,6 @@
 import { it, expect } from 'vitest';
 import { translate } from '../src/i18n/index.js';
 import { ru } from '../src/i18n/ru.js';
-import { taskCard, agentCard } from '../src/integrations/telegram-cards.js';
 import { setLocale, preferences } from '../src/core/preferences.js';
 import { fixture } from './helpers.js';
 it('translates UI templates in both directions while preserving inserted content', () => {
@@ -20,34 +19,6 @@ it('translates UI templates in both directions while preserving inserted content
     expect([...key.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort(), key).toEqual(
       [...value.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort(),
     );
-});
-it('keeps task and conversation text original when switching Telegram card language', async () => {
-  const f = await fixture();
-  try {
-    const task = {
-      ...f.task,
-      state: 'complete' as const,
-      title: 'Complete',
-      summary: '**Needs attention** — исходный текст',
-    };
-    const english = taskCard(task, undefined, 'en'),
-      russian = taskCard(task, undefined, 'ru');
-    expect(english.text).toContain('✅ Task complete');
-    expect(russian.text).toContain('✅ Задача завершена');
-    expect(english.text).toContain('Complete');
-    expect(russian.text).toContain('Complete');
-    expect(english.text).toContain('Needs attention — исходный текст');
-    expect(russian.text).toContain('Needs attention — исходный текст');
-    const reply = agentCard(task, 'author', '**Save** `код`', undefined, 'ru');
-    expect(reply.text).toContain('Save код');
-    for (const value of [english, russian, reply])
-      for (const entity of value.entities) {
-        expect(entity.offset + entity.length).toBeLessThanOrEqual(value.text.length);
-        expect(entity.length).toBeGreaterThan(0);
-      }
-  } finally {
-    f.store.close();
-  }
 });
 it('changes the interface preference without changing tasks or queued agent profiles', async () => {
   const f = await fixture();

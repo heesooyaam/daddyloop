@@ -16,7 +16,7 @@ daddy
 
 The download command requires public release access. For a private repository, download the release using an authenticated GitHub CLI.
 
-The release bundles Node, Codex and GitHub CLI. A systemd service keeps running after the terminal or laptop disconnects. `reviewctl` remains a compatible executable alias; existing configuration, credentials and data paths are preserved during upgrades.
+The release bundles Node, Codex and GitHub CLI. A systemd service keeps running after the terminal or laptop disconnects. Use `daddy` to open the console. Configuration and data use the `daddyloop` directories.
 
 ## Workspaces, sessions and writers
 

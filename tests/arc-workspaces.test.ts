@@ -58,7 +58,7 @@ it('retains the named author branch when its pushed head becomes the next review
     repoPath: '/fake/arc-source',
     revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
   });
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-arc-test-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-arc-test-')),
     bridge = new MountFixture(),
     workspaces = new ArcWorkspaces(dir, bridge);
   try {
@@ -101,7 +101,7 @@ it('recovers the lease journal after interrupted checkout and refuses to start a
     repoPath: '/fake/arc-source',
     revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
   });
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-arc-test-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-arc-test-')),
     bridge = new MountFixture(),
     workspaces = new ArcWorkspaces(dir, bridge);
   bridge.failCheckout = true;

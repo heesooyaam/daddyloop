@@ -6,7 +6,7 @@ import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
 import { buildContext } from './context.js';
-import { projectScope } from '../core/projects.js';
+import { workspaceScope } from '../core/workspace-registry.js';
 import { realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { assignWriter, canAssignWriter, reconcileWriterPools } from '../core/writer-pool.js';
@@ -258,7 +258,7 @@ export class Worker {
           throw new Error('The shared reviewer configuration changed before this job started');
         task.reviewerThreadId = group.reviewerThreadId;
       }
-      job.profile ??= this.engine.effectiveAgents(task)[job.role];
+      job.profile ??= this.engine.effectiveAgents(task)[job.role === 'author' ? 'writer' : 'daddy'];
       store.saveJob(job);
       const startingPR = isTicket(task)
         ? undefined
@@ -343,7 +343,7 @@ export class Worker {
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {
-        agentCwd = realpathSync(join(cwd, projectScope(task.scope)));
+        agentCwd = realpathSync(join(cwd, workspaceScope(task.scope)));
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }

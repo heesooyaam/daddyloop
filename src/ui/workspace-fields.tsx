@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DaddyApi } from '../client/daddy.js';
-import type { Project } from '../core/types.js';
-import type { WorkspaceInput } from '../core/projects.js';
+import type { Workspace } from '../core/types.js';
+import type { RepositorySelection } from '../core/workspace-registry.js';
 import { useLocale } from './i18n.js';
 
-/** The value belongs to this draft. Choosing a directory never edits project defaults. */
+/** The value belongs to this draft. Choosing a directory never edits workspace defaults. */
 export function WorkspaceFields({
   api,
-  project,
+  workspace,
   value,
   onChange,
   compact = false,
 }: {
   api: DaddyApi;
-  project: Project;
-  value?: WorkspaceInput;
-  onChange: (value?: WorkspaceInput) => void;
+  workspace: Workspace;
+  value?: RepositorySelection;
+  onChange: (value?: RepositorySelection) => void;
   compact?: boolean;
 }) {
   const { t } = useLocale();
@@ -52,7 +52,7 @@ export function WorkspaceFields({
         {t('Repository on this server')}
         <input
           aria-label={t('Repository on this server')}
-          value={value?.path ?? project.repoPath}
+          value={value?.path ?? workspace.repoPath}
           onChange={(event) =>
             onChange({ ...value, path: event.target.value, scope: undefined, base: undefined })
           }
@@ -88,7 +88,7 @@ export function WorkspaceFields({
       <label>
         {t('Starting directory (relative)')}
         <input
-          value={value?.scope ?? (value?.path ? '' : project.scope)}
+          value={value?.scope ?? (value?.path ? '' : workspace.scope)}
           placeholder={t('Repository root')}
           onChange={(event) => onChange({ ...value, scope: event.target.value })}
         />
@@ -96,7 +96,7 @@ export function WorkspaceFields({
       <label>
         {t('Base branch (optional)')}
         <input
-          value={value?.base ?? (value?.path ? '' : (project.base ?? ''))}
+          value={value?.base ?? (value?.path ? '' : (workspace.base ?? ''))}
           onChange={(event) => onChange({ ...value, base: event.target.value })}
         />
       </label>
@@ -124,7 +124,7 @@ export function WorkspaceFields({
     <details className="daddy-workspace-fields" open={compact ? undefined : true}>
       <summary>
         {t(value ? 'Repository for this request' : 'Using workspace defaults')} ·{' '}
-        {value?.path ?? project.repoPath}
+        {value?.path ?? workspace.repoPath}
       </summary>
       {fields}
     </details>

@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { api as client } from './client.js';
-import type { Project } from '../core/types.js';
+import type { Workspace } from '../core/types.js';
 import type { DaddyBoard, DaddySession } from '../client/daddy.js';
 import type { ResetPlan, UsageView } from '../core/usage.js';
 import { usageLines, resetOutcomeText } from '../client/usage.js';
@@ -48,12 +48,12 @@ export function registerDaddyCommands(program: Command) {
           '\n',
       );
     });
-  const project = async (name: string) => {
-    const matches = (await api<Project[]>('/workspaces')).filter(
-      (project) =>
-        project.id === name ||
-        project.id.startsWith(name) ||
-        project.name.toLowerCase() === name.toLowerCase(),
+  const workspace = async (name: string) => {
+    const matches = (await api<Workspace[]>('/workspaces')).filter(
+      (workspace) =>
+        workspace.id === name ||
+        workspace.id.startsWith(name) ||
+        workspace.name.toLowerCase() === name.toLowerCase(),
     );
     if (matches.length !== 1)
       throw new Error('Choose a unique workspace name or ID from daddy workspaces');
@@ -70,12 +70,11 @@ export function registerDaddyCommands(program: Command) {
       throw new Error('Choose a unique session name or ID from daddy sessions');
     return matches[0];
   };
-  const projects = program
+  const workspaces = program
     .command('workspaces')
-    .alias('projects')
     .description('Register and choose workspace folders on the server');
-  projects.action(async () => print(await api('/workspaces')));
-  projects
+  workspaces.action(async () => print(await api('/workspaces')));
+  workspaces
     .command('set')
     .argument('<workspace>')
     .argument('<path>')
@@ -83,16 +82,16 @@ export function registerDaddyCommands(program: Command) {
     .option('--base <branch>')
     .description('Change defaults on this server for future sessions')
     .action(async (name, path, options) => {
-      const selected = await project(name);
+      const selected = await workspace(name);
       print(
         await api(`/workspaces/${selected.id}/defaults`, { name: selected.name, path, ...options }),
       );
     });
-  projects
+  workspaces
     .command('discover')
     .description('Find repositories on the server')
     .action(async () => print(await api('/workspaces/suggestions')));
-  projects
+  workspaces
     .command('browse')
     .argument('[path]')
     .description('Browse server directories')
@@ -101,7 +100,7 @@ export function registerDaddyCommands(program: Command) {
         await api('/workspaces/directories' + (path ? '?path=' + encodeURIComponent(path) : '')),
       ),
     );
-  projects
+  workspaces
     .command('add')
     .argument('<path>')
     .requiredOption('--name <name>')
@@ -126,7 +125,6 @@ export function registerDaddyCommands(program: Command) {
     .command('new')
     .argument('[message]')
     .option('--workspace <name>', 'workspace to use')
-    .option('--project <name>', 'compatibility alias for --workspace')
     .option('--title <title>')
     .option('--writers <count>', 'maximum simultaneous writers', '1')
     .option('--repo <path>', 'repository for this session only')
@@ -134,14 +132,11 @@ export function registerDaddyCommands(program: Command) {
     .option('--base <branch>', 'base branch for this session')
     .description('Give daddy a goal in a registered workspace')
     .action(async (message, options) => {
-      if (!options.workspace && !options.project)
-        throw new Error('Choose a workspace with --workspace');
-      if (options.workspace && options.project && options.workspace !== options.project)
-        throw new Error('Choose one workspace');
-      const selected = await project(options.workspace ?? options.project);
+      if (!options.workspace) throw new Error('Choose a workspace with --workspace');
+      const selected = await workspace(options.workspace);
       const board = await api<DaddyBoard>('/daddy/sessions', {
-        projectId: selected.id,
-        workspace: workspaceOptions(options),
+        workspaceId: selected.id,
+        repository: workspaceOptions(options),
         message,
         title: options.title,
         writerLimit: Number(options.writers),
@@ -164,7 +159,7 @@ export function registerDaddyCommands(program: Command) {
       print(
         await api(`/daddy/sessions/${(await session(name)).id}/chat`, {
           text,
-          workspace: workspaceOptions(options),
+          repository: workspaceOptions(options),
           requestId: crypto.randomUUID(),
         }),
       ),

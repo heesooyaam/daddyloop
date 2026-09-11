@@ -1,7 +1,7 @@
 node_modules/
 dist/
 .tools/
-.reviewloop/
+.daddyloop/
 .env
 .env.*
 !.env.example

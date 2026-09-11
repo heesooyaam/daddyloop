@@ -14,12 +14,12 @@ it('keeps unpublished native review and reviewer chat out of the coordination co
     return { status: 'completed', summary: 'Done', checkedHead: '' };
   });
   try {
-    const group = f.daddy.create({ projectId: f.project.id, message: 'Coordinate the work' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, message: 'Coordinate the work' });
     const task = await f.engine.create({
       ref: {
         provider: 'demo',
         host: 'demo.local',
-        repo: 'fixture/project',
+        repo: 'fixture/workspace',
         number: 1,
         url: 'https://demo.local/pull/1',
       },

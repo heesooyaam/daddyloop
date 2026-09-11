@@ -37,20 +37,20 @@ export function modelsCard(
 ): TelegramCard {
   const t = translator(locale),
     text = new TelegramText().add('🤖 ' + t('Models'), 'bold').add('\n\n');
-  for (const role of ['author', 'reviewer'] as const)
+  for (const role of ['writer', 'daddy'] as const)
     text
-      .add(t(role === 'author' ? 'Author' : 'Reviewer') + ': ', 'bold')
+      .add((role === 'writer' ? t('Writer') : 'daddy') + ': ', 'bold')
       .add(profiles[role].model ?? t('Codex configuration'), 'code')
       .add(profiles[role].effort ? ` / ${profiles[role].effort}` : '')
       .add('\n');
   text
     .add('\n')
-    .add(t('Select an author or reviewer model independently.'))
+    .add(t('Select writer and daddy models independently.'))
     .add('\n')
     .add('/defaults', 'code')
     .add(' · ')
     .add('/models', 'code')
-    .add(' — reviewctl\n\n');
+    .add(' — daddy\n\n');
   for (const model of models)
     text.add(model.id, 'code').add('\n' + model.efforts.join(' · ') + '\n\n');
   text.add(t('Source: Codex app-server model/list')).add('\n');
@@ -129,11 +129,11 @@ export function updatesCard(
         '\n' +
           t(
             tool.source === 'bundled'
-              ? 'Bundled with Reviewloop'
+              ? 'Bundled with daddyloop'
               : tool.source === 'missing'
                 ? 'Not installed'
                 : tool.source === 'managed'
-                  ? 'Managed by Reviewloop'
+                  ? 'Managed by daddyloop'
                   : 'External CLI',
           ),
       );

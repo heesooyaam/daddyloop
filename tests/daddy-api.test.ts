@@ -48,13 +48,13 @@ it('checks the viewed revision after acquiring the task lock before a human appr
     await f.close();
   }
 });
-it('authenticates project/session controls, deduplicates messages and closes public writer chat', async () => {
+it('authenticates workspace/session controls, deduplicates messages and closes public writer chat', async () => {
   const f = daddyFixture(),
     server = await buildApp({
       dataDir: f.dir,
       store: f.store,
-      projects: f.projects,
       workspaces: f.workspaces,
+      checkouts: f.checkouts,
       daddyRuntime: f.runtime,
       daddyWorkspace: f.context,
       catalogue,
@@ -64,14 +64,14 @@ it('authenticates project/session controls, deduplicates messages and closes pub
     });
   const headers = { authorization: 'Bearer fixture' };
   try {
-    expect((await server.app.inject('/api/projects')).statusCode).toBe(401);
     expect((await server.app.inject('/api/workspaces')).statusCode).toBe(401);
+    expect((await server.app.inject({ url: '/api/projects', headers })).statusCode).toBe(404);
     expect((await server.app.inject({ url: '/api/workspaces', headers })).json()).toEqual(
-      (await server.app.inject({ url: '/api/projects', headers })).json(),
+      (await server.app.inject({ url: '/api/workspaces', headers })).json(),
     );
-    expect((await server.app.inject({ url: '/api/projects', headers })).json()).toHaveLength(1);
+    expect((await server.app.inject({ url: '/api/workspaces', headers })).json()).toHaveLength(1);
     const requestId = randomUUID(),
-      input = { projectId: f.project.id, message: 'Start from this goal', requestId };
+      input = { workspaceId: f.workspace.id, message: 'Start from this goal', requestId };
     const first = (
       await server.app.inject({
         method: 'POST',
@@ -115,7 +115,7 @@ it('authenticates project/session controls, deduplicates messages and closes pub
       ).statusCode,
     ).toBe(400);
     const task = await f.tickets.local({
-      project: f.project,
+      workspace: f.workspace,
       groupId: first.group.id,
       groupGeneration: first.group.generation,
       title: 'Subtask',
@@ -131,7 +131,7 @@ it('authenticates project/session controls, deduplicates messages and closes pub
           payload: { role: 'author', text: 'Bypass daddy' },
         })
       ).statusCode,
-    ).toBe(403);
+    ).toBe(404);
     expect(f.store.jobs(task.id)).toHaveLength(0);
     expect(
       (
@@ -142,8 +142,8 @@ it('authenticates project/session controls, deduplicates messages and closes pub
           payload: { role: 'reviewer', text: 'Question for daddy' },
         })
       ).statusCode,
-    ).toBe(200);
-    expect(f.store.messages(first.group.id).at(-1)?.text).toBe('Question for daddy');
+    ).toBe(404);
+    expect(f.store.messages(first.group.id).at(-1)?.text).toBe('Add one more ticket');
     expect(f.store.messages(task.id)).toHaveLength(0);
   } finally {
     await server.app.close();

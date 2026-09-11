@@ -135,7 +135,7 @@ it('keeps a stable executable symlink so native updater replacements take effect
   const { join } = await import('node:path');
   const { tmpdir } = await import('node:os');
   const { requireExecutable, executablePath } = await import('../src/runtime/executable.js');
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-cli-link-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cli-link-'));
   try {
     const launcher = join(dir, 'codex'),
       old = join(dir, 'old-version'),

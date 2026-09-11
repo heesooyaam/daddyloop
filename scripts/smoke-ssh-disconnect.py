@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-state = Path(os.environ.get('REVIEWLOOP_DATA_DIR', str(root / '.reviewloop')))
+state = Path(os.environ.get('DADDYLOOP_DATA_DIR', str(root / '.daddyloop')))
 base = 'http://127.0.0.1:4317/api'
 token = (state / 'access-token').read_text().strip()
 def api(path, body=None):
@@ -23,7 +23,7 @@ def api(path, body=None):
 before = api('/health')
 task = None
 result = {'before_pid': before['pid'], 'passed': False}
-with tempfile.TemporaryDirectory(prefix='reviewloop-ssh-test-', dir=str(Path.home())) as directory:
+with tempfile.TemporaryDirectory(prefix='daddyloop-ssh-test-', dir=str(Path.home())) as directory:
     temporary = Path(directory)
     for name in ['host', 'client']:
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(temporary/name)], check=True, stdout=subprocess.DEVNULL)
@@ -47,13 +47,13 @@ with tempfile.TemporaryDirectory(prefix='reviewloop-ssh-test-', dir=str(Path.hom
             if pidfile.exists(): break
             if server.poll() is not None: raise RuntimeError('Temporary sshd failed to start: ' + server.stderr.read().decode()[:500])
             time.sleep(0.05)
-        client = subprocess.Popen(['ssh', '-tt', '-p', str(port), '-i', str(temporary/'client'), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(known), '-o', 'ConnectTimeout=10', pwd.getpwuid(os.getuid()).pw_name + '@127.0.0.1', "printf 'REVIEWLOOP_SSH_SESSION_READY\\n'; sleep 60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        client = subprocess.Popen(['ssh', '-tt', '-p', str(port), '-i', str(temporary/'client'), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(known), '-o', 'ConnectTimeout=10', pwd.getpwuid(os.getuid()).pw_name + '@127.0.0.1', "printf 'DADDYLOOP_SSH_SESSION_READY\\n'; sleep 60"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = b''; deadline = time.time() + 20
-        while time.time() < deadline and b'REVIEWLOOP_SSH_SESSION_READY' not in output:
+        while time.time() < deadline and b'DADDYLOOP_SSH_SESSION_READY' not in output:
             readable, _, _ = select.select([client.stdout], [], [], 0.25)
             if readable: output += os.read(client.stdout.fileno(), 4096)
             if client.poll() is not None: raise RuntimeError('SSH session did not authenticate: ' + client.stderr.read().decode()[:500])
-        if b'REVIEWLOOP_SSH_SESSION_READY' not in output: raise RuntimeError('SSH session was not established')
+        if b'DADDYLOOP_SSH_SESSION_READY' not in output: raise RuntimeError('SSH session was not established')
         task = api('/demo', {})
         client.kill(); client.wait(timeout=10)
         after = api('/health')
@@ -67,9 +67,6 @@ with tempfile.TemporaryDirectory(prefix='reviewloop-ssh-test-', dir=str(Path.hom
         print('PASS: real SSH client killed; service PID unchanged; queued review completed afterward.')
     finally:
         if client and client.poll() is None: client.kill(); client.wait(timeout=10)
-        if task:
-            try: api('/tasks/' + task['id'] + '/actions', {'action': 'pause', 'reason': 'SSH-disconnect smoke test complete; demo retained for inspection'})
-            except Exception: pass
         if pidfile.exists():
             pid = int(pidfile.read_text().strip())
             commandline = Path('/proc')/str(pid)/'cmdline'

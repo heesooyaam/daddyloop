@@ -1,7 +1,7 @@
 node_modules
 dist
 .tools
-.reviewloop
+.daddyloop
 package-lock.json
 docs/screenshots
 test-results

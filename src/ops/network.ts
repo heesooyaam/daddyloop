@@ -56,12 +56,12 @@ export async function setupTailscale(dataDir: string) {
   const q = systemdQuote,
     identity = manager.mode === 'system' ? `User=${userInfo().uid}\nGroup=${userInfo().gid}\n` : '';
   await manager.writeUnit(
-    'reviewloop-network.service',
-    `[Unit]\nDescription=Reviewloop private web network\nAfter=network-online.target\n\n[Service]\nType=simple\n${identity}ExecStart=:${q(daemon)} --tun=userspace-networking --state=${q(join(root, 'state'))} --socket=${q(socket)} --port=0\nRestart=always\nRestartSec=5\nUMask=0077\nMemoryMax=512M\n\n[Install]\nWantedBy=${manager.mode === 'system' ? 'multi-user' : 'default'}.target\n`,
-    'Description=Reviewloop private web network',
+    'daddyloop-network.service',
+    `[Unit]\nDescription=daddyloop private web network\nAfter=network-online.target\n\n[Service]\nType=simple\n${identity}ExecStart=:${q(daemon)} --tun=userspace-networking --state=${q(join(root, 'state'))} --socket=${q(socket)} --port=0\nRestart=always\nRestartSec=5\nUMask=0077\nMemoryMax=512M\n\n[Install]\nWantedBy=${manager.mode === 'system' ? 'multi-user' : 'default'}.target\n`,
+    'Description=daddyloop private web network',
   );
   await manager.ctl(['daemon-reload']);
-  await manager.ctl(['enable', '--now', 'reviewloop-network.service']);
+  await manager.ctl(['enable', '--now', 'daddyloop-network.service']);
   const args = ['--socket', socket];
   let status: { BackendState: string; Self?: { DNSName?: string }; AuthURL?: string } | undefined;
   for (let i = 0; i < 20; i++) {
@@ -83,7 +83,7 @@ export async function setupTailscale(dataDir: string) {
       'up',
       '--accept-dns=false',
       '--accept-routes=false',
-      '--hostname=reviewloop',
+      '--hostname=daddyloop',
     ]);
   }
   status = JSON.parse((await command(bin, [...args, 'status', '--json'])).stdout);
@@ -100,7 +100,7 @@ export async function setupTailscale(dataDir: string) {
   return {
     url: config.publicOrigin,
     phone:
-      'Install Tailscale on the phone and sign in to the same network, then run reviewctl phone to pair the browser.',
+      'Install Tailscale on the phone and sign in to the same network, then run daddy phone to pair the browser.',
     survivesLogout: true,
   };
 }

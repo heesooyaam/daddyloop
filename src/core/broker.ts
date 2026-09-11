@@ -75,7 +75,7 @@ export class Broker {
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
-    const marker = `reviewloop:${task.id}:${task.generation}:${task.round}`;
+    const marker = `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
       revision = task.revision!;
     const review = await this.outbox.perform(
@@ -179,7 +179,7 @@ export class Broker {
       const data = schemas.edit_comment.parse(input),
         old = snapshot.comments.find((c) => c.id === data.id);
       if (!old) throw new AppError('comment_not_owned', 'Comment is not part of this review', 404);
-      const marker = old.body.match(/<!-- reviewloop:[^>]+ -->/)?.[0];
+      const marker = old.body.match(/<!-- daddyloop:[^>]+ -->/)?.[0];
       const next = data.body + (marker ? `\n\n${marker}` : '');
       return this.outbox.perform(
         task.id,

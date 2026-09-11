@@ -13,7 +13,7 @@ it('runs independent authors together and serializes one persistent reviewer acr
     child = await engine.createTicket({
       ...ticketInput(43),
       parentTaskId: root.id,
-      agents: { ...profiles, author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
+      agents: { ...profiles, writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
     });
   const ws = new Workspaces('/tmp');
   vi.spyOn(ws, 'prepareTicket').mockResolvedValue('/tmp');
@@ -53,7 +53,7 @@ it('runs independent authors together and serializes one persistent reviewer acr
     await engine.chat(child.id, 'reviewer', 'Discuss child');
     await worker.tick();
     await vi.waitFor(() => expect(pending).toHaveLength(1));
-    await expect(engine.setTaskAgent(root.id, 'reviewer', profiles.author)).rejects.toThrow(
+    await expect(engine.setTaskAgent(root.id, 'reviewer', profiles.writer)).rejects.toThrow(
       'queue',
     );
     await finish();
@@ -61,13 +61,13 @@ it('runs independent authors together and serializes one persistent reviewer acr
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     const second = pending[0].input;
     expect(second.task.reviewerThreadId).toBe('one-shared-reviewer');
-    expect(second.job.profile).toEqual(profiles.reviewer);
+    expect(second.job.profile).toEqual(profiles.daddy);
     expect(second.prompt).toContain('one shared reviewer');
     expect(second.prompt).not.toContain('private-parent-author-chat');
     await finish();
     expect(store.getGroup(root.groupId!).reviewerThreadId).toBe('one-shared-reviewer');
-    await engine.setTaskAgent(child.id, 'reviewer', profiles.author);
-    expect(engine.effectiveAgents(store.getTask(root.id)).reviewer).toEqual(profiles.author);
+    await engine.setTaskAgent(child.id, 'reviewer', profiles.writer);
+    expect(engine.effectiveAgents(store.getTask(root.id)).daddy).toEqual(profiles.writer);
   } finally {
     for (const item of pending) item.done();
     await worker.stop();
@@ -80,13 +80,13 @@ it('records profiles at enqueue, keeps manual policy explicit and rejects compet
   try {
     const root = await engine.createTicket(ticketInput());
     expect(root.policy.publication).toBe('auto');
-    engine.setDefaultAgents({ author: { engine: 'codex' }, reviewer: { engine: 'codex' } });
-    expect(store.jobs(root.id)[0].profile).toEqual(profiles.author);
+    engine.setDefaultAgents({ writer: { engine: 'codex' }, daddy: { engine: 'codex' } });
+    expect(store.jobs(root.id)[0].profile).toEqual(profiles.writer);
     await expect(
       engine.createTicket({
         ...ticketInput(43),
         parentTaskId: root.id,
-        agents: { ...profiles, reviewer: profiles.author },
+        agents: { ...profiles, daddy: profiles.writer },
       }),
     ).rejects.toThrow('inherit');
     const child = await engine.createTicket({

@@ -57,7 +57,7 @@ export function credential(provider: ProviderName, host: string): string {
     return rememberSecret(token);
   }
   const key = provider.toUpperCase();
-  const customFile = process.env[`REVIEWLOOP_${key}_TOKEN_FILE`];
+  const customFile = process.env[`DADDYLOOP_${key}_TOKEN_FILE`];
   const files = customFile
     ? [customFile]
     : [join(homedir(), '.tokens', `${provider}-${host}`), join(homedir(), '.tokens', provider)];
@@ -65,7 +65,7 @@ export function credential(provider: ProviderName, host: string): string {
     process.env[`${key}_TOKEN`] || process.env[provider === 'github' ? 'GH_TOKEN' : 'GLAB_TOKEN'];
   // Generic environment tokens are scoped to the configured host, never an arbitrary PR URL.
   const allowedHost =
-    process.env[`REVIEWLOOP_${key}_HOST`] || (provider === 'github' ? 'github.com' : 'gitlab.com');
+    process.env[`DADDYLOOP_${key}_HOST`] || (provider === 'github' ? 'github.com' : 'gitlab.com');
   if (host !== allowedHost && !existsSync(files[0]))
     throw new AppError(
       'credentials_missing',

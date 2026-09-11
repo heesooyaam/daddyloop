@@ -13,7 +13,7 @@ import {
   type Decision,
   type ReviewGroup,
   type AgentProfiles,
-  type Project,
+  type Workspace,
   type DaddyJob,
 } from './types.js';
 
@@ -25,11 +25,19 @@ export class Store {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
-    if (version > 5) {
+    if (
+      (version !== 0 && version !== 6) ||
+      (version === 0 &&
+        this.db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+          )
+          .get())
+    ) {
       this.db.close();
       throw new AppError(
-        'schema_newer',
-        'This database belongs to a newer Reviewloop version; refusing to downgrade it',
+        'schema_version',
+        'This daddyloop release requires schema 6. Use a converted database or an empty data directory.',
         500,
       );
     }
@@ -52,13 +60,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_actions (id TEXT PRIMARY KEY, data TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, status TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS review_groups (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS daddy_jobs (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS one_running_daddy ON daddy_jobs(group_id) WHERE status='running';
       CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
       CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
-      PRAGMA user_version=5;
+      PRAGMA user_version=6;
     `);
     this.changes.setMaxListeners(100);
   }
@@ -138,7 +146,10 @@ export class Store {
       status: 'queued',
       createdAt: now(),
       profile:
-        role === 'reviewer' && group ? group.reviewer : (task.agents?.[role] ?? defaults?.[role]),
+        role === 'reviewer' && group
+          ? group.daddy
+          : (task.agents?.[role === 'author' ? 'writer' : 'daddy'] ??
+            defaults?.[role === 'author' ? 'writer' : 'daddy']),
       groupId: group?.id,
       groupGeneration: group?.generation,
       actionId,
@@ -211,22 +222,24 @@ export class Store {
       .all()
       .map((row) => JSON.parse(row.data as string));
   }
-  projects(): Project[] {
+  workspaces(): Workspace[] {
     return this.db
-      .prepare('SELECT data FROM projects ORDER BY rowid')
+      .prepare('SELECT data FROM workspaces ORDER BY rowid')
       .all()
       .map((row) => JSON.parse(row.data as string));
   }
-  project(id: string): Project {
-    const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(id);
-    if (!row) throw new AppError('project_missing', 'Project not found', 404);
+  workspace(id: string): Workspace {
+    const row = this.db.prepare('SELECT data FROM workspaces WHERE id=?').get(id);
+    if (!row) throw new AppError('project_missing', 'Workspace not found', 404);
     return JSON.parse(row.data as string);
   }
-  saveProject(project: Project) {
-    project.updatedAt = now();
+  saveWorkspace(workspace: Workspace) {
+    workspace.updatedAt = now();
     this.db
-      .prepare('INSERT INTO projects VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
-      .run(project.id, JSON.stringify(project));
+      .prepare(
+        'INSERT INTO workspaces VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+      )
+      .run(workspace.id, JSON.stringify(workspace));
   }
   daddyJobs(groupId?: string): DaddyJob[] {
     const rows = groupId
@@ -246,7 +259,7 @@ export class Store {
     sender: Message['sender'],
     text: string,
     runId?: string,
-    project?: Message['project'],
+    workspace?: Message['workspace'],
   ) {
     const message: Message = {
       id: randomUUID(),
@@ -255,7 +268,7 @@ export class Store {
       sender,
       text,
       runId,
-      project,
+      workspace,
       at: now(),
     };
     this.db

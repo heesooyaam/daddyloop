@@ -13,7 +13,7 @@ daddy принимает задачи, распределяет работу м�
 
 </div>
 
-> Скриншоты показывают настоящий интерфейс с демонстрационными данными. daddyloop вырос из Reviewloop; прежние данные и команда `reviewctl` поддерживаются при обновлении.
+> Скриншоты показывают настоящий интерфейс с демонстрационными данными. daddyloop вырос из daddyloop; прежние данные и команда `daddy` поддерживаются при обновлении.
 
 ## Как это работает
 
@@ -46,10 +46,10 @@ flowchart LR
 На Linux x64 или ARM64:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.10.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.11.0/install.sh | bash
 ```
 
-Пакет содержит Node, Codex CLI и GitHub CLI. Установщик создаёт постоянный systemd-сервис и команды `daddy`, `daddyloop`, `reviewctl`. Для приватного репозитория сначала скачай релиз через авторизованный `gh release download`; публичный `curl` требует публичного доступа к релизу.
+Пакет содержит Node, Codex CLI и GitHub CLI. Установщик создаёт постоянный systemd-сервис и команды `daddy`, `daddyloop`, `daddy`. Для приватного репозитория сначала скачай релиз через авторизованный `gh release download`; публичный `curl` требует публичного доступа к релизу.
 
 Подключи аккаунты и зарегистрируй воркспейс:
 
@@ -200,7 +200,7 @@ node scripts/capture-daddy.mjs
 
 Обычные тесты автономны и не пишут в реальные PR. Живые проверки моделей запускаются отдельно. Медиа снимаются с настоящих UI и CLI на изолированном сервере с демонстрационными данными.
 
-[CI](https://github.com/heesooyaam/daddyloop/actions) · [Релиз 0.10.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.10.0) · [Ревью изменений](docs/review-v0.7.md) · [Исследование решения](docs/research-daddyloop.md)
+[CI](https://github.com/heesooyaam/daddyloop/actions) · [Релиз 0.11.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.11.0) · [Ревью изменений](docs/review-v0.11.md)
 
 ## Лимиты Codex и доступные сбросы
 
@@ -238,7 +238,5 @@ daddy limits reset --request REQUEST_ID --yes
 | Личка                            | `/group` — подключить группу; `/updates` — обновлять CLI                                                                                                      |
 
 `/new Исправление поиска` можно отправить прямо в существующей теме. Выбираешь воркспейс, подтверждаешь папку — создаётся **новая тема** с новой сессией; исходная тема сохраняет свой разговор. Можно также попросить daddy обычным текстом: «Создай отдельную сессию для исправления поиска». Он создаст её и даст ссылку. Чтобы добавить работу этому же daddy, просто отправь следующий тикет в текущую тему.
-
-Старые `daddy projects`, `--project`, `/projects` и `/workspace` сохраняются как совместимые варианты. Основные названия теперь `daddy workspaces`, `--workspace`, `/workspaces` и `/group`.
 
 При запуске из исходников модель готовится один раз: `npm run speech:prepare`. Для установки зависимостей без CUDA: `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci`. Источник и лицензия модели указаны в [уведомлении Whisper](docs/third-party/whisper.md).

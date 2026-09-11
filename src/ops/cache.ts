@@ -44,7 +44,7 @@ export class CacheManager {
         } catch {
           continue;
         }
-        if (owner.application !== 'reviewloop' || owner.taskId !== folder) continue;
+        if (owner.application !== 'daddyloop' || owner.taskId !== folder) continue;
         let task;
         try {
           task = this.engine.store.getTask(folder);
@@ -91,13 +91,13 @@ export class CacheManager {
           });
         }
       }
-    // Only an installer-created cache with this marker belongs to Reviewloop.
+    // Only an installer-created cache with this marker belongs to daddyloop.
     const cache = join(this.dataDir, 'cache'),
-      marker = join(cache, '.reviewloop-cache');
+      marker = join(cache, '.daddyloop-cache');
     if (
       existsSync(marker) &&
       !(await lstat(cache)).isSymbolicLink() &&
-      (await readFile(marker, 'utf8')).trim() === 'reviewloop-cache-v1'
+      (await readFile(marker, 'utf8')).trim() === 'daddyloop-cache-v1'
     ) {
       for (const name of await readdir(cache)) {
         if (!/^(download|temporary)-[A-Za-z0-9._-]+$/.test(name)) continue;

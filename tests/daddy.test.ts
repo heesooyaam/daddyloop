@@ -35,19 +35,19 @@ it('creates one daddy conversation idempotently and lets him split and dispatch 
   try {
     const requestId = randomUUID(),
       group = f.daddy.create({
-        projectId: f.project.id,
+        workspaceId: f.workspace.id,
         message: 'Build three independent features.',
         requestId,
       });
     expect(
       f.daddy.create({
-        projectId: f.project.id,
+        workspaceId: f.workspace.id,
         message: 'Build three independent features.',
         requestId,
       }).id,
     ).toBe(group.id);
     expect(() =>
-      f.daddy.create({ projectId: f.project.id, message: 'Different request', requestId }),
+      f.daddy.create({ workspaceId: f.workspace.id, message: 'Different request', requestId }),
     ).toThrow('different arguments');
     expect(f.store.messages(group.id)).toHaveLength(1);
     f.daddy.tick();
@@ -60,7 +60,7 @@ it('creates one daddy conversation idempotently and lets him split and dispatch 
     );
     expect(f.store.getGroup(group.id).daddyThreadId).toBe('one-daddy');
     expect(f.store.messages(group.id).at(-1)?.text).toContain('assigned');
-    expect(f.store.jobs().every((job) => job.profile?.model === profiles.author.model)).toBe(true);
+    expect(f.store.jobs().every((job) => job.profile?.model === profiles.writer.model)).toBe(true);
   } finally {
     await f.close();
   }
@@ -73,10 +73,10 @@ it('drains whole tasks through review and fixes before retiring writer slots', a
     return { status: 'completed', summary: 'Done', checkedHead: input.task.revision!.head };
   });
   try {
-    const group = f.daddy.create({ projectId: f.project.id, writerLimit: 2 });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, writerLimit: 2 });
     for (let i = 0; i < 3; i++) {
       const task = await f.tickets.local({
-        project: f.project,
+        workspace: f.workspace,
         groupId: group.id,
         groupGeneration: group.generation,
         title: `Task ${i}`,
@@ -144,7 +144,7 @@ it('drains whole tasks through review and fixes before retiring writer slots', a
 it('applies growth asynchronously and lets the latest pool request supersede a pending resize', async () => {
   const f = daddyFixture();
   try {
-    const group = f.daddy.create({ projectId: f.project.id });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
     expect((await f.daddy.settings(group.id, { writerLimit: 3 })).writers).toMatchObject({
       limit: 1,
       target: 3,
@@ -181,7 +181,7 @@ it('keeps the shared daddy thread exclusive with native review and fences tools 
     return { status: 'completed', summary: 'Done', checkedHead: '' };
   });
   try {
-    const group = f.daddy.create({ projectId: f.project.id, message: 'Discuss the work' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, message: 'Discuss the work' });
     f.daddy.tick();
     await vi.waitFor(() => expect(current).toBeDefined());
     expect(f.worker.reserveGroup(group.id)).toBe(false);
@@ -211,10 +211,10 @@ it('enforces same-session task scope and acyclic prerequisites before dispatch',
     return { status: 'completed', summary: 'Done', checkedHead: '' };
   });
   try {
-    const group = f.daddy.create({ projectId: f.project.id, message: 'Plan' }),
-      other = f.daddy.create({ projectId: f.project.id });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, message: 'Plan' }),
+      other = f.daddy.create({ workspaceId: f.workspace.id });
     const foreign = await f.tickets.local({
-      project: f.project,
+      workspace: f.workspace,
       groupId: other.id,
       groupGeneration: other.generation,
       title: 'Foreign',
@@ -263,17 +263,17 @@ it('allows writer defaults to change while daddy works, but preserves his active
     return { status: 'completed', summary: 'Done', checkedHead: '' };
   });
   try {
-    const group = f.daddy.create({ projectId: f.project.id, message: 'Work' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, message: 'Work' });
     f.daddy.tick();
     await vi.waitFor(() => expect(started).toBe(true));
     await f.daddy.settings(group.id, {
-      profiles: { ...profiles, author: { ...profiles.author, effort: 'medium' } },
+      profiles: { ...profiles, writer: { ...profiles.writer, effort: 'medium' } },
     });
     expect(f.store.getGroup(group.id).generation).toBe(group.generation);
     await expect(
-      f.daddy.settings(group.id, { profiles: { ...profiles, reviewer: profiles.author } }),
+      f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.writer } }),
     ).rejects.toThrow('idle');
-    expect(f.store.getGroup(group.id).reviewer).toEqual(profiles.reviewer);
+    expect(f.store.getGroup(group.id).daddy).toEqual(profiles.daddy);
   } finally {
     done?.();
     await f.close();
@@ -283,7 +283,7 @@ it('creates a separate session through a scoped tool without duplicating it on a
   const f = daddyFixture();
   try {
     const parent = f.daddy.create({
-        projectId: f.project.id,
+        workspaceId: f.workspace.id,
         message: 'Create a separate session for the API work',
       }),
       job = f.store.daddyJobs(parent.id)[0];
@@ -305,7 +305,7 @@ it('creates a separate session through a scoped tool without duplicating it on a
     expect(f.daddy.sessions()).toHaveLength(2);
     const child = f.daddy.group(result.sessionId);
     expect(child.parentGroupId).toBe(parent.id);
-    expect(child.reviewer).toEqual(parent.reviewer);
+    expect(child.daddy).toEqual(parent.daddy);
     expect(f.store.messages(child.id)[0].text).toBe('Design the new endpoint');
     expect(f.store.tasks()).toHaveLength(0);
     await expect(
@@ -324,7 +324,7 @@ it('creates a separate session through a scoped tool without duplicating it on a
 it('refreshes coordination tools while preserving saved history and the native review thread', async () => {
   const f = daddyFixture();
   try {
-    const group = f.daddy.create({ projectId: f.project.id });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
     group.daddyThreadId = 'previous-coordination';
     group.reviewerThreadId = 'private-native-review';
     f.store.saveGroup(group);

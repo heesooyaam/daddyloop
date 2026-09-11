@@ -14,15 +14,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 function setup() {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-runtime-selection-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-runtime-selection-')),
     config = join(dir, 'config.json'),
-    store = new Store(join(dir, 'reviewloop.sqlite'));
+    store = new Store(join(dir, 'daddyloop.sqlite'));
   store.setSetting('server.instanceId', 'fixture-installation');
   writeFileSync(join(dir, 'access-token'), 'fixture-token', { mode: 0o600 });
   writeFileSync(config, JSON.stringify({ dataDir: dir, serverUrl: 'http://127.0.0.1:4321' }), {
     mode: 0o600,
   });
-  vi.stubEnv('REVIEWLOOP_CONFIG', config);
+  vi.stubEnv('DADDYLOOP_CONFIG', config);
   const target = join(dir, 'codex-version'),
     launcher = join(dir, 'codex');
   writeFileSync(target, '#!/bin/sh\n', { mode: 0o700 });
@@ -74,12 +74,12 @@ it('validates the CLI before selecting its stable launcher and refuses changes w
       .spyOn(ServiceManager.prototype, 'restart')
       .mockResolvedValue({ installed: true, mode: 'system', survivesLogout: true });
   try {
-    await f.program().parseAsync(['node', 'reviewctl', 'runtime', 'use', f.launcher]);
+    await f.program().parseAsync(['node', 'daddy', 'runtime', 'use', f.launcher]);
     expect(loadConfig().codex.executable).toBe(f.launcher);
     expect(restart).toHaveBeenCalledOnce();
     f.setBusy();
     await expect(
-      f.program().parseAsync(['node', 'reviewctl', 'runtime', 'use', f.launcher]),
+      f.program().parseAsync(['node', 'daddy', 'runtime', 'use', f.launcher]),
     ).rejects.toThrow('Wait for running');
     expect(restart).toHaveBeenCalledOnce();
   } finally {
@@ -96,7 +96,7 @@ it('restores only the CLI setting if restart fails, preserving other concurrent 
   });
   try {
     await expect(
-      f.program().parseAsync(['node', 'reviewctl', 'runtime', 'use', f.launcher]),
+      f.program().parseAsync(['node', 'daddy', 'runtime', 'use', f.launcher]),
     ).rejects.toThrow('Restart failed');
     expect(loadConfig().codex.executable).toBeUndefined();
     expect(loadConfig().locale).toBe('ru');

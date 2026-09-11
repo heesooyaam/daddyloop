@@ -9,12 +9,12 @@ import { Workspaces } from '../../dist/server/runtime/workspaces.js';
 import { Store } from '../../dist/server/core/store.js';
 import { UpdateMonitor } from '../../dist/server/core/updates.js';
 import { configSchema } from '../../dist/server/ops/config.js';
-import { Projects } from '../../dist/server/core/projects.js';
+import { WorkspaceRegistry } from '../../dist/server/core/workspace-registry.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFileSync, existsSync } from 'node:fs';
 import { usageFixture } from './usage-fixture.mjs';
-const dir = resolve('.reviewloop/e2e');
+const dir = resolve('.daddyloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 const key = join(dir, 'test-key.pem'),
   cert = join(dir, 'test-cert.pem');
@@ -41,8 +41,8 @@ execFileSync(
 );
 chmodSync(key, 0o600);
 const fixtureProfiles = {
-  author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
-  reviewer: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 const reader = new TicketReader();
 reader.read = async (source) => {
@@ -74,8 +74,8 @@ reader.read = async (source) => {
     },
   };
 };
-const workspaces = new Workspaces(dir);
-workspaces.describeTicket = async (repoPath, ref) => ({
+const checkouts = new Workspaces(dir);
+checkouts.describeTicket = async (repoPath, ref) => ({
   repoPath,
   ref,
   repository: {
@@ -85,12 +85,12 @@ workspaces.describeTicket = async (repoPath, ref) => ({
     branch: '',
   },
 });
-workspaces.prepareTicket = async () => dir;
+checkouts.prepareTicket = async () => dir;
 // This fixed directory belongs exclusively to the offline browser fixture.
 // Do not let previous test sessions make selectors ambiguous on a repeated run.
 for (const suffix of ['', '-wal', '-shm'])
-  rmSync(join(dir, 'reviewloop.sqlite' + suffix), { force: true });
-const store = new Store(join(dir, 'reviewloop.sqlite'));
+  rmSync(join(dir, 'daddyloop.sqlite' + suffix), { force: true });
+const store = new Store(join(dir, 'daddyloop.sqlite'));
 const projectRoot = join(dir, 'fixture-repository');
 mkdirSync(join(projectRoot, 'src'), { recursive: true });
 if (!existsSync(join(projectRoot, '.git'))) {
@@ -111,9 +111,9 @@ if (!existsSync(join(alternateRoot, '.git'))) {
     stdio: 'ignore',
   });
 }
-const projects = new Projects(store, [dir], { mounts: async () => [] });
-await projects.register({ name: 'Fixture project', path: projectRoot });
-workspaces.commitTicket = async () => 'b'.repeat(40);
+const workspaces = new WorkspaceRegistry(store, [dir], { mounts: async () => [] });
+await workspaces.register({ name: 'Fixture workspace', path: projectRoot });
+checkouts.commitTicket = async () => 'b'.repeat(40);
 store.setSetting('preferences', {
   locale: 'en',
   version: (store.setting('preferences')?.version ?? 0) + 1,
@@ -129,10 +129,10 @@ const { app } = await buildApp({
   usage: usageFixture(),
   startUpdateCheck: false,
   store,
-  projects,
+  workspaces,
   updateMonitor: updates,
   ticketReader: reader,
-  workspaces,
+  checkouts,
   catalogue: {
     list: async () =>
       Object.values(fixtureProfiles).map((profile) => ({

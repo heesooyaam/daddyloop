@@ -84,7 +84,7 @@ export function registerEnvironmentCommands(program: Command) {
           codexUpdater?: { busy: boolean };
         }>('/status');
         const config = loadConfig(),
-          file = join(program.opts().dataDir ?? defaultDataDir(config), 'reviewloop.sqlite');
+          file = join(program.opts().dataDir ?? defaultDataDir(config), 'daddyloop.sqlite');
         if (!existsSync(file)) throw new Error('Run this command on the service host');
         const db = new DatabaseSync(file, { readOnly: true });
         try {
@@ -100,7 +100,7 @@ export function registerEnvironmentCommands(program: Command) {
           throw new Error('Wait for the Codex update before changing the CLI');
         if (status.runtime.source === 'environment')
           throw new Error(
-            'REVIEWLOOP_CODEX_BIN overrides configuration; change that service environment setting first',
+            'DADDYLOOP_CODEX_BIN overrides configuration; change that service environment setting first',
           );
         return config;
       };
@@ -109,7 +109,7 @@ export function registerEnvironmentCommands(program: Command) {
       if (value === 'bundled') {
         const root = bundledRoot();
         if (!root)
-          throw new Error('This command is not running from an installed Reviewloop bundle');
+          throw new Error('This command is not running from an installed daddyloop bundle');
         executable = requireExecutable(join(root, 'tools/node_modules/.bin/codex'));
       } else if (value === 'system') {
         const root = bundledRoot();

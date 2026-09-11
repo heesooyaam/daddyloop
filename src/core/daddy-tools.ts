@@ -5,7 +5,7 @@ const id = z.string().uuid(),
   text = z.string().trim().min(1).max(20000);
 export const daddySchemas = {
   create_session: z
-    .object({ title: z.string().trim().min(1).max(200), goal: text, projectId: id.optional() })
+    .object({ title: z.string().trim().min(1).max(200), goal: text, workspaceId: id.optional() })
     .strict(),
   read_conversation: z
     .object({
@@ -14,16 +14,16 @@ export const daddySchemas = {
     })
     .strict(),
   read_board: z.object({}).strict(),
-  list_projects: z.object({}).strict(),
+  list_workspaces: z.object({}).strict(),
   list_models: z.object({}).strict(),
   read_task: z.object({ taskId: id }).strict(),
   import_ticket: z
-    .object({ source: z.string().min(1).max(2048), projectId: id.optional() })
+    .object({ source: z.string().min(1).max(2048), workspaceId: id.optional() })
     .strict(),
   attach_review: z
     .object({
       url: z.string().url().max(2048),
-      projectId: id.optional(),
+      workspaceId: id.optional(),
       requirements: text.optional(),
     })
     .strict(),
@@ -31,7 +31,7 @@ export const daddySchemas = {
     .object({
       title: z.string().trim().min(1).max(200),
       requirements: text,
-      projectId: id.optional(),
+      workspaceId: id.optional(),
       dependsOn: z.array(id).max(20).optional(),
     })
     .strict(),
@@ -51,7 +51,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
     'Read saved messages in this session, newest first, using offset and limit. Use this to recover earlier requirements beyond the recent context. It never exposes native private-review messages.',
   read_board:
     'Read this daddy session: tasks, dependencies, writer capacity and current jobs. Inspect before dispatching.',
-  list_projects:
+  list_workspaces:
     'List repositories the user registered on this server. Choose only these workspace IDs.',
   list_models:
     'Read the actual Codex model catalogue and supported reasoning efforts before choosing a different writer model.',

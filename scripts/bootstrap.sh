@@ -7,4 +7,4 @@ if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0
 fi
 npm ci
 npm run build
-printf '\nReady. Run ./scripts/reviewctl.mjs serve --demo\n'
+printf '\nReady. Run ./scripts/daddy.mjs serve --demo\n'

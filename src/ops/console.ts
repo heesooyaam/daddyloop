@@ -1,10 +1,9 @@
-import type { Api } from '../terminal/model.js';
+import type { DaddyApi as Api } from '../client/daddy.js';
 import type { Locale } from '../i18n/index.js';
 export async function consoleUI(
   api: Api,
   options: {
     id?: string;
-    role?: 'author' | 'reviewer';
     plain?: boolean;
     theme?: 'dark' | 'light';
     locale?: Locale;

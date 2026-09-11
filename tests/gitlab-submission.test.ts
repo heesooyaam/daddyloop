@@ -18,7 +18,12 @@ it.each([false, true])(
     let body: Record<string, any> | undefined,
       posts = 0;
     const input = ticketInput();
-    input.ref = { ...input.ref, provider: 'gitlab', host: 'gitlab.com', repo: 'team/sub/project' };
+    input.ref = {
+      ...input.ref,
+      provider: 'gitlab',
+      host: 'gitlab.com',
+      repo: 'team/sub/workspace',
+    };
     const provider = {
       getPR: async () => ({
         title: 'Fixture MR',
@@ -29,7 +34,7 @@ it.each([false, true])(
         state: 'open',
         branch: 'fixture',
         targetBranch: 'main',
-        cloneUrl: 'https://gitlab.com/team/sub/project.git',
+        cloneUrl: 'https://gitlab.com/team/sub/workspace.git',
         checks: 'passing',
         checkDetails: [],
       }),
@@ -47,7 +52,7 @@ it.each([false, true])(
         return new Response(
           JSON.stringify({
             iid: 9,
-            web_url: 'https://gitlab.com/team/sub/project/-/merge_requests/9',
+            web_url: 'https://gitlab.com/team/sub/workspace/-/merge_requests/9',
           }),
         );
       }
@@ -56,7 +61,7 @@ it.each([false, true])(
           JSON.stringify([
             {
               iid: 9,
-              web_url: 'https://gitlab.com/team/sub/project/-/merge_requests/9',
+              web_url: 'https://gitlab.com/team/sub/workspace/-/merge_requests/9',
               description: body?.description,
               source_branch: body?.source_branch,
               source_project_id: 55,
@@ -75,14 +80,18 @@ it.each([false, true])(
       store.saveTask(task);
       if (lost) await expect(workflow.submit(task.id)).rejects.toThrow('did not finish');
       const result = await workflow.submit(task.id);
-      expect(result.ref).toMatchObject({ provider: 'gitlab', repo: 'team/sub/project', number: 9 });
+      expect(result.ref).toMatchObject({
+        provider: 'gitlab',
+        repo: 'team/sub/workspace',
+        number: 9,
+      });
       expect(posts).toBe(1);
       expect(body).toMatchObject({
         source_branch: task.ticketRepository!.branch,
         target_branch: 'main',
         remove_source_branch: false,
       });
-      expect(body?.description).toContain(`<!-- reviewloop:ticket:${task.id} -->`);
+      expect(body?.description).toContain(`<!-- daddyloop:ticket:${task.id} -->`);
       expect(body?.title).toMatch(/^Draft:/);
     } finally {
       store.close();

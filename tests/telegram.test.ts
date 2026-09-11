@@ -1,4 +1,3 @@
-import { prRef } from '../src/core/types.js';
 import { it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,7 +42,7 @@ it('replaces a chat only with a fresh pairing link and supports explicit revocat
 });
 it('resets polling receipts and chat binding when the configured bot changes', async () => {
   const f = await fixture(),
-    dir = mkdtempSync(join(tmpdir(), 'reviewloop-telegram-test-')),
+    dir = mkdtempSync(join(tmpdir(), 'daddyloop-telegram-test-')),
     path = join(dir, 'token');
   writeFileSync(path, '123456:abcdefghijklmnopqrstuvwxyz123456', { mode: 0o600 });
   let identity = 12;
@@ -88,134 +87,12 @@ it('ignores unknown chats and binds a one-use pairing to one private user', asyn
   await bot.handle(update(3, '/tasks', 99));
   expect(t.sent).toHaveLength(count);
   await bot.handle(update(4, '/tasks'));
-  expect(t.sent.at(-1)?.body.text).toContain(f.task.title);
+  expect(t.sent.at(-1)?.body.text).toContain('daddy');
   const after = t.sent.length;
   await bot.handle(update(4, '/tasks'));
   expect(t.sent).toHaveLength(after);
   f.store.close();
 });
-it('publishes only after a fresh human callback, with duplicate callbacks unable to repeat it', async () => {
-  const f = await fixture(),
-    t = transport(),
-    bot = new Telegram(f.engine, t.api, 'test_bot');
-  await f.engine.review(f.task.id);
-  await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'Fix me' });
-  await f.run();
-  const code = new URL(bot.pair().url).searchParams.get('start');
-  await bot.handle(update(1, '/start ' + code));
-  await bot.handle(update(2, '/publish ' + f.task.id));
-  expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication');
-  const buttons = t.sent.at(-1)?.body.reply_markup as {
-    inline_keyboard: { callback_data: string }[][];
-  };
-  const callback = {
-    id: 'cb1',
-    from: { id: 7 },
-    message: { chat: { id: 7, type: 'private' } },
-    data: buttons.inline_keyboard[0][0].callback_data,
-  };
-  await bot.handle({ update_id: 3, callback_query: callback });
-  expect(f.store.getTask(f.task.id).state).toBe('fixing');
-  await bot.handle({ update_id: 4, callback_query: callback });
-  expect(f.store.jobs().filter((j) => j.kind === 'fix')).toHaveLength(1);
-  f.store.close();
-});
-it('rejects a Telegram publication confirmation if the review text changed', async () => {
-  const f = await fixture(),
-    t = transport(),
-    bot = new Telegram(f.engine, t.api, 'test_bot');
-  await f.engine.review(f.task.id);
-  await f.run();
-  const code = new URL(bot.pair().url).searchParams.get('start');
-  await bot.handle(update(1, '/start ' + code));
-  await bot.handle(update(2, '/publish ' + f.task.id));
-  const buttons = t.sent.at(-1)?.body.reply_markup as {
-    inline_keyboard: { callback_data: string }[][];
-  };
-  const task = f.store.getTask(f.task.id);
-  await f.provider.updateSummary(prRef(task), task.review!, 'Changed after confirmation');
-  await bot.handle({
-    update_id: 3,
-    callback_query: {
-      id: 'cb1',
-      from: { id: 7 },
-      message: { chat: { id: 7, type: 'private' } },
-      data: buttons.inline_keyboard[0][0].callback_data,
-    },
-  });
-  expect(f.store.getTask(task.id).state).toBe('awaiting_publication');
-  expect(t.sent.at(-1)?.body.text).toContain('changed');
-  f.store.close();
-});
-it('routes author and reviewer chats separately and keeps long responses complete', async () => {
-  const f = await fixture(),
-    t = transport(),
-    bot = new Telegram(f.engine, t.api, 'test_bot');
-  await f.engine.review(f.task.id);
-  await f.run();
-  const code = new URL(bot.pair().url).searchParams.get('start');
-  await bot.handle(update(1, '/start ' + code));
-  await bot.handle(update(2, `/reviewer ${f.task.id} Explain the race`));
-  expect(f.store.messages(f.task.id).at(-1)).toMatchObject({
-    role: 'reviewer',
-    text: 'Explain the race',
-  });
-  const text = 'x'.repeat(5000);
-  await t.api.send(7, text);
-  const chunks = t.sent.filter((s) => String(s.body.text).startsWith('xxx'));
-  expect(chunks).toHaveLength(2);
-  expect(
-    chunks
-      .map((c) => String(c.body.text).replace('\n[continued in the next message]', ''))
-      .join(''),
-  ).toBe(text);
-  f.store.close();
-});
-
-it('sends quiet completion notices once, supports all replies and can be disabled from the bot', async () => {
-  const f = await fixture(),
-    sent: Record<string, unknown>[] = [];
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
-    if (String(url).endsWith('/getUpdates'))
-      return new Promise((_resolve, reject) =>
-        options?.signal?.addEventListener('abort', () => reject(new Error('stopped')), {
-          once: true,
-        }),
-      );
-    sent.push(JSON.parse(String(options?.body)));
-    return new Response(JSON.stringify({ ok: true, result: {} }));
-  });
-  const bot = new Telegram(f.engine, api, 'test_bot');
-  await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
-  const baseline = sent.length;
-  bot.start();
-  try {
-    f.store.message(f.task.id, 'reviewer', 'agent', 'Intermediate reply');
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(sent).toHaveLength(baseline);
-    const task = f.store.getTask(f.task.id);
-    task.state = 'complete';
-    task.reason = 'All checks passed';
-    f.store.saveTask(task);
-    f.store.event(task.id, 'task.state', { state: 'complete' });
-    f.store.event(task.id, 'task.state', { state: 'complete' });
-    await vi.waitFor(() => expect(sent).toHaveLength(baseline + 1));
-    expect(sent.at(-1)?.text).toContain('✅ Задача завершена');
-    expect(sent.at(-1)?.text).toContain('CI: пройдены');
-    await bot.handle(update(2, '/notifications all'));
-    f.store.message(task.id, 'author', 'agent', 'Detailed author reply');
-    await vi.waitFor(() => expect(sent.at(-1)?.text).toContain('Detailed author reply'));
-    await bot.handle(update(3, '/notifications off'));
-    const after = sent.length;
-    f.store.message(task.id, 'reviewer', 'agent', 'Silenced reply');
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(sent).toHaveLength(after);
-  } finally {
-    await bot.stop();
-    f.store.close();
-  }
-});
-
 it('serves formatted navigation and preference buttons only to the paired private user', async () => {
   const f = await fixture(),
     t = transport(),
@@ -235,14 +112,14 @@ it('serves formatted navigation and preference buttons only to the paired privat
       },
     });
     const before = t.sent.length;
-    await bot.handle(click(2, 'tasks:0', 99));
+    await bot.handle(click(2, 'dad:sessions', 99));
     await bot.handle(click(3, 'notifications:off', 99));
     expect(t.sent).toHaveLength(before);
     expect(f.store.setting('notifications.telegram')).toBeUndefined();
     await bot.handle(click(4, 'tasks:0'));
-    expect(t.sent.at(-1)?.body.text).toContain(f.task.title);
+    expect(t.sent.at(-1)?.body.text).toContain('Unknown action');
     await bot.handle(click(5, 'task:' + f.task.id));
-    expect(t.sent.at(-1)?.body.text).toContain('Задача ' + f.task.id.slice(0, 8));
+    expect(t.sent.at(-1)?.body.text).toContain('Unknown action');
     await bot.handle(click(6, 'notifications:off'));
     expect(f.store.setting('notifications.telegram')).toEqual({
       enabled: false,
@@ -254,39 +131,6 @@ it('serves formatted navigation and preference buttons only to the paired privat
     f.store.close();
   }
 });
-it('opens a fresh confirmation from the task button before any publication occurs', async () => {
-  const f = await fixture(),
-    t = transport(),
-    bot = new Telegram(f.engine, t.api, 'test_bot');
-  try {
-    await f.engine.review(f.task.id);
-    await f.run();
-    await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
-    const callback = (id: number, data: string): Update => ({
-      update_id: id,
-      callback_query: {
-        id: 'cb' + id,
-        data,
-        from: { id: 7 },
-        message: { chat: { id: 7, type: 'private' } },
-      },
-    });
-    await bot.handle(callback(2, 'publish:' + f.task.id));
-    expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication');
-    const review = f.store.getTask(f.task.id).review!;
-    expect((await f.provider.getReview(prRef(f.task), review)).status).toBe('draft');
-    const buttons = t.sent.at(-1)!.body.reply_markup as {
-      inline_keyboard: { callback_data: string }[][];
-    };
-    const confirmation = buttons.inline_keyboard[0][0].callback_data;
-    expect(confirmation).not.toContain('publish:');
-    await bot.handle(callback(3, confirmation));
-    expect((await f.provider.getReview(prRef(f.task), review)).status).toBe('published');
-  } finally {
-    f.store.close();
-  }
-});
-
 it('switches English/Russian only for the bound user and reads fresh model choices from the CLI catalogue', async () => {
   const { catalogue, profiles } = await import('./planning-fixture.js');
   const { UpdateMonitor } = await import('../src/core/updates.js');
@@ -305,7 +149,7 @@ it('switches English/Russian only for the bound user and reads fresh model choic
     await bot.handle(update(3, '/language ru', 99));
     expect(f.store.setting<{ locale: string }>('preferences')?.locale).toBe('en');
     await bot.handle(update(4, '/models'));
-    expect(t.sent.at(-1)?.body.text).toContain(profiles.author.model);
+    expect(t.sent.at(-1)?.body.text).toContain(profiles.writer.model);
     expect(list).toHaveBeenCalledWith(false);
     await bot.handle({
       update_id: 5,

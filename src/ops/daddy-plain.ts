@@ -43,14 +43,16 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
         if (matches.length === 1) await model.select(matches[0].id);
       } else if (input.startsWith('/new ')) {
         const name = input.slice(5),
-          project = model
+          workspace = model
             .snapshot()
-            .projects.find((project) => project.name === name || project.id.startsWith(name));
-        if (project) await model.create(project.id);
+            .workspaces.find(
+              (workspace) => workspace.name === name || workspace.id.startsWith(name),
+            );
+        if (workspace) await model.create(workspace.id);
         else process.stdout.write(t('Choose a registered workspace.') + '\n');
       } else if (input === '/repo' || input.startsWith('/repo ')) {
         const path = input.slice(5).trim();
-        model.workspace(path && path !== 'default' ? { path } : undefined);
+        model.repository(path && path !== 'default' ? { path } : undefined);
         process.stdout.write(
           path && path !== 'default' ? safeText(path) + '\n' : t('Using workspace defaults') + '\n',
         );

@@ -1,7 +1,7 @@
 import type { AgentProfiles, TicketRef, TicketSource } from '../src/core/types.js';
 export const profiles: AgentProfiles = {
-  author: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
-  reviewer: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 export const catalogue = {
   list: async () =>
@@ -10,7 +10,7 @@ export const catalogue = {
       name: profile.model!,
       efforts: ['medium', 'max'],
       defaultEffort: 'medium',
-      isDefault: profile === profiles.reviewer,
+      isDefault: profile === profiles.daddy,
     })),
   validate: async () => {},
 };

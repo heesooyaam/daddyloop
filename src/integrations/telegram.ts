@@ -2,7 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../core/engine.js';
-import { AppError, now, prRef, type Event, type Task } from '../core/types.js';
+import { AppError, now, type Event } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
 import { notificationPreferences } from './notifications.js';
 import {
@@ -11,17 +11,7 @@ import {
   type TelegramCard,
   type TelegramButton,
 } from './telegram-text.js';
-import {
-  taskCard,
-  agentCard,
-  tasksCard,
-  notificationsCard,
-  welcomeCard,
-  helpCard,
-  noteCard,
-  errorCard,
-  publishCard,
-} from './telegram-cards.js';
+import { notificationsCard, noteCard, errorCard } from './telegram-cards.js';
 import { preferences, setLocale } from '../core/preferences.js';
 import type { Locale } from '../i18n/index.js';
 import type { Catalogue } from '../server/planning.js';
@@ -68,15 +58,6 @@ export interface Update {
   };
 }
 type Pairing = { chatId: number; userId: number; username: string };
-type Confirmation = {
-  taskId: string;
-  generation: number;
-  reviewId: string;
-  head: string;
-  snapshotHash: string;
-  expiresAt: string;
-  chatId: number;
-};
 function networkFailure(error: unknown) {
   const codes = new Set<string>();
   const visit = (value: unknown, depth = 0) => {
@@ -346,7 +327,7 @@ export class Telegram {
       configured: true,
       bot: this.username,
       paired: !!this.engine.store.setting('telegram.pairing'),
-      workspace: this.workspace?.room(),
+      group: this.workspace?.room(),
       error:
         this.engine.store.setting('telegram.error') ??
         this.engine.store.setting('telegram.pollError') ??
@@ -380,66 +361,6 @@ export class Telegram {
       this.updateNotice(event.data as UpdateNotice);
       return;
     }
-    const preferences = notificationPreferences(this.engine.store);
-    if (!this.paired() || !preferences.enabled) return;
-    const state = (event.data as { state?: string }).state;
-    if (event.type !== 'task.state' && event.type !== 'message.created') return;
-    const snapshot = this.engine.store.getTask(event.taskId);
-    if (snapshot.groupId && this.engine.store.getGroup(snapshot.groupId).orchestrated) return;
-    const milestone =
-      event.type === 'task.state' &&
-      state &&
-      [
-        'awaiting_publication',
-        'awaiting_plan_approval',
-        'needs_input',
-        'complete',
-        'ready_for_review',
-        'awaiting_push',
-        'awaiting_checks',
-      ].includes(state);
-    const attention =
-      milestone &&
-      (['complete', 'needs_input', 'awaiting_plan_approval', 'awaiting_push'].includes(state!) ||
-        (state === 'ready_for_review' && !snapshot.policy.autoPush) ||
-        (state === 'awaiting_publication' && snapshot.policy.publication === 'human') ||
-        (state === 'awaiting_checks' &&
-          ['failing', 'missing'].includes(snapshot.pr?.checks ?? '')));
-    if (
-      preferences.mode === 'attention' ? !attention : !milestone && event.type !== 'message.created'
-    )
-      return;
-    this.notices = this.notices
-      .then(async () => {
-        if (this.stopped || !notificationPreferences(this.engine.store).enabled) return;
-        const store = this.engine.store,
-          id =
-            event.type === 'message.created'
-              ? `telegram:event:${event.id}`
-              : `telegram:state:${hash(JSON.stringify([event.taskId, snapshot.generation, snapshot.revision, state, snapshot.reason]))}`;
-        if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
-        const task = snapshot,
-          pair = this.paired();
-        if (!pair) return;
-        let content: TelegramCard;
-        if (event.type === 'message.created') {
-          const message = store
-            .messages(task.id)
-            .find((m) => m.id === (event.data as { messageId: string }).messageId);
-          if (!message || message.sender !== 'agent') return;
-          content = agentCard(task, message.role, message.text, this.publicOrigin, this.locale());
-        } else content = taskCard(task, this.publicOrigin, this.locale());
-        // Lost sendMessage responses cannot be conclusively looked up. Keep an
-        // uncertain notification instead of repeatedly sending it to the user.
-        store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        try {
-          await this.api.send(pair.chatId, content);
-          store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
-        } catch (error) {
-          store.setSetting('telegram.error', redact(String(error)));
-        }
-      })
-      .catch((error) => this.engine.store.setSetting('telegram.error', redact(String(error))));
   };
   async handle(update: Update) {
     const store = this.engine.store;
@@ -478,9 +399,10 @@ export class Telegram {
       });
       await this.api.send(
         chat.id,
-        this.integrations?.daddy
-          ? daddyHome(this.locale(), this.integrations.daddy.sessions())
-          : welcomeCard(this.locale()),
+        daddyHome(
+          this.locale(),
+          this.engine.store.groups().filter((group) => group.orchestrated),
+        ),
       );
       this.currentUpdates();
       return;
@@ -491,42 +413,7 @@ export class Telegram {
       if (callback) {
         await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
         if (await this.navigate(callback.data ?? '', chat.id)) return;
-        const row = store.db
-          .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
-          .get(callback.data ?? '');
-        if (!row || row.consumed)
-          throw new Error('This confirmation expired or was already used. Send /publish again.');
-        const action = JSON.parse(row.data as string) as Confirmation;
-        if (action.expiresAt <= now() || action.chatId !== chat.id)
-          throw new Error('Confirmation expired. Send /publish again.');
-        await this.engine.lock(action.taskId, async () => {
-          const task = store.getTask(action.taskId);
-          if (
-            task.generation !== action.generation ||
-            task.review?.id !== action.reviewId ||
-            task.revision?.head !== action.head ||
-            task.state !== 'awaiting_publication' ||
-            store.busy(task.id)
-          )
-            throw new Error('The task changed since this confirmation. Review its current state.');
-          const snapshot = await this.engine
-            .provider(prRef(task))
-            .getReview(prRef(task), task.review);
-          if (hash(JSON.stringify(snapshot)) !== action.snapshotHash)
-            throw new Error('The review comments changed. Send /publish again.');
-          store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(callback.data!);
-          await this.engine.broker.publish(task);
-        });
-        await this.engine.reconcile(action.taskId);
-        await this.api.send(
-          chat.id,
-          noteCard(
-            '✅ Ревью опубликовано',
-            'Цикл работы продолжается автоматически.',
-            this.locale(),
-          ),
-        );
-        return;
+        throw new Error('Unknown action. Open the current menu with /start.');
       }
       const text = message?.text?.trim();
       if (!text) return;
@@ -544,14 +431,6 @@ export class Telegram {
         await this.showUpdates(chat.id, false);
         return;
       }
-      if (text === '/tasks' || text === '/start') {
-        await this.api.send(chat.id, tasksCard(store.tasks(), 0, this.locale()));
-        return;
-      }
-      if (text === '/help') {
-        await this.api.send(chat.id, helpCard(this.locale()));
-        return;
-      }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
         const mode = text.split(/\s+/)[1];
         if (mode)
@@ -567,7 +446,7 @@ export class Telegram {
       }
       if (text === '/web') {
         if (!this.publicOrigin)
-          throw new Error('Configure a permanent HTTPS address with reviewctl web first.');
+          throw new Error('Configure a permanent HTTPS address with daddy web first.');
         const { Access } = await import('../server/access.js');
         const link = new Access(store, 'unused-telegram-pairing-root').pairing(
           'Telegram browser',
@@ -582,74 +461,16 @@ export class Telegram {
         await this.api.send(chat.id, content);
         return;
       }
-      const match = text.match(
-        /^\/(status|reviewer|author|publish|pause|resume|retry)\s+([a-zA-Z0-9-]+)(?:\s+([\s\S]+))?$/,
+      await this.api.send(
+        chat.id,
+        daddyHome(
+          this.locale(),
+          this.engine.store.groups().filter((group) => group.orchestrated),
+        ),
       );
-      if (!match) {
-        await this.api.send(chat.id, helpCard(this.locale()));
-        return;
-      }
-      const [, verb, prefix, content] = match,
-        matches = store.tasks().filter((t) => t.id.startsWith(prefix));
-      if (matches.length !== 1) throw new Error('Task ID is missing or ambiguous. Use /tasks.');
-      const task = matches[0];
-      if (verb === 'status') {
-        await this.api.send(chat.id, taskCard(task, this.publicOrigin, this.locale()));
-        return;
-      }
-      if (verb === 'author' || verb === 'reviewer') {
-        if (!content?.trim()) throw new Error('Include a message after the task ID.');
-        await this.engine.chat(task.id, verb, content);
-        await this.api.send(
-          chat.id,
-          noteCard(
-            verb === 'author' ? '✍️ Сообщение передано автору' : '🔎 Сообщение передано ревьюеру',
-            'Сообщение поставлено в очередь. Историю можно открыть в рабочем пространстве.',
-            this.locale(),
-          ),
-        );
-        return;
-      }
-      if (verb === 'publish') {
-        await this.confirm(task, chat.id);
-        return;
-      }
-      const result =
-        verb === 'retry'
-          ? task.ref.kind === 'ticket'
-            ? await this.engine.retryTicket(task.id)
-            : await this.engine.review(task.id, true)
-          : await this.engine.action(task.id, verb as 'pause' | 'resume');
-      await this.api.send(chat.id, taskCard(result, this.publicOrigin, this.locale()));
     } catch (error) {
       await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
-  }
-  private async confirm(task: Task, chatId: number) {
-    if (
-      task.state !== 'awaiting_publication' ||
-      !task.review ||
-      !task.reviewFinished ||
-      this.engine.store.busy(task.id)
-    )
-      throw new Error('A finished, idle draft review is required before publication.');
-    const snapshot = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review);
-    if (snapshot.status !== 'draft')
-      throw new Error('This review is no longer an unpublished draft.');
-    const id = randomBytes(18).toString('base64url');
-    const action: Confirmation = {
-      taskId: task.id,
-      generation: task.generation,
-      reviewId: task.review.id,
-      head: task.revision!.head,
-      snapshotHash: hash(JSON.stringify(snapshot)),
-      expiresAt: new Date(Date.now() + 5 * 60000).toISOString(),
-      chatId,
-    };
-    this.engine.store.db
-      .prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)')
-      .run(id, JSON.stringify(action));
-    await this.api.send(chatId, publishCard(task, snapshot, id, this.locale()));
   }
   private async navigate(data: string, chatId: number): Promise<boolean> {
     if (data.startsWith('codex:')) {
@@ -687,25 +508,6 @@ export class Telegram {
       return true;
     }
 
-    if (data === 'help') {
-      await this.api.send(chatId, helpCard(this.locale()));
-      return true;
-    }
-    const list = data.match(/^tasks:(\d{1,8})$/);
-    if (list) {
-      await this.api.send(
-        chatId,
-        tasksCard(this.engine.store.tasks(), Number(list[1]), this.locale()),
-      );
-      return true;
-    }
-    const task = data.match(/^(task|publish):([a-f0-9-]{36})$/);
-    if (task) {
-      const current = this.engine.store.getTask(task[2]);
-      if (task[1] === 'publish') await this.confirm(current, chatId);
-      else await this.api.send(chatId, taskCard(current, this.publicOrigin, this.locale()));
-      return true;
-    }
     const prefs = data.match(/^notifications:(show|on|off|all)$/);
     if (prefs) {
       if (prefs[1] !== 'show')
@@ -844,7 +646,7 @@ export class Telegram {
       webhook = await api.call<{ url: string }>('getWebhookInfo', {}, signal);
     if (webhook.url)
       throw new Error(
-        'This bot already uses a webhook. Configure a dedicated bot; Reviewloop will not remove another integration.',
+        'This bot already uses a webhook. Configure a dedicated bot; daddyloop will not remove another integration.',
       );
     if (!Number.isSafeInteger(me.id) || !me.username)
       throw new Error('Telegram returned an invalid bot identity');

@@ -75,7 +75,7 @@ export class GitLabProvider implements ReviewProvider {
         'GitLab has not prepared the merge request diff yet',
         503,
       );
-    const project = await this.http.request<{ http_url_to_repo: string }>(
+    const workspace = await this.http.request<{ http_url_to_repo: string }>(
       'GET',
       `/projects/${mr.source_project_id}`,
     );
@@ -87,7 +87,7 @@ export class GitLabProvider implements ReviewProvider {
       start: mr.diff_refs.start_sha,
       title: mr.title,
       body: mr.description ?? '',
-      cloneUrl: project.http_url_to_repo,
+      cloneUrl: workspace.http_url_to_repo,
       branch: mr.source_branch,
       targetBranch: mr.target_branch,
       state: mr.state === 'merged' ? 'merged' : mr.state === 'opened' ? 'open' : 'closed',

@@ -7,7 +7,7 @@ export const ru: Record<string, string> = {
   'Inspect a server-side Codex update': 'Показать состояние обновления Codex на сервере',
   'confirm the displayed version and start the operation':
     'подтвердить указанную версию и начать операцию',
-  'Managed by Reviewloop': 'Установлен через Reviewloop',
+  'Managed by daddyloop': 'Установлен через daddyloop',
   'Open Updates to install Codex directly on this server.':
     'Открой «Обновления», чтобы установить Codex прямо на этом сервере.',
   'Update Codex': 'Обновить Codex',
@@ -81,7 +81,7 @@ export const ru: Record<string, string> = {
   'Checking…': 'Проверка…',
   'Check failed': 'Проверка не удалась',
   'Configured executable': 'Используемый CLI',
-  'Bundled with Reviewloop': 'Встроен в Reviewloop',
+  'Bundled with daddyloop': 'Встроен в daddyloop',
   'External CLI': 'Внешний CLI',
   'Integration not available': 'Интеграция пока недоступна',
   'Refresh model list': 'Обновить список моделей',
@@ -93,8 +93,8 @@ export const ru: Record<string, string> = {
   'Version: {version}': 'Версия: {version}',
   'New tasks keep these defaults. Existing jobs keep their recorded model.':
     'Эти настройки применяются к новым задачам. Запущенные задания сохраняют свою модель.',
-  'The model list is provided by your CLI and account, not maintained in Reviewloop.':
-    'Список моделей предоставляет твой CLI и аккаунт. В Reviewloop он не задаётся вручную.',
+  'The model list is provided by your CLI and account, not maintained in daddyloop.':
+    'Список моделей предоставляет твой CLI и аккаунт. В daddyloop он не задаётся вручную.',
   'Claude integration is not implemented yet.': 'Интеграция с Claude пока не реализована.',
   'Review workspace': 'Рабочее пространство',
   'Your review workspace': 'Твоё рабочее пространство',
@@ -286,8 +286,8 @@ Object.assign(ru, {
   'GiB in service budget': 'ГиБ в лимите сервиса',
   'Give the reviewer the original intent, not just the diff.':
     'Расскажи ревьюеру о цели изменения и исходных требованиях.',
-  'Hand control of this session to Reviewloop before attaching it.':
-    'Перед подключением передай эту сессию под управление Reviewloop.',
+  'Hand control of this session to daddyloop before attaching it.':
+    'Перед подключением передай эту сессию под управление daddyloop.',
   'Human CI decision': 'Решение по CI',
   'Human approval before implementation': 'Принятие человеком перед реализацией',
   'I publish each review': 'Я публикую каждое ревью',
@@ -297,8 +297,8 @@ Object.assign(ru, {
     'Автор продолжает работу, каждое изменение получает независимую проверку.',
   'Leave off to discuss and publish each draft yourself.':
     'Выключи, чтобы обсуждать и публиковать каждый черновик вручную.',
-  'Local access only. Configure a permanent HTTPS address with reviewctl web on the host.':
-    'Пока доступ только с хоста. Настрой постоянный HTTPS-адрес командой reviewctl web на сервере.',
+  'Local access only. Configure a permanent HTTPS address with daddy web on the host.':
+    'Пока доступ только с хоста. Настрой постоянный HTTPS-адрес командой daddy web на сервере.',
   'Local by default. Reach a remote machine through an SSH tunnel.':
     'Сервис работает на хосте. Для удалённого доступа нужен постоянный HTTPS-адрес.',
   'Local installation': 'Установка на хосте',
@@ -352,8 +352,8 @@ Object.assign(ru, {
   'Review type': 'Тип ревью',
   Revoke: 'Отозвать',
   Round: 'Раунд',
-  'Run reviewctl telegram setup on the host, then open its private-chat pairing link.':
-    'Выполни reviewctl telegram setup на хосте, затем открой ссылку привязки личного чата.',
+  'Run daddy telegram setup on the host, then open its private-chat pairing link.':
+    'Выполни daddy telegram setup на хосте, затем открой ссылку привязки личного чата.',
   'Running on this machine': 'Работает на этом хосте',
   'Save settings': 'Сохранить настройки',
   'Separate from the reviewer’s conversation': 'Отдельно от разговора с ревьюером',
@@ -389,8 +389,8 @@ Object.assign(ru, {
   'Release notes': 'Описание релиза',
   'Updates are checked every {hours} hours. Running agents are never restarted automatically.':
     'Обновления проверяются каждые {hours} ч. Работающие агенты автоматически не перезапускаются.',
-  'This CLI is part of the Reviewloop release. Updating a system CLI does not replace it.':
-    'Этот CLI входит в релиз Reviewloop. Обновление системного CLI его не заменяет.',
+  'This CLI is part of the daddyloop release. Updating a system CLI does not replace it.':
+    'Этот CLI входит в релиз daddyloop. Обновление системного CLI его не заменяет.',
   'Notify in Telegram about CLI updates': 'Уведомлять в Telegram об обновлениях CLI',
   '{v0} model': 'Модель: {v0}',
   '{v0} effort': 'Уровень рассуждений: {v0}',
@@ -448,7 +448,7 @@ Object.assign(ru, {
   'Your tasks': 'Твои задачи',
   '{from}–{to} of {total}': '{from}–{to} из {total}',
   'No tasks yet. Start with': 'Пока задач нет. Начни с',
-  'in reviewctl or attach a PR on the website.': 'в reviewctl или подключи PR на сайте.',
+  'in daddy or attach a PR on the website.': 'в daddy или подключи PR на сайте.',
   'Publish review…': 'Опубликовать ревью…',
   'Open website ↗': 'Открыть на сайте ↗',
   'Open ticket ↗': 'Открыть тикет ↗',
@@ -468,7 +468,7 @@ Object.assign(ru, {
     'Буду присылать ответы автора, ревьюера и важные этапы задач.',
   'Only completion and decisions': 'Только итог и нужные решения',
   'Turn off': 'Выключить',
-  'Reviewloop connected': 'Reviewloop подключён',
+  'daddyloop connected': 'daddyloop подключён',
   'This chat is now connected to your workspace.':
     'Теперь этот чат связан с твоим рабочим пространством.',
   'status and quick access to results.': 'статус и быстрый переход к результату.',
@@ -512,14 +512,14 @@ Object.assign(ru, {
   'This is the interface language. Task and conversation content is kept in its original language.':
     'Это язык интерфейса. Содержимое задач и переписки сохраняется на исходном языке.',
   'Select an author or reviewer model independently.': 'Выбери модель автора и ревьюера отдельно.',
-  'The configured CLI provides this list; no manual model table is maintained in Reviewloop.':
-    'Этот список предоставляет настроенный CLI; ручной таблицы моделей в Reviewloop нет.',
+  'The configured CLI provides this list; no manual model table is maintained in daddyloop.':
+    'Этот список предоставляет настроенный CLI; ручной таблицы моделей в daddyloop нет.',
   'CLI update available': 'Доступно обновление CLI',
   'CLI version changed': 'Версия CLI изменилась',
   Installed: 'Установлено',
   Available: 'Доступно',
-  'The bundled CLI updates with Reviewloop. A system CLI update does not change this copy.':
-    'Встроенный CLI обновляется вместе с Reviewloop. Обновление системного CLI не меняет эту копию.',
+  'The bundled CLI updates with daddyloop. A system CLI update does not change this copy.':
+    'Встроенный CLI обновляется вместе с daddyloop. Обновление системного CLI не меняет эту копию.',
   'No running session has been restarted.': 'Работающие сессии не перезапускались.',
   'Automatic CLI update checks': 'Автоматическая проверка обновлений CLI',
   'CLI update notifications': 'Уведомления об обновлениях CLI',
@@ -538,8 +538,8 @@ Object.assign(ru, {
   'A workspace for the work between agents.': 'Рабочее пространство для совместной работы агентов.',
   'The service is unavailable. Your console will reconnect automatically.':
     'Сервис недоступен. Консоль переподключится автоматически.',
-  'Run reviewctl init on the service host, or reviewctl connect <https-url> on a client.':
-    'Выполни reviewctl init на сервере или reviewctl connect <https-url> на клиенте.',
+  'Run daddy init on the service host, or daddy connect <https-url> on a client.':
+    'Выполни daddy init на сервере или daddy connect <https-url> на клиенте.',
   '/refresh retries now. Ctrl+Q closes this client.':
     '/refresh повторяет подключение. Ctrl+Q закрывает этот клиент.',
   'Loading the selected conversation…': 'Загрузка выбранной переписки…',
@@ -564,8 +564,6 @@ Object.assign(ru, {
   'Reviewer model: {v0}\nAuthor model: {v1}\nReviewer session: {v2}\nAuthor session: {v3}\nRepository: {v4}\nSource: {v5}':
     'Модель ревьюера: {v0}\nМодель автора: {v1}\nСессия ревьюера: {v2}\nСессия автора: {v3}\nРепозиторий: {v4}\nИсточник: {v5}',
   'ACTIVITY · latest persisted events': 'СОБЫТИЯ · последние сохранённые действия',
-  'Older messages are available in the web panel / reviewctl show.':
-    'Предыдущие сообщения доступны на сайте или через reviewctl show.',
   'Discuss the ticket here. /implement starts code changes and the automatic review loop.':
     'Обсуди тикет здесь. /implement запускает реализацию и автоматический цикл ревью.',
   'Your author session starts after feedback is published.':
@@ -648,8 +646,8 @@ Object.assign(ru, {
   'Ticket imported. Discuss it, then /implement starts implementation and automatic review.':
     'Тикет импортирован. Обсуди его, затем /implement запустит реализацию и ревью.',
   'Telegram notification preferences saved.': 'Настройки уведомлений Telegram сохранены.',
-  'Saved. Run reviewctl telegram setup to pair your private bot chat.':
-    'Сохранено. Привяжи личный чат командой reviewctl telegram setup.',
+  'Saved. Run daddy telegram setup to pair your private bot chat.':
+    'Сохранено. Привяжи личный чат командой daddy telegram setup.',
   'This field is required.': 'Это поле обязательно.',
   'Wait for model settings to load.': 'Дождись загрузки настроек моделей.',
   '{v0} profile saved: {v1}': 'Профиль {v0} сохранён: {v1}',
@@ -657,8 +655,8 @@ Object.assign(ru, {
   'Choose which updates reach your private bot chat.':
     'Выбери обновления для личного чата с ботом.',
   'Bot chat is paired.': 'Чат с ботом привязан.',
-  'Pair the bot on the host with reviewctl telegram setup.':
-    'Привяжи бота на сервере командой reviewctl telegram setup.',
+  'Pair the bot on the host with daddy telegram setup.':
+    'Привяжи бота на сервере командой daddy telegram setup.',
   '{v0}\nAuthor: {v1}\n{v2}: {v3}\n\n{v4}': '{v0}\nАвтор: {v1}\n{v2}: {v3}\n\n{v4}',
   '{v0}\n{v1}\n\n{v2}\n\nAuthor: {v3}\nReviewer: {v4}\n\nDiscussion comes first. /implement starts code changes, PR creation and automatic review publication.':
     '{v0}\n{v1}\n\n{v2}\n\nАвтор: {v3}\nРевьюер: {v4}\n\nСначала обсуждение. /implement запускает реализацию, создание PR и автоматическую публикацию ревью.',
@@ -709,8 +707,8 @@ Object.assign(ru, {
   'Reconnect and refresh status': 'Переподключиться и обновить статус',
   'Keyboard shortcuts and commands': 'Клавиши и команды',
   'Close this console; work continues': 'Закрыть консоль; работа продолжится',
-  'Reviewloop console closed. The service and agents continue running.':
-    'Консоль Reviewloop закрыта. Сервер и агенты продолжают работу.',
+  'daddyloop console closed. The service and agents continue running.':
+    'Консоль daddyloop закрыта. Сервер и агенты продолжают работу.',
   'List tasks': 'Список задач',
   'Select a task': 'Выбрать задачу',
   'Choose a conversation': 'Выбрать сессию',
@@ -733,7 +731,7 @@ Object.assign(ru, {
   'interface language for this client': 'язык интерфейса этого клиента',
   'terminal appearance': 'оформление терминала',
   'local state directory': 'каталог состояния',
-  'Reviewloop backend URL': 'адрес сервиса Reviewloop',
+  'daddyloop backend URL': 'адрес сервиса daddyloop',
   'output the version number': 'показать версию',
   'display help for command': 'показать справку',
   'check the version registries now': 'проверить доступные версии сейчас',
@@ -762,16 +760,16 @@ Object.assign(ru, {
     'Остановить сервис с сохранением состояния и незавершённой работы',
   'Restart the background service': 'Перезапустить фоновый сервис',
   'Manage the operating-system service': 'Управлять системным сервисом',
-  'Connect this CLI to a Reviewloop server': 'Подключить CLI к серверу Reviewloop',
+  'Connect this CLI to a daddyloop server': 'Подключить CLI к серверу daddyloop',
   'Connect agent and review-provider accounts': 'Подключить аккаунты агентов и платформ ревью',
   'Create a short-lived one-use phone login link': 'Создать одноразовую ссылку входа с телефона',
   'Configure persistent browser/phone access': 'Настроить постоянный доступ с браузера и телефона',
   'Connect a private Telegram bot chat': 'Подключить личный чат Telegram',
   'List paired browser sessions': 'Показать привязанные браузеры',
-  'Inspect and prune only verified Reviewloop-owned caches': 'Проверить и очистить кеши Reviewloop',
+  'Inspect and prune only verified daddyloop-owned caches': 'Проверить и очистить кеши daddyloop',
   'Configure the optional Arc/Arcanum integration': 'Настроить интеграцию с Arc/Arcanum',
-  'Use reviewctl --help for commands, or run reviewctl in a terminal for the interactive console.':
-    'Команды: reviewctl --help. Интерактивный режим: запусти reviewctl в терминале.',
+  'Use daddy --help for commands, or run daddy in a terminal for the interactive console.':
+    'Команды: daddy --help. Интерактивный режим: запусти daddy в терминале.',
   'No tasks yet. Use /attach to connect a PR, or /demo to try the workflow.':
     'Задач пока нет. /attach подключает PR, /demo запускает демонстрацию.',
   'Author and reviewer sessions, managed by your background service.':

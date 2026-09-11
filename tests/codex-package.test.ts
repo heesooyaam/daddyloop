@@ -18,7 +18,7 @@ import {
   type CodexPackage,
 } from '../src/ops/codex-package.js';
 function archive(unsafe = false) {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-codex-package-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-codex-package-test-'));
   const triple =
     process.arch === 'x64' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl';
   const prefix = `package/vendor/${triple}`;

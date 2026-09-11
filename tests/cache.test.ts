@@ -14,7 +14,7 @@ import { fixture } from './helpers.js';
 import { CacheManager } from '../src/ops/cache.js';
 import { execFileSync } from 'node:child_process';
 it('prunes only explicitly owned, expired temporary artifacts and never follows symlinks', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-cache-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cache-')),
     f = await fixture();
   try {
     const cache = join(dir, 'cache'),
@@ -22,7 +22,7 @@ it('prunes only explicitly owned, expired temporary artifacts and never follows 
     mkdirSync(cache);
     mkdirSync(outside);
     writeFileSync(join(outside, 'keep'), 'user data');
-    writeFileSync(join(cache, '.reviewloop-cache'), 'reviewloop-cache-v1');
+    writeFileSync(join(cache, '.daddyloop-cache'), 'daddyloop-cache-v1');
     const old = join(cache, 'download-old');
     writeFileSync(old, 'reproducible');
     utimesSync(old, new Date(0), new Date(0));
@@ -45,7 +45,7 @@ it('prunes only explicitly owned, expired temporary artifacts and never follows 
   }
 });
 it('does not clean an unmarked cache directory', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-cache-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cache-')),
     f = await fixture();
   try {
     mkdirSync(join(dir, 'cache'));
@@ -62,7 +62,7 @@ it('does not clean an unmarked cache directory', async () => {
   }
 });
 it('removes a registered clean old reviewer worktree while preserving dirty, current and author copies', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-cache-git-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cache-git-')),
     f = await fixture();
   const run = (args: string[], cwd = dir) => execFileSync('git', args, { cwd, stdio: 'pipe' });
   try {
@@ -80,7 +80,7 @@ it('removes a registered clean old reviewer worktree while preserving dirty, cur
     run(['clone', '--bare', seed, bare]);
     writeFileSync(
       join(base, 'owner.json'),
-      JSON.stringify({ application: 'reviewloop', taskId: f.task.id }),
+      JSON.stringify({ application: 'daddyloop', taskId: f.task.id }),
     );
     const paths = ['reviewer-a-a', 'reviewer-b-b', 'reviewer-c-c', 'author'].map((name) =>
       join(base, name),

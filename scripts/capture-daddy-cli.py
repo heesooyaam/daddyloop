@@ -7,7 +7,7 @@ def health():
 pid=health()['pid'];events=[];snapshots=[]
 master,slave=pty.openpty();before=termios.tcgetattr(slave)
 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',38,124,0,0))
-env={**os.environ,'REVIEWLOOP_CONFIG':config_file,'TERM':'xterm-256color','COLORTERM':'truecolor','FORCE_COLOR':'3'};env.pop('NO_COLOR',None)
+env={**os.environ,'DADDYLOOP_CONFIG':config_file,'TERM':'xterm-256color','COLORTERM':'truecolor','FORCE_COLOR':'3'};env.pop('NO_COLOR',None)
 child=subprocess.Popen([node,entry,'--language','ru','console',session_id],stdin=slave,stdout=slave,stderr=slave,env=env,start_new_session=True)
 decoder=codecs.getincrementaldecoder('utf-8')();plain='';ansi=re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 def drain(seconds=.15):

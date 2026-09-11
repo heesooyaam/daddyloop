@@ -1,53 +1,58 @@
-import type { Projects } from '../core/projects.js';
-import type { Project, ReviewGroup, Task } from '../core/types.js';
+import type { WorkspaceRegistry } from '../core/workspace-registry.js';
+import type { Workspace, ReviewGroup, Task } from '../core/types.js';
 import { createHash } from 'node:crypto';
 import { defaultPolicy, now } from '../core/types.js';
 import type { Workspaces } from './workspaces.js';
 
-/** A private read-only project snapshot; never a user task or a native ticket. */
+/** A private read-only workspace snapshot; never a user task or a native ticket. */
 export class DaddyWorkspace {
   constructor(
-    private projects: Projects,
-    private workspaces: Workspaces,
+    private workspaces: WorkspaceRegistry,
+    private checkouts: Workspaces,
   ) {}
-  private selection(group: ReviewGroup, override?: Project) {
-    const project = override ?? group.project ?? this.projects.get(group.projectId!);
-    const original = group.project ?? this.projects.get(group.projectId!);
-    const signature = (value: Project) => JSON.stringify([value.repoPath, value.scope, value.base]);
+  private selection(group: ReviewGroup, override?: Workspace) {
+    const workspace = override ?? group.workspace!;
+    const original = group.workspace!;
+    const signature = (value: Workspace) =>
+      JSON.stringify([value.repoPath, value.scope, value.base]);
     const key =
-      signature(project) === signature(original)
+      signature(workspace) === signature(original)
         ? group.id
         : createHash('sha256')
-            .update(group.id + signature(project))
+            .update(group.id + signature(workspace))
             .digest('hex')
             .slice(0, 32);
-    return { project, key };
+    return { workspace, key };
   }
-  async prepare(group: ReviewGroup, signal: AbortSignal, override?: Project) {
-    const { project, key } = this.selection(group, override);
-    let context = this.projects.store.setting<Task>(`daddy.context:${key}`);
+  async prepare(group: ReviewGroup, signal: AbortSignal, override?: Workspace) {
+    const { workspace, key } = this.selection(group, override);
+    let context = this.workspaces.store.setting<Task>(`daddy.context:${key}`);
     if (!context) {
       const ref = {
         kind: 'ticket' as const,
-        provider: project.provider,
-        host: project.host,
-        repo: project.repo,
+        provider: workspace.provider,
+        host: workspace.host,
+        repo: workspace.repo,
         number: 0,
         key: 'context',
-        url: `https://${project.host}/${project.repo}`,
+        url: `https://${workspace.host}/${workspace.repo}`,
       };
-      const description = await this.workspaces.describeTicket(project.repoPath, ref, project.base);
+      const description = await this.checkouts.describeTicket(
+        workspace.repoPath,
+        ref,
+        workspace.base,
+      );
       context = {
         id: key,
         ref,
-        repoPath: project.repoPath,
-        scope: project.scope,
-        ticketRepository: { ...description.repository, branch: `reviewloop/context-${group.id}` },
+        repoPath: workspace.repoPath,
+        scope: workspace.scope,
+        ticketRepository: { ...description.repository, branch: `daddyloop/context-${group.id}` },
         title: group.title,
         requirements: group.requirements,
         kind: 'code',
         state: 'discussing',
-        reason: 'Read-only project context',
+        reason: 'Read-only workspace context',
         policy: defaultPolicy,
         generation: group.generation,
         contextVersion: 1,
@@ -65,18 +70,18 @@ export class DaddyWorkspace {
     }
     let root: string;
     try {
-      root = await this.workspaces.prepareTicket(context, 'reviewer', signal);
+      root = await this.checkouts.prepareTicket(context, 'reviewer', signal);
     } finally {
-      this.projects.store.setSetting(`daddy.context:${key}`, context);
+      this.workspaces.store.setSetting(`daddy.context:${key}`, context);
     }
-    return { cwd: this.projects.cwd(root, project.scope), context };
+    return { cwd: this.workspaces.cwd(root, workspace.scope), context };
   }
-  async release(group: ReviewGroup, override?: Project) {
+  async release(group: ReviewGroup, override?: Workspace) {
     const { key } = this.selection(group, override);
-    const context = this.projects.store.setting<Task>(`daddy.context:${key}`);
+    const context = this.workspaces.store.setting<Task>(`daddy.context:${key}`);
     if (context?.ref.provider === 'arcadia' && context.arcWorkspaces?.reviewer) {
-      await this.workspaces.releaseArc(context, 'reviewer');
-      this.projects.store.setSetting(`daddy.context:${key}`, context);
+      await this.checkouts.releaseArc(context, 'reviewer');
+      this.workspaces.store.setSetting(`daddy.context:${key}`, context);
     }
   }
 }

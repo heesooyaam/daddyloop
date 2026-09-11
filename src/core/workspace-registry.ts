@@ -4,12 +4,12 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { AppError, now, type Project } from './types.js';
+import { AppError, now, type Workspace } from './types.js';
 import type { Store } from './store.js';
 import { git } from '../runtime/workspaces.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 
-export const projectInput = z
+export const workspaceSchema = z
   .object({
     name: z.string().trim().min(1).max(100),
     path: z.string().min(1).max(4000),
@@ -17,9 +17,11 @@ export const projectInput = z
     base: z.string().max(200).optional(),
   })
   .strict();
-export const workspaceInput = projectInput.omit({ name: true }).partial({ path: true });
-export type WorkspaceInput = z.infer<typeof workspaceInput>;
-export function projectScope(value: string) {
+export const repositorySelectionSchema = workspaceSchema
+  .omit({ name: true })
+  .partial({ path: true });
+export type RepositorySelection = z.infer<typeof repositorySelectionSchema>;
+export function workspaceScope(value: string) {
   if (
     isAbsolute(value) ||
     value.includes('\\') ||
@@ -29,7 +31,7 @@ export function projectScope(value: string) {
     throw new AppError('invalid_scope', 'Use a relative directory inside the repository', 400);
   return value.replace(/\/+$/, '');
 }
-export class Projects {
+export class WorkspaceRegistry {
   readonly roots: string[];
   constructor(
     readonly store: Store,
@@ -85,11 +87,11 @@ export class Projects {
       truncated: candidates.length > 150,
     };
   }
-  private async inspect(input: z.infer<typeof projectInput>): Promise<Project> {
-    input = projectInput.parse(input);
+  private async inspect(input: z.infer<typeof workspaceSchema>): Promise<Workspace> {
+    input = workspaceSchema.parse(input);
     const path = this.path(input.path);
     let root = path,
-      vcs: Project['vcs'] | undefined;
+      vcs: Workspace['vcs'] | undefined;
     for (let at = path; ; at = dirname(at)) {
       // Never invoke Git inside Arcadia, including a selected subdirectory.
       if (existsSync(join(at, '.arc')) || existsSync(join(at, '.arcignore'))) {
@@ -103,7 +105,7 @@ export class Projects {
       }
       if (dirname(at) === at) break;
     }
-    let host: string, repo: string, provider: Project['provider'];
+    let host: string, repo: string, provider: Workspace['provider'];
     if (vcs === 'arcadia') {
       const mount = (await this.arc.mounts()).find(
         (mount) => mount.path === root && mount.object_store_ok,
@@ -156,7 +158,7 @@ export class Projects {
         'Choose a Git or mounted Arcadia repository',
         422,
       );
-    const scope = projectScope(input.scope ?? relative(root, path).split(sep).join('/'));
+    const scope = workspaceScope(input.scope ?? relative(root, path).split(sep).join('/'));
     if (scope) {
       const cwd = realpathSync(join(root, scope));
       if (!cwd.startsWith(root + sep) || !statSync(cwd).isDirectory())
@@ -178,52 +180,48 @@ export class Projects {
       updatedAt: now(),
     };
   }
-  async selection(project: Project, input?: WorkspaceInput): Promise<Project> {
-    if (!input || !Object.keys(input).length) return { ...project };
-    input = workspaceInput.parse(input);
+  async selection(workspace: Workspace, input?: RepositorySelection): Promise<Workspace> {
+    if (!input || !Object.keys(input).length) return { ...workspace };
+    input = repositorySelectionSchema.parse(input);
     const selected = await this.inspect({
-      name: project.name,
-      path: input.path ?? project.repoPath,
-      scope: input.scope ?? (input.path ? undefined : project.scope),
+      name: workspace.name,
+      path: input.path ?? workspace.repoPath,
+      scope: input.scope ?? (input.path ? undefined : workspace.scope),
       // A different repository must not inherit a branch name from another VCS.
-      base: input.base ?? (input.path ? undefined : project.base),
+      base: input.base ?? (input.path ? undefined : workspace.base),
     });
-    const identity = (value: Project) => [
+    const identity = (value: Workspace) => [
       value.repoPath,
       value.scope,
       value.base ?? '',
       value.host,
       value.repo,
     ];
-    const changed = JSON.stringify(identity(selected)) !== JSON.stringify(identity(project));
+    const changed = JSON.stringify(identity(selected)) !== JSON.stringify(identity(workspace));
     const hash = createHash('sha256')
-      .update(JSON.stringify([project.id, ...identity(selected)]))
+      .update(JSON.stringify([workspace.id, ...identity(selected)]))
       .digest('hex');
     const id = changed
       ? `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`
-      : project.id;
-    return { ...selected, id, createdAt: project.createdAt };
+      : workspace.id;
+    return { ...selected, id, createdAt: workspace.createdAt };
   }
-  async register(input: z.infer<typeof projectInput>, id?: string): Promise<Project> {
-    const project = await this.inspect(input);
+  async register(input: z.infer<typeof workspaceSchema>, id?: string): Promise<Workspace> {
+    const workspace = await this.inspect(input);
     const existing = id
       ? this.get(id)
       : this.store
-          .projects()
-          .find((saved) => saved.repoPath === project.repoPath && saved.scope === project.scope);
+          .workspaces()
+          .find(
+            (saved) => saved.repoPath === workspace.repoPath && saved.scope === workspace.scope,
+          );
     if (existing) {
-      project.id = existing.id;
-      project.createdAt = existing.createdAt;
-      // Pin pre-snapshot sessions before changing any default.
-      for (const group of this.store.groups())
-        if (group.projectId === existing.id && !group.project) {
-          group.project = existing;
-          this.store.saveGroup(group);
-        }
+      workspace.id = existing.id;
+      workspace.createdAt = existing.createdAt;
     }
-    this.store.saveProject(project);
-    this.store.event('_system', 'workspace.saved', { id: project.id, name: project.name });
-    return project;
+    this.store.saveWorkspace(workspace);
+    this.store.event('_system', 'workspace.saved', { id: workspace.id, name: workspace.name });
+    return workspace;
   }
   async suggestions() {
     const candidates = new Set<string>();
@@ -254,14 +252,14 @@ export class Projects {
       .map((path) => ({ name: basename(path), path }));
   }
   get(id: string) {
-    return this.store.project(id);
+    return this.store.workspace(id);
   }
   list() {
-    return this.store.projects();
+    return this.store.workspaces();
   }
   cwd(root: string, scope = '') {
     const base = realpathSync(root),
-      cwd = realpathSync(resolve(root, projectScope(scope)));
+      cwd = realpathSync(resolve(root, workspaceScope(scope)));
     if (cwd !== base && !cwd.startsWith(base + sep))
       throw new Error('The starting directory escaped its managed workspace');
     return cwd;

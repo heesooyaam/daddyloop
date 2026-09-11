@@ -6,12 +6,12 @@ import { sameRevision, type ReviewHandle } from '../src/core/types.js';
 class FakeArc extends ArcBridge {
   calls: string[][] = [];
   general = [
-    { id: -7, content: tag('reviewloop:test'), is_draft: true, author: { name: 'tester' } },
+    { id: -7, content: tag('daddyloop:test'), is_draft: true, author: { name: 'tester' } },
   ];
   inline = [
     {
       id: -9,
-      content: 'Exact markdown\n```cpp\nreturn;\n```\n' + tag('reviewloop:test:comment:R1'),
+      content: 'Exact markdown\n```cpp\nreturn;\n```\n' + tag('daddyloop:test:comment:R1'),
       is_draft: true,
       author: { name: 'tester' },
     },
@@ -26,7 +26,7 @@ const ref = parsePR('https://a.yandex-team.ru/review/11111111');
 const review: ReviewHandle = {
   id: '-7',
   nodeId: '99',
-  marker: 'reviewloop:test',
+  marker: 'daddyloop:test',
   authorId: 'tester',
   revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40), revisionId: '99' },
 };

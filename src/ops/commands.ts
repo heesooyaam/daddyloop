@@ -273,7 +273,7 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const path = options.tokenFile
         ? resolve(options.tokenFile)
-        : join(homedir(), '.tokens/reviewloop-telegram');
+        : join(homedir(), '.tokens/daddyloop-telegram');
       let token: string;
       if (existsSync(path)) token = readFileSync(path, 'utf8').trim();
       else {

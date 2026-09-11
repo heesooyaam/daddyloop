@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Store } from '../core/store.js';
-import { AppError, now, type Project, type ResourceStatus } from '../core/types.js';
+import { AppError, now, type Workspace, type ResourceStatus } from '../core/types.js';
 import type { Locale } from '../i18n/index.js';
 import type { Speech } from '../runtime/speech.js';
 import { redact } from '../core/security.js';
@@ -12,7 +12,7 @@ export interface VoiceRoute {
   threadId?: number;
   groupId: string;
   generation: number;
-  project: Project;
+  workspace: Workspace;
   locale: Locale;
 }
 export interface VoiceJob {

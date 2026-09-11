@@ -6,7 +6,7 @@ import { command } from './process.js';
 import { configPath, loadConfig, type Config } from './config.js';
 import { VERSION } from '../version.js';
 
-const name = 'reviewloop.service';
+const name = 'daddyloop.service';
 export function cliEntry() {
   return fileURLToPath(new URL('../cli.js', import.meta.url));
 }
@@ -31,7 +31,7 @@ export function serviceUnit(options: {
     if (!isAbsolute(path)) throw new Error('Service paths must be absolute');
   }
   if (!/^\d+(?:[KMGT])?$/.test(options.memoryMax)) throw new Error('Invalid memory limit');
-  return `[Unit]\nDescription=daddyloop orchestration service\n# Legacy ownership: Description=Reviewloop author and reviewer service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=5\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('REVIEWLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=512\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
+  return `[Unit]\nDescription=daddyloop orchestration service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=5\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('DADDYLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=512\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
 }
 export class ServiceManager {
   readonly runtimeDir = `/run/user/${userInfo().uid}`;
@@ -60,7 +60,7 @@ export class ServiceManager {
   }
   async ctl(args: string[], allowFailure = false) {
     const mapped = args.map((arg) =>
-      arg.endsWith('.service') && arg.startsWith('reviewloop') ? this.unitName(arg) : arg,
+      arg.endsWith('.service') && arg.startsWith('daddyloop') ? this.unitName(arg) : arg,
     );
     if (this.mode === 'system') {
       const read = ['show', 'status', 'is-active', 'cat'].includes(args[0]);
@@ -78,7 +78,7 @@ export class ServiceManager {
   async ensureManager() {
     if (process.platform !== 'linux')
       throw new Error(
-        'Managed server installation currently requires Linux with systemd. The CLI can connect from macOS using reviewctl connect.',
+        'Managed server installation currently requires Linux with systemd. The CLI can connect from macOS using daddy connect.',
       );
     if (this.mode === 'system') {
       await command('sudo', ['-n', 'true']);
@@ -120,9 +120,7 @@ export class ServiceManager {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     if (
       existsSync(this.unitPath) &&
-      !readFileSync(this.unitPath, 'utf8').includes(
-        'Description=Reviewloop author and reviewer service',
-      )
+      !readFileSync(this.unitPath, 'utf8').includes('Description=daddyloop orchestration service')
     )
       throw new Error(`An unmanaged ${this.unitPath} already exists; it was preserved.`);
     const bundle = resolve(dirname(process.execPath), '../..');
@@ -171,7 +169,7 @@ export class ServiceManager {
         }
       }
     }
-    await this.writeUnit(name, unit, 'Description=Reviewloop author and reviewer service');
+    await this.writeUnit(name, unit, 'Description=daddyloop orchestration service');
     await this.ctl(['daemon-reload']);
     await this.ctl(['enable', name]);
     return this.unitPath;
@@ -207,7 +205,7 @@ export class ServiceManager {
     for (let i = 0; i < 100; i++) {
       const status = await this.status();
       if (status.ActiveState === 'failed')
-        throw new Error('Service failed to start. Run reviewctl service logs.');
+        throw new Error('Service failed to start. Run daddy service logs.');
       if (status.ActiveState === 'active') {
         try {
           const r = await fetch(`http://127.0.0.1:${config.port}/api/health`, {
@@ -221,7 +219,7 @@ export class ServiceManager {
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    throw new Error('Service did not become healthy. Run reviewctl service logs.');
+    throw new Error('Service did not become healthy. Run daddy service logs.');
   }
   async status() {
     const result = await this.ctl(
@@ -261,9 +259,7 @@ export class ServiceManager {
   async uninstall() {
     if (!existsSync(this.unitPath)) return;
     if (
-      !readFileSync(this.unitPath, 'utf8').includes(
-        'Description=Reviewloop author and reviewer service',
-      )
+      !readFileSync(this.unitPath, 'utf8').includes('Description=daddyloop orchestration service')
     )
       throw new Error('Refusing to remove an unmanaged service');
     await this.ctl(['disable', '--now', name]);

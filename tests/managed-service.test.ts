@@ -13,8 +13,8 @@ import type { ResourceStatus } from '../src/core/types.js';
 it('generates a service independent of terminals, with a separate user and memory limit', () => {
   const text = serviceUnit({
     executable: '/opt/Node With Space/node',
-    entry: '/opt/reviewloop/cli.js',
-    dataDir: '/data/reviewloop',
+    entry: '/opt/daddyloop/cli.js',
+    dataDir: '/data/daddyloop',
     configFile: '/data/config.json',
     path: '/usr/bin',
     memoryMax: '8G',
@@ -40,7 +40,7 @@ it('rejects credential-bearing or plaintext remote server URLs', () => {
   ])
     expect(() => validateServerUrl(url)).toThrow();
 });
-it('recovers old gracefully-cancelled jobs instead of leaving tasks permanently running', async () => {
+it('recovers interruption between saving cancellation and the task transition', async () => {
   const f = await fixture();
   await f.engine.review(f.task.id);
   const job = f.store.claim()!;
@@ -54,9 +54,9 @@ it('recovers old gracefully-cancelled jobs instead of leaving tasks permanently 
 it.skipIf(!existsSync('/usr/bin/systemd-analyze'))(
   'passes the host systemd parser with spaces and percent signs in paths',
   () => {
-    const root = mkdtempSync(join(tmpdir(), 'reviewloop-systemd-'));
+    const root = mkdtempSync(join(tmpdir(), 'daddyloop-systemd-'));
     try {
-      const file = join(root, 'reviewloop-test.service');
+      const file = join(root, 'daddyloop-test.service');
       writeFileSync(
         file,
         serviceUnit({
