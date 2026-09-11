@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Box, Text, render, useApp, useInput, usePaste, useWindowSize } from 'ink';
 import { DaddyClient, type DaddyApi } from '../client/daddy.js';
-import type { AgentProfiles, Project } from '../core/types.js';
+import type { AgentProfiles, Workspace } from '../core/types.js';
 import type { ModelOption } from '../core/agents.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { edit, emptyEditor, insert, editorRows, type Editor } from './editor.js';
@@ -29,7 +29,7 @@ type MenuState = {
   query: string;
   items?: { name: string; path: string }[];
   models?: ModelOption[];
-  role?: 'reviewer' | 'author';
+  role?: 'daddy' | 'writer';
   model?: ModelOption;
   message?: string;
   updates?: UpdateStatus;
@@ -151,16 +151,16 @@ export function DaddyTerminal({
         .map((group) => ({
           id: group.id,
           label: group.title,
-          detail: `${group.project?.name ?? ''} · ${group.complete}/${group.total}`,
+          detail: `${group.workspace?.name ?? ''} · ${group.complete}/${group.total}`,
         }));
     if (menu.kind === 'workspaces')
       return [
-        ...state.projects
-          .filter((project) => project.name.toLowerCase().includes(menu.query.toLowerCase()))
-          .map((project) => ({
-            id: project.id,
-            label: project.name,
-            detail: project.scope || project.repoPath,
+        ...state.workspaces
+          .filter((workspace) => workspace.name.toLowerCase().includes(menu.query.toLowerCase()))
+          .map((workspace) => ({
+            id: workspace.id,
+            label: workspace.name,
+            detail: workspace.scope || workspace.repoPath,
           })),
         { id: 'discover', label: t('Find workspaces on the server'), detail: '' },
       ];
@@ -183,12 +183,12 @@ export function DaddyTerminal({
     if (menu.kind === 'model-role')
       return [
         {
-          id: 'reviewer',
+          id: 'daddy',
           label: 'daddy',
-          detail: state.board?.group.reviewer.model ?? t('Codex configuration'),
+          detail: state.board?.group.daddy.model ?? t('Codex configuration'),
         },
         {
-          id: 'author',
+          id: 'writer',
           label: t('New writers'),
           detail: state.board?.group.writer?.model ?? t('Codex configuration'),
         },
@@ -204,7 +204,7 @@ export function DaddyTerminal({
         detail: effort === menu.model?.defaultEffort ? t('Default') : '',
       }));
     return [];
-  }, [menu, state.projects, state.sessions, state.board, locale]);
+  }, [menu, state.workspaces, state.sessions, state.board, locale]);
   const choose = async () => {
     if (!menu) return;
     const item = options[menu.index % Math.max(1, options.length)];
@@ -252,7 +252,7 @@ export function DaddyTerminal({
           setEmptyDraft('');
         }
       } else if (menu.kind === 'discover') {
-        await model.api<Project>('/workspaces', { name: item.label, path: item.id });
+        await model.api<Workspace>('/workspaces', { name: item.label, path: item.id });
         await model.refresh();
         setMenu({ ...menu, kind: 'workspaces', query: '', index: 0 });
       } else if (menu.kind === 'pool') {
@@ -274,15 +274,15 @@ export function DaddyTerminal({
           index: 0,
           query: '',
           models: result.models,
-          role: item.id as 'author' | 'reviewer',
+          role: item.id as 'writer' | 'daddy',
         });
       } else if (menu.kind === 'model') {
         const selected = menu.models?.find((model) => model.id === item.id);
         if (selected) setMenu({ ...menu, kind: 'effort', model: selected, index: 0, query: '' });
       } else if (menu.kind === 'effort' && state.board && menu.role && menu.model) {
         const profiles: AgentProfiles = {
-          reviewer: state.board.group.reviewer,
-          author: state.board.group.writer ?? { engine: 'codex' },
+          daddy: state.board.group.daddy,
+          writer: state.board.group.writer ?? { engine: 'codex' },
         };
         profiles[menu.role] = { engine: 'codex', model: menu.model.id, effort: item.id };
         await model.action('settings', { profiles });
@@ -300,7 +300,7 @@ export function DaddyTerminal({
       exit();
       return;
     }
-    if (name === '/new' || name === '/workspaces' || name === '/projects') {
+    if (name === '/new' || name === '/workspaces') {
       open('workspaces', argument || undefined);
       return;
     }
@@ -351,13 +351,13 @@ export function DaddyTerminal({
     }
     if (!state.selected) throw new Error(t('Start a daddy session first.'));
     if (name === '/repo') {
-      if (!argument || argument === 'default') model.workspace(undefined);
+      if (!argument || argument === 'default') model.repository(undefined);
       else {
         await model.api('/workspaces/preview', {
           sessionId: state.selected,
-          workspace: { path: argument },
+          repository: { path: argument },
         });
-        model.workspace({ path: argument });
+        model.repository({ path: argument });
       }
       return;
     }
@@ -683,7 +683,7 @@ export function DaddyTerminal({
                 <Text color={colors.muted}>
                   {' '}
                   {clip(
-                    `${group.complete}/${group.total} · ${group.project?.name ?? ''}`,
+                    `${group.complete}/${group.total} · ${group.workspace?.name ?? ''}`,
                     sidebar - 5,
                   )}
                 </Text>
@@ -757,8 +757,8 @@ export function DaddyTerminal({
                           ? `${state.board.writers.limit} → ${state.board.writers.target}`
                           : t('Writers: {active} / {limit}', state.board.writers)) +
                         ' · ' +
-                        (state.workspaces[state.selected]?.path ??
-                          state.board.project?.repoPath ??
+                        (state.overrides[state.selected]?.path ??
+                          state.board.workspace?.repoPath ??
                           '')
                       : t('Start a daddy session first.')),
                 width,

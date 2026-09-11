@@ -83,7 +83,7 @@ it('does not mistake pull requests for issues or silently truncate huge comments
   await expect(large.read(ticketInput().source.url)).rejects.toThrow('context limit');
 });
 it('preserves dirty source files, commits only the isolated author and verifies ownership before push', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-ticket-test-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-ticket-test-')),
     store = new Store(':memory:');
   try {
     const repo = join(dir, 'source');
@@ -155,7 +155,7 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
         {
           number: 20,
           html_url: 'https://github.com/test/repo/pull/20',
-          body: `<!-- reviewloop:ticket:${task.id} -->`,
+          body: `<!-- daddyloop:ticket:${task.id} -->`,
           user: { id: correctOwner ? 7 : 8 },
           head: { ref: task.ticketRepository!.branch, repo: { full_name: 'test/repo' } },
         },
@@ -188,7 +188,7 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
 it('runs ticket discussion, isolated implementation, PR creation and automatic review to completion', async () => {
   const { Worker } = await import('../src/runtime/worker.js');
   const { healthy } = await import('./planning-fixture.js');
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-ticket-cycle-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-ticket-cycle-')),
     store = new Store(':memory:');
   const provider = new DemoProvider(store),
     engine = new Engine(store, () => provider),

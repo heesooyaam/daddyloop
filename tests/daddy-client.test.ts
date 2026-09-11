@@ -4,12 +4,12 @@ import { daddyFixture } from './daddy-fixture.js';
 import { healthy } from './planning-fixture.js';
 it('fences a late session read and preserves drafts for both conversations', async () => {
   const f = daddyFixture(),
-    a = f.daddy.create({ projectId: f.project.id, title: 'A' }),
-    b = f.daddy.create({ projectId: f.project.id, title: 'B' });
+    a = f.daddy.create({ workspaceId: f.workspace.id, title: 'A' }),
+    b = f.daddy.create({ workspaceId: f.workspace.id, title: 'B' });
   let resolveA!: (value: unknown) => void;
   let delayed = false;
   const api: DaddyApi = async <T>(path: string) => {
-    if (path === '/workspaces') return [f.project] as T;
+    if (path === '/workspaces') return [f.workspace] as T;
     if (path === '/status')
       return {
         version: '0.7.0',
@@ -50,7 +50,7 @@ it('fences a late session read and preserves drafts for both conversations', asy
 });
 it('reuses an uncertain message request ID and keeps text edited while a send is pending', async () => {
   const f = daddyFixture(),
-    group = f.daddy.create({ projectId: f.project.id });
+    group = f.daddy.create({ workspaceId: f.workspace.id });
   const requests: { text: string; requestId: string }[] = [];
   let attempt = 0,
     finish!: () => void;
@@ -63,7 +63,7 @@ it('reuses an uncertain message request ID and keeps text edited while a send is
       });
       return {} as T;
     }
-    if (path === '/workspaces') return [f.project] as T;
+    if (path === '/workspaces') return [f.workspace] as T;
     if (path === '/status')
       return {
         version: '0.7.0',
@@ -125,7 +125,7 @@ it('can remount after cleanup without reusing an aborted read controller', async
 });
 it('keeps a changed repository draft during an uncertain send and binds retry identity to the whole request', async () => {
   const f = daddyFixture(),
-    group = f.daddy.create({ projectId: f.project.id });
+    group = f.daddy.create({ workspaceId: f.workspace.id });
   const requests: any[] = [];
   let finish!: () => void;
   const api: DaddyApi = async <T>(path: string, body?: unknown) => {
@@ -138,7 +138,7 @@ it('keeps a changed repository draft during an uncertain send and binds retry id
         });
       return {} as T;
     }
-    if (path === '/workspaces') return [f.project] as T;
+    if (path === '/workspaces') return [f.workspace] as T;
     if (path === '/daddy/sessions') return [] as T;
     if (path === '/status') return {} as T;
     return f.daddy.board(group.id) as T;
@@ -146,20 +146,20 @@ it('keeps a changed repository draft during an uncertain send and binds retry id
   const model = new DaddyClient(api, group.id);
   try {
     model.draft('A task');
-    model.workspace({ path: '/server/a' });
+    model.repository({ path: '/server/a' });
     await model.send();
     const retry = model.send();
     await vi.waitFor(() => expect(finish).toBeDefined());
-    model.workspace({ path: '/server/b' });
+    model.repository({ path: '/server/b' });
     finish();
     await retry;
     expect(requests[0]).toEqual(requests[1]);
     expect(model.snapshot().drafts[group.id]).toBe('A task');
-    expect(model.snapshot().workspaces[group.id]?.path).toBe('/server/b');
+    expect(model.snapshot().overrides[group.id]?.path).toBe('/server/b');
     await model.send();
     expect(requests[2].requestId).not.toBe(requests[1].requestId);
-    expect(requests[2].workspace.path).toBe('/server/b');
-    expect(model.snapshot().workspaces[group.id]).toBeUndefined();
+    expect(requests[2].repository.path).toBe('/server/b');
+    expect(model.snapshot().overrides[group.id]).toBeUndefined();
     expect(model.snapshot().drafts[group.id]).toBe('');
   } finally {
     finish?.();

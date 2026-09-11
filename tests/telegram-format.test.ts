@@ -6,14 +6,8 @@ import {
   safeLink,
   type FormattedText,
 } from '../src/integrations/telegram-text.js';
-import {
-  taskCard,
-  tasksCard,
-  agentCard,
-  notificationsCard,
-} from '../src/integrations/telegram-cards.js';
+import { notificationsCard } from '../src/integrations/telegram-cards.js';
 import { TelegramApi } from '../src/integrations/telegram.js';
-import { taskA } from './terminal-fixture.js';
 const fragments = (value: FormattedText, type: string) =>
   value.entities
     .filter((entity) => entity.type === type)
@@ -111,60 +105,7 @@ it('sends native entities and puts working buttons on the last chunk only', asyn
   expect(sent[0].reply_markup).toBeUndefined();
   expect(sent.at(-1)?.reply_markup).toBeDefined();
 });
-it('shows honest task facts, literal titles and no nonexistent web or demo links', () => {
-  const task = {
-    ...taskA,
-    state: 'complete' as const,
-    title: '<b>literal **title**</b>',
-    summary: '**Готово.** Проверка завершена.',
-    checksWaivedAt: '2026-09-09T00:00:00Z',
-  };
-  const value = taskCard(task);
-  expect(value.text).toContain(task.title);
-  expect(value.text).toContain('✅ Задача завершена');
-  expect(value.text).toContain('ДЕМО');
-  expect(value.buttons?.flat().some((button) => !!button.url)).toBe(false);
-  const agent = agentCard(task, 'reviewer', '**Finding**\n\n```cpp\nreturn 0;\n```');
-  expect(agent.text).toContain('🔎 Ответ ревьюера');
-  expect(fragments(agent, 'pre')).toEqual(['return 0;']);
-  const real = taskCard(
-    {
-      ...task,
-      ref: { ...task.ref, provider: 'github', url: 'https://github.com/test/repo/pull/1' },
-      pr: {
-        head: 'a'.repeat(40),
-        base: 'b'.repeat(40),
-        start: 'b'.repeat(40),
-        title: 'PR',
-        body: '',
-        branch: 'work',
-        targetBranch: 'main',
-        cloneUrl: 'https://github.com/test/repo.git',
-        state: 'open',
-        checks: 'failing',
-        checkDetails: [],
-      },
-    },
-    'https://review.example',
-  );
-  expect(real.text).toContain('CI: принято исключение');
-  expect(real.text).not.toContain('CI: пройдены');
-  expect(real.buttons?.flat().filter((button) => !!button.url)).toHaveLength(2);
-});
-it('paginates task cards and exposes current notification preferences through buttons', () => {
-  const tasks = Array.from({ length: 12 }, (_, i) => ({
-    ...taskA,
-    id: taskA.id.slice(0, -2) + String(i).padStart(2, '0'),
-    title: 'Задача ' + i,
-  }));
-  const first = tasksCard(tasks),
-    next = tasksCard(tasks, 5);
-  expect(first.text).toContain('1–5 из 12');
-  expect(next.text).toContain('6–10 из 12');
-  expect(next.text).not.toContain('Задача 0\n');
-  for (const button of [...first.buttons!.flat(), ...next.buttons!.flat()])
-    if (button.callback_data)
-      expect(Buffer.byteLength(button.callback_data)).toBeLessThanOrEqual(64);
+it('exposes current notification preferences through buttons', () => {
   const prefs = notificationsCard({ enabled: true, mode: 'attention' });
   expect(prefs.text).toContain('Тихий режим');
   expect(prefs.buttons?.flat().find((button) => button.text.startsWith('✓'))?.callback_data).toBe(
@@ -173,7 +114,7 @@ it('paginates task cards and exposes current notification preferences through bu
 });
 
 it('hides native correlation markers from summaries while preserving literal code examples', () => {
-  const marker = '<!-- reviewloop:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1:2 -->';
+  const marker = '<!-- daddyloop:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1:2 -->';
   const source = '**Проверено**\n\n' + marker;
   const value = markdownText(source);
   expect(value.text).toBe('Проверено');

@@ -52,8 +52,8 @@ export interface AgentProfile {
   effort?: ReasoningEffort;
 }
 export interface AgentProfiles {
-  author: AgentProfile;
-  reviewer: AgentProfile;
+  writer: AgentProfile;
+  daddy: AgentProfile;
 }
 export interface TicketSource {
   kind: 'github_issue' | 'tracker' | 'local';
@@ -73,19 +73,19 @@ export interface ReviewGroup {
   requirements: string;
   source?: TicketSource;
   rootTaskId: string;
-  reviewer: AgentProfile;
+  daddy: AgentProfile;
   reviewerThreadId?: string;
   generation: number;
   createdAt: string;
   updatedAt: string;
-  projectId?: string;
+  workspaceId?: string;
   orchestrated?: boolean;
   writerLimit?: number;
   requestedWriterLimit?: number;
   /** Occupied slots survive author turns, review, pauses and restarts. */
   writerTasks?: string[];
-  /** Snapshot: later edits to project defaults affect new sessions only. */
-  project?: Project;
+  /** Snapshot: later edits to workspace defaults affect new sessions only. */
+  workspace?: Workspace;
   writer?: AgentProfile;
   daddyState?: 'active' | 'paused' | 'needs_input' | 'archived';
   summary?: string;
@@ -96,7 +96,7 @@ export interface ReviewGroup {
   createdByAction?: string;
   defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
 }
-export interface Project {
+export interface Workspace {
   id: string;
   name: string;
   repoPath: string;
@@ -117,7 +117,7 @@ export interface DaddyJob {
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
-  project?: Project;
+  workspace?: Workspace;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -181,7 +181,7 @@ export interface Task {
   source?: TicketSource;
   groupId?: string;
   parentTaskId?: string;
-  projectId?: string;
+  workspaceId?: string;
   scope?: string;
   dependsOn?: string[];
   createdByAction?: string;
@@ -246,7 +246,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
-  project?: Project;
+  workspace?: Workspace;
   id: string;
   taskId: string;
   role: Role;

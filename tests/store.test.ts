@@ -22,7 +22,7 @@ it('does not emit or retain an event from a rolled-back state transition', async
   store.close();
 });
 it('retains task state, job intent and events across a SQLite reopen', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-store-test-')),
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-store-test-')),
     path = join(dir, 'state.sqlite');
   try {
     let store = new Store(path);

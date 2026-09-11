@@ -11,7 +11,7 @@ import { AppError, type Event, type ResourceStatus, type PRRef } from '../core/t
 import { accessToken, credential, redact, safeEqual } from '../core/security.js';
 import { resources } from '../core/resources.js';
 import { providers } from '../providers/index.js';
-import { parsePR, type ReviewProvider } from '../providers/provider.js';
+import { type ReviewProvider } from '../providers/provider.js';
 import { Workspaces } from '../runtime/workspaces.js';
 import { Worker } from '../runtime/worker.js';
 import { CodexRuntime } from '../runtime/codex.js';
@@ -22,7 +22,7 @@ import { VERSION } from '../version.js';
 import { Telegram, connectTelegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
-import { ModelCatalogue, profilesSchema } from '../core/agents.js';
+import { ModelCatalogue } from '../core/agents.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../integrations/tickets.js';
 import { registerPlanning, type Catalogue } from './planning.js';
@@ -32,7 +32,7 @@ import { preferences, preferenceInput, setLocale } from '../core/preferences.js'
 import { UpdateMonitor } from '../core/updates.js';
 import { CodexUpdater } from '../core/codex-updater.js';
 import { executablePath } from '../runtime/executable.js';
-import { Projects } from '../core/projects.js';
+import { WorkspaceRegistry } from '../core/workspace-registry.js';
 import { Daddy } from '../core/daddy.js';
 import { registerDaddy } from './daddy.js';
 import type { SessionRuntime } from '../runtime/agent.js';
@@ -41,35 +41,10 @@ import { CodexUsage, type UsageBackend } from '../core/usage.js';
 import { registerUsage } from './usage.js';
 import { LocalSpeech, type Speech } from '../runtime/speech.js';
 
-const policySchema = z
-  .object({
-    publication: z.enum(['human', 'auto']).optional(),
-    planApproval: z.enum(['human', 'auto']).optional(),
-    maxRounds: z.number().int().min(1).max(20).optional(),
-    maxNoProgress: z.number().int().min(1).max(10).optional(),
-    requireChecks: z.boolean().optional(),
-    autoPush: z.boolean().optional(),
-  })
-  .strict();
-const createSchema = z
-  .object({
-    url: z.string().url(),
-    provider: z.enum(['github', 'gitlab', 'arcadia']).optional(),
-    repoPath: z.string().min(1),
-    requirements: z.string().trim().min(1).max(100000),
-    title: z.string().max(200).optional(),
-    kind: z.enum(['plan', 'code']).default('code'),
-    policy: policySchema.optional(),
-    planTaskId: z.string().uuid().optional(),
-    authorThreadId: z.string().max(200).optional(),
-    agents: profilesSchema.optional(),
-    groupId: z.string().uuid().optional(),
-  })
-  .strict();
 export interface ServerOptions {
   speech?: Speech;
   usage?: UsageBackend;
-  projects?: Projects;
+  workspaces?: WorkspaceRegistry;
   daddyRuntime?: SessionRuntime;
   daddyWorkspace?: Pick<DaddyWorkspace, 'prepare' | 'release'>;
   codexUpdater?: CodexUpdater;
@@ -77,7 +52,7 @@ export interface ServerOptions {
   startUpdateCheck?: boolean;
   catalogue?: Catalogue;
   ticketReader?: TicketReader;
-  workspaces?: Workspaces;
+  checkouts?: Workspaces;
   liveRuntime?: AgentRuntime;
   config?: Config;
   telegramFactory?: typeof Telegram.create;
@@ -99,16 +74,16 @@ export async function buildApp(options: ServerOptions) {
   if (publicOrigin) validateServerUrl(publicOrigin, true);
   const dataDir = resolve(options.dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const store = options.store ?? new Store(join(dataDir, 'reviewloop.sqlite'));
+  const store = options.store ?? new Store(join(dataDir, 'daddyloop.sqlite'));
   const engine = new Engine(store, options.provider ?? providers(store), config.agents);
   if (!store.setting('preferences'))
     store.setSetting('preferences', { locale: config.locale, version: 0 });
   if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
-  const workspaces = options.workspaces ?? new Workspaces(dataDir);
+  const checkouts = options.checkouts ?? new Workspaces(dataDir);
   let configuredExecutable = config.codex.executable;
   const executable = () =>
-    process.env.REVIEWLOOP_CODEX_BIN ?? configuredExecutable ?? executablePath('codex') ?? 'codex';
+    process.env.DADDYLOOP_CODEX_BIN ?? configuredExecutable ?? executablePath('codex') ?? 'codex';
   const catalogue = options.catalogue ?? new ModelCatalogue(executable);
   const updates =
     options.updateMonitor ??
@@ -117,7 +92,7 @@ export async function buildApp(options: ServerOptions) {
       intervalHours: config.updates.intervalHours,
       managedRoot: join(dataDir, 'runtimes/codex'),
     });
-  const tickets = new TicketWorkflow(engine, workspaces, options.ticketReader);
+  const tickets = new TicketWorkflow(engine, checkouts, options.ticketReader);
   const getResources =
     options.resourceCheck ??
     (() =>
@@ -131,7 +106,7 @@ export async function buildApp(options: ServerOptions) {
     new CodexUpdater(store, {
       dataDir,
       executable,
-      enabled: !process.env.REVIEWLOOP_CODEX_BIN,
+      enabled: !process.env.DADDYLOOP_CODEX_BIN,
       resourceCheck: () => {
         const status = getResources();
         if (!status.ok || status.diskAvailableGiB < 2)
@@ -156,15 +131,15 @@ export async function buildApp(options: ServerOptions) {
             .groups()
             .filter((group) => group.orchestrated)
             .map((group) => ({
-              reviewer: group.reviewer,
-              author: group.writer ?? engine.defaultAgents().author,
+              daddy: group.daddy,
+              writer: group.writer ?? engine.defaultAgents().writer,
             })),
           ...store
             .tasks()
             .filter((task) => task.state !== 'complete')
             .map((task) => engine.effectiveAgents(task)),
         ];
-        for (const profile of profiles.flatMap((pair) => [pair.author, pair.reviewer])) {
+        for (const profile of profiles.flatMap((pair) => [pair.writer, pair.daddy])) {
           if (!profile.model) continue;
           const model = models.find((model) => model.id === profile.model);
           if (!model || (profile.effort && !model.efforts.includes(profile.effort)))
@@ -184,11 +159,11 @@ export async function buildApp(options: ServerOptions) {
   await updater.recover();
   const worker = new Worker(
     engine,
-    workspaces,
+    checkouts,
     options.liveRuntime ??
       new CodexRuntime({
         executable,
-        model: process.env.REVIEWLOOP_CODEX_MODEL,
+        model: process.env.DADDYLOOP_CODEX_MODEL,
       }),
     new DemoRuntime(),
     getResources,
@@ -196,15 +171,15 @@ export async function buildApp(options: ServerOptions) {
     config.maxConcurrentAgents,
   );
   worker.autoSubmit = (id) => tickets.submit(id);
-  const projects = options.projects ?? new Projects(store, config.projects.roots);
-  workspaces.protectSources(() =>
+  const workspaces = options.workspaces ?? new WorkspaceRegistry(store, config.workspaces.roots);
+  checkouts.protectSources(() =>
     [
-      ...projects.list(),
-      ...store.groups().flatMap((group) => (group.project ? [group.project] : [])),
-      ...store.daddyJobs().flatMap((job) => (job.project ? [job.project] : [])),
+      ...workspaces.list(),
+      ...store.groups().flatMap((group) => (group.workspace ? [group.workspace] : [])),
+      ...store.daddyJobs().flatMap((job) => (job.workspace ? [job.workspace] : [])),
     ]
-      .filter((project) => project.vcs === 'arcadia')
-      .map((project) => project.repoPath)
+      .filter((workspace) => workspace.vcs === 'arcadia')
+      .map((workspace) => workspace.repoPath)
       .concat(
         store
           .tasks()
@@ -214,7 +189,7 @@ export async function buildApp(options: ServerOptions) {
   );
   const daddy = new Daddy(
     engine,
-    projects,
+    workspaces,
     tickets,
     worker,
     options.daddyRuntime ?? new CodexRuntime({ executable }),
@@ -267,7 +242,7 @@ export async function buildApp(options: ServerOptions) {
     )
       return;
     const bearer = request.headers.authorization?.replace(/^Bearer /i, '');
-    const supplied = bearer ?? request.cookies.reviewloop_session ?? '';
+    const supplied = bearer ?? request.cookies.daddyloop_session ?? '';
     if (!access.validate(supplied))
       return reply.code(401).send({
         error: {
@@ -278,7 +253,7 @@ export async function buildApp(options: ServerOptions) {
     if (
       !['GET', 'HEAD'].includes(request.method) &&
       !bearer &&
-      request.headers['x-reviewloop-request'] !== '1'
+      request.headers['x-daddyloop-request'] !== '1'
     )
       return reply.code(403).send({
         error: {
@@ -311,7 +286,7 @@ export async function buildApp(options: ServerOptions) {
     if (!safeEqual(input.token, token))
       throw new AppError('unauthorized', 'Incorrect access token', 401);
     const device = access.createDevice('Browser');
-    reply.setCookie('reviewloop_session', device.token, {
+    reply.setCookie('daddyloop_session', device.token, {
       httpOnly: true,
       sameSite: 'strict',
       path: '/',
@@ -329,7 +304,7 @@ export async function buildApp(options: ServerOptions) {
       .strict()
       .parse(request.body);
     const device = access.consume(code);
-    reply.setCookie('reviewloop_session', device.token, {
+    reply.setCookie('daddyloop_session', device.token, {
       httpOnly: true,
       sameSite: 'strict',
       path: '/',
@@ -349,7 +324,7 @@ export async function buildApp(options: ServerOptions) {
     if (!publicOrigin)
       throw new AppError(
         'public_origin_required',
-        'Configure a permanent HTTPS address with reviewctl web before pairing your phone',
+        'Configure a permanent HTTPS address with daddy web before pairing your phone',
         422,
       );
     return access.pairing(name, publicOrigin);
@@ -372,7 +347,7 @@ export async function buildApp(options: ServerOptions) {
       const task = store.getTask(request.params.id);
       if (task.state !== 'complete' || store.busy(task.id))
         throw new AppError('task_active', 'Finish the task before releasing its workspace');
-      const result = await workspaces.releaseArc(task, role);
+      const result = await checkouts.releaseArc(task, role);
       store.saveTask(task);
       store.event(task.id, 'arcadia.lease_released', result);
       return result;
@@ -383,16 +358,16 @@ export async function buildApp(options: ServerOptions) {
       if (config.telegram.enabled)
         throw new AppError(
           'telegram_connecting',
-          `${store.setting<string>('telegram.error') ?? 'Telegram is connecting.'} Configuration is saved; run reviewctl telegram status, then reviewctl telegram pair when connected.`,
+          `${store.setting<string>('telegram.error') ?? 'Telegram is connecting.'} Configuration is saved; run daddy telegram status, then daddy telegram pair when connected.`,
           503,
         );
-      throw new AppError('telegram_not_configured', 'Run reviewctl telegram setup first', 422);
+      throw new AppError('telegram_not_configured', 'Run daddy telegram setup first', 422);
     }
     return telegram.pair();
   });
   app.post('/api/telegram/unpair', async () => {
     if (!telegram)
-      throw new AppError('telegram_not_configured', 'Run reviewctl telegram setup first', 422);
+      throw new AppError('telegram_not_configured', 'Run daddy telegram setup first', 422);
     return telegram.unpair();
   });
   app.post<{ Params: { id: string } }>('/api/devices/:id/revoke', async (request) => {
@@ -401,7 +376,7 @@ export async function buildApp(options: ServerOptions) {
   });
   app.get('/api/status', async () => {
     const connection = (name: 'github' | 'gitlab') => {
-      const host = process.env[`REVIEWLOOP_${name.toUpperCase()}_HOST`] ?? `${name}.com`;
+      const host = process.env[`DADDYLOOP_${name.toUpperCase()}_HOST`] ?? `${name}.com`;
       try {
         return { host, configured: !!credential(name, host) };
       } catch {
@@ -414,7 +389,7 @@ export async function buildApp(options: ServerOptions) {
       preferences: preferences(store),
       instanceId: store.setting('server.instanceId'),
       runtime: {
-        source: process.env.REVIEWLOOP_CODEX_BIN
+        source: process.env.DADDYLOOP_CODEX_BIN
           ? 'environment'
           : configuredExecutable
             ? 'configuration'
@@ -470,24 +445,7 @@ export async function buildApp(options: ServerOptions) {
     store.setSetting('updates.notifications', enabled);
     return updates.status();
   });
-  registerPlanning(app, engine, tickets, catalogue, config.maxConcurrentAgents);
-  app.post('/api/tasks', async (request, reply) => {
-    const input = createSchema.parse(request.body);
-    if (input.agents)
-      await Promise.all([
-        catalogue.validate(input.agents.author),
-        catalogue.validate(input.agents.reviewer),
-      ]);
-    const ref = parsePR(input.url, input.provider);
-    const repoPath = await workspaces.validate(input.repoPath, ref.provider);
-    const task = await engine.create({
-      ...input,
-      repoPath,
-      ref,
-    });
-    reply.code(201);
-    return task;
-  });
+  registerPlanning(app, engine, catalogue, config.maxConcurrentAgents);
   app.post('/api/demo', async (_request, reply) => {
     if (!options.demo)
       throw new AppError('demo_disabled', 'Start with --demo to enable demo fixtures', 404);
@@ -527,7 +485,7 @@ export async function buildApp(options: ServerOptions) {
               title: task.title,
               state: task.state,
               parentTaskId: task.parentTaskId,
-              author: engine.effectiveAgents(task).author,
+              writer: engine.effectiveAgents(task).writer,
             }))
         : [],
       messages: store.messages(id),
@@ -544,76 +502,6 @@ export async function buildApp(options: ServerOptions) {
       return store.events(request.params.id, after);
     },
   );
-  app.post<{ Params: { id: string } }>('/api/tasks/:id/actions', async (request) => {
-    const { action, reason } = z
-      .object({
-        action: z.enum([
-          'review',
-          'retry',
-          'reconcile',
-          'publish',
-          'pause',
-          'resume',
-          'approve-plan',
-          'waive-checks',
-          'reopen',
-          'implement',
-          'submit',
-        ]),
-        reason: z.string().max(10000).default(''),
-      })
-      .strict()
-      .parse(request.body);
-    const id = request.params.id;
-    if (action === 'implement') return engine.implement(id);
-    if (action === 'submit') return tickets.submit(id);
-    if (action === 'retry' && store.getTask(id).ref.kind === 'ticket')
-      return store.getTask(id).resumeState === 'submitting'
-        ? tickets.submit(id)
-        : engine.retryTicket(id);
-    if (action === 'review' || action === 'retry') return engine.review(id, action === 'retry');
-    if (action === 'reconcile') return engine.reconcile(id);
-    if (action === 'publish') return engine.publish(id);
-    return engine.action(id, action, reason);
-  });
-  app.post<{ Params: { id: string } }>('/api/tasks/:id/messages', async (request) => {
-    const { role, text } = z
-      .object({
-        role: z.enum(['author', 'reviewer']),
-        text: z.string().trim().min(1).max(60000),
-      })
-      .strict()
-      .parse(request.body);
-    if (role === 'author')
-      throw new AppError(
-        'contact_daddy',
-        'Send instructions to daddy; writers receive tasks only from him',
-        403,
-      );
-    const task = store.getTask(request.params.id);
-    if (task.groupId && store.getGroup(task.groupId).orchestrated)
-      return daddy.chat(task.groupId, text);
-    return engine.chat(request.params.id, role, text);
-  });
-  app.post<{ Params: { id: string } }>('/api/tasks/:id/policy', async (request) => {
-    const { policy } = z.object({ policy: policySchema }).strict().parse(request.body);
-    return engine.lock(request.params.id, async () => {
-      const task = store.getTask(request.params.id);
-      if (store.busy(task.id))
-        throw new AppError(
-          'task_busy',
-          'Wait for the active session or pause before changing its permissions',
-        );
-      const previous = task.policy;
-      task.policy = { ...previous, ...policy };
-      store.saveTask(task);
-      store.event(task.id, 'human.policy_changed', {
-        previous,
-        current: task.policy,
-      });
-      return task;
-    });
-  });
   const eventStreams = new Set<() => void>();
   app.get('/api/events', async (request, reply) => {
     reply.hijack();
@@ -698,7 +586,7 @@ export async function buildApp(options: ServerOptions) {
         () =>
           (options.telegramFactory ?? Telegram.create)(
             engine,
-            config.telegram.tokenFile ?? join(homedir(), '.tokens/reviewloop-telegram'),
+            config.telegram.tokenFile ?? join(homedir(), '.tokens/daddyloop-telegram'),
             publicOrigin,
             telegramController.signal,
           ),
@@ -733,5 +621,5 @@ export async function buildApp(options: ServerOptions) {
     worker.start();
     daddy.start();
   }
-  return { app, engine, worker, store, daddy, projects };
+  return { app, engine, worker, store, daddy, workspaces };
 }

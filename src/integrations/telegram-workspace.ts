@@ -4,11 +4,11 @@ import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from 
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
 import { TelegramText, type TelegramCard } from './telegram-text.js';
-import { daddyHome, projectPicker, daddyBoard, poolCard } from './daddy-cards.js';
+import { daddyHome, workspacePicker, daddyBoard, poolCard } from './daddy-cards.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
-import type { Project } from '../core/types.js';
-import type { WorkspaceInput } from '../core/projects.js';
+import type { Workspace } from '../core/types.js';
+import type { RepositorySelection } from '../core/workspace-registry.js';
 import type { UsageBackend, ResetPlan } from '../core/usage.js';
 import { usageLines, resetOutcomeText } from '../client/usage.js';
 import { VoiceInbox, type VoiceRoute, type VoiceJob } from './voice-inbox.js';
@@ -24,9 +24,9 @@ type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
   ownerId: number;
-  project: Project;
+  workspace: Workspace;
   groupId?: string;
-  input?: WorkspaceInput;
+  input?: RepositorySelection;
   expiresAt: string;
   creationExpiresAt?: string;
 };
@@ -80,7 +80,7 @@ export class TelegramWorkspace {
         : this.groupAt(destination);
     if (!id) return;
     const group = this.authorize(destination, id),
-      next = this.store.setting<{ project: Project; expiresAt: string }>(
+      next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(
         this.repoKey(destination, id),
       );
     if (next && next.expiresAt <= now())
@@ -90,7 +90,7 @@ export class TelegramWorkspace {
       ownerId: pair.userId,
       groupId: id,
       generation: group.generation,
-      project: next?.project ?? this.daddy.board(id).project!,
+      workspace: next?.workspace ?? this.daddy.board(id).workspace!,
       locale: this.locale(),
     };
   }
@@ -111,7 +111,7 @@ export class TelegramWorkspace {
         'The session changed while recognizing the voice. Send it again to continue.',
       );
     const text = job.fileId ? '🎙️ ' + job.text : job.text!;
-    this.daddy.chat(group.id, text, receipt, job.route.project);
+    this.daddy.chat(group.id, text, receipt, job.route.workspace);
     if (job.fileId)
       await this.api
         .send(
@@ -132,7 +132,7 @@ export class TelegramWorkspace {
     return this.store.setting<Pair>('telegram.pairing');
   }
   room() {
-    const room = this.store.setting<Room>('telegram.workspace');
+    const room = this.store.setting<Room>('telegram.group');
     return room?.ownerId === this.pair()?.userId ? room : undefined;
   }
   private key(room: Room, groupId: string) {
@@ -324,7 +324,7 @@ export class TelegramWorkspace {
       throw new Error(this.t('Group selection expired. Send /group again.'));
     const room: Room = { chatId: shared.chat_id, title: chat.title, ownerId: pair.userId };
     this.store.transaction(() => {
-      this.store.setSetting('telegram.workspace', room);
+      this.store.setSetting('telegram.group', room);
       this.store.setSetting('telegram.workspaceRequest', null);
     });
     await this.api.call('sendMessage', {
@@ -389,13 +389,13 @@ export class TelegramWorkspace {
       ],
     });
   }
-  private async models(groupId: string, destination: Destination, role?: 'author' | 'reviewer') {
+  private async models(groupId: string, destination: Destination, role?: 'writer' | 'daddy') {
     const group = this.authorize(destination, groupId);
     const text = new TelegramText()
       .add('🤖 ' + this.t('Models'), 'bold')
       .add('\n\nDaddy: ')
-      .add(group.reviewer.model ?? this.t('Codex configuration'), 'code')
-      .add(' / ' + (group.reviewer.effort ?? this.t('Default')))
+      .add(group.daddy.model ?? this.t('Codex configuration'), 'code')
+      .add(' / ' + (group.daddy.effort ?? this.t('Default')))
       .add('\n' + this.t('New writers') + ': ')
       .add(group.writer?.model ?? this.t('Codex configuration'), 'code')
       .add(' / ' + (group.writer?.effort ?? this.t('Default')));
@@ -404,8 +404,8 @@ export class TelegramWorkspace {
         ...text,
         buttons: [
           [
-            { text: 'daddy', callback_data: `dad:models:${groupId}:reviewer` },
-            { text: this.t('New writers'), callback_data: `dad:models:${groupId}:author` },
+            { text: 'daddy', callback_data: `dad:models:${groupId}:daddy` },
+            { text: this.t('New writers'), callback_data: `dad:models:${groupId}:writer` },
           ],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
         ],
@@ -431,7 +431,7 @@ export class TelegramWorkspace {
     });
     await this.api.send(destination, { ...text, buttons });
   }
-  private async newSession(projectId: string, destination: Destination, project?: Project) {
+  private async newSession(workspaceId: string, destination: Destination, workspace?: Workspace) {
     const pending = this.store.setting<{ text?: string; expiresAt: string }>(
       this.creationKey(destination),
     );
@@ -439,8 +439,8 @@ export class TelegramWorkspace {
       throw new Error(this.t('This selection expired. Start a new session again.'));
     const text = pending && pending.expiresAt > now() ? pending.text : undefined;
     const group = this.daddy.create({
-      projectId,
-      project,
+      workspaceId,
+      workspace,
       title: text?.split('\n')[0].slice(0, 80),
       requirements: text,
     });
@@ -481,11 +481,12 @@ export class TelegramWorkspace {
     };
     const title = new TelegramText()
       .add('📁 ' + this.t('Repository for this request'), 'bold')
-      .add('\n\n' + choice.project.name)
+      .add('\n\n' + choice.workspace.name)
       .add(
         '\n' +
           (choice.input?.path ??
-            choice.project.repoPath + (choice.project.scope ? '/' + choice.project.scope : '')),
+            choice.workspace.repoPath +
+              (choice.workspace.scope ? '/' + choice.workspace.scope : '')),
         'code',
       )
       .add(
@@ -513,8 +514,8 @@ export class TelegramWorkspace {
         : []),
     ];
     if (browse) {
-      const listing = await this.daddy.projects.browse(
-        choice.input?.path ?? choice.project.repoPath,
+      const listing = await this.daddy.workspaces.browse(
+        choice.input?.path ?? choice.workspace.repoPath,
       );
       if (listing.parent)
         buttons.push([
@@ -554,10 +555,10 @@ export class TelegramWorkspace {
       throw new Error(this.t('This selection expired. Start a new session again.'));
     if (match[2] === 'browse') await this.repository(choice, true);
     else {
-      const selected = await this.daddy.projects.selection(choice.project, choice.input);
+      const selected = await this.daddy.workspaces.selection(choice.workspace, choice.input);
       if (choice.groupId) {
         this.store.setSetting(this.repoKey(destination, choice.groupId), {
-          project: selected,
+          workspace: selected,
           expiresAt: choice.expiresAt,
         });
         await this.api.send(
@@ -570,13 +571,13 @@ export class TelegramWorkspace {
                 this.t('Send the task now. The following message will use the defaults again.'),
             ),
         );
-      } else await this.newSession(choice.project.id, destination, selected);
+      } else await this.newSession(choice.workspace.id, destination, selected);
       this.store.setSetting(key, null);
     }
     return true;
   }
   private async discover(destination: Destination) {
-    const suggestions = (await this.daddy.projects.suggestions()).slice(0, 20);
+    const suggestions = (await this.daddy.workspaces.suggestions()).slice(0, 20);
     const text = new TelegramText().add('📁 ' + this.t('Workspaces on this server'), 'bold');
     const buttons = suggestions.map((item) => {
       const id = 'dad-workspace:' + randomBytes(12).toString('base64url');
@@ -667,13 +668,6 @@ export class TelegramWorkspace {
   private creationKey(destination: Destination) {
     const pair = this.pair()!,
       key = `telegram.newSession:${pair.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
-    if (destination.chatId === pair.chatId && !this.store.setting(key)) {
-      const old = this.store.setting<{ expiresAt: string }>('telegram.pendingDaddy');
-      if (old && old.expiresAt > now()) {
-        this.store.setSetting(key, old);
-        this.store.setSetting('telegram.pendingDaddy', null);
-      }
-    }
     return key;
   }
   async callback(data: string, destination: Destination): Promise<boolean> {
@@ -697,7 +691,6 @@ export class TelegramWorkspace {
       await this.api.send(destination, notificationsCard(value, this.locale()));
       return true;
     }
-    if (data === 'dad:projects') data = 'dad:workspaces';
     if (data.startsWith('dad:limits')) {
       await this.limits(destination, data);
       return true;
@@ -710,7 +703,7 @@ export class TelegramWorkspace {
         destination,
         ownerId: this.pair()!.userId,
         groupId: repo[1],
-        project: this.daddy.board(repo[1]).project!,
+        workspace: this.daddy.board(repo[1]).workspace!,
         expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
       });
       return true;
@@ -723,7 +716,7 @@ export class TelegramWorkspace {
         throw new Error(this.t('This model selection expired. Open Models again.'));
       const action = JSON.parse(row.data as string) as {
         groupId: string;
-        role: 'author' | 'reviewer';
+        role: 'writer' | 'daddy';
         model: { id: string; name: string; efforts: string[]; defaultEffort: string };
         chatId: number;
         threadId?: number;
@@ -750,8 +743,8 @@ export class TelegramWorkspace {
         const effort = action.model.efforts[Number(modelAction[2])];
         if (!effort) throw new Error('Unsupported reasoning effort');
         const profiles: AgentProfiles = {
-          reviewer: group.reviewer,
-          author: group.writer ?? { engine: 'codex' },
+          daddy: group.daddy,
+          writer: group.writer ?? { engine: 'codex' },
         };
         profiles[action.role] = { engine: 'codex', model: action.model.id, effort };
         await this.daddy.settings(group.id, { profiles });
@@ -760,7 +753,7 @@ export class TelegramWorkspace {
       }
       return true;
     }
-    if (data.startsWith('dad-workspace:') || data.startsWith('dad-project:')) {
+    if (data.startsWith('dad-workspace:')) {
       const row = this.store.db
         .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
         .get(data);
@@ -779,13 +772,16 @@ export class TelegramWorkspace {
         action.expiresAt <= now()
       )
         throw new Error(this.t('This selection expired. Open Workspaces again.'));
-      const project = await this.daddy.projects.register({ name: action.name, path: action.path });
+      const workspace = await this.daddy.workspaces.register({
+        name: action.name,
+        path: action.path,
+      });
       this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(data);
-      await this.api.send(destination, projectPicker(this.locale(), [project]));
+      await this.api.send(destination, workspacePicker(this.locale(), [workspace]));
       return true;
     }
     if (!data.startsWith('dad:')) return false;
-    if (data === 'dad:workspace' || data === 'dad:group') {
+    if (data === 'dad:group') {
       if (destination.chatId !== this.pair()?.chatId) throw new Error('Use the private bot chat');
       await this.setup();
       return true;
@@ -803,12 +799,15 @@ export class TelegramWorkspace {
         this.store.setSetting(this.creationKey(destination), {
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         });
-      await this.api.send(destination, projectPicker(this.locale(), this.daddy.projects.list()));
+      await this.api.send(
+        destination,
+        workspacePicker(this.locale(), this.daddy.workspaces.list()),
+      );
       return true;
     }
-    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(author|reviewer))?$/);
+    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(writer|daddy))?$/);
     if (models) {
-      await this.models(models[1], destination, models[2] as 'author' | 'reviewer' | undefined);
+      await this.models(models[1], destination, models[2] as 'writer' | 'daddy' | undefined);
       return true;
     }
     const match = data.match(/^dad:(new|open|add|pause|resume|pool):([a-f0-9-]{36})(?::([1-8]))?$/);
@@ -820,10 +819,10 @@ export class TelegramWorkspace {
         prior && prior.expiresAt > now()
           ? prior
           : { expiresAt: new Date(Date.now() + 10 * 60000).toISOString() };
-      this.store.setSetting(this.creationKey(destination), { ...pending, projectId: id });
+      this.store.setSetting(this.creationKey(destination), { ...pending, workspaceId: id });
       await this.repository({
         destination,
-        project: this.daddy.projects.get(id),
+        workspace: this.daddy.workspaces.get(id),
         ownerId: this.pair()!.userId,
         expiresAt: pending.expiresAt,
         creationExpiresAt: pending.expiresAt,
@@ -884,7 +883,6 @@ export class TelegramWorkspace {
         if (
           !callback.data?.startsWith('dad:') &&
           !callback.data?.startsWith('dad-workspace:') &&
-          !callback.data?.startsWith('dad-project:') &&
           !callback.data?.startsWith('dad-model:') &&
           !callback.data?.startsWith('notifications:') &&
           !callback.data?.startsWith('language:')
@@ -948,7 +946,7 @@ export class TelegramWorkspace {
         });
         return true;
       }
-      if ((text === '/group' || text === '/workspace') && !privateChat) {
+      if (text === '/group' && !privateChat) {
         await this.api.send(
           destination,
           this.t('Send /group in the private bot chat to connect a Telegram group.'),
@@ -959,15 +957,15 @@ export class TelegramWorkspace {
         await this.limits(destination);
         return true;
       }
-      if ((text === '/group' || text === '/workspace') && privateChat) {
+      if (text === '/group' && privateChat) {
         await this.setup();
         return true;
       }
-      if (['/sessions', '/tasks', '/start', '/start daddy', '/help'].includes(text)) {
+      if (['/sessions', '/start', '/start daddy', '/help'].includes(text)) {
         await this.home(destination);
         return true;
       }
-      if (/^\/new(?:\s|$)/.test(text) || text === '/workspaces' || text === '/projects') {
+      if (/^\/new(?:\s|$)/.test(text) || text === '/workspaces') {
         if (text.startsWith('/new')) {
           this.store.setSetting(this.creationKey(destination), {
             text: text.slice(4).trim() || undefined,
@@ -975,7 +973,7 @@ export class TelegramWorkspace {
           });
           await this.api.send(
             destination,
-            projectPicker(this.locale(), this.daddy.projects.list()),
+            workspacePicker(this.locale(), this.daddy.workspaces.list()),
           );
           return true;
         }
@@ -1009,10 +1007,10 @@ export class TelegramWorkspace {
       const pool = text.match(/^\/pool(?:\s+([1-8]))?$/);
       const repo = text.match(/^\/repo(?:\s+(.+))?$/);
       if (repo) {
-        const pending = this.store.setting<{ projectId?: string; expiresAt: string }>(
+        const pending = this.store.setting<{ workspaceId?: string; expiresAt: string }>(
           this.creationKey(destination),
         );
-        const creating = pending && pending.expiresAt > now() && pending.projectId;
+        const creating = pending && pending.expiresAt > now() && pending.workspaceId;
         if (repo[1] === 'default' && groupId && !creating) {
           this.authorize(destination, groupId);
           this.store.setSetting(this.repoKey(destination, groupId), null);
@@ -1025,9 +1023,9 @@ export class TelegramWorkspace {
           destination,
           ownerId: pair.userId,
           groupId: creating ? undefined : groupId,
-          project: creating
-            ? this.daddy.projects.get(creating)
-            : this.daddy.board(groupId!).project!,
+          workspace: creating
+            ? this.daddy.workspaces.get(creating)
+            : this.daddy.board(groupId!).workspace!,
           input: repo[1] && repo[1] !== 'default' ? { path: repo[1] } : undefined,
           creationExpiresAt: creating ? pending!.expiresAt : undefined,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
@@ -1069,7 +1067,10 @@ export class TelegramWorkspace {
           text,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         });
-        await this.api.send(destination, projectPicker(this.locale(), this.daddy.projects.list()));
+        await this.api.send(
+          destination,
+          workspacePicker(this.locale(), this.daddy.workspaces.list()),
+        );
         return true;
       }
       if (!groupId) {
@@ -1097,12 +1098,12 @@ export class TelegramWorkspace {
       const receipt = `telegram:${chat.id}:${message?.message_id ?? update.update_id}`;
       if (this.store.setting(`daddy.receipt:${receipt}`)) return true;
       const nextKey = this.repoKey(destination, groupId),
-        next = this.store.setting<{ project: Project; expiresAt: string }>(nextKey);
+        next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(nextKey);
       if (next && next.expiresAt <= now()) {
         this.store.setSetting(nextKey, null);
         throw new Error(this.t('This selection expired. Choose the repository again.'));
       }
-      this.daddy.chat(groupId, text, receipt, next?.project);
+      this.daddy.chat(groupId, text, receipt, next?.workspace);
       if (next) this.store.setSetting(nextKey, null);
       return true;
     } catch (error) {

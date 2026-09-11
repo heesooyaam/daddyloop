@@ -11,7 +11,7 @@ import {
   type AgentProfiles,
   type PRRef,
   type Task,
-  type Project,
+  type Workspace,
   type TicketRef,
 } from './types.js';
 import { TicketReader } from '../integrations/tickets.js';
@@ -38,7 +38,7 @@ export class TicketWorkflow {
     autoPush?: boolean;
     groupId?: string;
     groupGeneration?: number;
-    projectId?: string;
+    workspaceId?: string;
     scope?: string;
     createdByAction?: string;
   }) {
@@ -58,14 +58,14 @@ export class TicketWorkflow {
       autoPush: input.autoPush,
       groupId: input.groupId,
       groupGeneration: input.groupGeneration,
-      projectId: input.projectId,
+      workspaceId: input.workspaceId,
       scope: input.scope,
       createdByAction: input.createdByAction,
     });
     return task;
   }
   async local(input: {
-    project: Project;
+    workspace: Workspace;
     groupId: string;
     groupGeneration: number;
     title: string;
@@ -74,25 +74,29 @@ export class TicketWorkflow {
     dependsOn?: string[];
   }) {
     const id = randomUUID(),
-      project = input.project;
-    const url = `https://${project.host}/${project.provider === 'arcadia' ? 'arc' : project.repo}#daddyloop-${id}`;
+      workspace = input.workspace;
+    const url = `https://${workspace.host}/${workspace.provider === 'arcadia' ? 'arc' : workspace.repo}#daddyloop-${id}`;
     const ref: TicketRef = {
       kind: 'ticket',
-      provider: project.provider,
-      host: project.host,
-      repo: project.repo,
+      provider: workspace.provider,
+      host: workspace.host,
+      repo: workspace.repo,
       number: 0,
       key: `DADDY-${id.slice(0, 8)}`,
       url,
     };
-    const repository = await this.workspaces.describeTicket(project.repoPath, ref, project.base);
+    const repository = await this.workspaces.describeTicket(
+      workspace.repoPath,
+      ref,
+      workspace.base,
+    );
     return this.engine.createTicket({
       ...repository,
       id,
       groupId: input.groupId,
       groupGeneration: input.groupGeneration,
-      projectId: project.id,
-      scope: project.scope,
+      workspaceId: workspace.id,
+      scope: workspace.scope,
       createdByAction: input.createdByAction,
       dependsOn: input.dependsOn,
       requirements: input.requirements,
@@ -125,7 +129,7 @@ export class TicketWorkflow {
       if (!['ready_for_review', 'needs_input', 'submitting'].includes(task.state))
         throw new AppError('implementation_required', 'Implementation is not ready for submission');
       const generation = task.generation,
-        marker = `reviewloop:ticket:${task.id}`;
+        marker = `daddyloop:ticket:${task.id}`;
       const title = Array.from(
         `${task.source?.key ?? 'Ticket'}: ${task.title}`.replace(/\s+/g, ' '),
       )
@@ -219,7 +223,7 @@ export class TicketWorkflow {
     };
     if (
       info.hash !== task.pendingAuthorHead ||
-      !info.branch.startsWith(`reviewloop/${task.id}`) ||
+      !info.branch.startsWith(`daddyloop/${task.id}`) ||
       (await this.arc.native(['status', '--short'], lease.mount))
     )
       throw new Error('The saved Arc implementation changed; inspect it before submitting');
@@ -294,7 +298,7 @@ export class TicketWorkflow {
         ],
         lease.mount,
       );
-      const ref = await this.findPR(task, `reviewloop:ticket:${task.id}`, info.user_login);
+      const ref = await this.findPR(task, `daddyloop:ticket:${task.id}`, info.user_login);
       if (!ref)
         throw new Error(
           'Arc created a PR but its identity could not be verified; submit again to reconcile it',
@@ -308,7 +312,7 @@ export class TicketWorkflow {
     if (task.ref.provider === 'gitlab') {
       const api = this.reader.gitlab(task.ref),
         path = `/projects/${encodeURIComponent(task.ref.repo)}`;
-      const project = await api.request<{ id: number }>('GET', path);
+      const workspace = await api.request<{ id: number }>('GET', path);
       const pulls = await api.pages<{
         iid: number;
         web_url: string;
@@ -322,7 +326,7 @@ export class TicketWorkflow {
       const matches = pulls.filter(
         (mr) =>
           String(mr.author.id) === owner &&
-          mr.source_project_id === project.id &&
+          mr.source_project_id === workspace.id &&
           mr.source_branch === task.ticketRepository!.branch &&
           mr.description?.includes(`<!-- ${marker} -->`),
       );

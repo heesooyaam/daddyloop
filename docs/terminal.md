@@ -1,6 +1,6 @@
 # daddyloop CLI
 
-Run `daddy` for the full-screen terminal client. `daddyloop` and `reviewctl` are executable aliases. The terminal has one daddy conversation, session selection, a task board, workspace selection and writer/model settings.
+Run `daddy` for the full-screen terminal client. The terminal has one daddy conversation, session selection, a task board, workspace selection and writer/model settings.
 
 ```bash
 daddy workspaces add ~/workspaces/app --name App
@@ -43,4 +43,4 @@ daddy console SESSION_ID
 
 For a remote client, configure the service connection with `daddy connect <https-url>`. Workspaces always refer to directories on the service host, not on the laptop.
 
-Legacy task-level APIs and commands remain for compatibility where applicable, but direct writer chat is rejected. Use `daddy talk` or the daddy conversation for instructions.
+Use `daddy talk` or the daddy conversation for instructions. Task details are read-only outside the session controls.

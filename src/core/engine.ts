@@ -62,7 +62,7 @@ export class Engine {
     authorThreadId?: string;
     agents?: AgentProfiles;
     groupId?: string;
-    projectId?: string;
+    workspaceId?: string;
     scope?: string;
     createdByAction?: string;
     groupGeneration?: number;
@@ -111,14 +111,14 @@ export class Engine {
       authorThreadId: input.authorThreadId,
       planTaskId: input.planTaskId,
       groupId: group?.id,
-      projectId: input.projectId ?? group?.projectId,
+      workspaceId: input.workspaceId ?? group?.workspaceId,
       scope: input.scope,
       createdByAction: input.createdByAction,
       agents: {
         ...this.defaultAgents(),
-        ...(group?.writer ? { author: group.writer } : {}),
+        ...(group?.writer ? { writer: group.writer } : {}),
         ...input.agents,
-        ...(group ? { reviewer: group.reviewer } : {}),
+        ...(group ? { daddy: group.daddy } : {}),
       },
     };
     if (input.planTaskId) {
@@ -305,7 +305,7 @@ export class Engine {
           .update(
             JSON.stringify(
               snapshot.comments.map((c) => ({
-                body: c.body.replace(/<!-- reviewloop:[^>]+ -->/g, ''),
+                body: c.body.replace(/<!-- daddyloop:[^>]+ -->/g, ''),
                 location: c.location,
               })),
             ),
@@ -733,7 +733,7 @@ export class Engine {
     return {
       ...this.defaultAgents(),
       ...task.agents,
-      ...(task.groupId ? { reviewer: this.store.getGroup(task.groupId).reviewer } : {}),
+      ...(task.groupId ? { daddy: this.store.getGroup(task.groupId).daddy } : {}),
     };
   }
   setDefaultAgents(profiles: AgentProfiles) {
@@ -762,7 +762,7 @@ export class Engine {
               'Wait for the shared reviewer queue to become idle before changing its model',
             );
           const group = this.store.getGroup(task.groupId);
-          group.reviewer = profile;
+          group.daddy = profile;
           group.generation++;
           this.store.saveGroup(group);
         } else {
@@ -771,7 +771,10 @@ export class Engine {
               'task_busy',
               'Wait for this task to become idle before changing its model',
             );
-          task.agents = { ...this.effectiveAgents(task), [role]: profile };
+          task.agents = {
+            ...this.effectiveAgents(task),
+            [role === 'author' ? 'writer' : 'daddy']: profile,
+          };
           task.contextVersion++;
           task.generation++;
           this.store.saveTask(task);
@@ -797,7 +800,7 @@ export class Engine {
     autoPush?: boolean;
     groupId?: string;
     groupGeneration?: number;
-    projectId?: string;
+    workspaceId?: string;
     scope?: string;
     createdByAction?: string;
     dependsOn?: string[];
@@ -841,7 +844,7 @@ export class Engine {
           title: parent.title,
           requirements: parent.requirements,
           source: parent.source,
-          reviewer: this.effectiveAgents(parent).reviewer,
+          daddy: this.effectiveAgents(parent).daddy,
           reviewerThreadId: parent.reviewerThreadId,
           generation: 1,
           createdAt: now(),
@@ -855,16 +858,16 @@ export class Engine {
           title: input.source.title,
           source: input.source,
           requirements: input.requirements ?? (input.source.body || input.source.title),
-          reviewer: input.agents?.reviewer ?? this.defaultAgents().reviewer,
+          daddy: input.agents?.daddy ?? this.defaultAgents().daddy,
           generation: 1,
           createdAt: now(),
           updatedAt: now(),
         };
       if (
         (parent || input.groupId) &&
-        input.agents?.reviewer &&
+        input.agents?.daddy &&
         (['engine', 'model', 'effort'] as const).some(
-          (key) => input.agents!.reviewer[key] !== group.reviewer[key],
+          (key) => input.agents!.daddy[key] !== group.daddy[key],
         )
       )
         throw new AppError(
@@ -882,13 +885,13 @@ export class Engine {
         requirements: input.requirements ?? (input.source.body || input.source.title),
         parentTaskId: parent?.id,
         groupId: group.id,
-        projectId: input.projectId ?? group.projectId,
+        workspaceId: input.workspaceId ?? group.workspaceId,
         scope: input.scope,
         createdByAction: input.createdByAction,
         dependsOn: input.dependsOn,
         agents: {
-          author: input.agents?.author ?? group.writer ?? this.defaultAgents().author,
-          reviewer: group.reviewer,
+          writer: input.agents?.writer ?? group.writer ?? this.defaultAgents().writer,
+          daddy: group.daddy,
         },
         policy: {
           ...defaultPolicy,
@@ -913,7 +916,7 @@ export class Engine {
         createdAt: now(),
         updatedAt: now(),
       };
-      task.ticketRepository!.branch = `reviewloop/${task.id}`;
+      task.ticketRepository!.branch = `daddyloop/${task.id}`;
       group.rootTaskId ||= task.id;
       this.store.transaction(() => {
         this.store.saveGroup(group);
@@ -977,7 +980,7 @@ export class Engine {
     if (this.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get('ticket-submit:' + id))
       throw new AppError(
         'submission_pending',
-        `Use Submit for review in the web panel or reviewctl submit ${id} to reconcile the existing PR.`,
+        `Open the task report in the daddy session and use Submit for review to reconcile the existing PR.`,
       );
     if (task.state === 'paused' || this.store.busy(id))
       throw new AppError('task_busy', 'Resume or wait for the current task before retrying');

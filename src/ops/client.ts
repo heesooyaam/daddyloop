@@ -13,7 +13,7 @@ export async function api<T = unknown>(
   } = {},
 ): Promise<T> {
   const config = loadConfig(),
-    url = validateServerUrl(options.url ?? process.env.REVIEWLOOP_URL ?? config.serverUrl);
+    url = validateServerUrl(options.url ?? process.env.DADDYLOOP_URL ?? config.serverUrl);
   const tokenFile =
     options.tokenFile ??
     config.clientTokenFile ??

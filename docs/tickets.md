@@ -3,12 +3,12 @@
 A daddy session owns a shared goal, conversation, reviewer profile and writer pool. Add a ticket by sending its link or key in that session:
 
 ```bash
-daddy new --project App "https://github.com/acme/app/issues/42"
+daddy new --workspace App "https://github.com/acme/app/issues/42"
 daddy talk SESSION_ID "Also handle https://github.com/acme/app/issues/43"
 daddy pool SESSION_ID 3
 ```
 
-GitHub issues and Yandex Tracker tickets are read as source material, including their descriptions and comments. daddy can also create local work items from a natural-language goal or attach an existing GitHub/GitLab/Arcadia PR/MR for review. A registered project supplies the server repository and starting directory.
+GitHub issues and Yandex Tracker tickets are read as source material, including their descriptions and comments. daddy can also create local work items from a natural-language goal or attach an existing GitHub/GitLab/Arcadia PR/MR for review. A registered workspace supplies the server repository and starting directory.
 
 Import does not start a writer automatically in a daddy session. daddy examines the goal, sets prerequisites where needed, and dispatches appropriate work. The backend enforces ownership, writer limits and dependency cycles. Per-task writer models can differ; choices are validated against the actual Codex catalogue.
 

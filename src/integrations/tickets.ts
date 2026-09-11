@@ -40,7 +40,7 @@ export function parseTicket(input: string): TicketAddress {
   if (
     !match ||
     !Number.isSafeInteger(Number(match[2])) ||
-    (url.hostname !== 'github.com' && url.hostname !== process.env.REVIEWLOOP_GITHUB_HOST)
+    (url.hostname !== 'github.com' && url.hostname !== process.env.DADDYLOOP_GITHUB_HOST)
   )
     throw new AppError('invalid_ticket', 'Use a GitHub issue URL or a Yandex Tracker ticket', 400);
   match[1] = match[1].toLowerCase();
@@ -103,7 +103,7 @@ export class TicketReader {
   github(address: Pick<TicketAddress, 'host'>) {
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'reviewloop',
+      'User-Agent': 'daddyloop',
     };
     try {
       headers.Authorization = `Bearer ${this.githubCredential(address.host)}`;

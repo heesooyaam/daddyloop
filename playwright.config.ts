@@ -12,7 +12,7 @@ export default defineConfig({
     launchOptions: { args: ['--disable-dev-shm-usage'] },
   },
   webServer: {
-    env: { REVIEWLOOP_CONFIG: resolve('.reviewloop/e2e/config.json') },
+    env: { DADDYLOOP_CONFIG: resolve('.daddyloop/e2e/config.json') },
     command: 'node tests/e2e/host.mjs',
     url: 'http://127.0.0.1:4318/api/health',
     reuseExistingServer: false,

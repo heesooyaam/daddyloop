@@ -105,7 +105,7 @@ it.each(['malformed', 'exit'])(
 
 it('applies separate role models and efforts on thread start, resume and every turn', async () => {
   const f = await fixture(),
-    dir = mkdtempSync(join(tmpdir(), 'reviewloop-protocol-test-'));
+    dir = mkdtempSync(join(tmpdir(), 'daddyloop-protocol-test-'));
   try {
     for (const role of ['author', 'reviewer'] as const) {
       const model = role === 'author' ? 'gpt-5.6-sol' : 'gpt-6-astra',

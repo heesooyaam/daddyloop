@@ -31,10 +31,10 @@ export function resources(
         usage: 'memory.current',
         inactive: 'inactive_file',
       });
-    const legacy = groups.find((parts) => parts[1].split(',').includes('memory'));
-    if (legacy)
+    const memoryGroup = groups.find((parts) => parts[1].split(',').includes('memory'));
+    if (memoryGroup)
       candidates.push({
-        root: `/sys/fs/cgroup/memory${legacy[2]}`,
+        root: `/sys/fs/cgroup/memory${memoryGroup[2]}`,
         limit: 'memory.limit_in_bytes',
         usage: 'memory.usage_in_bytes',
         inactive: 'total_inactive_file',

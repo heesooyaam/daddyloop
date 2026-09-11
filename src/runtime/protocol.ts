@@ -35,7 +35,7 @@ export class CodexConnection extends EventEmitter {
     const env = { ...process.env };
     for (const name of Object.keys(env))
       if (
-        /^(GITHUB_TOKEN|GITLAB_TOKEN|GH_TOKEN|GLAB_TOKEN|ARC_TOKEN|ARC_OAUTH_TOKEN|TRACKER_TOKEN|TRACKER_OAUTH_TOKEN|TELEGRAM_BOT_TOKEN|REVIEWLOOP_.*TOKEN.*|GIT_CONFIG_.*)$/.test(
+        /^(GITHUB_TOKEN|GITLAB_TOKEN|GH_TOKEN|GLAB_TOKEN|ARC_TOKEN|ARC_OAUTH_TOKEN|TRACKER_TOKEN|TRACKER_OAUTH_TOKEN|TELEGRAM_BOT_TOKEN|DADDYLOOP_.*TOKEN.*|GIT_CONFIG_.*)$/.test(
           name,
         )
       )
@@ -81,7 +81,7 @@ export class CodexConnection extends EventEmitter {
       this.fail(new AppError('codex_exited', `Codex exited (${code ?? signal})`, 502));
     });
     const initialized = await this.request<{ userAgent?: string }>('initialize', {
-      clientInfo: { name: 'reviewloop', title: 'daddyloop', version: VERSION },
+      clientInfo: { name: 'daddyloop', title: 'daddyloop', version: VERSION },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: 'initialized', params: {} });

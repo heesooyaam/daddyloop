@@ -25,14 +25,14 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
-import type { AgentProfiles, Message, Project, Task } from '../core/types.js';
+import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
 import type { ModelOption } from '../core/agents.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
-import { NotificationsForm } from './planning.js';
+import { NotificationsForm } from './notifications.js';
 import './daddy.css';
-import type { WorkspaceInput } from '../core/projects.js';
+import type { RepositorySelection } from '../core/workspace-registry.js';
 import { WorkspaceFields } from './workspace-fields.js';
 import { UsagePanel } from './usage.js';
 import { usageSummary } from '../client/usage.js';
@@ -215,7 +215,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               <span>
                 <strong>{group.title}</strong>
                 <small>
-                  {group.project?.name} · {group.complete}/{group.total} {t('done')}
+                  {group.workspace?.name} · {group.complete}/{group.total} {t('done')}
                 </small>
               </span>
               {group.writers.active > 0 && (
@@ -233,7 +233,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <button onClick={() => setModal('workspaces')}>
             <FolderGit2 size={17} />
             {t('Workspaces')}
-            <span>{state.projects.length}</span>
+            <span>{state.workspaces.length}</span>
           </button>
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
@@ -248,10 +248,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Limits')}
             {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
           </button>
-          <a className="daddy-history-link" href="?legacy=1">
-            {t('Previous work history')}
-            <ArrowUpRight size={13} />
-          </a>
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -286,7 +282,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <Menu size={20} />
           </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.project?.name ?? 'daddyloop'}</span>
+            <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
             <h1>{board?.group.title ?? t('What are we building?')}</h1>
           </div>
           {board && (
@@ -358,10 +354,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                         <time>{stamp(message.at)}</time>
                       </div>
                       <div className="daddy-prose">
-                        {message.project && (
+                        {message.workspace && (
                           <small className="daddy-muted">
-                            {message.project.repoPath}
-                            {message.project.scope ? '/' + message.project.scope : ''}
+                            {message.workspace.repoPath}
+                            {message.workspace.scope ? '/' + message.workspace.scope : ''}
                           </small>
                         )}
                         <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
@@ -388,9 +384,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   <WorkspaceFields
                     key={board.group.id}
                     api={model.api}
-                    project={board.project!}
-                    value={state.workspaces[state.selected]}
-                    onChange={(value) => model.workspace(value)}
+                    workspace={board.workspace!}
+                    value={state.overrides[state.selected]}
+                    onChange={(value) => model.repository(value)}
                     compact
                   />
                   <textarea
@@ -507,8 +503,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       <strong>{task.title}</strong>
                       <footer>
                         <span>
-                          {state.projects.find((project) => project.id === task.projectId)?.name ??
-                            board.project?.name}
+                          {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
+                            ?.name ?? board.workspace?.name}
                         </span>
                         {task.ref.kind !== 'ticket' && <GitPullRequest size={14} />}
                       </footer>
@@ -541,8 +537,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   <span>
                     {t('One daddy. Shared context.')}
                     <small>
-                      {board.group.reviewer.model ?? t('Codex configuration')}{' '}
-                      {board.group.reviewer.effort && '· ' + board.group.reviewer.effort}
+                      {board.group.daddy.model ?? t('Codex configuration')}{' '}
+                      {board.group.daddy.effort && '· ' + board.group.daddy.effort}
                     </small>
                   </span>
                 </div>
@@ -565,10 +561,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </p>
             <button
               className="daddy-button primary"
-              onClick={() => setModal(state.projects.length ? 'new' : 'workspaces')}
+              onClick={() => setModal(state.workspaces.length ? 'new' : 'workspaces')}
             >
               <Plus size={17} />
-              {t(state.projects.length ? 'Start a session' : 'Add your first workspace')}
+              {t(state.workspaces.length ? 'Start a session' : 'Add your first workspace')}
             </button>
             <div className="daddy-welcome-steps">
               <span>
@@ -590,12 +586,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       {modal === 'new' && (
         <Dialog title={t('New daddy session')} onClose={() => setModal(null)}>
           <NewSession
-            projects={state.projects}
+            workspaces={state.workspaces}
             busy={state.busy}
-            onProjects={() => setModal('workspaces')}
+            onWorkspaces={() => setModal('workspaces')}
             api={model.api}
-            onCreate={async (projectId, message, title, workspace) => {
-              await model.create(projectId, message, title, workspace);
+            onCreate={async (workspaceId, message, title, repository) => {
+              await model.create(workspaceId, message, title, repository);
               setModal(null);
               setPane('chat');
               setMenu(false);
@@ -607,7 +603,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <Dialog title={t('Workspaces on this server')} onClose={() => setModal(null)} wide>
           <ProjectManager
             api={api}
-            projects={state.projects}
+            workspaces={state.workspaces}
             onSaved={() => void model.refresh()}
           />
         </Dialog>
@@ -643,7 +639,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <Dialog title={t('Notifications and Telegram')} onClose={() => setModal(null)}>
           <div className="daddy-telegram-setup">
             <strong>
-              {state.status?.telegram.workspace?.title ?? t('One topic per daddy session')}
+              {state.status?.telegram.group?.title ?? t('One topic per daddy session')}
             </strong>
             <p>
               {t(
@@ -674,28 +670,28 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   );
 }
 function NewSession({
-  projects,
+  workspaces,
   busy,
   onCreate,
-  onProjects,
+  onWorkspaces,
   api,
 }: {
-  projects: Project[];
+  workspaces: Workspace[];
   busy: boolean;
   onCreate: (
-    projectId: string,
+    workspaceId: string,
     message?: string,
     title?: string,
-    workspace?: WorkspaceInput,
+    repository?: RepositorySelection,
   ) => Promise<void>;
   api: DaddyApi;
-  onProjects: () => void;
+  onWorkspaces: () => void;
 }) {
   const { t } = useLocale(),
-    [project, setProject] = useState(projects[0]?.id ?? ''),
+    [workspace, setWorkspace] = useState(workspaces[0]?.id ?? ''),
     [message, setMessage] = useState(''),
     [title, setTitle] = useState(''),
-    [workspace, setWorkspace] = useState<WorkspaceInput>(),
+    [repository, setRepository] = useState<RepositorySelection>(),
     [error, setError] = useState('');
   return (
     <form
@@ -704,41 +700,41 @@ function NewSession({
         event.preventDefault();
         setError('');
         void onCreate(
-          project,
+          workspace,
           message,
           title || message.split('\n')[0].slice(0, 80) || undefined,
-          workspace,
+          repository,
         ).catch((error) => setError(error.message));
       }}
     >
       <label>
         {t('Workspace')}
         <select
-          value={project}
+          value={workspace}
           onChange={(event) => {
-            setProject(event.target.value);
-            setWorkspace(undefined);
+            setWorkspace(event.target.value);
+            setRepository(undefined);
           }}
           required
         >
-          {!projects.length && <option value="">{t('Add a workspace first')}</option>}
-          {projects.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
+          {!workspaces.length && <option value="">{t('Add a workspace first')}</option>}
+          {workspaces.map((workspace) => (
+            <option key={workspace.id} value={workspace.id}>
+              {workspace.name}
             </option>
           ))}
         </select>
       </label>
-      {project && (
+      {workspace && (
         <WorkspaceFields
-          key={project}
+          key={workspace}
           api={api}
-          project={projects.find((item) => item.id === project)!}
-          value={workspace}
-          onChange={setWorkspace}
+          workspace={workspaces.find((item) => item.id === workspace)!}
+          value={repository}
+          onChange={setRepository}
         />
       )}
-      <button type="button" className="daddy-text-button" onClick={onProjects}>
+      <button type="button" className="daddy-text-button" onClick={onWorkspaces}>
         <Plus size={15} />
         {t('Register another workspace')}
       </button>
@@ -767,7 +763,7 @@ function NewSession({
           {t(error)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy || !project}>
+      <button className="daddy-button primary" disabled={busy || !workspace}>
         {busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}{' '}
         {t('Start session')}
       </button>
@@ -782,11 +778,11 @@ type DirectoryList = {
 };
 function ProjectManager({
   api,
-  projects,
+  workspaces,
   onSaved,
 }: {
   api: DaddyApi;
-  projects: Project[];
+  workspaces: Workspace[];
   onSaved: () => void;
 }) {
   const { t } = useLocale(),
@@ -850,24 +846,27 @@ function ProjectManager({
           'Register the source folder once. Agents use separate working copies; your checkout and local edits stay in place.',
         )}
       </p>
-      {!!projects.length && (
+      {!!workspaces.length && (
         <div className="daddy-workspace-chips">
-          {projects.map((project) => (
+          {workspaces.map((workspace) => (
             <button
-              key={project.id}
+              key={workspace.id}
               onClick={() => {
-                void browse(project.repoPath + (project.scope ? '/' + project.scope : ''), true);
-                setEditing(project.id);
-                setName(project.name);
-                setBase(project.base ?? '');
+                void browse(
+                  workspace.repoPath + (workspace.scope ? '/' + workspace.scope : ''),
+                  true,
+                );
+                setEditing(workspace.id);
+                setName(workspace.name);
+                setBase(workspace.base ?? '');
               }}
             >
               <FolderGit2 size={15} />
               <span>
-                {project.name}
+                {workspace.name}
                 <small>
-                  {project.vcs === 'arcadia' ? 'Arcadia' : 'Git'} ·{' '}
-                  {project.scope || t('Repository root')}
+                  {workspace.vcs === 'arcadia' ? 'Arcadia' : 'Git'} ·{' '}
+                  {workspace.scope || t('Repository root')}
                 </small>
               </span>
             </button>
@@ -875,7 +874,7 @@ function ProjectManager({
         </div>
       )}
       {!!suggestions.length && (
-        <details className="daddy-suggestions" open={!projects.length}>
+        <details className="daddy-suggestions" open={!workspaces.length}>
           <summary>{t('Detected repositories')}</summary>
           <div>
             {suggestions.map((item) => (
@@ -1002,8 +1001,8 @@ function SessionSettings({
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
-      reviewer: board.group.reviewer,
-      author: board.group.writer ?? { engine: 'codex' },
+      daddy: board.group.daddy,
+      writer: board.group.writer ?? { engine: 'codex' },
     }),
     [models, setModels] = useState<ModelOption[]>([]),
     [error, setError] = useState(''),
@@ -1033,16 +1032,16 @@ function SessionSettings({
           .finally(() => setBusy(false));
       }}
     >
-      {(['reviewer', 'author'] as const).map((role) => {
+      {(['daddy', 'writer'] as const).map((role) => {
         const profile = profiles[role],
           model = models.find((model) => model.id === profile.model);
         return (
           <fieldset key={role}>
-            <legend>{role === 'reviewer' ? 'daddy' : t('New writers')}</legend>
+            <legend>{role === 'daddy' ? 'daddy' : t('New writers')}</legend>
             <label>
               {t('Model')}
               <select
-                aria-label={(role === 'reviewer' ? 'daddy' : t('New writers')) + ' ' + t('Model')}
+                aria-label={(role === 'daddy' ? 'daddy' : t('New writers')) + ' ' + t('Model')}
                 value={profile.model ?? ''}
                 onChange={(event) => {
                   const model = models.find((model) => model.id === event.target.value);

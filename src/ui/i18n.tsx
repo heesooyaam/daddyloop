@@ -9,7 +9,7 @@ const Context = createContext({
 });
 export function LocaleProvider({ children }: { children: ReactNode }) {
   const [value, setValue] = useState<Preferences>(() => ({
-    locale: normalizeLocale(localStorage.getItem('reviewloop.locale') ?? navigator.language),
+    locale: normalizeLocale(localStorage.getItem('daddyloop.locale') ?? navigator.language),
     version: -1,
   }));
   const context = useMemo(
@@ -19,7 +19,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
       adopt: (next: Preferences) =>
         setValue((previous) => {
           if (next.version < previous.version) return previous;
-          localStorage.setItem('reviewloop.locale', next.locale);
+          localStorage.setItem('daddyloop.locale', next.locale);
           document.documentElement.lang = next.locale;
           return next.locale === previous.locale && next.version === previous.version
             ? previous
@@ -27,7 +27,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
         }),
       local: (locale: Locale) =>
         setValue((previous) => {
-          localStorage.setItem('reviewloop.locale', locale);
+          localStorage.setItem('daddyloop.locale', locale);
           document.documentElement.lang = locale;
           return { ...previous, locale };
         }),

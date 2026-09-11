@@ -33,10 +33,10 @@ function transport(
 describe('GitHub draft review contract', () => {
   it('does not adopt another account’s review based only on a matching marker', async () => {
     const http = transport((path) =>
-      path === '/user' ? { id: 7 } : [{ id: 44, body: tag('reviewloop:t:1'), user: { id: 999 } }],
+      path === '/user' ? { id: 7 } : [{ id: 44, body: tag('daddyloop:t:1'), user: { id: 999 } }],
     );
     expect(
-      await new GitHubProvider('github.com', 'fake', http).findReview(ref, 'reviewloop:t:1'),
+      await new GitHubProvider('github.com', 'fake', http).findReview(ref, 'daddyloop:t:1'),
     ).toBeUndefined();
   });
   it('creates a pending review on an explicit revision and publishes as COMMENT', async () => {
@@ -55,10 +55,10 @@ describe('GitHub draft review contract', () => {
       };
     });
     const provider = new GitHubProvider('github.com', 'fake', http);
-    const review = await provider.createReview(ref, revision, 'reviewloop:task:1');
+    const review = await provider.createReview(ref, revision, 'daddyloop:task:1');
     expect(calls[0].body).toEqual({
       commit_id: revision.head,
-      body: 'Review in progress.\n\n<!-- reviewloop:task:1 -->',
+      body: 'Review in progress.\n\n<!-- daddyloop:task:1 -->',
     });
     expect(calls[0].body).not.toHaveProperty('event');
     await provider.publish(ref, review);
@@ -92,7 +92,7 @@ describe('GitHub draft review contract', () => {
       review: ReviewHandle = {
         id: '33',
         nodeId: 'PRR_33',
-        marker: 'reviewloop:task:1',
+        marker: 'daddyloop:task:1',
         revision,
       };
     const body = 'See [contract](https://example.com).\n```suggestion\nreturn null;\n```';
@@ -135,12 +135,12 @@ describe('GitLab draft notes contract', () => {
   const ref = parsePR('https://gitlab.example.com/team/subgroup/service/-/merge_requests/9');
   const review: ReviewHandle = {
     id: '5',
-    marker: 'reviewloop:t:1',
+    marker: 'daddyloop:t:1',
     revision,
     authorId: '7',
     baselineNoteId: 100,
   };
-  it('encodes nested project paths and attaches the correct three diff SHAs', async () => {
+  it('encodes nested workspace paths and attaches the correct three diff SHAs', async () => {
     let received: Record<string, unknown> = {},
       url = '';
     const http = transport((path, _method, body) => {
@@ -152,7 +152,7 @@ describe('GitLab draft notes contract', () => {
       ref,
       review,
       'Repro',
-      'reviewloop:t:1:comment:R1',
+      'daddyloop:t:1:comment:R1',
       { path: 'new.ts', oldPath: 'old.ts', line: 4, side: 'LEFT' },
     );
     expect(url).toContain('team%2Fsubgroup%2Fservice');

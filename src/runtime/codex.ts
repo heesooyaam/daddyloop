@@ -187,7 +187,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
       else {
         const response = await rpc.request<{ thread: { id: string } }>('thread/start', {
           ...common,
-          serviceName: 'reviewloop',
+          serviceName: 'daddyloop',
           dynamicTools: input.tools ?? dynamicTools,
         });
         threadId = response.thread.id;

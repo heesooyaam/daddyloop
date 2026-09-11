@@ -7,7 +7,7 @@ import { CodexUpdater } from '../src/core/codex-updater.js';
 import type { CodexPackage } from '../src/ops/codex-package.js';
 afterEach(() => vi.restoreAllMocks());
 function updaterFixture(store = new Store(':memory:')) {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-updater-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-updater-test-'));
   let executable = '/previous/codex';
   const artifact: CodexPackage = {
     version: '2.0.0',

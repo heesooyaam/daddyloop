@@ -1,20 +1,18 @@
 {
   "name": "daddyloop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
-  "description": "daddy manages a pool of writers, project workspaces and native code reviews from one conversation.",
+  "description": "daddy manages a pool of writers, workspaces and native code reviews from one conversation.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <25 || >=26.0.0"
   },
   "bin": {
-    "daddy": "scripts/reviewctl.mjs",
-    "daddyloop": "scripts/reviewctl.mjs",
-    "reviewctl": "scripts/reviewctl.mjs"
+    "daddy": "scripts/daddy.mjs"
   },
   "files": [
     "dist",
-    "scripts/reviewctl.mjs",
+    "scripts/daddy.mjs",
     "README.md",
     "docs"
   ],
@@ -22,14 +20,14 @@
     "dev": "tsx src/cli.ts serve",
     "demo": "tsx src/cli.ts serve --demo",
     "ui": "vite --host 127.0.0.1",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.server.json && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "check": "npm run typecheck && npm test && npm run build",
     "start": "node dist/server/cli.js serve",
-    "reviewctl": "tsx src/cli.ts",
+    "daddy": "tsx src/cli.ts",
     "format": "prettier --write src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "format:check": "prettier --check src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "release:build": "npm run build && node scripts/build-release.mjs",

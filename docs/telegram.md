@@ -10,7 +10,7 @@ daddy telegram setup
 
 Create a dedicated bot with BotFather, provide its token and follow the pairing link. Only the paired private user can issue commands. The token is kept in a private local file.
 
-In the private chat, send `/group` (the old `/workspace` command remains an alias). Create a group in Telegram, enable Topics and choose it using the bot's chat picker. The bot needs administrator status with `can_manage_topics`. The picker and subsequent membership checks verify the group and permissions.
+In the private chat, send `/group`. Create a group in Telegram, enable Topics and choose it using the bot's chat picker. The bot needs administrator status with `can_manage_topics`. The picker and subsequent membership checks verify the group and permissions.
 
 The [Bot API](https://core.telegram.org/bots/api#keyboardbuttonrequestchat) provides a user-driven group selector, not a method for creating a group on the user's behalf. Once the group is connected, daddyloop creates [session topics](https://core.telegram.org/bots/api#createforumtopic) itself.
 

@@ -5,7 +5,7 @@ async function login(page: Page) {
   await page.goto('/');
   await page
     .getByLabel('Local access token')
-    .fill(readFileSync('.reviewloop/e2e/access-token', 'utf8'));
+    .fill(readFileSync('.daddyloop/e2e/access-token', 'utf8'));
   await page.getByRole('button', { name: 'Connect to workspace' }).click();
   await expect(page.locator('.daddy-app')).toBeVisible();
 }
@@ -58,7 +58,7 @@ test('uses a one-request repository from a phone and resets the composer without
   await page.setViewportSize({ width: 390, height: 844 });
   const fields = page.locator('.daddy-composer .daddy-workspace-fields');
   await fields.locator('summary').click();
-  const alternate = resolve('.reviewloop/e2e/fixture-repository-alternate');
+  const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
   await fields.getByLabel('Repository on this server').fill(alternate);
   const sent = page.waitForResponse(
     (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
@@ -70,9 +70,11 @@ test('uses a one-request repository from a phone and resets the composer without
   const response = await sent;
   expect(response.status()).toBe(200);
   const board = await response.json();
-  expect(board.messages.at(-1).project.repoPath).toBe(alternate);
-  expect(board.project.repoPath).toBe(resolve('.reviewloop/e2e/fixture-repository'));
-  await expect(fields.getByLabel('Repository on this server')).toHaveValue(board.project.repoPath);
+  expect(board.messages.at(-1).workspace.repoPath).toBe(alternate);
+  expect(board.workspace.repoPath).toBe(resolve('.daddyloop/e2e/fixture-repository'));
+  await expect(fields.getByLabel('Repository on this server')).toHaveValue(
+    board.workspace.repoPath,
+  );
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
   await expect(page.locator('.daddy-work-item')).toHaveCount(2);
@@ -123,6 +125,7 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await page.getByLabel('Language', { exact: true }).selectOption('ru');
   await expect(page.getByRole('button', { name: 'Новая сессия', exact: true })).toBeVisible();
   await expect(page.getByText(`Ticket fixture ${issue}`, { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
   await expect(page.getByLabel('Новые писатели Модель')).toHaveValue('gpt-5.6-sol');

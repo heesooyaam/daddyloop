@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { git, Workspaces } from '../src/runtime/workspaces.js';
 import { fixture } from './helpers.js';
 it('keeps source, author and reviewer checkouts separate and preserves unpushed author work', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'reviewloop-workspace-test-'));
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-workspace-test-'));
   const f = await fixture();
   try {
     const repo = join(dir, 'source'),

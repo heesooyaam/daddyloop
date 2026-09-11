@@ -48,11 +48,11 @@ export function UpdatesPanel({ api }: { api: Api }) {
           <span className="pill neutral">
             {t(
               tool.source === 'bundled'
-                ? 'Bundled with Reviewloop'
+                ? 'Bundled with daddyloop'
                 : tool.source === 'missing'
                   ? 'Not installed'
                   : tool.source === 'managed'
-                    ? 'Managed by Reviewloop'
+                    ? 'Managed by daddyloop'
                     : 'External CLI',
             )}
           </span>
@@ -88,7 +88,7 @@ export function UpdatesPanel({ api }: { api: Api }) {
           {tool.source === 'bundled' && (
             <small>
               {t(
-                'This CLI is part of the Reviewloop release. Updating a system CLI does not replace it.',
+                'This CLI is part of the daddyloop release. Updating a system CLI does not replace it.',
               )}
             </small>
           )}

@@ -8,7 +8,7 @@ import { UpdateMonitor } from '../src/core/updates.js';
 import { fixture } from './helpers.js';
 it('runs a paired one-use update without blocking bot navigation, reports completion once and offers rollback', async () => {
   const f = await fixture(),
-    dir = mkdtempSync(join(tmpdir(), 'reviewloop-telegram-updater-test-'));
+    dir = mkdtempSync(join(tmpdir(), 'daddyloop-telegram-updater-test-'));
   const sent: {
     text: string;
     reply_markup?: { inline_keyboard: { text: string; callback_data?: string }[][] };
@@ -102,7 +102,7 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
     expect(sent.at(-1)!.text).toContain('Обновление Codex началось');
     expect(updater.status().busy).toBe(true);
     await bot.handle(message('/tasks'));
-    expect(sent.at(-1)!.text).toContain(f.task.title);
+    expect(sent.at(-1)!.text).toContain('daddy');
     await bot.handle(click(confirmation.callback_data!));
     expect(install).toHaveBeenCalledOnce();
     finish();

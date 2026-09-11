@@ -59,7 +59,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     await bot.handle(message('/start ' + new URL(bot.pair().url).searchParams.get('start')));
     bot.start();
     f.daddy.start();
-    await bot.handle(message('/workspace'));
+    await bot.handle(message('/group'));
     const request = sent.find((item) => item.body.reply_markup?.keyboard)?.body.reply_markup
       .keyboard[0][0].request_chat;
     expect(request).toMatchObject({
@@ -74,7 +74,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
         chat_shared: { request_id: request.request_id, chat_id: -10042 },
       },
     });
-    expect(f.store.setting('telegram.workspace')).toBeUndefined();
+    expect(f.store.setting('telegram.group')).toBeUndefined();
     await bot.handle({
       update_id: id++,
       message: {
@@ -83,16 +83,16 @@ it('binds a forum selected by the paired owner, creates one topic per session an
         chat_shared: { request_id: request.request_id, chat_id: -10042 },
       },
     });
-    expect(f.store.setting('telegram.workspace')).toMatchObject({ chatId: -10042, ownerId: 7 });
+    expect(f.store.setting('telegram.group')).toMatchObject({ chatId: -10042, ownerId: 7 });
     await bot.handle(message('/new'));
-    await bot.handle(click(`dad:new:${f.project.id}`));
+    await bot.handle(click(`dad:new:${f.workspace.id}`));
     const start = sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data;
     await bot.handle(click(start));
     const group = f.daddy.sessions()[0];
     await vi.waitFor(() =>
       expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1),
     );
-    await bot.handle(click(`dad:new:${f.project.id}`));
+    await bot.handle(click(`dad:new:${f.workspace.id}`));
     expect(f.daddy.sessions()).toHaveLength(1);
     await bot.handle(message('Not the owner', -10042, 99, 17));
     expect(f.store.messages(group.id)).toHaveLength(0);
@@ -116,7 +116,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     expect(f.daddy.group(group.id).requestedWriterLimit).toBe(3);
     expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1);
     const task = await f.tickets.local({
-      project: f.project,
+      workspace: f.workspace,
       groupId: group.id,
       groupGeneration: group.generation,
       title: 'Private worker',
@@ -139,7 +139,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
 it('does not recreate a topic after a lost response and lets the owner attach the existing topic', async () => {
   const f = daddyFixture();
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-  f.store.setSetting('telegram.workspace', { chatId: -10042, title: 'Work', ownerId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
   let calls = 0;
   const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url) => {
     if (String(url).endsWith('/createForumTopic')) {
@@ -150,7 +150,7 @@ it('does not recreate a topic after a lost response and lets the owner attach th
   });
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
   try {
-    const group = f.daddy.create({ projectId: f.project.id });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
     await expect(workspace.ensureTopic(group)).rejects.toThrow();
     await expect(workspace.ensureTopic(group)).rejects.toThrow('/attach');
     expect(calls).toBe(1);
@@ -182,11 +182,11 @@ it('scopes a one-message repository selection to its owner and conversation, the
   } as unknown as TelegramApi;
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-  const group = f.daddy.create({ projectId: f.project.id });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
   f.store.setSetting('telegram.currentDaddy', group.id);
-  vi.spyOn(f.projects, 'selection').mockImplementation(async (project, input) => ({
-    ...project,
-    repoPath: input?.path ?? project.repoPath,
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => ({
+    ...workspace,
+    repoPath: input?.path ?? workspace.repoPath,
   }));
   let id = 100;
   const message = (text: string, userId = 7): Update => ({
@@ -206,18 +206,18 @@ it('scopes a one-message repository selection to its owner and conversation, the
     await workspace.handle(message('/repo /server/another-repository'));
     const use = sent.at(-1).buttons[0][0].callback_data;
     await workspace.handle(click(use, 99));
-    expect(f.projects.selection).not.toHaveBeenCalled();
+    expect(f.workspaces.selection).not.toHaveBeenCalled();
     await workspace.handle(click(use));
     expect(sent.at(-1).text).toContain('/server/another-repository');
     const first = message('Ticket one');
     await workspace.handle(first);
     await workspace.handle(first); // Retried update must not consume defaults or duplicate the task.
     await workspace.handle(message('Ticket two'));
-    expect(f.store.messages(group.id).map((message) => message.project?.repoPath)).toEqual([
+    expect(f.store.messages(group.id).map((message) => message.workspace?.repoPath)).toEqual([
       '/server/another-repository',
-      f.project.repoPath,
+      f.workspace.repoPath,
     ]);
-    expect(f.projects.get(f.project.id)).toEqual(f.project);
+    expect(f.workspaces.get(f.workspace.id)).toEqual(f.workspace);
   } finally {
     await workspace.stop();
     await f.close();
@@ -300,9 +300,9 @@ it('creates a session from a group topic and isolates its wizard from another to
   } as unknown as TelegramApi;
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-  f.store.setSetting('telegram.workspace', { chatId: -10042, title: 'Room', ownerId: 7 });
-  const root = f.daddy.create({ projectId: f.project.id }),
-    peer = f.daddy.create({ projectId: f.project.id });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Room', ownerId: 7 });
+  const root = f.daddy.create({ workspaceId: f.workspace.id }),
+    peer = f.daddy.create({ workspaceId: f.workspace.id });
   const a = await workspace.ensureTopic(root),
     b = await workspace.ensureTopic(peer);
   let id = 1000;
@@ -332,7 +332,7 @@ it('creates a session from a group topic and isolates its wizard from another to
     await workspace.handle(message('/new Separate feature', a!.threadId));
     await workspace.handle(message('Keep this in the original peer session', b!.threadId));
     expect(f.store.messages(peer.id)[0].text).toBe('Keep this in the original peer session');
-    await workspace.handle(click(`dad:new:${f.project.id}`, a!.threadId));
+    await workspace.handle(click(`dad:new:${f.workspace.id}`, a!.threadId));
     const use = sent.at(-1)!.card.buttons[0][0].callback_data;
     await workspace.handle(click(use, b!.threadId));
     expect(f.daddy.sessions()).toHaveLength(2);

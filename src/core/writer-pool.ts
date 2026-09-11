@@ -3,19 +3,9 @@ import type { ReviewGroup } from './types.js';
 
 export function writerPool(store: Store, group: ReviewGroup) {
   const jobs = store.jobs().filter((job) => job.groupId === group.id);
-  // Upgrade old sessions conservatively: an idle author can still owe review fixes.
-  const assigned =
-    group.writerTasks ??
-    store
-      .tasks()
-      .filter(
-        (task) =>
-          task.groupId === group.id &&
-          (task.authorThreadId ||
-            jobs.some((job) => job.taskId === task.id && job.role === 'author' && job.startedAt)),
-      )
-      .map((task) => task.id);
-  const taskIds = assigned.filter((id) => store.getTask(id).state !== 'complete' || store.busy(id));
+  const taskIds = group.writerTasks!.filter(
+    (id) => store.getTask(id).state !== 'complete' || store.busy(id),
+  );
   const limit = group.writerLimit ?? 1;
   const target = group.requestedWriterLimit ?? limit;
   return {
@@ -62,9 +52,8 @@ export function canAssignWriter(store: Store, group: ReviewGroup, taskId: string
 }
 
 export function assignWriter(store: Store, group: ReviewGroup, taskId: string) {
-  group.writerTasks ??= writerPool(store, group).taskIds;
-  if (!group.writerTasks.includes(taskId)) {
-    group.writerTasks.push(taskId);
+  if (!group.writerTasks!.includes(taskId)) {
+    group.writerTasks!.push(taskId);
     store.saveGroup(group);
   }
 }

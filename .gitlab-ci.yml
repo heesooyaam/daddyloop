@@ -1,4 +1,6 @@
 image: node:24-bookworm
+variables:
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 stages: [test]
 checks:
   stage: test

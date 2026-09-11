@@ -5,7 +5,7 @@ daddyloop is a local, single-user service. Workflow decisions are deterministic 
 ```mermaid
 flowchart LR
     UI[Web panel] --> API[Fastify API]
-    CLI[reviewctl] --> API
+    CLI[daddy] --> API
     Phone[Phone over persistent HTTPS] --> API
     Telegram[Paired Telegram bot] --> Engine
     API --> Engine[Workflow engine]
@@ -36,11 +36,11 @@ The installed service packages API, engine, poller and scheduler in one process 
 | `src/providers/`     | Provider-specific PR/check/draft/publication contracts                           |
 | `src/runtime/`       | Workspace preparation, Codex transport, context and job execution                |
 | `src/server/`        | Local API, auth, CSRF/Origin checks, static assets and event stream              |
-| `src/ui/`            | Task list, role conversations, findings, history, decisions and context          |
+| `src/ui/`            | daddy sessions, conversation, task board, model settings and workspace chooser   |
 
 `ReviewProvider` has GitHub, GitLab and optional Arcadia implementations, plus a visibly labeled persistent demo implementation. It does not know which agent runtime is used. `AgentRuntime` receives scoped tools and never needs platform tokens. SQLite contains no provider credentials. Arcadia uses existing corporate tools and leased shared-store mounts; it pins both full revisions and the native diff ID. Browser access and Telegram publication confirmations use separate scoped, expiring credentials.
 
-The terminal client uses Ink/React with a separate `ConsoleModel`. It owns only display state, task/role drafts and abortable HTTP reads/writes. Changing selections fences late responses; closing the client aborts its network requests and restores terminal modes without sending a task cancellation. The original line-oriented client remains available through `--plain`. Workflow and publication authority stay in the existing server engine.
+The terminal client uses Ink/React and the shared `DaddyClient`. It owns only display state, session drafts and abortable HTTP requests. Closing it restores the terminal and does not cancel server work. `--plain` presents the same daddy conversation for basic terminals.
 
 ## State machine
 
@@ -109,7 +109,7 @@ Original product discussion: [shared conversation](https://chatgpt.com/share/6a9
 
 ## Tickets and profiles
 
-See [ADR 0004](adr/0004-ticket-groups.md). `TicketReader` snapshots GitHub issues or Tracker tickets, including comments, without writing back. `TicketWorkflow` verifies the managed implementation, performs ordinary pushes, creates a native PR through the durable outbox and binds the exact submitted head. A failed or uncertain submission stays recoverable; a conversation cannot erase that intent or authorize a second creation. Native submissions run independently of the scheduling tick so resource checks continue while the provider responds.
+`TicketReader` snapshots GitHub issues or Tracker tickets, including comments, without writing back. `TicketWorkflow` verifies the managed implementation, performs ordinary pushes, creates a native PR through the durable outbox and binds the exact submitted head. A failed or uncertain submission stays recoverable; a conversation cannot erase that intent or authorize a second creation. Native submissions run independently of the scheduling tick so resource checks continue while the provider responds.
 
 Model defaults and Telegram preferences are persisted settings in SQLite. Config-file agent defaults seed a new database; afterwards the CLI/UI settings are authoritative. Old tasks retain their saved policies. New tasks publish completed reviews automatically; incomplete reviews, disputes, revision mismatches, CI and explicit human plan approval still gate completion. Automatic publication does not merge a PR.
 
@@ -121,31 +121,29 @@ Workspace preferences store an `en`/`ru` locale and a monotonically increasing v
 
 `UpdateMonitor` probes executable versions and checks package registries every six hours. It records available releases and observed installed-version changes. Telegram update notices use durable deduplication and retain the existing uncertain-delivery rules. Unsupported installed engines are diagnostic only. Explicit `runtime use` validates the selected Codex protocol, checks local installation identity and idle state, then updates configuration and restarts the service. Launcher paths are preserved so external CLI updaters can replace symlink targets.
 
-`CodexUpdater` installs a separately managed Codex through a confirmed Telegram or authenticated API/CLI action. One expiring plan pins the caller, source executable/version and official platform artifact with SHA-512 integrity. A durable operation consumes the plan before doing work. Downloads are bounded and cancellable; archive members go through stdout into private files, preventing archive paths or links from directing filesystem writes. Each candidate gets a unique directory outside immutable Reviewloop releases and external CLI installations.
+`CodexUpdater` installs a separately managed Codex through a confirmed Telegram or authenticated API/CLI action. One expiring plan pins the caller, source executable/version and official platform artifact with SHA-512 integrity. A durable operation consumes the plan before doing work. Downloads are bounded and cancellable; archive members go through stdout into private files, preventing archive paths or links from directing filesystem writes. Each candidate gets a unique directory outside immutable daddyloop releases and external CLI installations.
 
 Before activation, the candidate must report the pinned version and pass app-server initialization, model listing and saved-profile checks. The source executable is re-probed and configuration changes are fenced. Atomic config replacement and the live executable selection happen synchronously, preserving concurrent changes to other config fields. Each agent turn captures the selected executable once; active processes are untouched. A catalogue request that finishes after selection changed reloads from the new executable. The activation journal reconciles a crash immediately before or after config replacement. Failed installations preserve the selected CLI and clean their private directory; completed installations retain the previous selection for validated rollback. Telegram completion delivery is durable and deduplicated; an ambiguous send is not blindly retried.
 
 ## daddyloop sessions (0.7)
 
-The primary entry points now send user messages to a `daddy` session. A registered `Project` identifies the source repository, VCS, base and relative working directory. Existing `ReviewGroup` records are extended with orchestration settings, a writer limit and a separate coordination thread ID. SQLite schema 4 adds projects, durable daddy jobs and Telegram topic bindings.
+The primary entry points now send user messages to a `daddy` session. A registered `Workspace` identifies the source repository, VCS, base and relative working directory. `ReviewGroup` stores orchestration settings, a writer limit and a separate coordination thread ID. SQLite stores workspaces, durable daddy jobs and Telegram topic bindings.
 
 `daddy` coalesces queued input and wakes on worker outcomes. Its scoped tools read state, import tickets, create work items, attach existing reviews, assign writers, manage prerequisites and reconcile native submissions. Public writer chat is rejected. A writer profile is frozen in each queued job; session defaults apply to future tasks. The per-session pool defaults to one writer, with a maximum of eight and the existing resource checks.
 
 The coordination thread and native review thread are separate contexts under the same daddy profile. They are serialized per group. Coordination receives worker reports and published review feedback, not private reviewer chat or draft comments. This preserves the original publication boundary while allowing daddy to direct writers. Native review remains a pinned child-task job with the existing broker and revision/generation checks.
 
-`Projects` checks Arcadia markers before Git commands and bounds directory browsing to configured roots. Writers use existing managed-workspace implementations. An Arc allocator retains a control/review slot, waits when capacity is unavailable and may provision only eligible slots within the configured helper range. Clean author leases whose exact head is confirmed in the native PR can be released; unpublished or dirty work is preserved. Source mounts registered as projects are excluded from allocation.
+`WorkspaceRegistry` checks Arcadia markers before Git commands and bounds directory browsing to configured roots. Writers use existing managed-workspace implementations. An Arc allocator retains a control/review slot, waits when capacity is unavailable and may provision only eligible slots within the configured helper range. Clean author leases whose exact head is confirmed in the native PR can be released; unpublished or dirty work is preserved. Source mounts registered as workspaces are excluded from allocation.
 
 `DaddyClient` shares API/state behavior between the browser and terminal, including session selection fencing, independent drafts and idempotent message retries. Browser and CLI now display one daddy conversation and a read-only task/report board. The old interface remains available for existing native workflow history; its writer composer is disabled.
 
 `TelegramWorkspace` binds an owner-selected forum room and maps each daddy session to a topic. It verifies user and topic scope on every control, records topic creation through the outbox, and sends replies into the mapped thread. A topic whose creation result is uncertain can be attached explicitly by the owner. Native version-change notices identify managed updates so Telegram emits only the operation's completion message for those transitions.
 
-Renaming keeps compatibility boundaries deliberate: existing state directories, native markers, service identity and archive layout retain legacy identifiers, while the product and primary commands are daddyloop / `daddy`. `reviewctl` remains an executable alias. Upgrading the SQLite schema requires a pre-upgrade backup for a rollback to an older server.
-
 ## Request workspaces and draining pools (0.8)
 
-Project defaults are local to a server installation. A session pins a `Project` snapshot. Authenticated default edits pin pre-0.8 sessions before replacing the registry entry. A one-request override goes through the same repository/root/VCS validation without creating or modifying a registry entry. The resolved snapshot is stored on the user message and durable daddy job; only adjacent compatible requests coalesce. Tools default to that job's snapshot, and tasks retain their source path, scope and base. Read-only coordinator workspaces use separate identities for different selections. Arc allocation excludes registered defaults, session snapshots, queued request snapshots and existing task sources.
+Workspace defaults are local to a server installation. A session pins a `Workspace` snapshot. A one-request override goes through the same repository/root/VCS validation without creating or modifying a registry entry. The resolved snapshot is stored on the user message and durable daddy job; only adjacent compatible requests coalesce. Tools default to that job's snapshot, and tasks retain their source path, scope and base. Read-only coordinator workspaces use separate identities for different selections. Arc allocation excludes registered defaults, session snapshots, queued request snapshots and existing task sources.
 
-`requestedWriterLimit` is the desired size; `writerLimit` is the scheduler's applied size. `writerTasks` persists task-to-slot ownership and is assigned in the same transaction that claims an author job. Author turns, review, fixes, CI, pauses and failures keep the slot occupied. Only a complete task with no queued/running jobs releases it. The scheduler applies growth on its next tick, shrinks to max(target, occupied), and prevents new tasks from using retiring capacity. Continuations of assigned tasks stay eligible. Legacy groups recover occupied slots from prior author sessions/jobs. Resize requests never abort jobs or dispose workspaces. Host process/resource limits remain separate from logical task slots.
+`requestedWriterLimit` is the desired size; `writerLimit` is the scheduler's applied size. `writerTasks` persists task-to-slot ownership and is assigned in the same transaction that claims an author job. Author turns, review, fixes, CI, pauses and failures keep the slot occupied. Only a complete task with no queued/running jobs releases it. The scheduler applies growth on its next tick, shrinks to max(target, occupied), and prevents new tasks from using retiring capacity. Continuations of assigned tasks stay eligible. Resize requests never abort jobs or dispose workspaces. Host process/resource limits remain separate from logical task slots.
 
 ## Quotas and earned resets (0.9)
 
@@ -157,10 +155,16 @@ The protocol was checked against the installed Codex 0.154.0 schema and [officia
 
 ## Workspaces, group sessions and voice (0.10)
 
-Source repositories are called workspaces in product copy and commands. `/api/workspaces` aliases the preserved project registry; serialized `projectId` and snapshots retain their identity. Telegram creation drafts are scoped to owner/chat/topic. Browsing workspaces does not hijack the next conversation message. New sessions create new topics and link back to their origin.
+Source repositories are called workspaces in product copy and commands. `/api/workspaces` is the registry. Requests select `workspaceId`; saved snapshots use `workspace`. A per-request `repository` selection changes path/scope/base without changing the registered defaults. Telegram creation drafts are scoped to owner/chat/topic. Browsing workspaces does not hijack the next conversation message. New sessions create new topics and link back to their origin.
 
 `create_session` is a user-triggered, idempotent orchestration action; it inherits the current models/policy and preserves the original session. Coordination tool signatures start a fresh native context when tool schemas change; old thread IDs and the saved conversation remain available, with `read_conversation` for earlier user requirements. Native review threads are unchanged.
 
 SQLite schema 5 adds `voice_jobs`. Owner verification precedes any download. The inbox captures the session, generation, workspace override and language at receipt time; voice and following text use the same receipt identity as ordinary chat. It stages input before acknowledging Telegram, resumes interrupted recognition and rejects stale destinations/generations. Downloads stay on Telegram's fixed origin, are bounded to 10 MB and do not follow redirects. Only transcripts enter daddy's conversation.
 
 The bundled, checksum-pinned Whisper Small ONNX model runs in a disposable child with two CPU inference threads, a bounded V8 heap, a timeout and resource checks. Opus decoding is incremental with channel/duration/size guards. Raw audio is removed after processing; recognition has no API key or network dependency. Package validation runs an offline speech fixture on both release architectures.
+
+## Current contracts (0.11)
+
+There is one executable, `daddy`, one UI and one Telegram conversation router. Public task mutation routes, direct author/reviewer chat, `start`/`child`/`adopt`, project aliases and the former UI are removed. Native review jobs still distinguish author and reviewer responsibilities internally; model settings are `{ writer, daddy }`.
+
+Installations use `~/.config/daddyloop`, `~/.local/share/daddyloop`, `daddyloop.sqlite` and `DADDYLOOP_*` environment variables. Configuration format 2 and database schema 6 are the only accepted stored formats. A new database is initialized only when it is empty. Earlier formats fail before mutations. Conversion is an explicit operational step, not a fallback in runtime code.

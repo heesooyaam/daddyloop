@@ -79,7 +79,7 @@ export function markdownText(source: string): FormattedText {
 }
 function renderMarkdown(source: string): FormattedText {
   const serviceMarker = (node: Nodes) =>
-    node.type === 'html' && /^<!--\s*reviewloop:[A-Za-z0-9_.:-]+\s*-->$/.test(node.value.trim());
+    node.type === 'html' && /^<!--\s*daddyloop:[A-Za-z0-9_.:-]+\s*-->$/.test(node.value.trim());
   const root = fromMarkdown(source, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
   const definitions = new Map<string, Definition>();
   const collect = (node: Nodes) => {

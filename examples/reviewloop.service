@@ -1,17 +1,17 @@
 [Unit]
-Description=Reviewloop local review workspace
+Description=daddyloop local review workspace
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/reviewloop
-ExecStart=%h/projects/reviewloop/scripts/reviewctl.mjs serve --min-disk-gib 100 --max-disk-percent 80
+WorkingDirectory=%h/projects/daddyloop
+ExecStart=%h/projects/daddyloop/scripts/daddy.mjs serve --min-disk-gib 100 --max-disk-percent 80
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 UMask=0077
 Environment=NODE_ENV=production
-Environment="PATH=%h/.local/bin:%h/projects/reviewloop/.tools/node/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=%h/.local/bin:%h/projects/daddyloop/.tools/node/bin:/usr/local/bin:/usr/bin:/bin"
 
 [Install]
 WantedBy=default.target

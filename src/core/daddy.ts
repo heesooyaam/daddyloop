@@ -6,7 +6,7 @@ import {
   sameRevision,
   type DaddyJob,
   type Event,
-  type Project,
+  type Workspace,
   type ResourceStatus,
   type ReviewGroup,
   type Task,
@@ -14,7 +14,7 @@ import {
   type AgentProfile,
 } from './types.js';
 import type { Engine } from './engine.js';
-import type { Projects } from './projects.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { TicketWorkflow } from './ticket-workflow.js';
 import type { Worker } from '../runtime/worker.js';
 import type { SessionRuntime } from '../runtime/agent.js';
@@ -29,10 +29,10 @@ export class Daddy {
   private running = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private timer?: NodeJS.Timeout;
   private stopped = false;
-  private workspace: Pick<DaddyWorkspace, 'prepare' | 'release'>;
+  private checkouts: Pick<DaddyWorkspace, 'prepare' | 'release'>;
   constructor(
     readonly engine: Engine,
-    readonly projects: Projects,
+    readonly workspaces: WorkspaceRegistry,
     readonly tickets: TicketWorkflow,
     private worker: Worker,
     private runtime: SessionRuntime,
@@ -40,7 +40,7 @@ export class Daddy {
     readonly catalogue: Catalogue,
     workspace?: Pick<DaddyWorkspace, 'prepare' | 'release'>,
   ) {
-    this.workspace = workspace ?? new DaddyWorkspace(projects, tickets.workspaces);
+    this.checkouts = workspace ?? new DaddyWorkspace(workspaces, tickets.workspaces);
   }
   private get store() {
     return this.engine.store;
@@ -50,13 +50,12 @@ export class Daddy {
   }
   group(id: string) {
     const group = this.store.getGroup(id);
-    if (!group.orchestrated)
-      throw new AppError('legacy_session', 'Attach this work to a daddy session first', 422);
+    if (!group.orchestrated) throw new AppError('invalid_session', 'Choose a daddy session', 422);
     return group;
   }
   create(input: {
-    projectId: string;
-    project?: Project;
+    workspaceId: string;
+    workspace?: Workspace;
     parentGroupId?: string;
     createdByAction?: string;
     profiles?: AgentProfiles;
@@ -72,8 +71,8 @@ export class Daddy {
       .update(
         JSON.stringify({
           ...input,
-          project: input.project && {
-            ...input.project,
+          workspace: input.workspace && {
+            ...input.workspace,
             createdAt: undefined,
             updatedAt: undefined,
           },
@@ -94,18 +93,18 @@ export class Daddy {
         return this.group(prior.groupId);
       }
     }
-    const project = input.project ?? this.projects.get(input.projectId),
+    const workspace = input.workspace ?? this.workspaces.get(input.workspaceId),
       defaults = this.engine.defaultAgents();
     const group: ReviewGroup = {
       id: randomUUID(),
       rootTaskId: '',
-      title: input.title?.trim() || project.name,
+      title: input.title?.trim() || workspace.name,
       requirements: input.requirements?.trim() ?? '',
-      projectId: input.projectId,
-      project: { ...project },
+      workspaceId: input.workspaceId,
+      workspace: { ...workspace },
       orchestrated: true,
-      reviewer: input.profiles?.reviewer ?? defaults.reviewer,
-      writer: input.profiles?.author ?? defaults.author,
+      daddy: input.profiles?.daddy ?? defaults.daddy,
+      writer: input.profiles?.writer ?? defaults.writer,
       parentGroupId: input.parentGroupId,
       createdByAction: input.createdByAction,
       writerLimit: input.writerLimit ?? 1,
@@ -121,10 +120,10 @@ export class Daddy {
     this.store.transaction(() => {
       this.store.saveGroup(group);
       this.raiseCapacity(group.writerLimit!);
-      this.store.event(group.id, 'daddy.created', { projectId: project.id });
+      this.store.event(group.id, 'daddy.created', { workspaceId: workspace.id });
       if (input.message) {
-        this.store.daddyMessage(group.id, 'user', input.message, undefined, project);
-        this.enqueue(group, 'user', input.message, project);
+        this.store.daddyMessage(group.id, 'user', input.message, undefined, workspace);
+        this.enqueue(group, 'user', input.message, workspace);
       }
       if (input.requestId)
         this.store.setSetting(`daddy.create:${input.requestId}`, {
@@ -139,13 +138,15 @@ export class Daddy {
     const current = this.store.setting<number>('worker.maxAgents') ?? 1;
     if (writers > current) this.store.setSetting('worker.maxAgents', writers);
   }
-  private availableProjects(group: ReviewGroup, selected?: Project) {
-    const projects = new Map(this.projects.list().map((project) => [project.id, project]));
+  private availableWorkspaces(group: ReviewGroup, selected?: Workspace) {
+    const workspaces = new Map(
+      this.workspaces.list().map((workspace) => [workspace.id, workspace]),
+    );
     for (const job of this.store.daddyJobs(group.id))
-      if (job.project) projects.set(job.project.id, job.project);
-    if (group.project) projects.set(group.project.id, group.project);
-    if (selected) projects.set(selected.id, selected);
-    return projects;
+      if (job.workspace) workspaces.set(job.workspace.id, job.workspace);
+    if (group.workspace) workspaces.set(group.workspace.id, group.workspace);
+    if (selected) workspaces.set(selected.id, selected);
+    return workspaces;
   }
   board(id: string) {
     const group = this.group(id),
@@ -153,13 +154,13 @@ export class Daddy {
     const tasks = this.store.tasks().filter((task) => task.groupId === id);
     return {
       group,
-      project: group.project ?? (group.projectId ? this.projects.get(group.projectId) : undefined),
+      workspace: group.workspace!,
       tasks: tasks.map((task) => ({
         id: task.id,
         title: task.title,
         state: task.state,
         reason: task.reason,
-        projectId: task.projectId,
+        workspaceId: task.workspaceId,
         repoPath: task.repoPath,
         scope: task.scope,
         dependsOn: task.dependsOn ?? [],
@@ -168,7 +169,7 @@ export class Daddy {
         summary: task.summary,
         policy: task.policy,
         head: task.revision?.head,
-        writer: this.engine.effectiveAgents(task).author,
+        writer: this.engine.effectiveAgents(task).writer,
         running: jobs.some((job) => job.taskId === task.id && job.status === 'running'),
         queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
       })),
@@ -188,78 +189,21 @@ export class Daddy {
       throw new AppError('wrong_session', 'This task belongs to another daddy session', 403);
     return task;
   }
-  async adopt(taskId: string, projectId: string) {
-    const project = this.projects.get(projectId),
-      initial = this.store.getTask(taskId);
-    if (initial.ref.provider === 'demo')
-      throw new AppError(
-        'demo_history',
-        'The old demo remains in work history; start a real daddy session with a registered workspace',
-        422,
-      );
-    return this.engine.lock(initial.groupId ? `group:${initial.groupId}` : initial.id, async () => {
-      const task = this.store.getTask(taskId),
-        old = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-      if (old?.orchestrated) return this.board(old.id);
-      const children = old
-        ? this.store.tasks().filter((child) => child.groupId === old.id)
-        : [task];
-      if (children.some((child) => this.store.busy(child.id)))
-        throw new AppError(
-          'legacy_busy',
-          'Wait for the existing agents before converting their session to daddy',
-        );
-      if (project.provider !== task.ref.provider || project.host !== task.ref.host)
-        throw new AppError('project_mismatch', 'Choose the workspace belonging to this work', 422);
-      const group: ReviewGroup = old ?? {
-        id: randomUUID(),
-        rootTaskId: task.id,
-        title: task.title,
-        requirements: task.requirements,
-        reviewer: this.engine.effectiveAgents(task).reviewer,
-        reviewerThreadId: task.reviewerThreadId,
-        generation: 1,
-        createdAt: now(),
-        updatedAt: now(),
-      };
-      group.orchestrated = true;
-      group.projectId = project.id;
-      group.project = { ...project };
-      group.writerLimit = 1;
-      group.writer = this.engine.effectiveAgents(task).author;
-      group.daddyState = 'active';
-      this.store.transaction(() => {
-        this.store.saveGroup(group);
-        for (const child of children) {
-          child.groupId = group.id;
-          child.projectId ??= project.id;
-          this.store.saveTask(child);
-        }
-        this.store.event(group.id, 'daddy.created', { projectId: project.id });
-        this.enqueue(
-          group,
-          'recovery',
-          'Existing work was moved into this daddy session. Read its current state and continue only unfinished tasks; never redo completed work.',
-        );
-      });
-      return this.board(group.id);
-    });
-  }
-  chat(id: string, text: string, receipt?: string, project?: Project) {
+  chat(id: string, text: string, receipt?: string, workspace?: Workspace) {
     const group = this.group(id);
     if (['paused', 'archived'].includes(group.daddyState ?? ''))
       throw new AppError('daddy_paused', 'Resume daddy before sending another message');
     const trimmed = text.trim();
     if (!trimmed || trimmed.length > 20000)
       throw new AppError('invalid_message', 'Send a message between 1 and 20000 characters', 400);
-    project ??= group.project ?? this.projects.get(group.projectId!);
+    workspace ??= group.workspace!;
     const fingerprint = JSON.stringify({
       text: trimmed,
-      project: { ...project, createdAt: undefined, updatedAt: undefined },
+      workspace: { ...workspace, createdAt: undefined, updatedAt: undefined },
     });
-    const prior = receipt && this.store.setting<string | boolean>(`daddy.receipt:${receipt}`);
+    const prior = receipt && this.store.setting<string>(`daddy.receipt:${receipt}`);
     if (prior) {
-      if (typeof prior === 'string' && prior !== fingerprint)
+      if (prior !== fingerprint)
         throw new AppError(
           'idempotency_conflict',
           'This message request was already used with different arguments',
@@ -270,8 +214,8 @@ export class Daddy {
       group.daddyState = 'active';
       group.autoTurns = 0;
       this.store.saveGroup(group);
-      this.store.daddyMessage(id, 'user', trimmed, undefined, project);
-      this.enqueue(group, 'user', trimmed, project);
+      this.store.daddyMessage(id, 'user', trimmed, undefined, workspace);
+      this.enqueue(group, 'user', trimmed, workspace);
       if (receipt) this.store.setSetting(`daddy.receipt:${receipt}`, fingerprint);
     });
     return this.board(id);
@@ -280,7 +224,7 @@ export class Daddy {
     group: ReviewGroup,
     trigger: DaddyJob['trigger'],
     input: string,
-    project?: Project,
+    workspace?: Workspace,
   ) {
     if (group.daddyState !== 'active') return;
     const queued = this.store
@@ -288,7 +232,7 @@ export class Daddy {
       .filter((job) => job.status === 'queued' && job.generation === group.generation)
       .at(-1);
     const pending =
-      queued && JSON.stringify(queued.project) === JSON.stringify(project) ? queued : undefined;
+      queued && JSON.stringify(queued.workspace) === JSON.stringify(workspace) ? queued : undefined;
     if (pending) {
       if (trigger === 'user') {
         pending.trigger = trigger;
@@ -303,8 +247,8 @@ export class Daddy {
       generation: group.generation,
       trigger,
       input,
-      profile: group.reviewer,
-      project,
+      profile: group.daddy,
+      workspace,
       status: 'queued',
       createdAt: now(),
     };
@@ -314,8 +258,8 @@ export class Daddy {
   async settings(id: string, input: { writerLimit?: number; profiles?: AgentProfiles }) {
     if (input.profiles)
       await Promise.all([
-        this.catalogue.validate(input.profiles.author),
-        this.catalogue.validate(input.profiles.reviewer),
+        this.catalogue.validate(input.profiles.writer),
+        this.catalogue.validate(input.profiles.daddy),
       ]);
     const group = this.group(id);
     if (
@@ -324,8 +268,7 @@ export class Daddy {
     )
       throw new AppError('invalid_pool', 'Choose between 1 and 8 writers', 400);
     if (input.profiles) {
-      const reviewerChanged =
-        JSON.stringify(group.reviewer) !== JSON.stringify(input.profiles.reviewer);
+      const reviewerChanged = JSON.stringify(group.daddy) !== JSON.stringify(input.profiles.daddy);
       if (
         reviewerChanged &&
         (this.running.has(id) ||
@@ -343,8 +286,8 @@ export class Daddy {
           'daddy_busy',
           'Wait for this session to become idle before changing its models',
         );
-      group.reviewer = input.profiles.reviewer;
-      group.writer = input.profiles.author;
+      group.daddy = input.profiles.daddy;
+      group.writer = input.profiles.writer;
       if (reviewerChanged) group.generation++;
     }
     if (input.writerLimit !== undefined) {
@@ -413,7 +356,7 @@ export class Daddy {
       group,
       'worker',
       `Task ${task.id} changed: ${task.state}. Read its report, decide the next action, and continue independently.`,
-      task.projectId ? this.availableProjects(group).get(task.projectId) : undefined,
+      task.workspaceId ? this.availableWorkspaces(group).get(task.workspaceId) : undefined,
     );
   };
   start() {
@@ -428,7 +371,7 @@ export class Daddy {
           this.group(job.groupId),
           'recovery',
           'The service restarted. Inspect the current board and saved worker results; do not repeat completed actions.',
-          job.project,
+          job.workspace,
         );
       }
     for (const group of this.sessions().filter((group) => group.daddyState === 'active')) {
@@ -523,10 +466,10 @@ export class Daddy {
           'daddy_no_progress',
           'daddy paused after repeated turns without task progress. Clarify the goal or resume the session.',
         );
-      const prepared = await this.workspace.prepare(group, controller.signal, job.project);
+      const prepared = await this.checkouts.prepare(group, controller.signal, job.workspace);
       this.active(job, controller.signal);
       const context = {
-        project: job.project ?? board.project,
+        workspace: job.workspace ?? board.workspace,
         writerPool: board.writers,
         requirements: group.requirements,
         tasks: board.tasks.map(({ source, summary, reason, ...task }) => ({
@@ -535,7 +478,7 @@ export class Daddy {
         })),
         conversation: board.messages
           .slice(-30)
-          .map(({ sender, text, project }) => ({ sender, text: text.slice(-12000), project })),
+          .map(({ sender, text, workspace }) => ({ sender, text: text.slice(-12000), workspace })),
         currentInstruction: job.input,
         trigger: job.trigger,
       };
@@ -607,7 +550,7 @@ export class Daddy {
         this.store.daddyMessage(group.id, 'system', job.error, job.id);
       }
     } finally {
-      await this.workspace.release(this.group(job.groupId), job.project).catch((error) =>
+      await this.checkouts.release(this.group(job.groupId), job.workspace).catch((error) =>
         this.store.event(job.groupId, 'daddy.workspace_preserved', {
           error: redact(String(error)),
         }),
@@ -665,27 +608,31 @@ export class Daddy {
         nextOffset: offset + limit < messages.length ? offset + limit : null,
       };
     }
-    const selectedProject = job.project ?? group.project ?? this.projects.get(group.projectId!);
-    const available = this.availableProjects(group, selectedProject);
-    const resolveProject = (id?: string) => {
-      if (!id) return selectedProject;
-      const project = available.get(id);
-      if (!project)
-        throw new AppError('project_not_selected', 'Choose a workspace from list_projects', 422);
-      return project;
+    const selectedWorkspace = job.workspace ?? group.workspace!;
+    const available = this.availableWorkspaces(group, selectedWorkspace);
+    const resolveWorkspace = (id?: string) => {
+      if (!id) return selectedWorkspace;
+      const workspace = available.get(id);
+      if (!workspace)
+        throw new AppError(
+          'workspace_not_selected',
+          'Choose a workspace from list_workspaces',
+          422,
+        );
+      return workspace;
     };
     if (name === 'read_board') {
       const { messages, jobs, ...board } = this.board(group.id);
       return {
         ...board,
-        project: selectedProject,
+        workspace: selectedWorkspace,
         group: {
           id: group.id,
           title: group.title,
           requirements: group.requirements,
           daddyState: group.daddyState,
           writer: group.writer,
-          reviewer: group.reviewer,
+          daddy: group.daddy,
           defaultPolicy: group.defaultPolicy,
         },
         tasks: board.tasks.map(({ summary, reason, ...task }) => task),
@@ -693,7 +640,7 @@ export class Daddy {
         recentJobs: jobs.slice(-3),
       };
     }
-    if (name === 'list_projects') return [...available.values()];
+    if (name === 'list_workspaces') return [...available.values()];
     if (name === 'list_models') return this.catalogue.list();
     if (name === 'read_task') {
       const task = this.task(group.id, (input as { taskId: string }).taskId);
@@ -710,7 +657,7 @@ export class Daddy {
           source: task.source,
           ref: task.ref,
           state: task.state,
-          projectId: task.projectId,
+          workspaceId: task.workspaceId,
           repoPath: task.repoPath,
           scope: task.scope,
           dependsOn: task.dependsOn,
@@ -758,7 +705,11 @@ export class Daddy {
       if (session)
         return {
           found: true as const,
-          value: { sessionId: session.id, title: session.title, workspace: session.project?.name },
+          value: {
+            sessionId: session.id,
+            title: session.title,
+            workspace: session.workspace?.name,
+          },
         };
       const created = this.store.tasks().find((task) => task.createdByAction === actionId);
       if (created)
@@ -807,11 +758,11 @@ export class Daddy {
               'session_creation_limit',
               'At most five new sessions can be created for one request.',
             );
-          const options = input as { title: string; goal: string; projectId?: string };
-          const project = resolveProject(options.projectId);
+          const options = input as { title: string; goal: string; workspaceId?: string };
+          const workspace = resolveWorkspace(options.workspaceId);
           const session = this.create({
-            projectId: project.id,
-            project,
+            workspaceId: workspace.id,
+            workspace,
             title: options.title,
             message: options.goal,
             requirements: options.goal,
@@ -819,25 +770,25 @@ export class Daddy {
             createdByAction: actionId,
             requestId: actionId,
             profiles: {
-              reviewer: group.reviewer,
-              author: group.writer ?? this.engine.defaultAgents().author,
+              daddy: group.daddy,
+              writer: group.writer ?? this.engine.defaultAgents().writer,
             },
             publication: group.defaultPolicy?.publication,
             autoPush: group.defaultPolicy?.autoPush,
           });
-          return { sessionId: session.id, title: session.title, workspace: project.name };
+          return { sessionId: session.id, title: session.title, workspace: workspace.name };
         }
         if (name === 'attach_review') {
-          const options = input as { url: string; projectId?: string; requirements?: string },
-            project = resolveProject(options.projectId),
+          const options = input as { url: string; workspaceId?: string; requirements?: string },
+            workspace = resolveWorkspace(options.workspaceId),
             ref = parsePR(options.url);
           if (
-            ref.provider !== project.provider ||
-            ref.host !== project.host ||
-            (ref.provider !== 'arcadia' && ref.repo.toLowerCase() !== project.repo.toLowerCase())
+            ref.provider !== workspace.provider ||
+            ref.host !== workspace.host ||
+            (ref.provider !== 'arcadia' && ref.repo.toLowerCase() !== workspace.repo.toLowerCase())
           )
             throw new AppError(
-              'project_mismatch',
+              'workspace_mismatch',
               'Choose the registered workspace matching this pull request',
               422,
             );
@@ -845,7 +796,7 @@ export class Daddy {
             .tasks()
             .find((task) => task.groupId === group.id && task.ref.url === ref.url);
           if (existing) {
-            if (existing.repoPath !== project.repoPath || existing.scope !== project.scope)
+            if (existing.repoPath !== workspace.repoPath || existing.scope !== workspace.scope)
               throw new AppError(
                 'ticket_workspace_conflict',
                 'This ticket already has a task in another workspace. Its running work cannot be moved.',
@@ -855,13 +806,13 @@ export class Daddy {
           }
           const task = await this.engine.create({
             ref,
-            repoPath: project.repoPath,
+            repoPath: workspace.repoPath,
             requirements:
               options.requirements ??
               (group.requirements || 'Review the pull request against its original requirements.'),
             groupId: group.id,
-            projectId: project.id,
-            scope: project.scope,
+            workspaceId: workspace.id,
+            scope: workspace.scope,
             createdByAction: actionId,
             groupGeneration: job.generation,
           });
@@ -871,13 +822,13 @@ export class Daddy {
           if (this.board(group.id).tasks.length >= 100)
             throw new AppError('session_full', 'Start another daddy session after 100 tasks');
           const options = input as {
-            projectId?: string;
+            workspaceId?: string;
             source?: string;
             title?: string;
             requirements?: string;
             dependsOn?: string[];
           };
-          const project: Project = resolveProject(options.projectId);
+          const workspace: Workspace = resolveWorkspace(options.workspaceId);
           let task: Task;
           if (name === 'import_ticket') {
             const existing = this.store
@@ -889,7 +840,7 @@ export class Daddy {
               );
             if (
               existing &&
-              (existing.repoPath !== project.repoPath || existing.scope !== project.scope)
+              (existing.repoPath !== workspace.repoPath || existing.scope !== workspace.scope)
             )
               throw new AppError(
                 'ticket_workspace_conflict',
@@ -899,17 +850,17 @@ export class Daddy {
               return { taskId: existing.id, title: existing.title, state: existing.state };
             task = await this.tickets.start({
               source: options.source!,
-              repoPath: project.repoPath,
-              base: project.base,
+              repoPath: workspace.repoPath,
+              base: workspace.base,
               groupId: group.id,
               groupGeneration: job.generation,
-              projectId: project.id,
-              scope: project.scope,
+              workspaceId: workspace.id,
+              scope: workspace.scope,
               createdByAction: actionId,
             });
           } else
             task = await this.tickets.local({
-              project,
+              workspace,
               groupId: group.id,
               groupGeneration: job.generation,
               title: options.title!,

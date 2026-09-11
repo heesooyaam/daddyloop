@@ -25,8 +25,7 @@ export interface ArcNativePR {
   to_branch: string;
 }
 export function leaseHelper() {
-  const configured =
-    loadConfig().arcadia.leaseHelper ?? process.env.REVIEWLOOP_ARCADIA_LEASE_HELPER;
+  const configured = loadConfig().arcadia.leaseHelper ?? process.env.DADDYLOOP_ARCADIA_LEASE_HELPER;
   if (configured) return configured;
   const candidates = (process.env.PATH ?? '')
     .split(':')
@@ -37,7 +36,7 @@ export function leaseHelper() {
   if (!path)
     throw new AppError(
       'arcadia_lease_helper_missing',
-      'Configure the company arcadia-mount-lease helper with reviewctl arcadia setup --lease-helper <path>',
+      'Configure the company arcadia-mount-lease helper with daddy arcadia setup --lease-helper <path>',
       422,
     );
   return path;
@@ -80,7 +79,7 @@ export class ArcBridge {
       'claim',
       '--owner-id',
       ownerId,
-      ...(mount ? [mount, 'Reviewloop workspace'] : ['--note', 'Reviewloop workspace']),
+      ...(mount ? [mount, 'daddyloop workspace'] : ['--note', 'daddyloop workspace']),
     ]);
     const value = JSON.parse(result.stdout) as {
       status: string;
@@ -97,7 +96,7 @@ export class ArcBridge {
     return (await command('arc', args, { cwd: mount, timeoutMs: 120000, signal })).stdout.trimEnd();
   }
   async withMount<T>(fn: (mount: string) => Promise<T>) {
-    const lease = await this.claim(`reviewloop-read-${randomUUID()}`);
+    const lease = await this.claim(`daddyloop-read-${randomUUID()}`);
     try {
       return await fn(lease.mount);
     } finally {
@@ -170,7 +169,7 @@ export class ArcBridge {
     if (!existsSync(join(homedir(), '.tokens/arcadia')) && !process.env.ARC_TOKEN)
       throw new Error('Configure ~/.tokens/arcadia or ARC_TOKEN');
     if (workspace) {
-      const lease = await this.claim(`reviewloop-doctor-${randomUUID()}`, workspace);
+      const lease = await this.claim(`daddyloop-doctor-${randomUUID()}`, workspace);
       try {
         return JSON.parse(await this.native(['info', '--json'], lease.mount)) as {
           user_login: string;

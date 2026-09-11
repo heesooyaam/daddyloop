@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { CodexRuntime } from '../src/runtime/codex.js';
 import { defaultPolicy, type Task, type Job } from '../src/core/types.js';
-const dataDir = resolve('.reviewloop');
+const dataDir = resolve('.daddyloop');
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 const at = new Date().toISOString(),
   phrase = `transport-${randomUUID()}`;
@@ -33,7 +33,7 @@ const task: Task = {
   policy: defaultPolicy,
   revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
 };
-let executable = process.env.REVIEWLOOP_SMOKE_CODEX_BIN;
+let executable = process.env.DADDYLOOP_SMOKE_CODEX_BIN;
 const runtime = new CodexRuntime({ executable: () => executable, timeoutMs: 180000 });
 const events: { type: string; data: unknown }[] = [];
 let toolCalls = 0;
@@ -72,15 +72,15 @@ async function turn(prompt: string, model?: string) {
 try {
   const first = await turn(
     `This is a minimal protocol test, not a code review. Do not inspect files, run commands, invoke other agents, or change anything. Remember the phrase ${phrase}. Call read_review exactly once. Then return the required JSON: status completed, summary "Transport verified", checkedHead "${task.revision!.head}", question null, and empty verifiedCommentIds/disputedCommentIds.`,
-    process.env.REVIEWLOOP_SMOKE_AUTHOR_MODEL,
+    process.env.DADDYLOOP_SMOKE_AUTHOR_MODEL,
   );
   if (first.status !== 'completed' || toolCalls !== 1)
     throw new Error('Live dynamic-tool round trip did not complete');
   const thread = task.reviewerThreadId;
-  executable = process.env.REVIEWLOOP_SMOKE_NEXT_CODEX_BIN ?? executable;
+  executable = process.env.DADDYLOOP_SMOKE_NEXT_CODEX_BIN ?? executable;
   const second = await turn(
     `Continue the protocol test. Do not use any tools or inspect files. Return the exact phrase I asked you to remember in the previous turn as summary, with status completed, checkedHead "${task.revision!.head}", question null and empty verifiedCommentIds/disputedCommentIds.`,
-    process.env.REVIEWLOOP_SMOKE_REVIEWER_MODEL,
+    process.env.DADDYLOOP_SMOKE_REVIEWER_MODEL,
   );
   if (second.summary !== phrase || task.reviewerThreadId !== thread)
     throw new Error('The resumed thread did not retain the previous turn');

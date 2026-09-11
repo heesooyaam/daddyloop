@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-assets = root / '.reviewloop/releases'
+assets = root / '.daddyloop/releases'
 corrupt_checksum = False
 
 class Mirror(http.server.SimpleHTTPRequestHandler):
@@ -32,17 +32,18 @@ server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Mir
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 try:
-    with tempfile.TemporaryDirectory(prefix='reviewloop-install-test-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='daddyloop-install-test-') as temporary:
         prefix = Path(temporary) / 'prefix with spaces'
         bin_dir = Path(temporary) / 'bin'
-        env = {**os.environ, 'REVIEWLOOP_DOWNLOAD_BASE': f'http://127.0.0.1:{server.server_port}', 'REVIEWLOOP_INSTALL_DIR': str(prefix), 'REVIEWLOOP_BIN_DIR': str(bin_dir)}
+        env = {**os.environ, 'DADDYLOOP_DOWNLOAD_BASE': f'http://127.0.0.1:{server.server_port}', 'DADDYLOOP_INSTALL_DIR': str(prefix), 'DADDYLOOP_BIN_DIR': str(bin_dir)}
         def install(ok=True):
             result = subprocess.run(['bash', str(root / 'install.sh'), '--no-setup'], env=env, capture_output=True, text=True)
             if (result.returncode == 0) != ok:
                 raise RuntimeError(result.stderr[-2000:] + result.stdout[-1000:])
             return result
         install()
-        cli = bin_dir / 'reviewctl'
+        assert sorted(p.name for p in bin_dir.iterdir()) == ['daddy'], 'Only the daddy executable is installed'
+        cli = bin_dir / 'daddy'
         version = subprocess.check_output([str(cli), '--version'], text=True).strip()
         assert version == json.loads((root / 'package.json').read_text())['version']
         # --version alone does not load the lazy TUI and cannot verify its dependencies.
@@ -52,7 +53,7 @@ try:
         console_url = f'http://127.0.0.1:{server.server_port}'
         console_config.write_text(json.dumps({'dataDir': str(console_state), 'serverUrl': console_url}))
         master, slave = pty.openpty(); before_modes = termios.tcgetattr(slave)
-        console_env = {**env, 'REVIEWLOOP_CONFIG': str(console_config), 'REVIEWLOOP_DATA_DIR': str(console_state), 'REVIEWLOOP_URL': console_url, 'TERM': 'xterm-256color'}
+        console_env = {**env, 'DADDYLOOP_CONFIG': str(console_config), 'DADDYLOOP_DATA_DIR': str(console_state), 'DADDYLOOP_URL': console_url, 'TERM': 'xterm-256color'}
         child = subprocess.Popen([str(cli)], stdin=slave, stdout=slave, stderr=slave, env=console_env, start_new_session=True)
         captured = bytearray()
         try:
@@ -85,7 +86,7 @@ try:
         corrupt_checksum = False
         cli.unlink(); cli.write_text('unrelated user command')
         failure = install(False)
-        assert 'Existing reviewctl command preserved' in failure.stderr
+        assert 'Existing daddy command preserved' in failure.stderr
         assert cli.read_text() == 'unrelated user command'
         assert os.readlink(prefix / 'current') == target
         print('PASS: fresh install, paths with spaces, bundled TUI in a PTY, idempotent reinstall, checksum rejection and preservation.')

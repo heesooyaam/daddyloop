@@ -45,7 +45,7 @@ export class Access {
       if (!row || String(row.expires_at) <= now())
         throw new AppError(
           'pairing_invalid',
-          'This pairing link expired or was already used. Generate a new link with reviewctl phone.',
+          'This pairing link expired or was already used. Generate a new link with daddy phone.',
           401,
         );
       this.store.db.prepare('DELETE FROM pairings WHERE code_hash=?').run(hash);

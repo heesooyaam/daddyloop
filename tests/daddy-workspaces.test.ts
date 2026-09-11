@@ -8,8 +8,8 @@ import { reconcileWriterPools, writerPool } from '../src/core/writer-pool.js';
 it('pins defaults and per-request repositories through queued turns, tool calls and a restart', async () => {
   const f = daddyFixture(true);
   try {
-    const original = { ...f.project },
-      group = f.daddy.create({ projectId: original.id });
+    const original = { ...f.workspace },
+      group = f.daddy.create({ workspaceId: original.id });
     const other = {
       ...original,
       id: '713a8568-7553-5cef-8f52-590d51bbd880',
@@ -21,12 +21,12 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
     mkdirSync(join(other.repoPath, 'src'), { recursive: true });
     f.daddy.chat(group.id, 'Task in another repository', 'one', other);
     f.daddy.chat(group.id, 'Task using defaults', 'two');
-    f.store.saveProject({ ...original, repoPath: join(f.dir, 'future') });
+    f.store.saveWorkspace({ ...original, repoPath: join(f.dir, 'future') });
     const reopened = new Store(join(f.dir, 'state.sqlite'));
     const jobs = reopened.daddyJobs(group.id);
     reopened.close();
     expect(jobs).toHaveLength(2);
-    expect(jobs.map((job) => job.project?.repoPath)).toEqual([other.repoPath, original.repoPath]);
+    expect(jobs.map((job) => job.workspace?.repoPath)).toEqual([other.repoPath, original.repoPath]);
     for (const job of jobs) {
       const created = (await f.daddy.call(
         job,
@@ -36,8 +36,8 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
         new AbortController().signal,
       )) as { taskId: string };
       expect(f.store.getTask(created.taskId)).toMatchObject({
-        repoPath: job.project!.repoPath,
-        scope: job.project!.scope,
+        repoPath: job.workspace!.repoPath,
+        scope: job.workspace!.scope,
       });
       expect(
         (
@@ -48,23 +48,23 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
             undefined,
             new AbortController().signal,
           )) as any
-        ).project.repoPath,
-      ).toBe(job.project!.repoPath);
+        ).workspace.repoPath,
+      ).toBe(job.workspace!.repoPath);
     }
     const defaultsJob = jobs[1];
     const available = (await f.daddy.call(
       defaultsJob,
-      'list_projects',
+      'list_workspaces',
       {},
       undefined,
       new AbortController().signal,
     )) as (typeof original)[];
-    expect(available.find((project) => project.id === other.id)?.repoPath).toBe(other.repoPath);
+    expect(available.find((workspace) => workspace.id === other.id)?.repoPath).toBe(other.repoPath);
     const followup = (await f.daddy.call(
       defaultsJob,
       'create_task',
       {
-        projectId: other.id,
+        workspaceId: other.id,
         title: 'Follow-up',
         requirements: 'Continue in the previously selected repository',
       },
@@ -72,11 +72,11 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
       new AbortController().signal,
     )) as { taskId: string };
     expect(f.store.getTask(followup.taskId).repoPath).toBe(other.repoPath);
-    expect(f.daddy.board(group.id).project).toEqual(original);
-    expect(f.daddy.create({ projectId: original.id }).project!.repoPath).toBe(
+    expect(f.daddy.board(group.id).workspace).toEqual(original);
+    expect(f.daddy.create({ workspaceId: original.id }).workspace!.repoPath).toBe(
       join(f.dir, 'future'),
     );
-    expect(f.store.messages(group.id).map((message) => message.project?.repoPath)).toEqual([
+    expect(f.store.messages(group.id).map((message) => message.workspace?.repoPath)).toEqual([
       other.repoPath,
       original.repoPath,
     ]);
@@ -95,21 +95,21 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
   }
 });
 
-it('recovers old occupied writers and pending retirements from durable state', async () => {
+it('recovers occupied writers and pending retirements from durable state', async () => {
   const f = daddyFixture(true);
   try {
-    const group = f.daddy.create({ projectId: f.project.id, writerLimit: 2 });
-    delete group.writerTasks; // A 0.7 session that already ended its author turns.
-    f.store.saveGroup(group);
+    const group = f.daddy.create({ workspaceId: f.workspace.id, writerLimit: 2 });
     for (let n = 0; n < 2; n++) {
       const task = await f.tickets.local({
-        project: f.project,
+        workspace: f.workspace,
         groupId: group.id,
         groupGeneration: group.generation,
         title: `Task ${n}`,
         requirements: 'Finish the review cycle',
         createdByAction: `test-${n}`,
       });
+      group.writerTasks!.push(task.id);
+      f.store.saveGroup(group);
       task.authorThreadId = `writer-${n}`;
       task.state = 'awaiting_checks';
       f.store.saveTask(task);

@@ -1,43 +1,40 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
-import { projectInput, workspaceInput } from '../core/projects.js';
+import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
 import { profilesSchema } from '../core/agents.js';
 import { AppError } from '../core/types.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
 
-  app.post('/api/daddy/adopt', async (request) => {
-    const input = z.object({ taskId: id, projectId: id }).strict().parse(request.body);
-    return daddy.adopt(input.taskId, input.projectId);
-  });
-  for (const prefix of ['/api/workspaces', '/api/projects']) {
-    app.get(prefix, async () => daddy.projects.list());
-    app.get(`${prefix}/suggestions`, async () => daddy.projects.suggestions());
+  {
+    const prefix = '/api/workspaces';
+    app.get(prefix, async () => daddy.workspaces.list());
+    app.get(`${prefix}/suggestions`, async () => daddy.workspaces.suggestions());
     app.get<{ Querystring: { path?: string } }>(`${prefix}/directories`, async (request) =>
-      daddy.projects.browse(request.query.path),
+      daddy.workspaces.browse(request.query.path),
     );
     app.post(prefix, async (request, reply) =>
-      reply.code(201).send(await daddy.projects.register(projectInput.parse(request.body))),
+      reply.code(201).send(await daddy.workspaces.register(workspaceSchema.parse(request.body))),
     );
     app.post<{ Params: { id: string } }>(`${prefix}/:id/defaults`, async (request) =>
-      daddy.projects.register(projectInput.parse(request.body), id.parse(request.params.id)),
+      daddy.workspaces.register(workspaceSchema.parse(request.body), id.parse(request.params.id)),
     );
     app.post(`${prefix}/preview`, async (request) => {
       const input = z
         .object({
-          projectId: id.optional(),
+          workspaceId: id.optional(),
           sessionId: id.optional(),
-          workspace: workspaceInput.optional(),
+          repository: repositorySelectionSchema.optional(),
         })
         .strict()
-        .refine((input) => !!input.projectId !== !!input.sessionId)
+        .refine((input) => !!input.workspaceId !== !!input.sessionId)
         .parse(request.body);
-      return daddy.projects.selection(
+      return daddy.workspaces.selection(
         input.sessionId
-          ? daddy.board(input.sessionId).project!
-          : daddy.projects.get(input.projectId!),
-        input.workspace,
+          ? daddy.board(input.sessionId).workspace!
+          : daddy.workspaces.get(input.workspaceId!),
+        input.repository,
       );
     });
   }
@@ -46,7 +43,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       const board = daddy.board(group.id);
       return {
         ...group,
-        project: board.project,
+        workspace: board.workspace,
         writers: board.writers,
         daddyBusy: board.daddyBusy,
         total: board.tasks.length,
@@ -57,8 +54,8 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.post('/api/daddy/sessions', async (request, reply) => {
     const input = z
       .object({
-        projectId: id,
-        workspace: workspaceInput.optional(),
+        workspaceId: id,
+        repository: repositorySelectionSchema.optional(),
         title: z.string().trim().min(1).max(200).optional(),
         message: z.string().trim().min(1).max(20000).optional(),
         writerLimit: z.number().int().min(1).max(8).optional(),
@@ -68,9 +65,12 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       })
       .strict()
       .parse(request.body);
-    const { workspace, ...options } = input;
-    const project = await daddy.projects.selection(daddy.projects.get(input.projectId), workspace);
-    const group = daddy.create({ ...options, project, requirements: input.message });
+    const { repository, ...options } = input;
+    const workspace = await daddy.workspaces.selection(
+      daddy.workspaces.get(input.workspaceId),
+      repository,
+    );
+    const group = daddy.create({ ...options, workspace, requirements: input.message });
     return reply.code(201).send(daddy.board(group.id));
   });
   app.get<{ Params: { id: string } }>('/api/daddy/sessions/:id', async (request) =>
@@ -81,20 +81,20 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       .object({
         text: z.string().trim().min(1).max(20000),
         requestId: z.string().uuid().optional(),
-        workspace: workspaceInput.optional(),
+        repository: repositorySelectionSchema.optional(),
       })
       .strict()
       .parse(request.body);
     const sessionId = id.parse(request.params.id);
-    const project = await daddy.projects.selection(
-      daddy.board(sessionId).project!,
-      input.workspace,
+    const workspace = await daddy.workspaces.selection(
+      daddy.board(sessionId).workspace!,
+      input.repository,
     );
     return daddy.chat(
       sessionId,
       input.text,
       input.requestId ? `api:${sessionId}:${input.requestId}` : undefined,
-      project,
+      workspace,
     );
   });
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/settings', async (request) =>
