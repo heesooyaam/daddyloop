@@ -135,11 +135,15 @@ export function DaddyTerminal({
           ]
         : [
             { id: 'refresh', label: t('Refresh limits'), detail: '' },
-            ...(menu.usage?.resets.canUse
+            ...(menu.usage?.agents.some((agent) => agent.resets.canUse)
               ? [
                   {
                     id: 'prepare',
-                    label: t(menu.usage.resets.pending ? 'Resolve pending reset' : 'Use a reset'),
+                    label: t(
+                      menu.usage.agents.some((agent) => agent.resets.pending)
+                        ? 'Resolve pending reset'
+                        : 'Use a reset',
+                    ),
                     detail: '',
                   },
                 ]
@@ -387,7 +391,7 @@ export function DaddyTerminal({
       workspaces: 'Choose a workspace',
       discover: 'Workspaces on this server',
       pool: 'Worker pool',
-      limits: 'Codex limits',
+      limits: 'Agent usage',
       help: 'daddyloop commands',
       updates: 'CLI updates',
       notifications: 'Notifications',
@@ -402,7 +406,7 @@ export function DaddyTerminal({
         content.push(
           ...markdown(
             t(
-              'Use one available reset for the Codex account on this server? Existing conversations and files are kept.',
+              'Use one available reset for the selected provider account? Existing conversations and files are kept.',
             ),
             width,
           ),
@@ -412,9 +416,7 @@ export function DaddyTerminal({
     if (menu.kind === 'help')
       content.push(
         ...markdown(
-          t(
-            'Talk to daddy in plain language. Paste goals or ticket links; he handles the workers.',
-          ) +
+          t('Tell daddy what you need. A goal or a ticket is enough; I’ll handle the crew.') +
             '\n\n' +
             commands.join('  ') +
             '\n\n' +
@@ -459,9 +461,13 @@ export function DaddyTerminal({
       content.push({ text: t('↑ ↓ choose · Enter confirm · Esc back') });
       if (menu.kind === 'limits' && !menu.resetPlan && menu.usage) {
         const count =
-          menu.usage.resets.availableCount == null
+          menu.usage.agents.find((agent) => agent.resets.availableCount != null)?.resets
+            .availableCount == null
             ? t('Available resets: unknown')
-            : t('Available resets: {count}', { count: menu.usage.resets.availableCount });
+            : t('Available resets: {count}', {
+                count: menu.usage.agents.find((agent) => agent.resets.availableCount != null)
+                  ?.resets.availableCount,
+              });
         content.push(
           { text: '' },
           { text: count },
@@ -473,11 +479,11 @@ export function DaddyTerminal({
     }
   } else if (!state.board) {
     content.push(
-      { text: t('Your task. My crew.'), kind: 'heading' },
+      { text: t('Hand it over. daddy’s got it.'), kind: 'heading' },
       { text: '' },
       ...markdown(
         t(
-          'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.',
+          'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.',
         ),
         width,
       ),
@@ -509,18 +515,15 @@ export function DaddyTerminal({
         { text: '' },
       );
     if (!state.board.tasks.length)
-      content.push(
-        ...markdown(
-          t('daddy will put the plan and work items here as you discuss the goal.'),
-          width,
-        ),
-      );
+      content.push(...markdown(t('The crew is ready. Give daddy something to handle.'), width));
   } else {
     if (!state.board.messages.length)
       content.push(
         { text: 'daddy', kind: 'heading' },
         ...markdown(
-          t('Drop the task here. I’ll get the crew moving and check the work myself.'),
+          t(
+            'Hand it to daddy. I’ll get the crew moving, check their work and bring you the result.',
+          ),
           width,
         ),
         { text: '' },
@@ -749,7 +752,7 @@ export function DaddyTerminal({
               ))
             ) : (
               <Text color={colors.muted}>
-                {t('Drop a task or ticket. I’ll take it from here.')}
+                {t('A task, a ticket, a voice note. daddy’s listening.')}
               </Text>
             )}
             <Box flexGrow={1} />

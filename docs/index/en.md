@@ -22,3 +22,7 @@ Start with installation, then open the site or the CLI. Every topic has the same
 - [Speech model attribution](../voice-model/en.md)
 - [Release notes](../release-notes/en.md)
 - [Review scope](../review/en.md)
+
+- [Claude setup](../claude/en.md)
+- [Back up and restore](../backups/en.md)
+- [Write your own module](../module-development/en.md)

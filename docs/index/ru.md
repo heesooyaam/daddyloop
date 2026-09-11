@@ -22,3 +22,7 @@
 - [Источник модели речи](../voice-model/ru.md)
 - [Что нового](../release-notes/ru.md)
 - [Область ревью](../review/ru.md)
+
+- [Настройка Claude](../claude/ru.md)
+- [Бэкапы и восстановление](../backups/ru.md)
+- [Написать свой модуль](../module-development/ru.md)

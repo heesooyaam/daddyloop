@@ -1,13 +1,7 @@
-import type {
-  AgentProfile,
-  AgentResult,
-  PRRef,
-  Task,
-  TicketSource,
-  TicketRef,
-} from '../core/types.js';
+import type { AgentProfile, PRRef, Task, TicketSource, TicketRef } from '../core/types.js';
+import type { AgentUsage } from '../core/usage.js';
 import type { ModelOption, ModelCatalogueInfo } from '../core/agents.js';
-import type { AgentInput, SessionInput, AgentRuntime, SessionRuntime } from '../runtime/agent.js';
+import type { AgentRuntime, SessionRuntime } from '../runtime/agent.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import type { Store } from '../core/store.js';
 import type { TicketReader } from './repositories/tickets.js';
@@ -26,8 +20,8 @@ export interface AgentModule {
   name: string;
   runtime: AgentRuntime & SessionRuntime;
   catalogue: AgentCatalogue;
+  usage?: AgentUsage;
 }
-export type AgentDispatch = (input: AgentInput | SessionInput) => Promise<AgentResult>;
 export interface SubmissionContext {
   reader: TicketReader;
   workspaces: Workspaces;
@@ -40,6 +34,11 @@ export interface SubmissionBackend {
   create(task: Task, title: string, body: string): Promise<PRRef>;
   find(task: Task, marker: string, owner: string): Promise<PRRef | undefined>;
 }
+export interface WorkspaceBackupSink {
+  file(path: string, source: string): Promise<void>;
+  text(path: string, content: string): Promise<void>;
+  warning(message: string): void;
+}
 export interface RepositoryModule {
   id: string;
   name: string;
@@ -49,6 +48,7 @@ export interface RepositoryModule {
     reader: TicketReader,
   ): Promise<{ source: TicketSource; ref: TicketRef }>;
   vcs: 'git' | 'arcadia';
+  backupWorkspace?(task: Task, sink: WorkspaceBackupSink): Promise<void>;
   matchesRepository(input: { vcs: 'git' | 'arcadia'; host: string; remotes: string[] }): number;
   parsePR(url: URL): PRRef | undefined;
   review(ref: PRRef, store: Store): ReviewProvider;

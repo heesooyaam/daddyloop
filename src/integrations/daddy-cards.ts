@@ -90,12 +90,7 @@ export function daddyBoard(
                     : 'Waiting for daddy',
           ),
       );
-  text.add(
-    '\n\n' +
-      t(
-        'Send another ticket or describe what you need in this conversation. daddy handles the workers.',
-      ),
-  );
+  text.add('\n\n' + t('Got another ticket? Drop it here. daddy will make room for it.'));
   return {
     ...text,
     buttons: [

@@ -1,3 +1,4 @@
+import { ModuleUsage } from '../modules/agents/usage.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import serveStatic from '@fastify/static';
@@ -40,7 +41,7 @@ import { Daddy } from '../core/daddy.js';
 import { registerDaddy } from './daddy.js';
 import type { SessionRuntime } from '../runtime/agent.js';
 import type { DaddyWorkspace } from '../runtime/daddy-workspace.js';
-import { CodexUsage, type UsageBackend } from '../core/usage.js';
+import type { UsageBackend } from '../core/usage.js';
 import { registerUsage } from './usage.js';
 import { LocalSpeech, type Speech } from '../runtime/speech.js';
 
@@ -106,6 +107,8 @@ export async function buildApp(options: ServerOptions) {
   const agents =
     options.agents ??
     createAgents(config.modules, {
+      store,
+      dataDir,
       executable: (id) => (id === 'codex' ? executable : () => moduleExecutable(id, config)),
     });
   const catalogue = options.catalogue ?? agents;
@@ -114,6 +117,7 @@ export async function buildApp(options: ServerOptions) {
     new UpdateMonitor(store, {
       enabled: config.modules.filter((id) => agents.engines().some((engine) => engine.id === id)),
       codex: executable,
+      claude: moduleExecutable('claude', config),
       intervalHours: config.updates.intervalHours,
       managedRoot: join(dataDir, 'runtimes/codex'),
     });
@@ -311,24 +315,7 @@ export async function buildApp(options: ServerOptions) {
   );
   app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
   registerDaddy(app, daddy);
-  const unavailableUsage: UsageBackend = {
-    read: async () => ({
-      source: 'codex-app-server:account/rateLimits/read',
-      available: false,
-      stale: false,
-      buckets: [],
-      resets: { availableCount: null, canUse: false, credits: [] },
-    }),
-    prepare: async () => {
-      throw new AppError('agent_module_disabled', 'The Codex module is not enabled', 422);
-    },
-    consume: async () => {
-      throw new AppError('agent_module_disabled', 'The Codex module is not enabled', 422);
-    },
-  };
-  const usage =
-    options.usage ??
-    (config.modules.includes('codex') ? new CodexUsage(store, executable) : unavailableUsage);
+  const usage = options.usage ?? new ModuleUsage(agents, store);
   registerUsage(app, usage);
   app.post('/api/session', async (request, reply) => {
     const input = z

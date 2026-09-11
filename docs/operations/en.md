@@ -45,3 +45,5 @@ Before disk-heavy work inspect `df -h /home` and available RAM. Arcadia stores/m
 Finish or pause active work and back up the config/database before replacing an application release. Run the pinned installer with the required module selection. Earlier config/database formats need an explicit conversion; runtime code does not guess or migrate them. Backups are separate from executable compatibility.
 
 `daddy service uninstall` removes the app service while preserving data and credentials. The separately installed network service remains separate. Service changes may require sudo in system mode. Codex-only updates can preserve active turns; see [agents](../agents/en.md).
+
+For a portable snapshot, see [Back up and restore](../backups/en.md). Stop the service before `daddy backup create`; restore only into a new directory.

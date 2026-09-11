@@ -61,7 +61,7 @@ it('checks the selected CLI, caches registry queries and records an externally c
       updateAvailable: true,
       executable: '/custom/codex',
     });
-    expect(first.tools[1].supported).toBe(false);
+    expect(first.tools[1].supported).toBe(true);
     expect(first.tools[1].source).toBe('missing');
     await monitor.check();
     expect(fetcher).toHaveBeenCalledTimes(1);

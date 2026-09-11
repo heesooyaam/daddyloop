@@ -17,9 +17,9 @@ The web palettes cover the conversation, task board, dialogs, forms and login sc
 
 ## Usage stays visible
 
-The panel below the header shows Codex's returned quota windows, percentage remaining, reset times and available earned resets. It is visible on desktop and phone, including before you open a session. The account quota is shared by the Codex agents on this server.
+The panel below the header shows each enabled adapter separately: quota windows, remaining allowance, credits and resets. Claude can also report tokens and the estimated cost of its last API turn. It is visible on desktop and phone, including before you open a session. The account quota is shared by the Codex agents on this server.
 
-Window names come from their returned durations, so a weekly quota is not mislabeled as a five-hour quota. Cached, unreachable or stale readings are labeled; missing usage is never shown as zero remaining. The server caches reads for a minute. Opening details allows an explicit refresh.
+Window names come from their returned durations, so a weekly quota is not mislabeled as a five-hour quota. Cached, unreachable or stale readings are labeled; missing usage is never shown as zero remaining. Codex reads are cached for one minute. Claude displays event observations when available; refreshing does not invent a fresh quota response. Opening details allows an explicit refresh.
 
 **Details and reset** opens the full account view. Preparing a reset does not spend it: a separate confirmation is required. Retries use the same request ID. The app does not buy credits or automatically consume earned resets, and it does not infer permission to resume an agent from a percentage alone.
 

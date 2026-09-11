@@ -7,7 +7,7 @@ export const profileSchema = z
       .default('codex'),
     model: z
       .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,119}$/)
       .optional(),
     effort: z
       .string()

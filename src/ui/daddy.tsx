@@ -118,7 +118,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             daddyloop<span className="daddy-brand-dot">.</span>
           </span>
         </a>
-        <p className="daddy-kicker">{t('One conversation. A whole team.')}</p>
+        <p className="daddy-kicker">{t('One daddy. No babysitting.')}</p>
         <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
           <Plus size={17} />
           {t('New session')}
@@ -281,7 +281,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       <strong>daddy</strong>
                       <p>
                         {t(
-                          'Drop the task here. I’ll get the crew moving and check the work myself.',
+                          'Hand it to daddy. I’ll get the crew moving, check their work and bring you the result.',
                         )}
                       </p>
                     </div>
@@ -340,7 +340,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     placeholder={t(
                       paused
                         ? 'Resume daddy to continue'
-                        : 'Drop a task or ticket. I’ll take it from here.',
+                        : 'A task, a ticket, a voice note. daddy’s listening.',
                     )}
                     value={state.drafts[state.selected] ?? ''}
                     disabled={paused}
@@ -361,7 +361,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     <span>
                       {board.workers.active
                         ? t('Workers at work: {count}', { count: board.workers.active })
-                        : t('The crew is my problem. The goal is yours.')}
+                        : t('You set the goal. daddy handles the headaches.')}
                     </span>
                     <button
                       type="submit"
@@ -465,7 +465,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </div>
                 {!board.tasks.length && (
                   <p className="daddy-empty-small">
-                    {t('daddy will put the plan and work items here as you discuss the goal.')}
+                    {t('The crew is ready. Give daddy something to handle.')}
                   </p>
                 )}
                 <button
@@ -495,15 +495,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         ) : (
           <div className="daddy-welcome">
             <span className="daddy-mark large">d.</span>
-            <div className="daddy-eyebrow">{t('Meet the crew')}</div>
+            <div className="daddy-eyebrow">{t('Leave it with daddy')}</div>
             <h2>
-              {t('Your task.')}
+              {t('Hand it over.')}
               <br />
-              <span>{t('My crew.')}</span>
+              <span>{t('daddy’s got it.')}</span>
             </h2>
             <p>
               {t(
-                'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.',
+                'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.',
               )}
             </p>
             <button
@@ -701,7 +701,7 @@ function NewSession({
         <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} />
       </label>
       <p className="daddy-muted">
-        {t('One worker to start. Set the crew size; I’ll handle the assignments.')}
+        {t('One worker to start. Pick the crew size; daddy will put everyone to work.')}
       </p>
       {error && (
         <p role="alert" className="daddy-field-error">

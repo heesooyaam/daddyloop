@@ -7,6 +7,7 @@ The installer offers the modules that actually work:
 | ID        | Purpose                                                    | Additional installation                    |
 | --------- | ---------------------------------------------------------- | ------------------------------------------ |
 | `codex`   | Agent execution, model catalogue, Codex quotas and updates | Codex CLI                                  |
+| `claude`  | Claude execution, dynamic catalogue and usage events       | Claude CLI, Bubblewrap and socat           |
 | `github`  | GitHub reviews, PR submission and issues                   | GitHub CLI for account setup               |
 | `gitlab`  | GitLab reviews and MR submission                           | REST adapter; no GitLab CLI                |
 | `arcadia` | Arcadia reviews/submission and Tracker tickets             | Uses existing Arc, Arcanum and mount tools |
@@ -21,11 +22,11 @@ daddy modules list
 
 Without `--yes`, the installer shows checkboxes: arrows move, Space toggles, Enter installs. `--yes` chooses defaults; a current configuration can supply its existing selection. Explicit `--modules` overrides it. To change the selection, finish or pause work, rerun the installer with the required full list, and check `daddy modules list`. Different selections are stored as immutable installation variants. Source data and credentials are separate from these variants.
 
-Claude is not a shipped adapter yet. A new engine implements the same execution interface; there is no fake Claude installation option.
+The Claude adapter is shipped. Select `claude` to install its native CLI and sandbox dependencies; connect an API key with `daddy auth agent claude`. See [Claude setup](../claude/en.md).
 
 ## Agent boundary
 
-[`AgentModule`](../../src/modules/contracts.ts) supplies a runtime and catalogue. [`AgentRegistry`](../../src/modules/agents/registry.ts) routes both task and coordinator turns by `profile.engine`. It passes the model/effort to that module as data.
+[`AgentModule`](../../src/modules/contracts.ts) supplies a runtime, catalogue and optional usage/reset capability. [`AgentRegistry`](../../src/modules/agents/registry.ts) routes both task and coordinator turns by `profile.engine`. It passes the model/effort to that module as data.
 
 - `AgentRuntime.run(AgentInput)` executes a task turn.
 - `SessionRuntime.runSession(SessionInput)` executes a coordinator turn.
@@ -55,3 +56,5 @@ Session handles are opaque to the scheduler and bound to an engine. A turn canno
 5. Add both `docs/<topic>/en.md` and `ru.md`. Update [the docs index](../index/en.md) and run the [contribution checks](../contributing/en.md).
 
 Modules are trusted application code reviewed and built with the release. A task cannot install arbitrary code or register its own backend.
+
+A complete walkthrough with contract examples and regression tests is in [Write a module](../module-development/en.md).

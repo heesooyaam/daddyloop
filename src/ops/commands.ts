@@ -82,6 +82,13 @@ export function registerOperations(program: Command) {
       const config = loadConfig();
       if (options.modules !== undefined)
         config.modules = checkedModules(options.modules.split(','));
+      const agent = moduleCatalogue.find(
+        (module) => module.kind === 'agent' && config.modules.includes(module.id),
+      );
+      if (!agent) throw new Error('Select at least one agent module');
+      for (const role of ['worker', 'daddy'] as const)
+        if (!config.modules.includes(config.agents[role].engine))
+          config.agents[role] = { engine: agent.id };
       config.dataDir = dir();
       mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
       if (!options.yes && process.stdin.isTTY) {
@@ -100,6 +107,23 @@ export function registerOperations(program: Command) {
           config.cache.auto = /^y(es)?$/i.test(cache.trim());
         } finally {
           rl.close();
+        }
+      }
+      const database = join(config.dataDir!, 'daddyloop.sqlite');
+      if (existsSync(database)) {
+        const { Store } = await import('../core/store.js');
+        const store = new Store(database);
+        try {
+          const profiles =
+            store.setting<import('../core/types.js').AgentProfiles>('agents.defaults');
+          if (profiles) {
+            for (const role of ['worker', 'daddy'] as const)
+              if (!config.modules.includes(profiles[role].engine))
+                profiles[role] = { engine: agent.id };
+            store.setSetting('agents.defaults', profiles);
+          }
+        } finally {
+          store.close();
         }
       }
       config.serverUrl = `http://127.0.0.1:${config.port}`;
@@ -200,10 +224,20 @@ export function registerOperations(program: Command) {
   auth
     .command('agent')
     .argument('<module>', 'agent module ID')
+    .option('--token-file <path>', 'read an API key from a private file')
     .option('--browser', 'use browser login if the module supports it')
     .action(async (id, options) => {
       requireModule(id);
       const module = moduleCatalogue.find((module) => module.id === id && module.kind === 'agent');
+      if (module && 'apiKeyFile' in module) {
+        const key = options.tokenFile
+          ? readFileSync(resolve(options.tokenFile), 'utf8').trim()
+          : await promptSecret(`${module.name} API key (hidden): `);
+        if (!key || /\s/.test(key)) throw new Error('Use a non-empty API key without whitespace');
+        privateWrite(join(homedir(), '.tokens', module.apiKeyFile), key + '\n');
+        output(`${module.name} API key saved. New agent runs will use it.`);
+        return;
+      }
       if (!module || !('login' in module))
         throw new Error('This module does not provide a CLI login flow');
       await interactiveCommand(moduleExecutable(id, loadConfig()), [

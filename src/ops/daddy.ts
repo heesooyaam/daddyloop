@@ -14,8 +14,8 @@ export function registerDaddyCommands(program: Command) {
   };
   const limits = program
     .command('limits')
-    .description('Show remaining Codex quotas and available resets')
-    .option('--refresh', 'read fresh limits from Codex')
+    .description('Show provider quotas and available resets')
+    .option('--refresh', 'refresh readings from agent modules')
     .option('--json', 'print structured usage');
   limits.action(async (options) => {
     const view = await api<UsageView>('/usage' + (options.refresh ? '?refresh=1' : ''));
@@ -24,13 +24,14 @@ export function registerDaddyCommands(program: Command) {
   });
   limits
     .command('reset')
-    .description('Use one earned Codex reset; retry with the same saved request ID')
+    .description('Use one provider quota reset; retry with the same saved request ID')
     .option('--yes', 'confirm using one reset')
+    .option('--engine <id>', 'agent module to reset')
     .option('--request <id>', 'retry an existing reset request')
     .action(async (options) => {
       const plan = options.request
         ? { id: options.request }
-        : await api<ResetPlan>('/usage/reset/prepare', {});
+        : await api<ResetPlan>('/usage/reset/prepare', { engine: options.engine });
       if (!options.yes) {
         print(plan);
         process.stdout.write(`\ndaddy limits reset --request ${plan.id} --yes\n`);

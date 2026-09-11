@@ -33,7 +33,7 @@ def snapshot(name):drain(.6);snapshots.append({'name':name,'at':len(events)})
 try:
     wait('daddyloop.');wait(tr('Workers:','Воркеры:'));snapshot('daddy-cli')
     send('/pool');send('\r');wait(tr('Worker pool','Пул воркеров'));snapshot('daddy-cli-pool')
-    send('\x1b');send('/limits');send('\r');wait(tr('Codex limits','Лимиты Codex'));wait(tr('Available resets:','Доступно сбросов:'));snapshot('daddy-cli-limits')
+    send('\x1b');send('/limits');send('\r');wait(tr('Agent usage','Лимиты агентов'));wait(tr('Available resets:','Доступно сбросов:'));snapshot('daddy-cli-limits')
     send('\x1b');send('/new');send('\r');wait(tr('Choose a workspace','Выбрать воркспейс'));snapshot('daddy-cli-workspaces')
     send('\x1b');send('\x11')
     deadline=time.monotonic()+10

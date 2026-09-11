@@ -234,13 +234,23 @@ it('shows shared limits and only the paired owner can confirm consuming a reset'
     call: vi.fn(async () => ({})),
   } as unknown as TelegramApi;
   const view = {
-    source: 'codex-app-server:account/rateLimits/read' as const,
-    available: true,
-    stale: false,
-    buckets: [
-      { id: 'codex', name: 'Codex', windows: [{ remainingPercent: 19, durationMinutes: 10080 }] },
+    agents: [
+      {
+        engine: 'codex',
+        name: 'Codex',
+        source: 'codex-app-server:account/rateLimits/read' as const,
+        available: true,
+        stale: false,
+        buckets: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            windows: [{ remainingPercent: 19, durationMinutes: 10080 }],
+          },
+        ],
+        resets: { availableCount: 3, canUse: true, credits: [] },
+      },
     ],
-    resets: { availableCount: 3, canUse: true, credits: [] },
   };
   const id = '852c8b38-1a61-438c-a250-88098c430d5d';
   const plan = {

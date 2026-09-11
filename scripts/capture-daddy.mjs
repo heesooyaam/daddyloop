@@ -89,7 +89,7 @@ const fixture = {
       ],
       [
         'agent',
-        'The crew is on it. **API and tests** stay together; the docs can run in parallel.\n\n- Worker 1 — the idempotency key and retry handling.\n- Worker 2 — API contracts and examples.\n- I will review both and check the lost-response case myself.\n\nWe have **3 worker slots**. I will use another one when there is independent work.',
+        'Leave it with daddy. The crew is on it. **API and tests** stay together; the docs can run in parallel.\n\n- Worker 1 — the idempotency key and retry handling.\n- Worker 2 — API contracts and examples.\n- I will review both and check the lost-response case myself.\n\nWe have **3 worker slots**. I will use another one when there is independent work.',
       ],
       ['user', 'Also cover a lost response followed by the same request again.'],
       [
@@ -108,12 +108,12 @@ const fixture = {
       ],
       [
         'agent',
-        'Раздал работу. **API и тесты** идут вместе, документацию делаем параллельно.\n\n- Воркер 1 — ключ идемпотентности и обработка повторов.\n- Воркер 2 — контракты API и примеры.\n- Я проверю результат и отдельно пройду потерянный ответ.\n\nВ команде **3 места**. Ещё одного подключу, когда будет независимая задача.',
+        'Беру на себя. Папочка уже раздал работу. **API и тесты** идут вместе, документацию делаем параллельно.\n\n- Воркер 1 — ключ идемпотентности и обработка повторов.\n- Воркер 2 — контракты API и примеры.\n- Я проверю результат и отдельно пройду потерянный ответ.\n\nВ команде **3 места**. Ещё одного подключу, когда будет независимая задача.',
       ],
       ['user', 'Добавь случай, когда ответ потерялся, а запрос пришёл повторно.'],
       [
         'agent',
-        'Уже в задаче. Ключ и результат сохраняем до ответа: повтор получит прежний результат.\n\nТесты уже проверяют повторы и параллельные запросы. Сейчас смотрю, чтобы ошибка сети не выдала себя за успешный платёж.',
+        'Учёл. Папочка этот случай не пропустит. Ключ и результат сохраняем до ответа: повтор получит прежний результат.\n\nТесты уже проверяют повторы и параллельные запросы. Сейчас смотрю, чтобы ошибка сети не выдала себя за успешный платёж.',
       ],
     ],
     titles: [
@@ -211,6 +211,9 @@ try {
       exact: false,
     }),
   ).toBeVisible();
+  await page.getByRole('button', { name: t('Change theme') }).click();
+  await page.getByRole('radio', { name: t('Mint'), exact: true }).click();
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
   await page.screenshot({ path: join(output, 'daddy-desktop.png'), animations: 'disabled' });
   await page.getByRole('button', { name: t('Change theme') }).click();
   await expect(page.getByRole('radiogroup')).toBeVisible();
