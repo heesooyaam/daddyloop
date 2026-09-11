@@ -6,7 +6,13 @@ import { createBackup, restoreBackup, inspectBackup } from '../src/ops/backup/sn
 import { configSchema } from '../src/ops/config.js';
 import { Store } from '../src/core/store.js';
 import { fixture } from './helpers.js';
-import { Workspaces, git } from '../src/runtime/workspaces.js';
+import { Workspaces, git as runGit } from '../src/runtime/workspaces.js';
+const git = (...args: Parameters<typeof runGit>) =>
+  runGit(...args).catch((error) => {
+    throw new Error(`Fixture Git ${JSON.stringify(args[0])} in ${args[1]}: ${error.message}`, {
+      cause: error,
+    });
+  });
 const config = configSchema.parse({
   modules: ['codex', 'github'],
   resources: { minDiskGiB: 0, maxDiskPercent: 99, minMemoryGiB: 0 },
