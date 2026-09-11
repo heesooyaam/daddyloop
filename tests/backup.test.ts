@@ -9,9 +9,25 @@ import { fixture } from './helpers.js';
 import { Workspaces, git as runGit } from '../src/runtime/workspaces.js';
 const git = (...args: Parameters<typeof runGit>) =>
   runGit(...args).catch((error) => {
-    throw new Error(`Fixture Git ${JSON.stringify(args[0])} in ${args[1]}: ${error.message}`, {
-      cause: error,
-    });
+    const info: Record<string, unknown> = {};
+    const cwd = args[1];
+    if (cwd && existsSync(join(cwd, '.git'))) {
+      const marker = readFileSync(join(cwd, '.git'), 'utf8');
+      info.marker = marker;
+      const directory = marker.replace(/^gitdir: /, '').trim();
+      if (existsSync(directory)) {
+        info.entries = readdirSync(directory);
+        for (const file of ['HEAD', 'commondir', 'gitdir', 'config.worktree'])
+          if (existsSync(join(directory, file)))
+            info[file] = readFileSync(join(directory, file), 'utf8');
+      }
+    }
+    throw new Error(
+      `Fixture Git ${JSON.stringify(args[0])} in ${args[1]}: ${error.message} Metadata: ${JSON.stringify(info)}`,
+      {
+        cause: error,
+      },
+    );
   });
 const config = configSchema.parse({
   modules: ['codex', 'github'],
