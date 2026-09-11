@@ -123,6 +123,7 @@ it('applies separate role models and efforts on thread start, resume and every t
         ...f.job(),
         role,
         profile: { engine: 'codex' as const, model, effort: 'max' as const },
+        instructions: { prompt: `Custom ${role} instructions for this task.` },
       };
       await runtime.run({
         task,
@@ -147,6 +148,11 @@ it('applies separate role models and efforts on thread start, resume and every t
         model,
         effort: 'max',
       });
+      expect(
+        packets.find(
+          (packet) => packet.method === (role === 'reviewer' ? 'thread/resume' : 'thread/start'),
+        ).params.developerInstructions,
+      ).toContain(job.instructions.prompt);
     }
   } finally {
     f.store.close();

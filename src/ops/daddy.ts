@@ -6,6 +6,7 @@ import type { ResetPlan, UsageView } from '../core/usage.js';
 import { usageLines, resetOutcomeText } from '../client/usage.js';
 import { loadConfig } from './config.js';
 import { translator } from '../i18n/index.js';
+import { instructionOptions, selectedInstructions } from './instructions.js';
 export function registerDaddyCommands(program: Command) {
   const api = <T>(path: string, body?: unknown) =>
     client<T>(path, body, { dataDir: program.opts().dataDir, url: program.opts().url });
@@ -124,8 +125,7 @@ export function registerDaddyCommands(program: Command) {
     .command('sessions')
     .description('List daddy sessions and worker pools')
     .action(async () => print(await api('/daddy/sessions')));
-  program
-    .command('new')
+  instructionOptions(program.command('new'))
     .argument('[message]')
     .option('--workspace <name>', 'workspace to use')
     .option('--title <title>')
@@ -138,6 +138,7 @@ export function registerDaddyCommands(program: Command) {
       if (!options.workspace) throw new Error('Choose a workspace with --workspace');
       const selected = await workspace(options.workspace);
       const board = await api<DaddyBoard>('/daddy/sessions', {
+        instructions: await selectedInstructions(options, api),
         workspaceId: selected.id,
         repository: workspaceOptions(options),
         message,

@@ -7,6 +7,7 @@ import { ClaudeCatalogue } from '../src/modules/agents/claude/models.js';
 import { ClaudeUsage } from '../src/modules/agents/claude/usage.js';
 import { Store } from '../src/core/store.js';
 import { profileSchema } from '../src/core/agents.js';
+import { withInstructions } from '../src/core/instructions.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ClaudeQuery } from '../src/modules/agents/claude/connection.js';
@@ -28,6 +29,9 @@ it('routes Claude tools, structured output, model/effort and native resume throu
     expect(options?.model).toBe('sonnet[1m]');
     expect(options?.effort).toBe('max');
     expect(options?.settingSources).toEqual([]);
+    expect(options?.systemPrompt).toMatchObject({
+      append: expect.stringContaining('Use concise review explanations.'),
+    });
     expect(options?.sandbox).toMatchObject({
       enabled: true,
       failIfUnavailable: true,
@@ -72,7 +76,7 @@ it('routes Claude tools, structured output, model/effort and native resume throu
       profile: { engine: 'claude', model: 'sonnet[1m]', effort: 'max' },
       prompt: 'Review',
       readOnly: true,
-      instructions: 'Scoped task',
+      instructions: withInstructions('Scoped task', { prompt: 'Use concise review explanations.' }),
       signal: new AbortController().signal,
       onTool,
       onSession,

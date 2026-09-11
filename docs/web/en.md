@@ -24,27 +24,20 @@ If your terminal prompt already shows the remote machine, you are inside SSH. Op
 
 ## Computer: the quickest connection over SSH
 
-1. Start the service on the server: `daddy up`.
-2. In a terminal **on your laptop**, run the following command. Replace `user@server` with the same SSH destination you normally use:
+1. On the server, run `daddy up`, then `daddy web`.
+2. Copy the SSH command printed by `daddy web` into a **new local terminal on the laptop**. It already contains this server’s username, hostname, HTTP port and detected SSH port.
+3. Open the browser URL printed beside it. Keep the tunnel terminal open.
+4. Run `daddy token` on the server and use the token in the browser login form.
 
-   ```bash
-   ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 4317:127.0.0.1:4317 user@server
-   ```
+If daddy is installed on the laptop, the server also prints a shorter command using `daddy web --ssh` with the actual destination. That command starts the tunnel, waits for the site and opens the local browser when available. Press Ctrl+C to close only the tunnel. SSH uses your normal keys, agent and SSH configuration.
 
-3. After authentication the SSH command may stay silent. That is expected: `-N` holds a tunnel without opening a shell. Keep that terminal open. In the **laptop browser**, open [http://127.0.0.1:4317](http://127.0.0.1:4317).
-4. Run `daddy token` **on the server** and paste the token into the website's login form. Keep the token private.
+A server cannot start a process on a disconnected laptop. Run the printed command on the laptop; `daddy open` inside SSH now shows the same connection instructions instead of trying to launch a server browser. `daddy up` also prints them after starting the service.
 
-`127.0.0.1` in your browser means your laptop; the tunnel forwards that port to the service host. If local port 4317 is occupied, replace the first `4317` with a free port and use it in the browser URL.
+### Another address or a busy laptop port
 
-Closing SSH disconnects this browser route. **The service, daddy and workers continue on the server.** Reopen the same tunnel to reconnect. This method does not give the phone a permanent route.
+On the server, `daddy web --host work-host --port 14317` prints commands using your SSH alias and port 14317 on the laptop. The remote service port stays unchanged. When using the laptop CLI directly, `--remote-port` sets the service port and `--ssh-port` sets a non-default SSH port.
 
-### If the laptop port is busy
-
-```bash
-ssh -N -o ExitOnForwardFailure=yes -L 14317:127.0.0.1:4317 user@server
-```
-
-Open **http://127.0.0.1:14317** in your browser. `14317` belongs to the laptop; the last `4317` is daddyloop's port on the server. If you changed the service port, put it in the last field. You do not need to bind daddyloop to `0.0.0.0` or expose its port to the internet.
+The tunnel binds only to the laptop’s loopback address. Closing it disconnects the browser route; **daddy and workers continue on the server**. Reopen the same tunnel to reconnect. For a phone or permanent address, use the private HTTPS setup below.
 
 ### Check the connection
 
@@ -52,7 +45,7 @@ In another server terminal, run `curl -fsS http://127.0.0.1:4317/api/health`. Ru
 
 ## Browser on the service host itself
 
-Open [http://127.0.0.1:4317](http://127.0.0.1:4317) or run `daddy open` on that machine. Log in with `daddy token`. Running `daddy open` in a remote SSH shell tries to open a browser on the server, not on your laptop.
+Open [http://127.0.0.1:4317](http://127.0.0.1:4317) or run `daddy open` on that machine. Log in with `daddy token`. Inside SSH, `daddy open` prints connection instructions for the laptop.
 
 ## Computer and phone: permanent private access
 

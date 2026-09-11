@@ -15,7 +15,7 @@ A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he a
 You need a **Linux server** with access to your repositories and an account for your chosen agent. Run this on that server:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.14.1/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.15.0/install.sh | bash
 ```
 
 Arrows select a module; Space checks it. Codex and GitHub start checked. Add Claude, GitLab or Arcadia if you need them. The installer provides the selected engines, the `daddy` CLI, local voice recognition and a persistent background service. No manual tmux setup.
@@ -68,15 +68,9 @@ The bot runs on the server. Your laptop, SSH tunnel and browser tab can all be c
 
 ## Open the website from your laptop
 
-**On the server:** `daddy up`.
+**On the server:** `daddy up`, then `daddy web`.
 
-**On your laptop**, in its local terminal:
-
-```bash
-ssh -N -o ExitOnForwardFailure=yes -L 4317:127.0.0.1:4317 user@server
-```
-
-Use your usual SSH destination. Leave the command running and open **[http://127.0.0.1:4317](http://127.0.0.1:4317) in your laptop’s browser**. Run `daddy token` on the server and paste the token into the login form.
+Copy the printed command into your laptop’s local terminal: the user, host and ports are already filled in, with the browser address alongside. If daddy is installed on the laptop too, `daddy web --ssh` starts the tunnel and opens the browser. Run `daddy token` on the server to sign in.
 
 Disconnect SSH and the browser loses its connection. Reconnect and pick up the conversation. daddy and the crew keep running on the server throughout.
 
@@ -102,6 +96,8 @@ Models and effort levels come from the CLI, not a hand-maintained daddyloop list
 ![The daddyloop CLI with a conversation and worker pool](docs/media/en/daddy-cli.png)
 
 [Agents, limits and updates](docs/agents/en.md) · [CLI commands](docs/terminal/en.md) · [Claude setup](docs/claude/en.md)
+
+Want a different style for this task? Give daddy one instruction set and all its workers another. Combine your own prompts with skills from GitHub, local files or pasted Markdown. The texts belong to the session and travel in its backup. [Instructions and skills](docs/instructions/en.md).
 
 ## What daddy takes off your hands
 
@@ -148,4 +144,4 @@ Agents share execution, model catalogue and usage contracts. Repository modules 
 
 Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/media-guide/en.md).
 
-[Release 0.14.1](https://github.com/heesooyaam/daddyloop/releases/tag/v0.14.1) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Release 0.15.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.15.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

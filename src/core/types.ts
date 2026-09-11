@@ -68,6 +68,7 @@ export interface TicketSource {
 }
 export type PRTask = Task & { ref: PRRef };
 export interface ReviewGroup {
+  instructions?: import('./instructions.js').SessionInstructions;
   id: string;
   title: string;
   requirements: string;
@@ -110,6 +111,7 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   groupId: string;
   generation: number;
@@ -265,6 +267,7 @@ export interface Decision {
   at: string;
 }
 export interface Job {
+  instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   taskId: string;
   generation: number;

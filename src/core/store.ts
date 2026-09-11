@@ -151,6 +151,7 @@ export class Store {
           : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
             defaults?.[role === 'author' ? 'worker' : 'daddy']),
       groupId: group?.id,
+      instructions: structuredClone(group?.instructions?.[role === 'author' ? 'worker' : 'daddy']),
       groupGeneration: group?.generation,
       actionId,
     };

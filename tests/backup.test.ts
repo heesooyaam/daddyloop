@@ -17,6 +17,8 @@ import { configSchema } from '../src/ops/config.js';
 import { Store } from '../src/core/store.js';
 import { fixture } from './helpers.js';
 import { Workspaces, git as runGit } from '../src/runtime/workspaces.js';
+import { InstructionSources } from '../src/ops/instruction-sources.js';
+import { sessionInstructionsSchema, withInstructions } from '../src/core/instructions.js';
 const git = (...args: Parameters<typeof runGit>) =>
   runGit(...args).catch((error) => {
     const info: Record<string, unknown> = {};
@@ -79,12 +81,39 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     await git(['add', 'task.txt'], repo);
     writeFileSync(join(repo, 'notes.txt'), 'untracked source work');
     store.saveTask(task);
+    const skillDirectory = join(root, 'local-skills');
+    mkdirSync(skillDirectory);
+    writeFileSync(
+      join(skillDirectory, 'SKILL.md'),
+      `---\nname: portable-style\n---\nKeep explanations short. Original source: ${repo}\n`,
+    );
+    const skill = await new InstructionSources().import({ kind: 'local', path: skillDirectory });
+    const instructions = {
+      daddy: { prompt: 'Explain decisions in Russian.', skills: [skill] },
+      worker: { prompt: 'Check the implementation carefully.' },
+    };
+    const groupId = '839e11c0-f019-49db-b300-184b9697c6a2';
+    store.saveGroup({
+      id: groupId,
+      rootTaskId: task.id,
+      title: 'Portable task instructions',
+      requirements: '',
+      daddy: { engine: 'codex' },
+      generation: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      instructions,
+    });
+    task.groupId = groupId;
+    store.saveTask(task);
+    const job = store.enqueue(task, 'author', 'chat', 'Continue after moving');
     store.setSetting('preferences', { locale: 'ru' });
     store.setSetting('telegram.pairing', { secret: 'must-not-transfer' });
     store.event(task.id, 'review.evidence', { markdown: '**Keep this review**' });
     store.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     store.close();
     const saved = await createBackup(data, archive, config, 1);
+    rmSync(skillDirectory, { recursive: true });
     expect(saved.sha256).toHaveLength(64);
     expect((await inspectBackup(archive, 1, 0)).files).toBeGreaterThan(4);
     const result = await restoreBackup(archive, target, {}, 1, 0);
@@ -94,6 +123,14 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     const restored = new Store(join(target, 'daddyloop.sqlite'));
     try {
       const next = restored.getTask(task.id);
+      const savedInstructions = sessionInstructionsSchema.parse(
+        restored.getGroup(groupId).instructions,
+      );
+      expect(savedInstructions).toEqual(instructions);
+      expect(withInstructions('Workflow policy', savedInstructions.daddy)).toContain(skill.text);
+      expect(restored.jobs().find((item) => item.id === job.id)?.instructions).toEqual(
+        instructions.worker,
+      );
       expect(next.state).toBe('paused');
       expect(next.authorThreadId).toBeUndefined();
       expect(next.repoPath).toContain(target);

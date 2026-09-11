@@ -4,6 +4,7 @@ import type { Daddy } from '../core/daddy.js';
 import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
 import { profilesSchema } from '../core/agents.js';
 import { AppError } from '../core/types.js';
+import { sessionInstructionsSchema } from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
 
@@ -43,6 +44,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       const board = daddy.board(group.id);
       return {
         ...group,
+        instructions: undefined,
         workspace: board.workspace,
         workers: board.workers,
         daddyBusy: board.daddyBusy,
@@ -62,6 +64,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         requestId: id.optional(),
         publication: z.enum(['auto', 'human']).optional(),
         autoPush: z.boolean().optional(),
+        instructions: sessionInstructionsSchema.optional(),
       })
       .strict()
       .parse(request.body);
@@ -109,6 +112,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         .object({
           workerLimit: z.number().int().min(1).max(8).optional(),
           profiles: profilesSchema.optional(),
+          instructions: sessionInstructionsSchema.optional(),
         })
         .strict()
         .parse(request.body),

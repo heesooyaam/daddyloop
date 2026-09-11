@@ -24,6 +24,11 @@ import { redact } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
 import { workerPool } from './worker-pool.js';
+import {
+  sessionInstructionsSchema,
+  withInstructions,
+  type SessionInstructions,
+} from './instructions.js';
 
 export class Daddy {
   private running = new Map<string, { controller: AbortController; done: Promise<void> }>();
@@ -59,6 +64,7 @@ export class Daddy {
     parentGroupId?: string;
     createdByAction?: string;
     profiles?: AgentProfiles;
+    instructions?: SessionInstructions;
     title?: string;
     requirements?: string;
     workerLimit?: number;
@@ -103,6 +109,9 @@ export class Daddy {
       workspaceId: input.workspaceId,
       workspace: { ...workspace },
       orchestrated: true,
+      instructions: input.instructions
+        ? sessionInstructionsSchema.parse(input.instructions)
+        : undefined,
       daddy: input.profiles?.daddy ?? defaults.daddy,
       worker: input.profiles?.worker ?? defaults.worker,
       parentGroupId: input.parentGroupId,
@@ -180,7 +189,10 @@ export class Daddy {
           (job) => job.groupId === id && job.role === 'reviewer' && job.status === 'running',
         ),
       messages: this.store.messages(id),
-      jobs: this.store.daddyJobs(id).slice(-20),
+      jobs: this.store
+        .daddyJobs(id)
+        .slice(-20)
+        .map((job) => ({ ...job, instructions: undefined })),
     };
   }
   task(groupId: string, taskId: string) {
@@ -232,7 +244,11 @@ export class Daddy {
       .filter((job) => job.status === 'queued' && job.generation === group.generation)
       .at(-1);
     const pending =
-      queued && JSON.stringify(queued.workspace) === JSON.stringify(workspace) ? queued : undefined;
+      queued &&
+      JSON.stringify(queued.workspace) === JSON.stringify(workspace) &&
+      JSON.stringify(queued.instructions) === JSON.stringify(group.instructions?.daddy)
+        ? queued
+        : undefined;
     if (pending) {
       if (trigger === 'user') {
         pending.trigger = trigger;
@@ -248,6 +264,7 @@ export class Daddy {
       trigger,
       input,
       profile: group.daddy,
+      instructions: structuredClone(group.instructions?.daddy),
       workspace,
       status: 'queued',
       createdAt: now(),
@@ -255,13 +272,18 @@ export class Daddy {
     this.store.saveDaddyJob(job);
     this.store.event(group.id, 'daddy.queued', { trigger }, job.id);
   }
-  async settings(id: string, input: { workerLimit?: number; profiles?: AgentProfiles }) {
+  async settings(
+    id: string,
+    input: { workerLimit?: number; profiles?: AgentProfiles; instructions?: SessionInstructions },
+  ) {
     if (input.profiles)
       await Promise.all([
         this.catalogue.validate(input.profiles.worker),
         this.catalogue.validate(input.profiles.daddy),
       ]);
     const group = this.group(id);
+    if (input.instructions)
+      group.instructions = sessionInstructionsSchema.parse(input.instructions);
     if (
       input.workerLimit !== undefined &&
       (!Number.isInteger(input.workerLimit) || input.workerLimit < 1 || input.workerLimit > 8)
@@ -502,7 +524,7 @@ export class Daddy {
         profile: job.profile,
         readOnly: true,
         tools: daddyTools,
-        instructions,
+        instructions: withInstructions(instructions, job.instructions),
         prompt: JSON.stringify(context),
         signal: controller.signal,
         onSession: (threadId) => {

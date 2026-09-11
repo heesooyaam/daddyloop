@@ -17,6 +17,8 @@ import type { ResourceStatus } from '../core/types.js';
 import { setLocale } from '../core/preferences.js';
 import { notificationsCard } from './telegram-cards.js';
 import { languageCard } from './telegram-meta.js';
+import { instructionCommand, instructionLines } from '../client/instructions.js';
+import { InstructionSources } from '../ops/instruction-sources.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
@@ -820,6 +822,19 @@ export class TelegramWorkspace {
       await this.models(models[1], destination, models[2] as 'worker' | 'daddy' | undefined);
       return true;
     }
+    const instructions = data.match(/^dad:instructions:([a-f0-9-]{36})$/);
+    if (instructions) {
+      this.authorize(destination, instructions[1]);
+      await this.api.send(
+        destination,
+        new TelegramText().add(
+          instructionLines(this.daddy.group(instructions[1]).instructions, this.locale()).join(
+            '\n',
+          ),
+        ),
+      );
+      return true;
+    }
     const match = data.match(/^dad:(new|open|add|pause|resume|pool):([a-f0-9-]{36})(?::([1-8]))?$/);
     if (!match) throw new Error('Unknown daddy action');
     const [, action, id, limit] = match;
@@ -1044,6 +1059,23 @@ export class TelegramWorkspace {
       }
       if (text === '/models' && groupId) {
         await this.models(groupId, destination);
+        return true;
+      }
+      if (/^\/(instructions|skill)(?:\s|$)/.test(text)) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        this.authorize(destination, groupId);
+        const instructions = await instructionCommand(
+          text,
+          this.daddy.group(groupId).instructions,
+          (url) => new InstructionSources().import({ kind: 'github', url }),
+        );
+        if (instructions) await this.daddy.settings(groupId, { instructions });
+        await this.api.send(
+          destination,
+          new TelegramText().add(
+            instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
+          ),
+        );
         return true;
       }
       if (pool && groupId) {

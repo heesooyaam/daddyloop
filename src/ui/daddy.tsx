@@ -33,6 +33,8 @@ import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import { WorkspaceFields } from './workspace-fields.js';
 import { FolderBrowser } from './folder-browser.js';
+import { InstructionFields } from './instructions.js';
+import type { SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageStrip, UsagePanel } from './usage.js';
@@ -556,8 +558,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             draft={newDraft}
             onDraft={setNewDraft}
             api={model.api}
-            onCreate={async (workspaceId, message, title, repository) => {
-              await model.create(workspaceId, message, title, repository);
+            onCreate={async (workspaceId, message, title, repository, instructions) => {
+              await model.create(workspaceId, message, title, repository, instructions);
               setNewDraft({});
               setModal(null);
               setPane('chat');
@@ -598,8 +600,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles) => {
-              await model.action('settings', { profiles });
+            onSave={async (profiles, instructions) => {
+              await model.action('settings', { profiles, instructions });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -655,6 +657,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   );
 }
 interface NewSessionDraft {
+  instructions?: SessionInstructions;
   workspaceId?: string;
   message?: string;
   title?: string;
@@ -676,6 +679,7 @@ function NewSession({
     message?: string,
     title?: string,
     repository?: RepositorySelection,
+    instructions?: SessionInstructions,
   ) => Promise<void>;
   api: DaddyApi;
   onWorkspaces: () => void;
@@ -684,7 +688,8 @@ function NewSession({
 }) {
   const { t } = useLocale(),
     [error, setError] = useState(''),
-    [editingFolder, setEditingFolder] = useState(false);
+    [editingFolder, setEditingFolder] = useState(false),
+    [importingInstructions, setImportingInstructions] = useState(false);
   const workspace = workspaces.find((item) => item.id === draft.workspaceId) ?? workspaces[0];
   return (
     <form
@@ -692,12 +697,13 @@ function NewSession({
       onSubmit={(event) => {
         event.preventDefault();
         setError('');
-        if (!workspace || editingFolder) return;
+        if (!workspace || editingFolder || importingInstructions) return;
         void onCreate(
           workspace.id,
           draft.message,
           draft.title || draft.message?.split('\n')[0].slice(0, 80) || undefined,
           draft.repository,
+          draft.instructions,
         ).catch((error) => setError(error.message));
       }}
     >
@@ -750,6 +756,12 @@ function NewSession({
           {t('Add another workspace')}
         </button>
       </div>
+      <InstructionFields
+        api={api}
+        value={draft.instructions}
+        onChange={(instructions) => onDraft({ ...draft, instructions })}
+        onBusyChange={setImportingInstructions}
+      />
       <label>
         {t('Session name (optional)')}
         <input
@@ -774,7 +786,10 @@ function NewSession({
           {t(error)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy || !workspace || editingFolder}>
+      <button
+        className="daddy-button primary"
+        disabled={busy || !workspace || editingFolder || importingInstructions}
+      >
         {busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}
         {t('Start session')}
       </button>
@@ -1019,17 +1034,22 @@ function SessionSettings({
 }: {
   api: DaddyApi;
   board: DaddyBoard;
-  onSave: (profiles: AgentProfiles) => Promise<void>;
+  onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
       worker: board.group.worker ?? board.group.daddy,
     }),
+    [instructions, setInstructions] = useState<SessionInstructions | undefined>(
+      board.group.instructions,
+    ),
+    [importingInstructions, setImportingInstructions] = useState(false),
     [models, setModels] = useState<ModelOption[]>([]),
     [engines, setEngines] = useState<{ id: string; name: string }[]>([]),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const originalProfiles = useRef(profiles);
   const load = async (refresh = false) => {
     try {
       const result = await api<{
@@ -1052,8 +1072,14 @@ function SessionSettings({
       className="daddy-form"
       onSubmit={(event) => {
         event.preventDefault();
+        if (importingInstructions) return;
         setBusy(true);
-        void onSave(profiles)
+        void onSave(
+          JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
+            ? undefined
+            : profiles,
+          instructions,
+        )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
       }}
@@ -1134,6 +1160,12 @@ function SessionSettings({
           </fieldset>
         );
       })}
+      <InstructionFields
+        api={api}
+        value={instructions}
+        onChange={setInstructions}
+        onBusyChange={setImportingInstructions}
+      />
       <button type="button" className="daddy-text-button" onClick={() => void load(true)}>
         <RefreshCw size={14} />
         {t('Refresh model list')}
@@ -1148,7 +1180,7 @@ function SessionSettings({
           {t(error)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy}>
+      <button className="daddy-button primary" disabled={busy || importingInstructions}>
         {t('Save settings')}
       </button>
     </form>

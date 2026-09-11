@@ -1,6 +1,14 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.14.1
+# daddyloop 0.15.0
+
+- Task-specific instruction sets: separate custom prompts and multiple skills for daddy and all workers in one session. Import from GitHub, server folders, device files or pasted text; export and reuse JSON sets. Web, CLI and Telegram controls share the same settings.
+- Each queued turn freezes its instructions. Backups carry the selected text and checksums, so restoring needs neither the old skill folder nor a GitHub download. Model defaults and other sessions are unaffected.
+- `daddy web` prints a laptop tunnel command with the real user, host and ports. On a laptop with the CLI installed, `daddy web --ssh user@host` opens the tunnel and browser. `daddy up` and remote `daddy open` show connection instructions too.
+
+Configuration 3 and SQLite 7 are unchanged. Skills are Markdown instruction text, not executable plugins. Reload open web pages after upgrading.
+
+## 0.14.1
 
 The sidebar logo is plain branding instead of a link that does nothing. The sidebar tagline and home-page prompt use simpler English/Russian copy, with refreshed screenshots including the empty home page. Addresses items 8–10 in [issue #19](https://github.com/heesooyaam/daddyloop/issues/19).
 
