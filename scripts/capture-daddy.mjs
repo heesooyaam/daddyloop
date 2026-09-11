@@ -275,6 +275,31 @@ try {
     );
   await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
   await page.screenshot({ path: join(output, 'daddy-new-session.png'), animations: 'disabled' });
+  await page.getByText(t('Style and skills for this session'), { exact: true }).click();
+  await page
+    .getByLabel(t('Your instructions for {role}', { role: 'daddy' }))
+    .fill(
+      locale === 'ru'
+        ? 'Коротко объясняй решения по-русски. Указывай, что уже проверено.'
+        : 'Explain decisions briefly. Say what has been verified.',
+    );
+  await page.getByRole('button', { name: t('Attach a skill'), exact: true }).click();
+  await page.getByLabel(t('Skill source')).selectOption('text');
+  await page
+    .getByLabel(t('Skill name'))
+    .fill(locale === 'ru' ? 'Короткие отчёты' : 'Brief reports');
+  await page
+    .getByLabel(t('Skill text'), { exact: true })
+    .fill(
+      locale === 'ru'
+        ? 'Сохраняй точные имена API и коды ошибок. Начинай с результата.'
+        : 'Keep API names and error codes exact. Lead with the result.',
+    );
+  await page.getByRole('button', { name: t('Attach skill'), exact: true }).click();
+  await expect(page.getByRole('button', { name: t('Attach a skill'), exact: true })).toBeVisible();
+  await page.locator('.daddy-instructions').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(output, 'daddy-instructions.png'), animations: 'disabled' });
+  await page.getByText(t('Style and skills for this session'), { exact: true }).click();
   await page.getByRole('button', { name: t('Change folder for this session') }).click();
   await page.getByRole('button', { name: t('Browse server folders') }).click();
   await expect(page.getByRole('button', { name: t('Select this folder') })).toBeEnabled();
@@ -388,6 +413,7 @@ try {
         terminalVerified: capture.verified,
         screens: [
           'daddy-home',
+          'daddy-instructions',
           'daddy-desktop',
           'daddy-models',
           'daddy-phone-chat',

@@ -3,6 +3,7 @@ import type { Workspace, ReviewGroup, ResourceStatus } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import type { UsageView } from '../core/usage.js';
+import type { SessionInstructions } from '../core/instructions.js';
 export type DaddyBoard = ReturnType<Daddy['board']>;
 export type DaddySession = ReviewGroup & {
   workspace?: Workspace;
@@ -174,11 +175,13 @@ export class DaddyClient {
     message?: string,
     title?: string,
     repository?: RepositorySelection,
+    instructions?: SessionInstructions,
   ) {
     if (this.value.busy) return;
     const input = {
         workspaceId,
         ...(repository ? { repository } : {}),
+        ...(instructions ? { instructions } : {}),
         ...(message?.trim() ? { message: message.trim() } : {}),
         ...(title?.trim() ? { title: title.trim() } : {}),
       },

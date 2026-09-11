@@ -21,6 +21,8 @@ import { registerPlanningCommands } from './ops/planning.js';
 import { registerEnvironmentCommands } from './ops/environment.js';
 import { registerModuleCommands } from './ops/modules.js';
 import { registerDaddyCommands } from './ops/daddy.js';
+import { registerInstructionCommands } from './ops/instructions.js';
+import { webConnectionText } from './ops/web.js';
 import { normalizeLocale, translator } from './i18n/index.js';
 
 const helpOnly = process.argv.some((arg) => ['--help', '-h', '--version', '-V'].includes(arg));
@@ -144,6 +146,19 @@ program
   .command('open')
   .argument('[session]')
   .action((id) => {
+    if (
+      process.env.SSH_CONNECTION ||
+      process.env.SSH_TTY ||
+      (process.platform !== 'darwin' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)
+    ) {
+      const config = loadConfig();
+      process.stdout.write(webConnectionText(config) + '\n');
+      if (id)
+        process.stdout.write(
+          `${config.publicOrigin ?? `http://127.0.0.1:${config.port}`}/#session/${encodeURIComponent(id)}\n`,
+        );
+      return;
+    }
     const url = program.opts().url + (id ? `/#session/${encodeURIComponent(id)}` : '');
     const browser = spawn(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], {
       stdio: 'ignore',
@@ -298,6 +313,7 @@ registerOperations(program);
 registerPlanningCommands(program);
 registerEnvironmentCommands(program);
 registerDaddyCommands(program);
+registerInstructionCommands(program);
 registerModuleCommands(program);
 registerBackupCommands(program);
 let cachedCliLocale: Locale | undefined;

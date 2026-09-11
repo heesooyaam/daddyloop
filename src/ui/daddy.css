@@ -2098,3 +2098,89 @@ body {
 .daddy-workspace-fields.compact .daddy-repository-summary > button {
   margin: 0;
 }
+.daddy-instructions {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 13px;
+  min-width: 0;
+}
+.daddy-instructions > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.daddy-instructions[open] > summary {
+  margin-bottom: 12px;
+}
+.daddy-instruction-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.daddy-instructions label {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0;
+}
+.daddy-instruction-skills {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.daddy-instruction-skill {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+.daddy-instruction-skill > details {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.daddy-instruction-skill summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.daddy-instruction-skill pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 11px;
+}
+.daddy-instruction-import {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  margin-top: 12px;
+}
+.daddy-instruction-import > button {
+  margin: 0 8px 8px 0;
+}
+.daddy-file-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  justify-self: start;
+}
+.daddy-file-picker input[type='file'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.daddy-file-picker:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  border-radius: 9px;
+}
+.daddy-file-picker.disabled {
+  opacity: 0.5;
+}

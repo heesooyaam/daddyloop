@@ -1,4 +1,58 @@
 export const daddyRu: Record<string, string> = {
+  'Choose a file': 'Выбрать файл',
+  'Style and skills for this session': 'Стиль и навыки этой сессии',
+  'Only this session. Choose separate instructions for daddy and for all its workers. Saved text travels with your backup.':
+    'Только для этой сессии: отдельно для daddy и для всех его воркеров. Тексты сохраняются в бекапе.',
+  'All workers': 'Все воркеры',
+  'Your instructions for {role}': 'Инструкции для {role}',
+  'For example: answer briefly, keep technical terms exact, and explain decisions in Russian.':
+    'Например: отвечай коротко, сохраняй технические термины и объясняй решения по-русски.',
+  'Pasted instructions': 'Текст инструкций',
+  'Remove skill {name}': 'Убрать навык {name}',
+  'Attach a skill': 'Добавить навык',
+  'Skill source': 'Откуда взять навык',
+  'Folder or file on the server': 'Папка или файл на сервере',
+  'File from this device': 'Файл с этого устройства',
+  'Paste skill text': 'Вставить текст навыка',
+  'Attach the Markdown instructions from SKILL.md. Native plugin installers, scripts and hooks are not run.':
+    'Добавляется текст инструкций из SKILL.md. Установщики плагинов, скрипты и хуки не запускаются.',
+  'Markdown file': 'Файл Markdown',
+  'Skill name': 'Название навыка',
+  'GitHub skill URL': 'Ссылка на навык в GitHub',
+  'Skill path on the server': 'Путь к навыку на сервере',
+  'Skill text': 'Текст навыка',
+  'Attach skill': 'Добавить навык',
+  'Download this instruction set': 'Скачать набор инструкций',
+  'Load an instruction set (.json)': 'Загрузить набор инструкций (.json)',
+  'The instruction set file is too large': 'Файл набора инструкций слишком большой',
+  'Changes affect newly queued turns. Running and already queued turns keep their saved instructions.':
+    'Изменения действуют для следующих запусков. Уже запущенные агенты и очередь сохранят прежние инструкции.',
+  'Choose at most 12 skills per role': 'Можно выбрать до 12 навыков для каждой роли',
+  'A skill must fit in 64 KiB': 'Размер навыка — до 64 КиБ',
+  'Instructions for this session': 'Инструкции этой сессии',
+  'No additional instructions': 'Дополнительных инструкций нет',
+  'Use /instructions daddy <text>, /instructions worker <text>, or /skill <role> <GitHub URL>':
+    'Используй /instructions daddy <текст>, /instructions worker <текст> или /skill <роль> <ссылка GitHub>',
+  'Permanent website: {url}': 'Постоянный адрес сайта: {url}',
+  'Run this on your laptop, in a new local terminal:':
+    'На ноутбуке открой новый локальный терминал и вставь эту команду:',
+  'Then open {url}': 'Затем открой {url}',
+  'Keep the tunnel terminal open. Closing it disconnects this browser; daddy and workers keep running on the server.':
+    'Оставь терминал с туннелем открытым. Если его закрыть, сайт потеряет связь; daddy и воркеры продолжат работу на сервере.',
+  'If daddy is installed on the laptop, use this single command instead:':
+    'Если daddy установлен на ноутбуке, достаточно одной команды:',
+  'For browser login, get the access token on this server with daddy token.':
+    'Для входа на сайт получи токен на этом сервере командой daddy token.',
+  'If you use an SSH alias or another address, run daddy web --host <your-address>.':
+    'Если подключаешься через SSH-алиас или другой адрес, укажи его: daddy web --host <твой-адрес>.',
+  'Local port {port} is busy. Choose another with --port.':
+    'Локальный порт {port} занят. Выбери другой через --port.',
+  'Connecting to {host} over SSH…': 'Подключаюсь к {host} по SSH…',
+  'The website did not respond through SSH. Check that daddy is running on the server.':
+    'Сайт не ответил через SSH. Проверь, что daddy запущен на сервере.',
+  'Website ready: {url}': 'Сайт доступен: {url}',
+  'Keep this terminal open. Press Ctrl+C to close only the tunnel.':
+    'Оставь этот терминал открытым. Ctrl+C закроет только туннель.',
   'Choose a folder on this server': 'Выбор папки на сервере',
   'Folders on this server': 'Папки на сервере',
   'Open folders to explore. Select the current folder with the button below.':

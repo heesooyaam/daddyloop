@@ -10,8 +10,10 @@ import type { UpdateStatus } from '../core/updates.js';
 import { VERSION } from '../version.js';
 import type { ResetPlan, UsageView } from '../core/usage.js';
 import { resetOutcomeText, usageLines, usageSummary } from '../client/usage.js';
+import { instructionCommand, instructionLines } from '../client/instructions.js';
 
 type MenuKind =
+  | 'instructions'
   | 'sessions'
   | 'workspaces'
   | 'discover'
@@ -38,6 +40,8 @@ type MenuState = {
   notice?: string;
 };
 const commands = [
+  '/instructions',
+  '/skill',
   '/new',
   '/sessions',
   '/workspaces',
@@ -320,6 +324,21 @@ export function DaddyTerminal({
       open('help');
       return;
     }
+    if (name === '/instructions' || name === '/skill') {
+      if (!state.board) throw new Error(t('Start a daddy session first.'));
+      const instructions = await instructionCommand(value, state.board.group.instructions, (url) =>
+        model.api('/instructions/import', { kind: 'github', url }),
+      );
+      if (instructions) await model.action('settings', { instructions });
+      if (model.snapshot().error) return;
+      setMenu({
+        kind: 'instructions',
+        index: 0,
+        query: '',
+        notice: instructionLines(model.snapshot().board?.group.instructions, locale).join('\n'),
+      });
+      return;
+    }
     if (name === '/tasks') {
       setView('tasks');
       return;
@@ -393,6 +412,7 @@ export function DaddyTerminal({
       pool: 'Worker pool',
       limits: 'Agent usage',
       help: 'daddyloop commands',
+      instructions: 'Instructions for this session',
       updates: 'CLI updates',
       notifications: 'Notifications',
       'model-role': 'Choose a role',
@@ -413,7 +433,8 @@ export function DaddyTerminal({
           { text: '' },
         );
     }
-    if (menu.kind === 'help')
+    if (menu.kind === 'instructions') content.push(...markdown(menu.notice ?? '', width));
+    else if (menu.kind === 'help')
       content.push(
         ...markdown(
           t('Tell daddy what you need. A goal or a ticket is enough; I’ll handle the crew.') +
@@ -606,7 +627,8 @@ export function DaddyTerminal({
     }
     if (menu) {
       if (keyInfo.return) {
-        if (menu.kind === 'help' || menu.kind === 'updates') setMenu(undefined);
+        if (menu.kind === 'help' || menu.kind === 'updates' || menu.kind === 'instructions')
+          setMenu(undefined);
         else void choose();
         return;
       }

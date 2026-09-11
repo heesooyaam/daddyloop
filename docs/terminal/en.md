@@ -18,6 +18,8 @@ Run `daddy` for the interactive console. There is one conversation with daddy, a
 | `/pause`, `/resume`            | Session lifecycle                         |
 | `/quit`                        | Disconnect this client                    |
 
+`/instructions` shows both role sets; `/instructions daddy <text>`, `/instructions worker <text>` and `/skill <role> <GitHub URL>` change only the selected session. [Instructions, imports and backups](../instructions/en.md).
+
 Ctrl+N starts a session, Ctrl+T selects one, Tab changes panes, PgUp/PgDn scroll, and Ctrl+Q exits. Enter sends text; the interface shows available shortcuts. Drafts stay separate while switching sessions within the same client.
 
 ```bash

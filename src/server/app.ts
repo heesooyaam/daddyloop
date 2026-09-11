@@ -30,6 +30,7 @@ import { CacheManager } from '../ops/cache.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../modules/repositories/tickets.js';
 import { registerPlanning, type Catalogue } from './planning.js';
+import { registerInstructions } from './instructions.js';
 import type { AgentRuntime } from '../runtime/agent.js';
 import { randomUUID } from 'node:crypto';
 import { preferences, preferenceInput, setLocale } from '../core/preferences.js';
@@ -485,6 +486,7 @@ export async function buildApp(options: ServerOptions) {
     return updates.status();
   });
   registerPlanning(app, engine, catalogue, config.maxConcurrentAgents);
+  registerInstructions(app);
   app.post('/api/demo', async (_request, reply) => {
     if (!options.demo)
       throw new AppError('demo_disabled', 'Start with --demo to enable demo fixtures', 404);

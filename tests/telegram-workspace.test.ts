@@ -5,6 +5,55 @@ import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
 afterEach(() => vi.restoreAllMocks());
+it('changes only the selected session role from a private chat or topic and ignores other senders', async () => {
+  const f = daddyFixture();
+  let topic = 30;
+  const api = {
+    send: vi.fn(async () => ({ message_id: 1 })),
+    call: vi.fn(async () => ({ message_thread_id: ++topic })),
+  } as unknown as TelegramApi;
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const first = f.daddy.create({ workspaceId: f.workspace.id }),
+    second = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  let updateId = 700;
+  const message = (text: string, user = 7, chat = 7, thread?: number): Update => ({
+    update_id: updateId++,
+    message: {
+      message_id: updateId,
+      text,
+      from: { id: user },
+      chat: { id: chat, type: chat === 7 ? 'private' : 'supergroup' },
+      message_thread_id: thread,
+    },
+  });
+  try {
+    await workspace.handle(message('/instructions daddy Answer briefly.'));
+    await workspace.handle(message('/instructions worker Check edge cases.'));
+    await workspace.handle(message('/instructions daddy Changed by another user', 99));
+    expect(f.daddy.group(first.id).instructions).toEqual({
+      daddy: { prompt: 'Answer briefly.' },
+      worker: { prompt: 'Check edge cases.' },
+    });
+    expect(f.daddy.group(second.id).instructions).toBeUndefined();
+    expect(f.store.messages(first.id)).toHaveLength(0);
+    f.store.setSetting('telegram.group', { chatId: -10042, title: 'Room', ownerId: 7 });
+    const destination = await workspace.ensureTopic(second);
+    await workspace.handle(
+      message('/instructions worker Keep reports precise.', 7, -10042, destination!.threadId),
+    );
+    expect(f.daddy.group(second.id).instructions?.worker.prompt).toBe('Keep reports precise.');
+    expect(f.daddy.group(first.id).instructions?.worker.prompt).toBe('Check edge cases.');
+    await workspace.handle(
+      message('/instructions worker --clear', 7, -10042, destination!.threadId),
+    );
+    expect(f.daddy.group(second.id).instructions?.worker).toEqual({});
+  } finally {
+    await workspace.stop();
+    await f.close();
+  }
+});
 it('binds a forum selected by the paired owner, creates one topic per session and routes only that owner’s messages to daddy', async () => {
   const f = daddyFixture(),
     sent: { method: string; body: Record<string, any> }[] = [];

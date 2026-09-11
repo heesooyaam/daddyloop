@@ -100,6 +100,12 @@ export function daddyBoard(
         { text: t('Worker pool'), callback_data: `dad:pool:${board.group.id}` },
       ],
       [{ text: t('Models'), callback_data: `dad:models:${board.group.id}` }],
+      [
+        {
+          text: t('Instructions for this session'),
+          callback_data: `dad:instructions:${board.group.id}`,
+        },
+      ],
       [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
       [
         {

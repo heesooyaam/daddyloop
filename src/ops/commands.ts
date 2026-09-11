@@ -20,6 +20,7 @@ import { api as client } from './client.js';
 import { command } from './process.js';
 import { TelegramApi } from '../integrations/telegram.js';
 import { setupTailscale } from './network.js';
+import { openWebTunnel, webConnectionText } from './web.js';
 import { ArcBridge, leaseHelper } from '../integrations/arcadia.js';
 
 export async function promptSecret(label: string): Promise<string> {
@@ -159,6 +160,7 @@ export function registerOperations(program: Command) {
       await manager.install(config, dir());
       await manager.start();
       output(await manager.status());
+      output(webConnectionText(config));
     });
   program
     .command('down')
@@ -297,15 +299,27 @@ export function registerOperations(program: Command) {
         `Open this link on the phone (one use, expires ${result.expiresAt}):\n${result.url}\nThe phone must be able to reach the service network directly; your laptop is not a relay.`,
       );
     });
-  const web = program.command('web').description('Configure persistent browser/phone access');
-  web.command('status', { isDefault: true }).action(async () => {
-    const config = loadConfig();
-    output(
-      config.publicOrigin
-        ? `Permanent address: ${config.publicOrigin}\nThe service runs on the host independently of SSH.`
-        : 'Local access only. Configure a permanent HTTPS address with daddy web origin <https-url>, or daddy web tailscale. An SSH tunnel stops when the laptop disconnects.',
-    );
-  });
+  const web = program
+    .command('web')
+    .description('Open a laptop SSH tunnel or show ready-to-copy browser connection commands')
+    .option('--ssh <destination>', 'run on the laptop: connect to an SSH alias or user@host')
+    .option(
+      '--host <destination>',
+      'server: override the SSH address shown in the copyable command',
+    )
+    .option('--port <number>', 'local browser port')
+    .option('--remote-port <number>', 'remote daddy HTTP port (default 4317)')
+    .option('--ssh-port <number>', 'SSH port (default 22)')
+    .option('--no-open', 'do not open the browser automatically')
+    .action(async (options) => {
+      const config = loadConfig();
+      if (options.ssh) await openWebTunnel(options.ssh, options, config.locale);
+      else output(webConnectionText(config, options));
+    });
+  web
+    .command('status')
+    .description('Show browser connection addresses and commands without starting a tunnel')
+    .action(() => output(webConnectionText(loadConfig(), web.opts())));
   web
     .command('origin')
     .argument('<url>')

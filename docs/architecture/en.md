@@ -55,6 +55,8 @@ The browser uses an HttpOnly cookie, CSRF headers and Host/Origin checks. Phone 
 
 Browser themes are local preferences. Usage reads do not mutate tasks; resets are separately confirmed and idempotent. Current data formats are config 3 / SQLite 7, with no runtime migration or retired command aliases.
 
+Session instruction sets are separate from global model profiles. Daddy and worker/review jobs copy the relevant role's text when enqueued; new instructions do not mutate pending or running jobs. `withInstructions` and `taskSession` compose the shared runtime input for all engines. Skill sources are attribution; the stored text is authoritative for that snapshot and travels in backups. Imports do not execute plugins or grant tools. See [instructions](../instructions/en.md).
+
 ## Portable state and provider usage
 
 Agent modules own quota reads and optional resets. The UI receives independent provider readings, including unknown and stale states. Claude uses the Agent SDK with scoped MCP tools and a required command sandbox; API billing observations do not imply a subscription quota. See [module development](../module-development/en.md).

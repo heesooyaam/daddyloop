@@ -71,3 +71,5 @@ Open each paused session, inspect the board and saved files, then use **Resume**
 For **Arcadia**, inspect `recovery/arcadia/<task>/<role>/state.json`, acquire a new mount through the normal lease helper and restore the base revision. Apply the committed, index and working patches in that order, inspect the saved changed files (including untracked files), and verify the diff. Then reconnect the task to the restored work. The first backup format preserves this material but does not automatically recreate Arc branches or apply patches to a live mount.
 
 The first format has no built-in remote storage scheduler or encryption. Use your normal encrypted storage and scheduling after verifying a restore. Creating an archive is not a substitute for testing that you can recover it.
+
+Session instruction sets and queued-turn snapshots include the actual skill text and checksums. Restored work needs no old skill folder or GitHub download; source locations remain attribution. See [instructions](../instructions/en.md).
