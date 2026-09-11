@@ -20,7 +20,7 @@ it('fences a late session read and preserves drafts for both conversations', asy
     if (path === '/daddy/sessions')
       return f.daddy.sessions().map((group) => ({
         ...group,
-        writers: f.daddy.board(group.id).writers,
+        workers: f.daddy.board(group.id).workers,
         total: 0,
         complete: 0,
         daddyBusy: false,
@@ -75,7 +75,7 @@ it('reuses an uncertain message request ID and keeps text edited while a send is
       return [
         {
           ...group,
-          writers: { active: 0, limit: 1, hostLimit: 1 },
+          workers: { active: 0, limit: 1, hostLimit: 1 },
           total: 0,
           complete: 0,
           daddyBusy: false,

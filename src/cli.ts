@@ -11,19 +11,22 @@ import { resources } from './core/resources.js';
 import { ProviderHttp } from './providers/http.js';
 import { CodexConnection } from './runtime/protocol.js';
 import { git } from './runtime/workspaces.js';
-import { loadConfig, defaultDataDir } from './ops/config.js';
+import { loadConfig, defaultDataDir, configSchema } from './ops/config.js';
 import { api as callApi } from './ops/client.js';
 import { registerOperations } from './ops/commands.js';
 import { consoleUI } from './ops/console.js';
 import { VERSION } from './version.js';
 import { registerPlanningCommands } from './ops/planning.js';
 import { registerEnvironmentCommands } from './ops/environment.js';
+import { registerModuleCommands } from './ops/modules.js';
 import { registerDaddyCommands } from './ops/daddy.js';
 import { normalizeLocale, translator } from './i18n/index.js';
 
+const helpOnly = process.argv.some((arg) => ['--help', '-h', '--version', '-V'].includes(arg));
+const initialConfig = helpOnly ? configSchema.parse({}) : loadConfig();
 const program = new Command()
   .name('daddy')
-  .description('One daddy, a pool of writers, and persistent work on your server')
+  .description('One daddy, a pool of workers, and persistent work on your server')
   .version(VERSION)
   .option('--plain', 'use the basic line-oriented console')
   .addOption(
@@ -32,11 +35,11 @@ const program = new Command()
   .addOption(
     new Option('--theme <theme>', 'terminal appearance').choices(['dark', 'light']).default('dark'),
   )
-  .option('--data-dir <path>', 'local state directory', defaultDataDir())
+  .option('--data-dir <path>', 'local state directory', defaultDataDir(initialConfig))
   .option(
     '--url <url>',
     'daddyloop backend URL',
-    process.env.DADDYLOOP_URL ?? loadConfig().serverUrl,
+    process.env.DADDYLOOP_URL ?? initialConfig.serverUrl,
   );
 const dataDir = () => resolve(program.opts().dataDir);
 async function api(path: string, body?: unknown) {
@@ -48,22 +51,22 @@ const print = (value: unknown): void => {
 program
   .command('serve')
   .description('Run the local backend, worker and web panel')
-  .option('--port <port>', 'loopback port', String(loadConfig().port))
+  .option('--port <port>', 'loopback port', String(initialConfig.port))
   .option('--demo', 'enable explicitly labeled demo tasks', false)
   .option(
     '--min-disk-gib <size>',
     'stop starting jobs below this disk space',
-    String(loadConfig().resources.minDiskGiB),
+    String(initialConfig.resources.minDiskGiB),
   )
   .option(
     '--max-disk-percent <percent>',
     'stop starting jobs at this usage',
-    String(loadConfig().resources.maxDiskPercent),
+    String(initialConfig.resources.maxDiskPercent),
   )
   .option(
     '--min-memory-gib <size>',
     'stop starting jobs below available RAM',
-    String(loadConfig().resources.minMemoryGiB),
+    String(initialConfig.resources.minMemoryGiB),
   )
   .action(async (options) => {
     const dir = dataDir();
@@ -294,6 +297,7 @@ registerOperations(program);
 registerPlanningCommands(program);
 registerEnvironmentCommands(program);
 registerDaddyCommands(program);
+registerModuleCommands(program);
 let cachedCliLocale: Locale | undefined;
 const cliText = (value: string) => {
   if (!cachedCliLocale) {

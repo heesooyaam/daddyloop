@@ -1,242 +1,87 @@
-<div align="center">
+# daddyloop
 
-# daddyloop.
+**English** · [Русский](README.ru.md) · [Documentation](docs/index/en.md)
 
-**Один разговор. Целая команда.**
+**Your task. My crew.**
 
-daddy принимает задачи, распределяет работу между писателями и проверяет результат.
-Ты обсуждаешь цель с daddy — в терминале, браузере или теме Telegram.
+Give daddy a goal or a ticket. He splits the work, assigns workers, follows up and reviews the result. You keep one conversation; the service keeps working on your server after you close the laptop.
 
-[Начать](#начать) · [Telegram](#telegram-с-темами) · [Воркспейсы и папки](#воркспейсы-и-папки) · [English](docs/quickstart-en.md)
+![The daddy conversation, worker pool and live usage](docs/media/en/daddy-desktop.png)
 
-![daddyloop: разговор, задачи и пул писателей](docs/media/daddy-desktop.png)
+## Start
 
-</div>
-
-> Скриншоты показывают настоящий интерфейс с демонстрационными данными. daddyloop вырос из daddyloop; прежние данные и команда `daddy` поддерживаются при обновлении.
-
-## Как это работает
-
-1. **Зарегистрируй воркспейс.** Например, `Work` для Arcadia или `Payments` для GitHub. Воркспейс запоминает папку на сервере, базовую ветку и стартовую подпапку.
-2. **Создай сессию daddy.** Отправь цель, GitHub issue, тикет Tracker или ссылку на PR/MR. Можно начать с обсуждения.
-3. **daddy распределит работу.** Он создаёт задачи, выбирает порядок и выдаёт инструкции писателям. Новые тикеты отправляются в тот же разговор.
-4. **Посмотри результат.** daddy получает отчёты, проводит ревью и продолжает исправления. Готовые PR/MR остаются для твоей финальной проверки и слияния.
-
-```mermaid
-flowchart LR
-    U[Ты: цель или тикеты] --> D[daddy — одна сессия]
-    P[Именованные воркспейсы] --> D
-    D --> Q[Очередь и зависимости]
-    Q --> W1[Писатель 1 · своя рабочая копия]
-    Q --> W2[Писатель 2 · своя рабочая копия]
-    W1 --> R[Ревью daddy]
-    W2 --> R
-    R -->|Замечания опубликованы| Q
-    R --> F[Результат для финальной проверки]
-```
-
-Пул по умолчанию допускает **одного писателя**. Можно выбрать до восьми одновременно работающих писателей. daddy решает, какие задачи независимы и когда использовать дополнительные слоты. Снижение лимита даёт текущим ходам закончить работу.
-
-Каждая задача хранит свою историю писателя и свою рабочую копию. Задач может быть больше, чем слотов: остальные ждут в очереди. Зависимости определяют порядок запуска; ветки не объединяются автоматически. Для тесно связанных изменений daddy должен использовать одну задачу или согласованный план интеграции.
-
-Прямой чат с писателями закрыт. Их отчёты доступны только для чтения; вопросы и новые требования отправляются daddy.
-
-## Начать
-
-На Linux x64 или ARM64:
+Run this **on the Linux server**:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.11.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.12.0/install.sh | bash
 ```
 
-Пакет содержит Node, Codex CLI и GitHub CLI. Установщик создаёт постоянный systemd-сервис и команды `daddy`, `daddyloop`, `daddy`. Для приватного репозитория сначала скачай релиз через авторизованный `gh release download`; публичный `curl` требует публичного доступа к релизу.
-
-Подключи аккаунты и зарегистрируй воркспейс:
+Choose modules using arrows and Space. Codex and GitHub are selected initially; GitLab and Arcadia are optional. The installer downloads the selected CLI packages, bundles Node and speech recognition, and starts a persistent service. No manual tmux sessions.
 
 ```bash
-daddy auth codex
+daddy auth agent codex
 daddy auth github
-
-daddy workspaces add ~/workspaces/payments --name Payments
+daddy workspaces add ~/work/app --name App
 daddy
 ```
 
-В интерактивной консоли: **`/new` → воркспейс → сообщение daddy**.
-
-Или одной командой после настройки:
+In the console: **`/new` → App → your task**. Or:
 
 ```bash
-daddy new --workspace Payments "https://github.com/acme/payments/issues/42"
-daddy sessions
-daddy talk SESSION_ID "Добавь ещё https://github.com/acme/payments/issues/43"
-daddy pool SESSION_ID 3
+daddy new --workspace App "Fix duplicate payments and cover retries with tests"
 ```
 
-![Настоящий терминальный интерфейс daddyloop](docs/media/daddy-cli.png)
+[Full installation guide](docs/start/en.md) · [Workspace paths and overrides](docs/workspaces/en.md)
 
-В CLI доступны `/new`, `/sessions`, `/workspaces`, `/pool`, `/repo`, `/limits`, `/models`, `/notifications`, `/updates`, `/language`, `/pause`, `/resume`. `Ctrl+N` создаёт сессию, `Ctrl+T` выбирает сессию, `Tab` переключает разговор и список задач, `Ctrl+Q` закрывает клиент. Работа продолжается на сервере.
+## Open the site on your computer
 
-<a id="проекты-и-папки"></a>
-
-## Воркспейсы и папки
-
-**Воркспейс — настройки по умолчанию на конкретном сервере.** На рабочей машине `Work` может указывать на `~/arcadia2`, а на другой — на `~/arcadia`. У каждой установки свой список воркспейсов; пути между серверами не синхронизируются.
-
-| Уровень                | Что сохраняется                                             | На что влияет изменение              |
-| ---------------------- | ----------------------------------------------------------- | ------------------------------------ |
-| Воркспейс `Work`       | Исходный репозиторий, начальная подпапка, базовая ветка     | На новые сессии этого сервера        |
-| Сессия daddy           | Снимок настроек воркспейса при создании, разговор и очередь | На новые запросы этой сессии         |
-| Запрос / тикет         | Выбранный для него репозиторий и подпапка                   | Только на задачи из этого запроса    |
-| Рабочая копия писателя | Отдельная копия кода и история его работы                   | Только на закреплённую за ним задачу |
-
-Например: открываешь `Work`, создаёшь сессию «Починить поиск» и отправляешь тикет. Обычно daddy использует настройки Work. Если именно этот тикет нужен в другой папке, выбираешь **«Репозиторий для следующей задачи»** и другую папку сервера. Отправляешь тикет — выбор сохраняется вместе с ним. Следующее сообщение снова использует настройки сессии. У одного daddy могут быть задачи с разными репозиториями; уже начатые задачи остаются в своих рабочих копиях.
-
-**Исходная папка и рабочая копия писателя — разные вещи.** Для Git создаются управляемые worktree, для Arcadia выделяется отдельный mount через настроенный helper. Писатель работает с выбранной базовой ревизией. Незакоммиченные правки исходной папки в его копию не переносятся. Исходная папка, её ветка и локальные изменения сохраняются. Начальная подпапка задаётся относительно корня и применяется внутри рабочей копии.
-
-На сайте **Воркспейсы** позволяет задать или изменить настройки по умолчанию. При создании сессии и рядом с полем сообщения есть выбор репозитория, подпапки и базы. В Telegram выбирай воркспейс → настройки репозитория → **Начать сессию**. Для следующего тикета используй кнопку **Репозиторий для следующей задачи**: папки можно просматривать кнопками; `/repo /полный/путь` позволяет ввести путь текстом, `/repo default` сбрасывает разовый выбор. Выбор в боте действует десять минут; при истечении бот просит повторить выбор и не отправляет задачу в другую папку молча.
+Run this **on your laptop**, using your usual SSH destination:
 
 ```bash
-# Один раз на каждой машине: путь именно этой машины.
-daddy workspaces add ~/arcadia --name Work --base trunk
-
-# Изменить дефолт для будущих сессий. Существующие сессии сохраняют настройки.
-daddy workspaces set Work ~/arcadia2 --base trunk
-
-# Переопределить репозиторий всей новой сессии, сохранив дефолт Work.
-daddy new --workspace Work --repo ~/arcadia --scope alice "Почини поиск"
-
-# Другой репозиторий только для этого сообщения существующему daddy.
-daddy talk SESSION_ID "Возьми следующий тикет" --repo ~/arcadia2 --scope alice
+ssh -N -L 4317:127.0.0.1:4317 user@server
 ```
 
-В интерактивном CLI: `/repo ~/arcadia2`, затем сообщение с задачей. `/repo default` отменяет выбор. Для существующего тикета уже выбранная рабочая копия не переносится.
+Open [http://127.0.0.1:4317](http://127.0.0.1:4317) in the laptop browser. Run `daddy token` **on the server** and paste it into the login form. Closing the tunnel disconnects the browser; it does not stop the workers.
 
-## Размер пула без прерывания работы
+For access that also works on your phone with the laptop off, configure `daddy web tailscale` or your own HTTPS proxy. [Computer and phone instructions](docs/web/en.md).
 
-Пул по умолчанию содержит одно место для писателя. daddy сам распределяет задачи в пределах выбранного размера и ресурсов сервера. `/pool 3` или `daddy pool SESSION_ID 3` **запрашивает** новый размер; планировщик применяет его в фоне.
+## Make it yours
 
-При уменьшении `3 → 1` занятые писатели заканчивают **весь цикл задачи**, включая ревью, исправления и необходимые проверки. Освобождающиеся лишние места удаляются; новые задачи ждут места в оставшемся пуле. Пауза, ошибка или ожидание человека сохраняют место за незавершённой задачей. Изменение размера не прерывает агентов и не удаляет рабочие копии.
+Eight themes, including four dark palettes. Usage is always visible: quota windows, percentage remaining, reset times and available resets. Colors are a browser preference; tasks and models keep running.
 
-Интерфейс показывает текущий и запрошенный размер, число выполняющихся ходов и занятых задачами мест. Новый запрос размера заменяет предыдущий. Запросы изменения и закреплённые задачи сохраняются при перезапуске сервиса.
+![Theme choices](docs/media/en/daddy-themes.png)
 
-## Telegram с темами
+![Dark theme](docs/media/en/daddy-dark.png)
 
-Подключи отдельного бота один раз:
+[Themes and usage](docs/appearance/en.md) · [CLI](docs/terminal/en.md)
+
+## One daddy, a crew of workers
+
+- Add more tickets in the same conversation to keep the same daddy.
+- Set the pool with `/pool 3`. Reductions wait for whole tasks to finish, including review and fixes.
+- Choose independent engine/model profiles for daddy and workers. Model lists come from the selected engine.
+- Work in named server workspaces. Each task uses an isolated copy; one-request folder overrides preserve defaults.
+- Chat in Telegram forum topics or send voice messages. Recognition is local, in English or Russian.
+- Native reviews publish automatically by default. Exact revisions, incomplete work, CI and explicit decisions still gate completion. There is no automatic merge.
 
 ```bash
-daddy telegram setup
+daddy agents defaults \
+  --worker-engine codex --worker-model gpt-5.6-sol --worker-effort max \
+  --daddy-engine codex --daddy-model gpt-6-astra --daddy-effort max
 ```
 
-В личном чате с ботом отправь **`/group`**. Создай группу в Telegram, включи «Темы» и выбери её кнопкой бота. Боту нужны права администратора с управлением темами. Bot API не создаёт группу от имени пользователя; после подключения группы темы создаются автоматически.
+Use models your `daddy models --refresh` response offers. The currently shipped agent module is Codex; Claude is not a working adapter yet.
 
-**Одна тема = одна сессия daddy.** Все тикеты, писатели и результаты этой сессии остаются внутри её темы. Отправляй обычный текст или ссылки. Новая ссылка добавляет работу к текущему daddy; `/pool 3` изменяет предел писателей, `/models` позволяет выбрать модели daddy и будущих писателей.
+[Tasks and pools](docs/tasks/en.md) · [Models and updates](docs/agents/en.md) · [Telegram](docs/telegram/en.md) · [Voice](docs/voice/en.md)
 
-Управление сообщениями и кнопками ограничено привязанным пользователем. Система не транслирует сырые сообщения писателей: daddy собирает их результаты. По умолчанию автоматические уведомления приходят для важных событий, а ответы на твои сообщения — всегда.
+## Built to extend
 
-<table><tr><td><img src="docs/media/daddy-phone-chat.png" width="300" alt="Разговор с daddy на телефоне"></td><td><img src="docs/media/daddy-phone-tasks.png" width="300" alt="Задачи и пул писателей на телефоне"></td></tr></table>
+Agents and repositories have explicit module contracts. daddy dispatches a worker through `AgentRegistry`, without interpreting its model or speaking its CLI protocol. Repository modules own native review and PR submission; the common workflow owns policy, revision checks and recovery.
 
-Если ответ Telegram на создание темы потерялся, система сохраняет неопределённый результат и не создаёт дубликат. Существующую тему можно связать с сессией командой `/attach SESSION_ID` внутри темы.
+[Module selection and interfaces](docs/modules/en.md) · [Architecture](docs/architecture/en.md) · [Contributing](docs/contributing/en.md)
 
-[Подробно о Telegram](docs/telegram.md)
+Every documentation topic has `en.md` and `ru.md`; both are checked along with their local links. Screenshots use isolated illustrative data. [How the images are made](docs/media-guide/en.md).
 
-## Модели и обновления
+daddyloop started as **reviewloop**, an author/reviewer loop. It grew into a coordinator with a worker pool.
 
-Модели daddy и писателей настраиваются отдельно. Например: daddy — `gpt-6-astra / max`, писатель — `gpt-5.6-sol / max`. Настройки писателя по умолчанию действуют на новые задачи; daddy также может выбрать модель для отдельной ещё не выполняющейся задачи.
-
-Каталог приходит от выбранного **Codex app-server `model/list`**, включая доступные уровни рассуждений. Список не поддерживается вручную. В интерфейсах есть принудительное обновление каталога.
-
-![Модели daddy и новых писателей](docs/media/daddy-models.png)
-
-Codex обновляется с телефона: **`/updates` → «Обновить Codex» → «Подтвердить»**. Сервер скачивает конкретную официальную версию, проверяет контрольную сумму, протокол и сохранённые профили. Работающие ходы завершаются на прежней версии; последующие используют новую. Есть откат.
-
-Для управляемого обновления приходит один итог операции. Отдельное уведомление об изменении версии используется для внешних обновлений CLI.
-
-```bash
-daddy runtime update --yes
-daddy runtime update-status
-daddy runtime rollback --yes
-```
-
-Сейчас рабочий движок — Codex. Claude виден в диагностике установленных CLI; его агентский runtime пока не реализован. [Языки, модели и версии](docs/models-and-updates.md)
-
-## Сервер продолжает работу
-
-Консоль, браузер и Telegram — клиенты постоянного сервиса. Закрытие ноутбука, окна SSH или вкладки не останавливает задания. Для браузера на телефоне нужен постоянный HTTPS-адрес сервера:
-
-```bash
-daddy web tailscale
-# либо свой постоянный адрес
-daddy web origin https://daddy.example.com
-daddy phone
-```
-
-Telegram работает через исходящее соединение сервера и не требует туннеля с ноутбука.
-
-Очереди, задачи, история, профили, рабочие копии и журнал операций сохраняются. При перезапуске daddy проверяет прерванную работу; неопределённые native-записи восстанавливаются через журнал. Неполное ревью не считается успешным.
-
-## Ресурсы и контроль
-
-Сервис проверяет доступную память и место на диске перед запуском и во время работы. Для systemd настраивается ограничение памяти; новая установка использует 8 ГиБ. Лимит писателей дополняет эти проверки.
-
-```bash
-daddy cache status
-daddy cache prune           # сначала покажет кандидатов
-daddy cache prune --apply   # удалит только проверенные допустимые данные
-daddy cache auto on
-```
-
-Очистка не удаляет авторские изменения, учётные данные и историю. Arcadia использует обычный GC и проверенные аренды; рабочие копии с неотправленными или непроверенными изменениями сохраняются.
-
-Native-комментарии сохраняют исходный Markdown. Перед передачей писателю замечания публикуются. daddy обсуждает работу в отдельном контексте от приватного native review, чтобы черновик не стал инструкцией писателю до публикации. Политики привязаны к точной ревизии; автоматического слияния PR нет.
-
-## Разработка
-
-```bash
-npm ci
-npm run check
-npm run test:e2e
-node scripts/capture-daddy.mjs
-```
-
-Обычные тесты автономны и не пишут в реальные PR. Живые проверки моделей запускаются отдельно. Медиа снимаются с настоящих UI и CLI на изолированном сервере с демонстрационными данными.
-
-[CI](https://github.com/heesooyaam/daddyloop/actions) · [Релиз 0.11.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.11.0) · [Ревью изменений](docs/review-v0.11.md)
-
-## Лимиты Codex и доступные сбросы
-
-![Лимиты Codex и доступные сбросы](docs/media/daddy-limits.png)
-
-Открой **Лимиты** на сайте или отправь `/limits` в Telegram / интерактивной консоли. `daddy limits --refresh` показывает свежие данные обычной CLI-командой, `--json` возвращает их для скриптов. Основной остаток также виден рядом с кнопкой «Лимиты» на сайте.
-
-Источник — установленный Codex app-server и авторизованный в нём аккаунт. Показываются все возвращённые квоты, процент остатка, длительность каждого периода и время автоматического обновления. Период не привязан к названию `primary`: если Codex возвращает недельную квоту, интерфейс показывает неделю. daddy и писатели расходуют общую квоту аккаунта. Устаревшие или недоступные данные помечаются явно; время сброса само по себе не означает, что Codex разрешил запуск.
-
-Если аккаунту доступны ручные сбросы квоты, появятся их количество, сроки действия и кнопка **Использовать сброс**. После подтверждения расходуется один доступный сброс. Разговоры, задачи и файлы сохраняются. Действие не покупает кредиты и не очищает контекст.
-
-```bash
-daddy limits
-# Сначала посмотреть предложение, без списания:
-daddy limits reset
-# Команда выше покажет REQUEST_ID. Подтвердить:
-daddy limits reset --request REQUEST_ID --yes
-```
-
-При потере ответа повторяй тот же `REQUEST_ID`. В Telegram и на сайте используется та же сохранённая операция; после перезапуска она доступна через **Завершить ожидающий сброс**. Даже если списан последний доступный сброс, проверка результата остаётся доступной. Приложение не расходует сбросы автоматически и не возобновляет задачи только на основании процентов или таймера.
-
-Контракт чтения квот и применения сбросов описан в [официальной документации Codex](https://learn.chatgpt.com/docs/app-server#auth-endpoints).
-
-## Голосовые и команды в темах Telegram
-
-Выбери воркспейс и создай сессию. Затем можешь отправлять daddy обычные голосовые Telegram — в личке выбранной сессии или прямо в её теме. Бот покажет распознанный текст и передаст его daddy; ответ придёт текстом в разговор сессии.
-
-Распознавание идёт локально на сервере через Whisper Small. Модель уже входит в релиз; отдельный API-ключ и ffmpeg для работы не нужны. Сначала выбирается язык интерфейса и распознавания: `/language ru` или `/language en`. Поддерживаются обычные OGG/Opus-голосовые до 5 минут и 10 МБ. Точность распознавания зависит от записи — неточные слова можно исправить следующим сообщением.
-
-Одновременно распознаётся одна запись, используются два вычислительных потока. Перед началом требуется минимум 3,5 ГиБ доступной памяти; при нехватке ресурсов запись ждёт. Команды управления продолжают работать во время распознавания. Голосовое и следующие сообщения сохраняют порядок; очередь переживает перезапуск, а обработанные аудиофайлы удаляются. Пауза или смена поколения сессии не позволяют позднему распознаванию запустить работу с устаревшими настройками.
-
-| Где                              | Команды                                                                                                                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Личка и темы подключённой группы | `/new`, `/sessions`, `/workspaces`, `/status`, `/pool`, `/models`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language ru` / `/language en` |
-| Личка                            | `/group` — подключить группу; `/updates` — обновлять CLI                                                                                                      |
-
-`/new Исправление поиска` можно отправить прямо в существующей теме. Выбираешь воркспейс, подтверждаешь папку — создаётся **новая тема** с новой сессией; исходная тема сохраняет свой разговор. Можно также попросить daddy обычным текстом: «Создай отдельную сессию для исправления поиска». Он создаст её и даст ссылку. Чтобы добавить работу этому же daddy, просто отправь следующий тикет в текущую тему.
-
-При запуске из исходников модель готовится один раз: `npm run speech:prepare`. Для установки зависимостей без CUDA: `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci`. Источник и лицензия модели указаны в [уведомлении Whisper](docs/third-party/whisper.md).
+[Release 0.12.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.12.0) · [CI](https://github.com/heesooyaam/daddyloop/actions) · [Operations and cleanup](docs/operations/en.md)

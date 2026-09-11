@@ -63,7 +63,7 @@ export class ArcWorkspaces {
           m.path !== task.repoPath &&
           !this.protectedSources().includes(m.path),
       );
-      // Leave one mount available for Daddy/review so a full writer pool cannot deadlock.
+      // Leave one mount available for Daddy/review so a full worker pool cannot deadlock.
       if (role === 'author' && candidates.length <= 1) {
         if (
           typeof this.bridge.provision === 'function' &&
@@ -72,7 +72,7 @@ export class ArcWorkspaces {
           return this.prepareLocked(task, role, signal);
         throw new AppError(
           'workspace_capacity',
-          'Waiting for an Arc writer slot; one workspace is reserved for daddy and review.',
+          'Waiting for an Arc worker slot; one workspace is reserved for daddy and review.',
           503,
         );
       }
@@ -130,7 +130,7 @@ export class ArcWorkspaces {
           return this.prepareLocked(task, role, signal);
         throw new AppError(
           'workspace_capacity',
-          'Waiting for a free, clean Arc workspace. Existing source checkouts and writer changes are preserved.',
+          'Waiting for a free, clean Arc workspace. Existing source checkouts and worker changes are preserved.',
           503,
         );
       }

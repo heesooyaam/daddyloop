@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
 import { TicketWorkflow } from '../src/core/ticket-workflow.js';
-import { TicketReader } from '../src/integrations/tickets.js';
+import { TicketReader } from '../src/modules/repositories/tickets.js';
 import { Workspaces } from '../src/runtime/workspaces.js';
 import type { ReviewProvider } from '../src/providers/provider.js';
 import { ticketInput } from './planning-fixture.js';

@@ -88,6 +88,19 @@ it('registers a named Git workspace with a relative working directory without ch
     await workspaces.register({ name: saved.name, path: repo, base: 'release' }, saved.id);
     expect(store.getGroup(groupId).workspace).toEqual(saved);
     expect(workspaces.get(saved.id)).toMatchObject({ repoPath: repo, scope: '', base: 'release' });
+    execFileSync('git', ['remote', 'set-url', 'origin', 'https://code.example.test/team/app.git'], {
+      cwd: repo,
+    });
+    const selfHosted = await workspaces.register(
+      { name: saved.name, path: repo, provider: 'gitlab' },
+      saved.id,
+    );
+    expect(selfHosted.provider).toBe('gitlab');
+    expect((await workspaces.selection(selfHosted, { scope: 'src' })).provider).toBe('gitlab');
+    expect(
+      (await workspaces.register({ name: saved.name, path: repo, base: 'release' }, saved.id))
+        .provider,
+    ).toBe('gitlab');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

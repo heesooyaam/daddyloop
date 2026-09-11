@@ -53,7 +53,16 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
     install,
     validate: async () => ({
       version: '2.0.0',
-      models: [{ id: 'fixture', name: 'Test', efforts: [], defaultEffort: 'max', isDefault: true }],
+      models: [
+        {
+          id: 'fixture',
+          engine: 'codex',
+          name: 'Test',
+          efforts: [],
+          defaultEffort: 'max',
+          isDefault: true,
+        },
+      ],
     }),
   });
   const updates = new UpdateMonitor(f.store, {

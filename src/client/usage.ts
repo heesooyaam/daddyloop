@@ -34,7 +34,7 @@ export const resetOutcomeText: Record<ResetOutcome, string> = {
 };
 export function usageLines(usage: UsageView, locale: Locale) {
   const t = translator(locale),
-    lines = [t('daddy and writers share the Codex account limits on this server.')];
+    lines = [t('daddy and workers share the Codex account limits on this server.')];
   if (!usage.available) lines.push(t('Limits are unavailable. Sign in to Codex and refresh.'));
   if (usage.stale) lines.push(t('These readings are outdated. Refresh before using a reset.'));
   if (usage.ordinaryUsageAllowed === false) lines.push(t('Codex currently blocks included usage.'));

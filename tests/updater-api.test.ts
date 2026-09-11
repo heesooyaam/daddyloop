@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildApp } from '../src/server/app.js';
 import { loadConfig, saveConfig } from '../src/ops/config.js';
-import { ModelCatalogue } from '../src/core/agents.js';
+import { CodexCatalogue } from '../src/modules/agents/codex/models.js';
 import * as packages from '../src/ops/codex-package.js';
 afterEach(() => {
   vi.restoreAllMocks();
@@ -17,7 +17,7 @@ it('authenticates update controls, activates atomically without changing the ser
     next = join(dir, 'new-codex');
   writeFileSync(previous, '#!/bin/sh\necho codex-cli 1.0.0\n', { mode: 0o700 });
   writeFileSync(next, '#!/bin/sh\necho codex-cli 2.0.0\n', { mode: 0o700 });
-  saveConfig({ ...loadConfig(), dataDir: dir, codex: { executable: previous } });
+  saveConfig({ ...loadConfig(), dataDir: dir, executables: { codex: previous } });
   vi.spyOn(packages, 'latestCodexPackage').mockResolvedValue({
     version: '2.0.0',
     platform: `linux-${process.arch}`,
@@ -36,10 +36,17 @@ it('authenticates update controls, activates atomically without changing the ser
     saveConfig(config);
     return next;
   });
-  vi.spyOn(ModelCatalogue.prototype, 'list').mockResolvedValue([
-    { id: 'fixture', name: 'Test', efforts: ['max'], defaultEffort: 'max', isDefault: true },
+  vi.spyOn(CodexCatalogue.prototype, 'list').mockResolvedValue([
+    {
+      id: 'fixture',
+      engine: 'codex',
+      name: 'Test',
+      efforts: ['max'],
+      defaultEffort: 'max',
+      isDefault: true,
+    },
   ]);
-  vi.spyOn(ModelCatalogue.prototype, 'metadata').mockReturnValue({
+  vi.spyOn(CodexCatalogue.prototype, 'metadata').mockReturnValue({
     source: 'codex-app-server:model/list',
     executable: next,
     cliVersion: '2.0.0',
@@ -109,7 +116,7 @@ it('authenticates update controls, activates atomically without changing the ser
         (await server.app.inject({ url: '/api/runtime/update', headers })).json().operation.phase,
       ).toBe('complete'),
     );
-    expect(loadConfig().codex.executable).toBe(next);
+    expect(loadConfig().executables.codex).toBe(next);
     expect(loadConfig().locale).toBe('ru');
     expect(
       (await server.app.inject({ url: '/api/status', headers })).json().runtime.executable,

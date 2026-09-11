@@ -6,7 +6,7 @@ import { api as client } from './client.js';
 import { loadConfig, saveConfig, defaultDataDir } from './config.js';
 import { ServiceManager } from './service.js';
 import { bundledRoot, executablePath, requireExecutable } from '../runtime/executable.js';
-import { ModelCatalogue } from '../core/agents.js';
+import { CodexCatalogue } from '../modules/agents/codex/models.js';
 import { preferenceInput } from '../core/preferences.js';
 import { translator, normalizeLocale } from '../i18n/index.js';
 export function registerEnvironmentCommands(program: Command) {
@@ -110,7 +110,7 @@ export function registerEnvironmentCommands(program: Command) {
         const root = bundledRoot();
         if (!root)
           throw new Error('This command is not running from an installed daddyloop bundle');
-        executable = requireExecutable(join(root, 'tools/node_modules/.bin/codex'));
+        executable = requireExecutable(join(root, 'modules/codex/bin/codex'));
       } else if (value === 'system') {
         const root = bundledRoot();
         executable = (process.env.PATH ?? '')
@@ -123,18 +123,20 @@ export function registerEnvironmentCommands(program: Command) {
         if (!executable) throw new Error('No external Codex executable was found on PATH');
         executable = requireExecutable(executable);
       } else executable = requireExecutable(value);
-      const catalogue = new ModelCatalogue(executable);
+      const catalogue = new CodexCatalogue(executable);
       const models = await catalogue.list(true);
       const previous = await local(),
         next = loadConfig();
-      next.codex = value === 'bundled' ? {} : { executable };
+      if (value === 'bundled') delete next.executables.codex;
+      else next.executables.codex = executable;
       saveConfig(next);
       try {
         await new ServiceManager().restart();
       } catch (error) {
         const current = loadConfig();
-        if (current.codex.executable === next.codex.executable) {
-          current.codex = previous.codex;
+        if (current.executables.codex === next.executables.codex) {
+          current.executables.codex = previous.executables.codex;
+          if (!previous.executables.codex) delete current.executables.codex;
           saveConfig(current);
         }
         throw error;

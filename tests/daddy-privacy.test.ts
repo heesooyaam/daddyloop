@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import type { SessionInput } from '../src/runtime/agent.js';
 import { prRef } from '../src/core/types.js';
-it('keeps unpublished native review and reviewer chat out of the coordination context and writer instructions', async () => {
+it('keeps unpublished native review and reviewer chat out of the coordination context and worker instructions', async () => {
   const f = daddyFixture();
   let current!: SessionInput, done!: () => void;
   f.runtime.runSession.mockImplementation(async (input) => {

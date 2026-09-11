@@ -1,3 +1,6 @@
+import { moduleCatalogue } from '../modules/catalogue.js';
+import { moduleExecutable } from '../runtime/executable.js';
+import { checkedModules } from '../modules/catalogue.js';
 import type { Command } from 'commander';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -74,14 +77,17 @@ export function registerOperations(program: Command) {
     .description('Set up this host and its background service')
     .option('-y, --yes', 'use defaults without interactive questions')
     .option('--no-service', 'configure only; do not install a service')
+    .option('--modules <ids>', 'enable the selected installation modules')
     .action(async (options) => {
       const config = loadConfig();
+      if (options.modules !== undefined)
+        config.modules = checkedModules(options.modules.split(','));
       config.dataDir = dir();
       mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
       if (!options.yes && process.stdin.isTTY) {
         const rl = createInterface({ input: process.stdin, output: process.stdout });
         try {
-          output('daddyloop setup · daddy and the writers run on this machine.');
+          output('daddyloop setup · daddy and the workers run on this machine.');
           const port = await rl.question(`Local port [${config.port}]: `);
           if (port.trim()) config.port = Number(port);
           const memory = await rl.question(
@@ -98,9 +104,11 @@ export function registerOperations(program: Command) {
       }
       config.serverUrl = `http://127.0.0.1:${config.port}`;
       saveConfig(config);
-      const gh = await command('gh', ['auth', 'token', '--hostname', 'github.com'], {
-        allowFailure: true,
-      }).catch(() => undefined);
+      const gh = config.modules.includes('github')
+        ? await command('gh', ['auth', 'token', '--hostname', 'github.com'], {
+            allowFailure: true,
+          }).catch(() => undefined)
+        : undefined;
       const tokenPath = join(homedir(), '.tokens/github');
       if (gh?.code === 0 && gh.stdout.trim() && !existsSync(tokenPath))
         privateWrite(tokenPath, gh.stdout.trim() + '\n');
@@ -113,7 +121,7 @@ export function registerOperations(program: Command) {
         );
       }
       output(
-        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse daddy auth codex / github / gitlab to connect accounts.\nUse daddy web and daddy phone to connect your browser and phone.\nUse daddy telegram setup to connect your bot.`,
+        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse daddy auth agent codex / daddy auth github / daddy auth gitlab to connect accounts.\nUse daddy web and daddy phone to connect your browser and phone.\nUse daddy telegram setup to connect your bot.`,
       );
     });
   program
@@ -184,14 +192,26 @@ export function registerOperations(program: Command) {
       saveConfig(config);
       output(`Connected to ${origin}`);
     });
+  const requireModule = (id: string) => {
+    if (!loadConfig().modules.includes(id))
+      throw new Error(`Enable the ${id} module in the installer first`);
+  };
   const auth = program.command('auth').description('Connect agent and review-provider accounts');
   auth
-    .command('codex')
-    .option('--browser', 'use the local browser login instead of device authentication')
-    .action(async (options) =>
-      interactiveCommand('codex', ['login', ...(options.browser ? [] : ['--device-auth'])]),
-    );
+    .command('agent')
+    .argument('<module>', 'agent module ID')
+    .option('--browser', 'use browser login if the module supports it')
+    .action(async (id, options) => {
+      requireModule(id);
+      const module = moduleCatalogue.find((module) => module.id === id && module.kind === 'agent');
+      if (!module || !('login' in module))
+        throw new Error('This module does not provide a CLI login flow');
+      await interactiveCommand(moduleExecutable(id, loadConfig()), [
+        ...(options.browser ? module.browserLogin : module.login),
+      ]);
+    });
   auth.command('github').action(async () => {
+    requireModule('github');
     await interactiveCommand('gh', [
       'auth',
       'login',
@@ -210,6 +230,7 @@ export function registerOperations(program: Command) {
     .option('--token-file <path>')
     .option('--host <host>', 'GitLab hostname', 'gitlab.com')
     .action(async (options) => {
+      requireModule('gitlab');
       if (!/^[a-z0-9.-]+$/i.test(options.host)) throw new Error('Invalid hostname');
       const token = options.tokenFile
         ? readFileSync(options.tokenFile, 'utf8').trim()
@@ -345,6 +366,7 @@ export function registerOperations(program: Command) {
     .description('Run native Arc garbage collection; never truncates shared storage')
     .option('--apply', 'perform ordinary arc gc; otherwise use its dry-run', false)
     .action(async (options) => {
+      requireModule('arcadia');
       const bridge = new ArcBridge();
       const result = await bridge.withMount(async (mount) =>
         bridge.native(['gc', ...(options.apply ? [] : ['--dry-run'])], mount),
@@ -360,6 +382,7 @@ export function registerOperations(program: Command) {
     .option('--lease-helper <path>')
     .action(async (options) => {
       const config = loadConfig();
+      requireModule('arcadia');
       if (options.leaseHelper) config.arcadia.leaseHelper = resolve(options.leaseHelper);
       saveConfig(config);
       const identity = await new ArcBridge().doctor(options.workspace);
@@ -374,7 +397,10 @@ export function registerOperations(program: Command) {
         note: 'Author and reviewer require separate free, clean, leased Arc mounts.',
       });
     });
-  arcadia.command('mounts').action(async () => output(await new ArcBridge().mounts()));
+  arcadia.command('mounts').action(async () => {
+    requireModule('arcadia');
+    output(await new ArcBridge().mounts());
+  });
   arcadia
     .command('release')
     .argument('<task>')

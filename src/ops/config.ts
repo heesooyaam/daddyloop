@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
+import { moduleCatalogue } from '../modules/catalogue.js';
 import { profilesSchema, inheritedProfiles } from '../core/agents.js';
 
 export const configSchema = z
   .object({
-    version: z.literal(2).default(2),
+    version: z.literal(3).default(3),
     dataDir: z.string().optional(),
     serverUrl: z.string().url().default('http://127.0.0.1:4317'),
     clientTokenFile: z.string().optional(),
@@ -19,10 +20,20 @@ export const configSchema = z
     serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
     demo: z.boolean().default(true),
     locale: z.enum(['en', 'ru']).default('en'),
+    modules: z
+      .array(
+        z
+          .string()
+          .refine((id) => moduleCatalogue.some((module) => module.id === id), 'Unknown module'),
+      )
+      .refine((ids) => new Set(ids).size === ids.length, 'Repeated module')
+      .default(() => moduleCatalogue.map((module) => module.id)),
     workspaces: z
       .object({ roots: z.array(z.string().min(1)).min(1).max(20).optional() })
       .default({}),
-    codex: z.object({ executable: z.string().min(1).optional() }).default({}),
+    executables: z
+      .record(z.string().regex(/^[a-z][a-z0-9-]{0,31}$/), z.string().min(1))
+      .default({}),
     updates: z
       .object({
         enabled: z.boolean().default(true),

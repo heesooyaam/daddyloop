@@ -33,8 +33,8 @@ jobs:
         with:
           name: daddyloop-linux-${{ matrix.arch }}
           path: |
-            .daddyloop/releases/daddyloop-linux-${{ matrix.arch }}.tar.gz
-            .daddyloop/releases/daddyloop-linux-${{ matrix.arch }}.tar.gz.sha256
+            .daddyloop/releases/*linux-${{ matrix.arch }}.tar.gz
+            .daddyloop/releases/*linux-${{ matrix.arch }}.tar.gz.sha256
           include-hidden-files: true
           retention-days: 7
   publish:
@@ -50,4 +50,4 @@ jobs:
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "daddyloop $GITHUB_REF_NAME" --notes-file docs/release-notes.md install.sh release-assets/*
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "daddyloop $GITHUB_REF_NAME" --notes-file docs/release-notes/en.md install.sh release-assets/*

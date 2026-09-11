@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import https from 'node:https';
 import http from 'node:http';
 import { buildApp } from '../../dist/server/server/app.js';
-import { TicketReader } from '../../dist/server/integrations/tickets.js';
+import { TicketReader } from '../../dist/server/modules/repositories/tickets.js';
 import { Workspaces } from '../../dist/server/runtime/workspaces.js';
 import { Store } from '../../dist/server/core/store.js';
 import { UpdateMonitor } from '../../dist/server/core/updates.js';
@@ -41,7 +41,7 @@ execFileSync(
 );
 chmodSync(key, 0o600);
 const fixtureProfiles = {
-  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  worker: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
   daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 const reader = new TicketReader();
@@ -136,6 +136,7 @@ const { app } = await buildApp({
   catalogue: {
     list: async () =>
       Object.values(fixtureProfiles).map((profile) => ({
+        engine: profile.engine,
         id: profile.model,
         name: profile.model,
         efforts: ['medium', 'max'],
@@ -187,7 +188,7 @@ const { app } = await buildApp({
       return {
         status: 'completed',
         summary: sources.length
-          ? `I added ${sources.length} ticket(s) to this session and assigned the work. Your writers share one daddy.`
+          ? `I added ${sources.length} ticket(s) to this session and assigned the work. Your workers share one daddy.`
           : 'I have checked the current task board. The work and conversation remain in this session.',
         checkedHead: '',
       };

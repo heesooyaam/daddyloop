@@ -1,11 +1,12 @@
 // Create a self-contained Linux release; never package the user's state or credentials.
-import { cp, mkdir, readFile, writeFile, rm, lstat } from 'node:fs/promises';
+import { cp, mkdir, readFile, writeFile, rm, lstat, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { prepareSpeech } from './prepare-speech.mjs';
+import { moduleCatalogue } from '../dist/server/modules/catalogue.js';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch))
@@ -16,7 +17,7 @@ const stage = join(out, `stage-${process.pid}`),
   app = join(payload, 'app');
 await mkdir(app, { recursive: true });
 try {
-  for (const file of ['package.json', 'package-lock.json', 'README.md'])
+  for (const file of ['package.json', 'package-lock.json', 'README.md', 'README.ru.md'])
     await cp(join(root, file), join(app, file));
   await cp(join(root, 'dist'), join(app, 'dist'), { recursive: true });
   await cp(join(root, 'docs'), join(app, 'docs'), { recursive: true });
@@ -57,8 +58,8 @@ try {
   await writeFile(archive, bytes);
   await mkdir(join(payload, 'node'));
   execFileSync('tar', ['-xzf', archive, '-C', join(payload, 'node'), '--strip-components=1']);
-  const tools = join(payload, 'tools');
-  await mkdir(tools);
+  const tools = join(stage, 'module-codex', 'daddyloop-module');
+  await mkdir(tools, { recursive: true });
   execFileSync(
     'npm',
     ['install', '--prefix', tools, '--no-audit', '--no-fund', '@openai/codex@0.154.0'],
@@ -82,12 +83,15 @@ try {
     throw new Error('GitHub CLI checksum mismatch');
   const ghArchive = join(stage, ghName);
   await writeFile(ghArchive, ghBytes);
+  const github = join(stage, 'module-github', 'daddyloop-module');
+  await mkdir(join(github, 'bin'), { recursive: true });
   await mkdir(join(tools, 'bin'));
+  await symlink('../node_modules/.bin/codex', join(tools, 'bin/codex'));
   execFileSync('tar', [
     '-xzf',
     ghArchive,
     '-C',
-    join(tools, 'bin'),
+    join(github, 'bin'),
     '--strip-components=2',
     `${ghName.slice(0, -7)}/bin/gh`,
   ]);
@@ -101,8 +105,7 @@ try {
         platform: process.platform,
         arch: process.arch,
         node: nodeVersion,
-        codex: '0.154.0',
-        gh: ghVersion,
+        modules: moduleCatalogue,
       },
       null,
       2,
@@ -113,6 +116,7 @@ try {
   const runtime = join(payload, 'node/bin/node');
   const result = execFileSync(runtime, [join(app, 'dist/server/cli.js'), '--version'], {
     encoding: 'utf8',
+    env: { ...env, DADDYLOOP_CONFIG: join(stage, 'test-config.json') },
   }).trim();
   if (result !== pkg.version) throw new Error('Release CLI version mismatch');
   const speechCheck = execFileSync(
@@ -140,7 +144,28 @@ try {
     env: { ...env, PATH: `${join(payload, 'node/bin')}:${env.PATH}` },
     stdio: 'inherit',
   });
-  if (!(await lstat(join(tools, 'bin/gh'))).isFile()) throw new Error('Missing GitHub CLI');
+  if (!(await lstat(join(github, 'bin/gh'))).isFile()) throw new Error('Missing GitHub CLI');
+  for (const [id, directory, cliVersion] of [
+    ['codex', tools, '0.154.0'],
+    ['github', github, ghVersion],
+  ]) {
+    await writeFile(
+      join(directory, 'module.json'),
+      JSON.stringify({
+        id,
+        version: pkg.version,
+        cliVersion,
+        platform: process.platform,
+        arch: process.arch,
+      }),
+    );
+    const name = `daddyloop-${id}-linux-${process.arch}.tar.gz`;
+    execFileSync('tar', ['-czf', join(out, name), '-C', dirname(directory), 'daddyloop-module']);
+    const digest = createHash('sha256')
+      .update(await readFile(join(out, name)))
+      .digest('hex');
+    await writeFile(join(out, name + '.sha256'), `${digest}  ${name}\n`);
+  }
   const filename = `daddyloop-linux-${process.arch}.tar.gz`,
     target = join(out, filename);
   execFileSync('tar', ['-czf', target, '-C', stage, 'daddyloop']);

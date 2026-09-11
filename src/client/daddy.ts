@@ -6,7 +6,7 @@ import type { UsageView } from '../core/usage.js';
 export type DaddyBoard = ReturnType<Daddy['board']>;
 export type DaddySession = ReviewGroup & {
   workspace?: Workspace;
-  writers: DaddyBoard['writers'];
+  workers: DaddyBoard['workers'];
   daddyBusy: boolean;
   total: number;
   complete: number;
@@ -87,6 +87,7 @@ export class DaddyClient {
     this.controller.abort();
     this.sequence++;
   }
+  setUsage = (usage: UsageView) => this.update({ usage });
   draft(text: string) {
     if (this.value.selected)
       this.update({ drafts: { ...this.value.drafts, [this.value.selected]: text } });
@@ -157,7 +158,10 @@ export class DaddyClient {
       .then((usage) => {
         if (!this.stopped && epoch === this.epoch) this.update({ usage });
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!this.stopped && epoch === this.epoch && this.value.usage)
+          this.update({ usage: { ...this.value.usage, stale: true } });
+      })
       .finally(() => {
         if (this.usagePending === pending) this.usagePending = undefined;
       });

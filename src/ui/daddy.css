@@ -1,11 +1,4 @@
 .daddy-app {
-  --paper: #faf9f6;
-  --panel: #f0efeb;
-  --ink: #292c28;
-  --muted: #7e8179;
-  --line: #e2e3dc;
-  --accent: #d4e5aa;
-  --deep: #384431;
   display: flex;
   height: 100dvh;
   min-height: 0;
@@ -35,7 +28,7 @@
 .daddy-app input:focus-visible,
 .daddy-app textarea:focus-visible,
 .daddy-app select:focus-visible {
-  outline: 2px solid #82915f;
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 .daddy-app a {
@@ -45,7 +38,7 @@
 .daddy-sidebar {
   width: 250px;
   flex-shrink: 0;
-  background: #eeefea;
+  background: var(--sidebar);
   border-right: 1px solid var(--line);
   padding: 29px 19px 18px;
   display: flex;
@@ -63,8 +56,8 @@
 .daddy-mark {
   width: 35px;
   height: 35px;
-  background: #303a2c;
-  color: #dceaac;
+  background: var(--primary);
+  color: var(--on-primary);
   border-radius: 11px;
   display: grid;
   place-items: center;
@@ -83,7 +76,7 @@
   margin-bottom: 27px;
 }
 .daddy-brand-dot {
-  color: #79935d;
+  color: var(--muted);
 }
 .daddy-kicker {
   color: var(--muted);
@@ -106,14 +99,14 @@
 }
 .daddy-button.primary {
   background: var(--deep);
-  color: #f3f5e9;
+  color: var(--on-primary);
   border-color: var(--deep);
 }
 .daddy-button.primary:hover {
-  background: #48563e;
+  background: var(--primary);
 }
 .daddy-button.outline {
-  border-color: #d5d8cb;
+  border-color: var(--line);
   background: transparent;
 }
 .daddy-button.quiet {
@@ -133,7 +126,7 @@
   text-transform: uppercase;
   letter-spacing: 1.2px;
   font-weight: 650;
-  color: #84877e;
+  color: var(--muted);
   margin: 0 6px 12px;
 }
 .daddy-section-label span {
@@ -160,10 +153,10 @@
   color: var(--ink);
 }
 .daddy-session.selected {
-  background: #e0e5d5;
+  background: var(--accent);
 }
 .daddy-session:hover {
-  background: #e6e9df;
+  background: var(--accent);
 }
 .daddy-session > span:nth-child(2) {
   flex: 1;
@@ -181,7 +174,7 @@
   display: block;
   margin-top: 6px;
   font-size: 10px;
-  color: #878b7e;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -189,22 +182,22 @@
 .daddy-session-dot {
   width: 6px;
   height: 6px;
-  background: #b9bead;
+  background: var(--panel);
   border-radius: 50%;
   margin-top: 5px;
   flex-shrink: 0;
 }
 .daddy-session-dot.working {
-  background: #718b48;
-  box-shadow: 0 0 0 3px #8ea97222;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px var(--shadow);
 }
 .daddy-session-dot.attention {
-  background: #c29b57;
+  background: var(--danger-bg);
 }
 .daddy-count {
   font-size: 10px !important;
-  background: #c6d2b0;
-  color: #465331;
+  background: var(--accent);
+  color: var(--accent-ink);
   padding: 2px 5px;
   border-radius: 4px;
 }
@@ -219,7 +212,7 @@
   gap: 10px;
   border: 0;
   background: transparent;
-  color: #656b5e;
+  color: var(--muted);
   width: 100%;
   padding: 9px 5px;
   font-size: 12px;
@@ -228,7 +221,7 @@
 .daddy-sidebar-bottom > button span {
   margin-left: auto;
   font-size: 10px;
-  color: #9a9e93;
+  color: var(--muted);
 }
 .daddy-language {
   display: flex;
@@ -240,18 +233,18 @@
   border: 0;
   background: transparent;
   font-size: 11px;
-  color: #727969;
+  color: var(--muted);
   max-width: 130px;
 }
 .daddy-language small {
   font:
     10px ui-monospace,
     monospace;
-  color: #a1a698;
+  color: var(--muted);
 }
 .daddy-server {
   font-size: 9px;
-  color: #7d8671;
+  color: var(--muted);
   margin-top: 12px;
   display: flex;
   gap: 6px;
@@ -261,10 +254,10 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #809a5c;
+  background: var(--primary);
 }
 .daddy-server.offline span {
-  background: #c89264;
+  background: var(--danger-bg);
 }
 .daddy-main {
   display: flex;
@@ -298,7 +291,7 @@
 .daddy-eyebrow {
   font-size: 10px;
   letter-spacing: 0.6px;
-  color: #898d81;
+  color: var(--muted);
 }
 .daddy-header-actions {
   display: flex;
@@ -312,11 +305,11 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #757d6b;
+  color: var(--muted);
   border-radius: 7px;
 }
 .daddy-icon:hover {
-  background: #e8eadd;
+  background: var(--accent);
 }
 .daddy-workspace {
   display: flex;
@@ -338,14 +331,14 @@
   overflow: auto;
   padding: 28px 0 25px;
   scrollbar-width: thin;
-  scrollbar-color: #d8ddce transparent;
+  scrollbar-color: var(--line) transparent;
 }
 .daddy-chat-intro {
   display: flex;
   gap: 13px;
   padding-bottom: 28px;
   margin: 0 auto 18px;
-  border-bottom: 1px solid #ebeee3;
+  border-bottom: 1px solid var(--line);
   max-width: 850px;
 }
 .daddy-avatar {
@@ -357,8 +350,8 @@
   width: 33px;
   height: 33px;
   border-radius: 10px;
-  background: #e0e8cd;
-  color: #5d7143;
+  background: var(--accent);
+  color: var(--accent-ink);
   font-size: 24px;
   font-weight: 600;
   letter-spacing: -2px;
@@ -377,7 +370,7 @@
 .daddy-chat-intro p {
   font-size: 12px;
   line-height: 1.8;
-  color: #8b9180;
+  color: var(--muted);
   margin: 6px 0 0;
   max-width: 430px;
 }
@@ -386,14 +379,14 @@
   margin: 0 auto 27px;
 }
 .daddy-message.user {
-  background: #eff1e8;
+  background: var(--panel);
   padding: 15px 18px;
   border-radius: 12px;
   margin-left: 35px;
 }
 .daddy-message.system {
-  border: 1px solid #dcccab;
-  background: #faf6eb;
+  border: 1px solid var(--line);
+  background: var(--surface);
   padding: 15px;
   border-radius: 10px;
 }
@@ -402,21 +395,21 @@
   align-items: center;
   gap: 10px;
   font-size: 10px;
-  color: #939987;
+  color: var(--muted);
   margin-bottom: 8px;
 }
 .daddy-message-label > span {
   font-weight: 650;
-  color: #5f6b51;
+  color: var(--ink);
 }
 .daddy-message-label time {
   font-size: 9px;
-  color: #a3aa98;
+  color: var(--muted);
 }
 .daddy-prose {
   font-size: 13px;
   line-height: 1.85;
-  color: #484f3e;
+  color: var(--ink);
   overflow-wrap: anywhere;
 }
 .daddy-prose p {
@@ -431,7 +424,7 @@
   font-size: 15px;
   line-height: 1.5;
   margin: 19px 0 9px;
-  color: #3d4632;
+  color: var(--ink);
 }
 .daddy-prose ul,
 .daddy-prose ol {
@@ -442,8 +435,8 @@
   margin: 4px 0;
 }
 .daddy-prose pre {
-  background: #f0f1e9;
-  border: 1px solid #e2e6d9;
+  background: var(--panel);
+  border: 1px solid var(--line);
   padding: 13px;
   border-radius: 9px;
   overflow: auto;
@@ -453,7 +446,7 @@
 .daddy-prose code {
   font-family: ui-monospace, monospace;
   font-size: 0.9em;
-  background: #ecefe3;
+  background: var(--panel);
   padding: 2px 4px;
   border-radius: 3px;
 }
@@ -462,15 +455,15 @@
   background: transparent;
 }
 .daddy-prose a {
-  color: #617d40;
+  color: var(--accent-ink);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .daddy-prose blockquote {
   margin: 14px 0;
   padding-left: 15px;
-  border-left: 2px solid #bccba5;
-  color: #7c856e;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
 }
 .daddy-prose table {
   display: block;
@@ -485,18 +478,18 @@
   padding: 5px 9px;
 }
 .daddy-composer {
-  border: 1px solid #d6dccb;
+  border: 1px solid var(--line);
   border-radius: 13px;
-  background: #fffefb;
+  background: var(--surface);
   padding: 14px 14px 10px;
-  box-shadow: 0 2px 8px #3e492608;
+  box-shadow: 0 2px 8px var(--shadow);
 }
 .daddy-composer textarea {
   display: block;
   width: 100%;
   border: 0;
   background: transparent;
-  color: #454d39;
+  color: var(--ink);
   resize: vertical;
   max-height: 220px;
   min-height: 62px;
@@ -505,7 +498,7 @@
   font-size: 13px;
 }
 .daddy-composer textarea::placeholder {
-  color: #a0a78f;
+  color: var(--muted);
 }
 .daddy-composer textarea:focus-visible {
   outline: none;
@@ -518,25 +511,25 @@
 }
 .daddy-composer footer > span {
   font-size: 10px;
-  color: #9aa388;
+  color: var(--muted);
 }
 .daddy-send {
   width: 32px;
   height: 32px;
   border-radius: 8px;
   border: 0;
-  background: #dbe6bd;
+  background: var(--primary);
   display: grid;
   place-items: center;
-  color: #65764e;
+  color: var(--on-primary);
 }
 .daddy-send:not(:disabled):hover {
-  background: #c9dba0;
+  background: var(--primary);
 }
 .daddy-composer-note {
   text-align: center;
   font-size: 9px;
-  color: #a3aa98;
+  color: var(--muted);
   margin: 10px 0 0;
 }
 .daddy-thinking {
@@ -544,13 +537,13 @@
   gap: 4px;
   align-items: center;
   font-size: 10px;
-  color: #8d997a;
+  color: var(--muted);
   padding: 6px 0 15px;
 }
 .daddy-thinking span {
   width: 4px;
   height: 4px;
-  background: #9ba787;
+  background: var(--primary);
   border-radius: 50%;
   animation: daddy-pulse 1.2s infinite;
 }
@@ -574,7 +567,7 @@
   padding: 26px 22px 20px;
   border-left: 1px solid var(--line);
   min-height: 0;
-  background: #f6f7f1;
+  background: var(--panel);
 }
 .daddy-board-header {
   display: flex;
@@ -592,12 +585,12 @@
   font:
     30px ui-monospace,
     monospace;
-  color: #71864c;
+  color: var(--accent-ink);
   letter-spacing: -2px;
 }
 .daddy-pool-count small {
   font-size: 16px;
-  color: #b2bc9f;
+  color: var(--accent-ink);
   letter-spacing: -1px;
 }
 .daddy-pool-control {
@@ -605,15 +598,15 @@
   align-items: center;
   justify-content: space-between;
   font-size: 11px;
-  color: #7a846a;
+  color: var(--muted);
 }
 .daddy-pool-control select {
   font:
     12px ui-monospace,
     monospace;
-  color: #667548;
-  background: #eef1e3;
-  border: 1px solid #dfe5d2;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 6px;
   min-width: 48px;
@@ -621,7 +614,7 @@
 .daddy-pool-hint {
   font-size: 10px;
   line-height: 1.7;
-  color: #9ba58c;
+  color: var(--muted);
   margin: 10px 0 28px;
 }
 .daddy-board > .daddy-section-label {
@@ -639,19 +632,19 @@
   text-align: left;
   padding: 13px;
   margin: 0 0 10px;
-  border: 1px solid #e0e5d5;
-  background: #fcfcf8;
+  border: 1px solid var(--line);
+  background: var(--surface);
   border-radius: 10px;
-  color: #4b563c;
+  color: var(--ink);
 }
 .daddy-work-item:hover {
-  border-color: #b9c7a0;
+  border-color: var(--line);
 }
 .daddy-work-item > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  color: #c2cab5;
+  color: var(--muted);
   margin-bottom: 9px;
 }
 .daddy-work-state {
@@ -659,16 +652,16 @@
   align-items: center;
   gap: 6px;
   font-size: 9px;
-  color: #97a183;
+  color: var(--muted);
 }
 .daddy-work-item.complete .daddy-work-state {
-  color: #71884f;
+  color: var(--success);
 }
 .daddy-work-dot {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #bec8ad;
+  background: var(--panel);
 }
 .daddy-work-item > strong {
   font-size: 11px;
@@ -681,13 +674,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  color: #a6b090;
+  color: var(--muted);
   font-size: 9px;
   margin-top: 10px;
 }
 .daddy-work-item > small {
   font-size: 9px;
-  color: #99a285;
+  color: var(--muted);
   display: block;
   margin-top: 7px;
 }
@@ -703,13 +696,13 @@
   gap: 9px;
   margin-top: auto;
   padding-top: 23px;
-  color: #84956b;
+  color: var(--muted);
   font-size: 9px;
 }
 .daddy-board-bottom small {
   display: block;
   font-size: 8px;
-  color: #a3ad92;
+  color: var(--muted);
   margin-top: 5px;
   overflow-wrap: anywhere;
 }
@@ -731,13 +724,13 @@
   margin: 15px 0 20px;
 }
 .daddy-welcome h2 > span {
-  color: #8c9b73;
+  color: var(--muted);
 }
 .daddy-welcome > p {
   font-size: 13px;
   line-height: 1.9;
   max-width: 450px;
-  color: #929b85;
+  color: var(--muted);
   margin: 0 0 24px;
 }
 .daddy-welcome-steps {
@@ -746,7 +739,7 @@
   margin-top: 43px;
   border-top: 1px solid var(--line);
   padding-top: 20px;
-  color: #9ba789;
+  color: var(--muted);
   font-size: 10px;
 }
 .daddy-welcome-steps span {
@@ -757,7 +750,7 @@
 .daddy-empty-small {
   font-size: 11px;
   line-height: 1.8;
-  color: #9aa58a;
+  color: var(--muted);
   padding: 10px 6px;
 }
 .daddy-error {
@@ -766,9 +759,9 @@
   align-items: center;
   padding: 11px 24px;
   font-size: 12px;
-  background: #fff3df;
-  color: #8e734b;
-  border-bottom: 1px solid #ecd9b9;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-bottom: 1px solid var(--danger);
   overflow-wrap: anywhere;
 }
 .daddy-error button {
@@ -784,7 +777,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1c231c55;
+  background: var(--overlay);
   backdrop-filter: blur(3px);
   z-index: 50;
   padding: 24px;
@@ -794,11 +787,11 @@
   max-width: 100%;
   max-height: 90dvh;
   overflow: auto;
-  background: #fafbf7;
-  border: 1px solid #e1e6d7;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 16px;
   padding: 23px 25px;
-  box-shadow: 0 20px 60px #1f2a1b22;
+  box-shadow: 0 20px 60px var(--shadow);
 }
 .daddy-dialog.wide {
   width: 720px;
@@ -827,17 +820,17 @@
   gap: 7px;
   font-size: 11px;
   font-weight: 550;
-  color: #758164;
+  color: var(--muted);
 }
 .daddy-form input,
 .daddy-form select,
 .daddy-form textarea {
   width: 100%;
-  background: #fffefb;
-  border: 1px solid #dce3d0;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 11px;
-  color: #4e5e3f;
+  color: var(--ink);
   font-size: 12px;
 }
 .daddy-form textarea {
@@ -846,7 +839,7 @@
 }
 .daddy-form input::placeholder,
 .daddy-form textarea::placeholder {
-  color: #a7b095;
+  color: var(--muted);
 }
 .daddy-form-columns {
   display: grid;
@@ -857,7 +850,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border: 1px solid #dce4cf;
+  border: 1px solid var(--line);
   border-radius: 11px;
   padding: 17px;
   margin: 0;
@@ -866,12 +859,12 @@
   font-size: 12px;
   font-weight: 600;
   padding: 0 6px;
-  color: #7d9061;
+  color: var(--muted);
 }
 .daddy-muted {
   font-size: 11px;
   line-height: 1.8;
-  color: #9ca78a;
+  color: var(--muted);
   margin: 0 0 13px;
 }
 .daddy-text-button {
@@ -879,7 +872,7 @@
   align-items: center;
   gap: 5px;
   font-size: 11px;
-  color: #7f945f;
+  color: var(--muted);
   border: 0;
   background: transparent;
   padding: 0;
@@ -889,7 +882,7 @@
 .daddy-field-error {
   font-size: 12px;
   line-height: 1.7;
-  color: #a16750;
+  color: var(--danger);
 }
 .daddy-project-chips {
   display: grid;
@@ -903,22 +896,22 @@
   gap: 9px;
   text-align: left;
   padding: 12px;
-  background: #edf2e1;
-  border: 1px solid #e0e8d1;
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 9px;
-  color: #809463;
+  color: var(--muted);
   font-size: 11px;
 }
 .daddy-project-chips small {
   display: block;
   margin-top: 5px;
   font-size: 9px;
-  color: #a0ad8c;
+  color: var(--muted);
 }
 .daddy-suggestions {
   margin-bottom: 16px;
   font-size: 11px;
-  color: #8c9e74;
+  color: var(--muted);
 }
 .daddy-suggestions summary {
   cursor: pointer;
@@ -933,15 +926,15 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  border: 1px solid #e2e9d5;
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px;
-  background: #f1f6e7;
-  color: #8ca073;
+  background: var(--panel);
+  color: var(--muted);
   font-size: 10px;
 }
 .daddy-folder-browser {
-  border: 1px solid #dce4d1;
+  border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
   margin: 15px 0 20px;
@@ -951,8 +944,8 @@
   align-items: center;
   gap: 5px;
   padding: 6px;
-  border-bottom: 1px solid #e3e9d9;
-  background: #f0f5e7;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
 .daddy-folder-path input {
   flex: 1;
@@ -962,7 +955,7 @@
     monospace;
   border: 0;
   background: transparent;
-  color: #71895a;
+  color: var(--muted);
   padding: 7px;
 }
 .daddy-directories {
@@ -980,11 +973,11 @@
   text-align: left;
   padding: 9px;
   border-radius: 6px;
-  color: #90a377;
+  color: var(--muted);
   font-size: 11px;
 }
 .daddy-directories > button:hover {
-  background: #edf5df;
+  background: var(--accent);
 }
 .daddy-directories > button span {
   flex: 1;
@@ -1001,47 +994,47 @@
 }
 .daddy-status-pill {
   display: inline-block;
-  background: #e8f1d9;
+  background: var(--panel);
   border-radius: 5px;
   padding: 5px 8px;
   font-size: 10px;
-  color: #8ba26a;
+  color: var(--muted);
 }
 .daddy-task-report > p {
   font-size: 12px;
-  color: #899b71;
+  color: var(--muted);
   line-height: 1.8;
 }
 .daddy-task-report h4 {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: #94a881;
+  color: var(--muted);
   margin: 28px 0 15px;
 }
 .daddy-report-message {
   padding: 15px 0;
-  border-top: 1px solid #e3ebd7;
+  border-top: 1px solid var(--line);
 }
 .daddy-report-message > strong {
   font-size: 11px;
-  color: #7f9962;
+  color: var(--muted);
 }
 .daddy-report-message > time {
   font-size: 9px;
-  color: #a5b691;
+  color: var(--muted);
   margin-left: 10px;
 }
 .daddy-report-message .daddy-prose {
   margin-top: 10px;
 }
 .daddy-telegram-setup {
-  border: 1px solid #e0e9d2;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #eef5e4;
+  background: var(--panel);
   padding: 16px;
   margin-bottom: 20px;
-  color: #809765;
+  color: var(--muted);
 }
 .daddy-telegram-setup strong {
   font-size: 12px;
@@ -1117,7 +1110,7 @@
     position: fixed;
     inset: 0;
     border: 0;
-    background: #28312166;
+    background: var(--overlay);
     z-index: 39;
   }
   .mobile-menu {
@@ -1168,17 +1161,17 @@
     border-bottom: 2px solid transparent;
     background: transparent;
     font-size: 11px;
-    color: #9ba78c;
+    color: var(--muted);
   }
   .daddy-mobile-tabs button.active {
-    color: #5e7644;
-    border-bottom-color: #8aa56b;
+    color: var(--ink);
+    border-bottom-color: var(--line);
   }
   .daddy-mobile-tabs button span {
     font-size: 9px;
     padding: 2px 5px;
     border-radius: 3px;
-    background: #e8efdc;
+    background: var(--panel);
   }
   .daddy-workspace {
     min-height: 0;
@@ -1283,7 +1276,7 @@
   gap: 8px;
   padding: 9px 5px;
   font-size: 11px;
-  color: #7c886d !important;
+  color: var(--muted) !important;
 }
 /* A request can override a source folder without editing the named project. */
 .daddy-workspace-fields {
@@ -1333,7 +1326,7 @@
 .daddy-usage-bucket progress {
   width: 100%;
   height: 8px;
-  accent-color: #67cbb4;
+  accent-color: var(--focus);
 }
 .daddy-usage-bucket small {
   display: block;
@@ -1344,4 +1337,269 @@
   border: 1px solid var(--line);
   padding: 16px;
   border-radius: 12px;
+}
+/* Appearance controls and the always-visible usage overview. */
+body {
+  background: var(--paper);
+  color: var(--ink);
+}
+.daddy-app {
+  background: var(--paper);
+}
+.daddy-icon {
+  min-width: 40px;
+  min-height: 40px;
+}
+.daddy-button.primary:hover,
+.daddy-send:hover {
+  background: var(--primary-hover);
+}
+.daddy-theme-toggle {
+  flex-shrink: 0;
+}
+.login-page > .daddy-theme-toggle {
+  position: absolute;
+  top: 21px;
+  right: 150px;
+}
+.daddy-dialog {
+  color: var(--ink);
+}
+.daddy-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.daddy-theme-grid button {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  text-align: left;
+}
+.daddy-theme-grid button[aria-checked='true'] {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.daddy-theme-system {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  color: var(--ink);
+}
+.daddy-theme-system span {
+  flex: 1;
+}
+.daddy-theme-system small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+.daddy-theme-card {
+  padding: 10px;
+  color: var(--ink);
+  background: var(--paper);
+}
+.daddy-theme-preview {
+  display: grid;
+  grid-template-columns: 25px 1fr;
+  gap: 6px;
+  padding: 10px;
+  background: var(--surface);
+  border-radius: 7px;
+}
+.daddy-theme-preview span {
+  grid-row: 1 / 3;
+  background: var(--primary);
+  color: var(--on-primary);
+  border-radius: 5px;
+  text-align: center;
+  padding: 2px;
+}
+.daddy-theme-preview i {
+  height: 5px;
+  margin-top: 3px;
+  background: var(--line);
+  border-radius: 3px;
+}
+.daddy-theme-preview b {
+  grid-column: 1 / -1;
+  height: 15px;
+  background: var(--accent);
+  border-radius: 4px;
+}
+.daddy-theme-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.daddy-theme-name svg:last-child {
+  margin-left: auto;
+}
+.daddy-usage-strip {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 20px;
+  padding: 13px 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.daddy-usage-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.daddy-usage-caption > span,
+.daddy-usage-caption > small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.daddy-usage-caption > small {
+  color: var(--danger);
+}
+.daddy-usage-windows {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px 24px;
+  min-width: 0;
+  max-height: 145px;
+  overflow: auto;
+}
+.daddy-usage-window {
+  min-width: 0;
+  max-width: 340px;
+}
+.daddy-usage-window > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+.daddy-usage-window strong {
+  color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+.daddy-usage-window time {
+  display: block;
+  font-size: 9px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.daddy-usage-window progress {
+  width: 100%;
+  height: 5px;
+  appearance: none;
+  border: 0;
+  display: block;
+  margin-top: 5px;
+  background: var(--panel);
+  border-radius: 5px;
+}
+.daddy-usage-window progress::-webkit-progress-bar {
+  background: var(--panel);
+  border-radius: 5px;
+}
+.daddy-usage-window progress::-webkit-progress-value {
+  background: var(--primary);
+  border-radius: 5px;
+}
+.daddy-usage-window progress::-moz-progress-bar {
+  background: var(--primary);
+  border-radius: 5px;
+}
+.daddy-usage-strip.stale progress {
+  opacity: 0.45;
+}
+.daddy-usage-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  text-align: right;
+  flex-shrink: 0;
+  color: var(--ink);
+  min-height: 40px;
+  justify-content: center;
+}
+.daddy-usage-details span {
+  color: var(--muted);
+  font-size: 10px;
+}
+@media (max-width: 1050px) {
+  .daddy-usage-strip {
+    gap: 14px;
+    padding: 12px 20px;
+  }
+  .daddy-usage-caption > span {
+    max-width: 90px;
+  }
+}
+@media (max-width: 700px) {
+  .daddy-usage-strip {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 9px;
+    padding: 10px 15px;
+  }
+  .daddy-usage-caption {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .daddy-usage-caption > span {
+    max-width: none;
+  }
+  .daddy-usage-windows {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px 18px;
+  }
+  .daddy-usage-details {
+    grid-row: 1;
+    grid-column: 2;
+    min-height: 36px;
+    font-size: 10px;
+  }
+  .daddy-usage-window {
+    max-width: none;
+  }
+  .daddy-theme-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .daddy-topbar {
+    gap: 8px;
+  }
+  .daddy-header-actions {
+    gap: 3px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+.daddy-docs-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.login-page small a {
+  color: var(--primary);
 }

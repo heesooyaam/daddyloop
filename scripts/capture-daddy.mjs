@@ -6,12 +6,15 @@ import { tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { buildApp } from '../dist/server/server/app.js';
+import { translator } from '../dist/server/i18n/index.js';
 import { usageFixture } from '../tests/e2e/usage-fixture.mjs';
 import { configSchema } from '../dist/server/ops/config.js';
 import { Store } from '../dist/server/core/store.js';
 import { WorkspaceRegistry } from '../dist/server/core/workspace-registry.js';
+const locale = process.env.DADDYLOOP_MEDIA_LOCALE === 'ru' ? 'ru' : 'en';
+const t = translator(locale);
 const root = resolve(import.meta.dirname, '..'),
-  output = join(root, 'docs/media');
+  output = join(root, 'docs/media', locale);
 mkdirSync(output, { recursive: true });
 const base = join(tmpdir(), 'daddyloop-media');
 mkdirSync(base, { recursive: true, mode: 0o700 });
@@ -37,12 +40,12 @@ const workspace = {
 };
 store.saveWorkspace(workspace);
 const profiles = {
-  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  worker: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
   daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 const config = configSchema.parse({
   dataDir: data,
-  locale: 'ru',
+  locale,
   agents: profiles,
   workspaces: { roots: [scratch] },
   telegram: { enabled: false },
@@ -50,6 +53,7 @@ const config = configSchema.parse({
 const catalogue = {
   list: async () =>
     Object.values(profiles).map((profile) => ({
+      engine: profile.engine,
       id: profile.model,
       name: profile.model,
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -75,36 +79,57 @@ const server = await buildApp({
   startUpdateCheck: false,
   catalogue,
 });
+const fixture = {
+  en: {
+    title: 'Payments without duplicate charges',
+    messages: [
+      [
+        'user',
+        'Make payments idempotent. A repeated request must not charge twice. Check the API, add tests and update the docs.',
+      ],
+      [
+        'agent',
+        'The crew is on it. **API and tests** stay together; the docs can run in parallel.\n\n- Worker 1 — the idempotency key and retry handling.\n- Worker 2 — API contracts and examples.\n- I will review both and check the lost-response case myself.\n\nWe have **3 worker slots**. I will use another one when there is independent work.',
+      ],
+      ['user', 'Also cover a lost response followed by the same request again.'],
+      [
+        'agent',
+        'Already in the task. The key and result are saved before the response, so a retry gets the original result.\n\nTests already cover retries and concurrent requests. Now I am checking that a network error never masquerades as a successful payment.',
+      ],
+    ],
+    titles: ['Idempotency contract', 'Retries and error handling', 'API docs and examples'],
+  },
+  ru: {
+    title: 'Платежи без повторных списаний',
+    messages: [
+      [
+        'user',
+        'Нужны идемпотентные платежи. Повторный запрос не должен списывать дважды. Проверь API, добавь тесты и обнови документацию.',
+      ],
+      [
+        'agent',
+        'Раздал работу. **API и тесты** идут вместе, документацию делаем параллельно.\n\n- Воркер 1 — ключ идемпотентности и обработка повторов.\n- Воркер 2 — контракты API и примеры.\n- Я проверю результат и отдельно пройду потерянный ответ.\n\nВ команде **3 места**. Ещё одного подключу, когда будет независимая задача.',
+      ],
+      ['user', 'Добавь случай, когда ответ потерялся, а запрос пришёл повторно.'],
+      [
+        'agent',
+        'Уже в задаче. Ключ и результат сохраняем до ответа: повтор получит прежний результат.\n\nТесты уже проверяют повторы и параллельные запросы. Сейчас смотрю, чтобы ошибка сети не выдала себя за успешный платёж.',
+      ],
+    ],
+    titles: [
+      'Контракт идемпотентности',
+      'Повторы и обработка ошибок',
+      'Документация и примеры API',
+    ],
+  },
+}[locale];
 const group = server.daddy.create({
   workspaceId: workspace.id,
-  title: 'Платежи без повторных списаний',
-  writerLimit: 3,
+  title: fixture.title,
+  workerLimit: 3,
 });
-store.daddyMessage(
-  group.id,
-  'user',
-  'Нужно сделать платежи идемпотентными. Повторный запрос не должен списывать деньги дважды. Посмотри API, добавь тесты и обнови документацию.',
-);
-store.daddyMessage(
-  group.id,
-  'agent',
-  'Разделил работу на три части. **API и тесты** выполняются вместе, документацию можно готовить параллельно.\n\n- Писатель 1 — ключ идемпотентности и обработка повторов.\n- Писатель 2 — контракты API и примеры.\n- Я проверю изменения и пройду сценарий с потерянным ответом.\n\nВ этой сессии доступно **3 писателя**. Подключу дополнительного, если появится независимая задача.',
-);
-store.daddyMessage(
-  group.id,
-  'user',
-  'Добавь ещё сценарий, когда ответ потерялся, а клиент отправил запрос повторно.',
-);
-store.daddyMessage(
-  group.id,
-  'agent',
-  'Добавил в ту же задачу. Ключ и результат операции сохраняются до ответа клиенту — повтор получит прежний результат.\n\nТесты уже проверяют повторную отправку и параллельные запросы. Сейчас смотрю, чтобы ошибки сети не превращались в успешный платёж.',
-);
-for (const [index, title] of [
-  'Контракт ключа идемпотентности',
-  'Повторные запросы и проверка ошибок',
-  'Документация и примеры API',
-].entries()) {
+for (const [sender, text] of fixture.messages) store.daddyMessage(group.id, sender, text);
+for (const [index, title] of fixture.titles.entries()) {
   const task = await server.engine.createTicket({
     groupId: group.id,
     workspaceId: workspace.id,
@@ -146,13 +171,19 @@ for (const [index, title] of [
       generation: task.generation,
       role: index === 1 ? 'reviewer' : 'author',
       kind: index === 1 ? 'review' : 'implement',
-      profile: index === 1 ? profiles.daddy : profiles.writer,
+      profile: index === 1 ? profiles.daddy : profiles.worker,
       input: 'Illustrative fixture',
       status: 'running',
       createdAt: new Date().toISOString(),
     });
 }
 let browser;
+const ledger = store.getGroup(group.id);
+ledger.workerTasks = store
+  .tasks()
+  .filter((task) => task.state !== 'complete')
+  .map((task) => task.id);
+store.saveGroup(ledger);
 const command = (exe, args) =>
   new Promise((resolve, reject) => {
     const p = spawn(exe, args, { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -175,22 +206,56 @@ try {
   const page = await context.newPage();
   await page.goto(origin + '/#session/' + group.id);
   await expect(page.getByRole('heading', { name: group.title })).toBeVisible();
-  await expect(page.getByText('Тесты уже проверяют', { exact: false })).toBeVisible();
+  await expect(
+    page.getByText(locale === 'ru' ? 'Тесты уже проверяют' : 'Tests already cover', {
+      exact: false,
+    }),
+  ).toBeVisible();
   await page.screenshot({ path: join(output, 'daddy-desktop.png'), animations: 'disabled' });
-  await page.getByRole('button', { name: 'Настройки сессии' }).click();
-  await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
+  await page.getByRole('button', { name: t('Change theme') }).click();
+  await expect(page.getByRole('radiogroup')).toBeVisible();
+  await page.screenshot({ path: join(output, 'daddy-themes.png'), animations: 'disabled' });
+  await page.getByRole('radio', { name: t('Graphite'), exact: true }).click();
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+  await page.screenshot({ path: join(output, 'daddy-dark.png'), animations: 'disabled' });
+  for (const theme of [
+    'Glacier',
+    'Pearl',
+    'Mint',
+    'Lilac',
+    'Graphite',
+    'Midnight',
+    'Forest',
+    'Plum',
+  ]) {
+    await page.getByRole('button', { name: t('Change theme') }).click();
+    await page.getByRole('radio', { name: t(theme), exact: true }).click();
+    await page.getByRole('button', { name: t('Close'), exact: true }).click();
+    await page.screenshot({
+      path: join(output, 'theme-' + theme.toLowerCase() + '.png'),
+      animations: 'disabled',
+    });
+  }
+  await page.getByRole('button', { name: t('Change theme') }).click();
+  await page.getByRole('radio', { name: t('Glacier'), exact: true }).click();
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+
+  await page.getByRole('button', { name: t('Session settings') }).click();
+  await expect(page.getByLabel('daddy ' + t('Model'))).toHaveValue('gpt-6-astra');
   await page.screenshot({ path: join(output, 'daddy-models.png'), animations: 'disabled' });
-  await page.getByRole('button', { name: 'Закрыть', exact: true }).click();
-  await page.getByRole('button', { name: /Лимиты/ }).click();
-  await expect(page.getByRole('dialog').getByText('Доступно сбросов: 3')).toBeVisible();
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+  await page.getByRole('button', { name: t('Limits'), exact: false }).click();
+  await expect(
+    page.getByRole('dialog').getByText(t('Available resets: {count}', { count: 3 })),
+  ).toBeVisible();
   await page.screenshot({ path: join(output, 'daddy-limits.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(output, 'daddy-phone-limits.png'), animations: 'disabled' });
-  await page.getByRole('button', { name: 'Закрыть', exact: true }).click();
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
   await page.screenshot({ path: join(output, 'daddy-phone-chat.png'), animations: 'disabled' });
   await page
     .locator('.daddy-mobile-tabs')
-    .getByRole('button', { name: /Задачи/ })
+    .getByRole('button', { name: t('Tasks'), exact: false })
     .click();
   await page.screenshot({ path: join(output, 'daddy-phone-tasks.png'), animations: 'disabled' });
   const recording = join(scratch, 'terminal.json');
@@ -242,7 +307,7 @@ try {
     await screen.close();
   }
   writeFileSync(
-    join(base, 'proof.json'),
+    join(base, 'proof-' + locale + '.json'),
     JSON.stringify(
       {
         fixtureData: true,

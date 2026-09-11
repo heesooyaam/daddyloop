@@ -57,9 +57,9 @@ export async function runDaddyPlain(api: DaddyApi, options: { id?: string; local
           path && path !== 'default' ? safeText(path) + '\n' : t('Using workspace defaults') + '\n',
         );
       } else if (input.startsWith('/pool '))
-        await model.action('settings', { writerLimit: Number(input.slice(6)) });
+        await model.action('settings', { workerLimit: Number(input.slice(6)) });
       else if (input === '/pool') {
-        const pool = model.snapshot().board?.writers;
+        const pool = model.snapshot().board?.workers;
         if (pool)
           process.stdout.write(
             t(

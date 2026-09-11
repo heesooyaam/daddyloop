@@ -2,7 +2,11 @@ import { it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { TicketReader, parseTicket, parseTrackerJson } from '../src/integrations/tickets.js';
+import {
+  TicketReader,
+  parseTicket,
+  parseTrackerJson,
+} from '../src/modules/repositories/tickets.js';
 import { Store } from '../src/core/store.js';
 import { Engine } from '../src/core/engine.js';
 import { DemoProvider } from '../src/providers/demo.js';

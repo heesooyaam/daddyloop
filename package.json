@@ -1,8 +1,8 @@
 {
   "name": "daddyloop",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
-  "description": "daddy manages a pool of writers, workspaces and native code reviews from one conversation.",
+  "description": "daddy manages a pool of workers, workspaces and native code reviews from one conversation.",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <25 || >=26.0.0"
@@ -25,13 +25,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run typecheck && npm test && npm run build && npm run docs:check",
     "start": "node dist/server/cli.js serve",
     "daddy": "tsx src/cli.ts",
     "format": "prettier --write src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "format:check": "prettier --check src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "release:build": "npm run build && node scripts/build-release.mjs",
-    "speech:prepare": "node scripts/prepare-speech.mjs"
+    "speech:prepare": "node scripts/prepare-speech.mjs",
+    "docs:check": "node scripts/check-docs.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

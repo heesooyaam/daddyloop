@@ -9,7 +9,7 @@ import { buildContext } from './context.js';
 import { workspaceScope } from '../core/workspace-registry.js';
 import { realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { assignWriter, canAssignWriter, reconcileWriterPools } from '../core/writer-pool.js';
+import { assignWorker, canAssignWorker, reconcileWorkerPools } from '../core/worker-pool.js';
 
 export class Worker {
   private active = new Map<string, AbortController>();
@@ -197,8 +197,8 @@ export class Worker {
             }
           }
         }
-      // Authors may be independent; each shared reviewer thread has one writer.
-      reconcileWriterPools(store);
+      // Authors may be independent; each shared reviewer thread has one worker.
+      reconcileWorkerPools(store);
       const limit = Math.max(
         1,
         Math.min(8, store.setting<number>('worker.maxAgents') ?? this.maxAgents),
@@ -212,7 +212,7 @@ export class Worker {
                 const group = store.getGroup(candidate.groupId!);
                 if (group.daddyState === 'paused' || group.daddyState === 'archived') return false;
                 if (candidate.role === 'reviewer') return !this.reservedGroups.has(group.id);
-                if (group.orchestrated && !canAssignWriter(store, group, candidate.taskId))
+                if (group.orchestrated && !canAssignWorker(store, group, candidate.taskId))
                   return false;
                 const task = store.getTask(candidate.taskId);
                 return (
@@ -230,7 +230,7 @@ export class Worker {
           (claimed) => {
             if (claimed.role === 'author' && claimed.groupId) {
               const group = store.getGroup(claimed.groupId);
-              if (group.orchestrated) assignWriter(store, group, claimed.taskId);
+              if (group.orchestrated) assignWorker(store, group, claimed.taskId);
             }
           },
         );
@@ -258,7 +258,7 @@ export class Worker {
           throw new Error('The shared reviewer configuration changed before this job started');
         task.reviewerThreadId = group.reviewerThreadId;
       }
-      job.profile ??= this.engine.effectiveAgents(task)[job.role === 'author' ? 'writer' : 'daddy'];
+      job.profile ??= this.engine.effectiveAgents(task)[job.role === 'author' ? 'worker' : 'daddy'];
       store.saveJob(job);
       const startingPR = isTicket(task)
         ? undefined

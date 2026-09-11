@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
-import { ModelCatalogue, type ModelOption } from './agents.js';
+import { CodexCatalogue } from '../modules/agents/codex/models.js';
+import type { ModelOption } from './agents.js';
 import { AppError, now } from './types.js';
 import { redact } from './security.js';
 import type { Store } from './store.js';
@@ -238,7 +239,7 @@ export class CodexUpdater {
     }
   }
   private async validate(executable: string) {
-    const catalogue = new ModelCatalogue(executable);
+    const catalogue = new CodexCatalogue(executable);
     const models = await catalogue.list(true, this.controller.signal);
     return { models, version: catalogue.metadata().cliVersion };
   }

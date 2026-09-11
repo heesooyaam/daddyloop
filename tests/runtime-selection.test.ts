@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'n
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/core/store.js';
-import { ModelCatalogue } from '../src/core/agents.js';
+import { CodexCatalogue } from '../src/modules/agents/codex/models.js';
 import { ServiceManager } from '../src/ops/service.js';
 import { registerEnvironmentCommands } from '../src/ops/environment.js';
 import { loadConfig, saveConfig } from '../src/ops/config.js';
@@ -46,7 +46,7 @@ function setup() {
         ),
     ),
   );
-  vi.spyOn(ModelCatalogue.prototype, 'list').mockResolvedValue([]);
+  vi.spyOn(CodexCatalogue.prototype, 'list').mockResolvedValue([]);
   vi.spyOn(process.stdout, 'write').mockReturnValue(true);
   const program = () => {
     const command = new Command();
@@ -75,7 +75,7 @@ it('validates the CLI before selecting its stable launcher and refuses changes w
       .mockResolvedValue({ installed: true, mode: 'system', survivesLogout: true });
   try {
     await f.program().parseAsync(['node', 'daddy', 'runtime', 'use', f.launcher]);
-    expect(loadConfig().codex.executable).toBe(f.launcher);
+    expect(loadConfig().executables.codex).toBe(f.launcher);
     expect(restart).toHaveBeenCalledOnce();
     f.setBusy();
     await expect(
@@ -98,7 +98,7 @@ it('restores only the CLI setting if restart fails, preserving other concurrent 
     await expect(
       f.program().parseAsync(['node', 'daddy', 'runtime', 'use', f.launcher]),
     ).rejects.toThrow('Restart failed');
-    expect(loadConfig().codex.executable).toBeUndefined();
+    expect(loadConfig().executables.codex).toBeUndefined();
     expect(loadConfig().locale).toBe('ru');
     expect(readFileSync(f.config, 'utf8')).not.toContain('fixture-token');
   } finally {

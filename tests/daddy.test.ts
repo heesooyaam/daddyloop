@@ -4,7 +4,7 @@ import { daddyFixture } from './daddy-fixture.js';
 import type { SessionInput, AgentInput } from '../src/runtime/agent.js';
 import { profiles } from './planning-fixture.js';
 afterEach(() => vi.restoreAllMocks());
-it('creates one daddy conversation idempotently and lets him split and dispatch work without contacting writers', async () => {
+it('creates one daddy conversation idempotently and lets him split and dispatch work without contacting workers', async () => {
   const f = daddyFixture();
   let created: string[] = [];
   f.runtime.runSession.mockImplementation(async (input) => {
@@ -60,20 +60,20 @@ it('creates one daddy conversation idempotently and lets him split and dispatch 
     );
     expect(f.store.getGroup(group.id).daddyThreadId).toBe('one-daddy');
     expect(f.store.messages(group.id).at(-1)?.text).toContain('assigned');
-    expect(f.store.jobs().every((job) => job.profile?.model === profiles.writer.model)).toBe(true);
+    expect(f.store.jobs().every((job) => job.profile?.model === profiles.worker.model)).toBe(true);
   } finally {
     await f.close();
   }
 });
-it('drains whole tasks through review and fixes before retiring writer slots', async () => {
+it('drains whole tasks through review and fixes before retiring worker slots', async () => {
   const f = daddyFixture(),
     pending: { input: AgentInput; done: () => void }[] = [];
-  f.writer.run.mockImplementation(async (input) => {
+  f.agentRuntime.run.mockImplementation(async (input) => {
     await new Promise<void>((done) => pending.push({ input, done }));
     return { status: 'completed', summary: 'Done', checkedHead: input.task.revision!.head };
   });
   try {
-    const group = f.daddy.create({ workspaceId: f.workspace.id, writerLimit: 2 });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
     for (let i = 0; i < 3; i++) {
       const task = await f.tickets.local({
         workspace: f.workspace,
@@ -89,8 +89,8 @@ it('drains whole tasks through review and fixes before retiring writer slots', a
     await vi.waitFor(() => expect(pending).toHaveLength(2));
     const a = pending[0].input.task.id,
       b = pending[1].input.task.id;
-    const requested = await f.daddy.settings(group.id, { writerLimit: 1 });
-    expect(requested.writers).toMatchObject({
+    const requested = await f.daddy.settings(group.id, { workerLimit: 1 });
+    expect(requested.workers).toMatchObject({
       limit: 2,
       target: 1,
       pending: true,
@@ -98,10 +98,10 @@ it('drains whole tasks through review and fixes before retiring writer slots', a
       occupied: 2,
     });
     pending.splice(0).forEach((run) => run.done());
-    await vi.waitFor(() => expect(f.daddy.board(group.id).writers.active).toBe(0));
+    await vi.waitFor(() => expect(f.daddy.board(group.id).workers.active).toBe(0));
     await f.worker.tick();
     expect(pending).toHaveLength(0); // Both tasks still owe review; the queued third task waits.
-    expect(f.daddy.board(group.id).writers).toMatchObject({ limit: 2, occupied: 2, retiring: 1 });
+    expect(f.daddy.board(group.id).workers).toMatchObject({ limit: 2, occupied: 2, retiring: 1 });
     const fixing = f.store.getTask(a);
     fixing.state = 'fixing';
     f.store.saveTask(fixing);
@@ -110,20 +110,20 @@ it('drains whole tasks through review and fixes before retiring writer slots', a
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     expect(pending[0].input.task.id).toBe(a);
     pending.shift()!.done();
-    await vi.waitFor(() => expect(f.daddy.board(group.id).writers.active).toBe(0));
+    await vi.waitFor(() => expect(f.daddy.board(group.id).workers.active).toBe(0));
     for (const state of ['paused', 'needs_input', 'awaiting_checks'] as const) {
       const current = f.store.getTask(a);
       current.state = state;
       f.store.saveTask(current);
       await f.worker.tick();
       expect(pending).toHaveLength(0);
-      expect(f.daddy.board(group.id).writers.occupied).toBe(2);
+      expect(f.daddy.board(group.id).workers.occupied).toBe(2);
     }
     const completedA = f.store.getTask(a);
     completedA.state = 'complete';
     f.store.saveTask(completedA);
     await f.worker.tick();
-    expect(f.daddy.board(group.id).writers).toMatchObject({
+    expect(f.daddy.board(group.id).workers).toMatchObject({
       limit: 1,
       target: 1,
       pending: false,
@@ -145,25 +145,25 @@ it('applies growth asynchronously and lets the latest pool request supersede a p
   const f = daddyFixture();
   try {
     const group = f.daddy.create({ workspaceId: f.workspace.id });
-    expect((await f.daddy.settings(group.id, { writerLimit: 3 })).writers).toMatchObject({
+    expect((await f.daddy.settings(group.id, { workerLimit: 3 })).workers).toMatchObject({
       limit: 1,
       target: 3,
       hostLimit: 1,
       pending: true,
     });
-    await f.daddy.settings(group.id, { writerLimit: 2 });
-    expect(f.daddy.board(group.id).writers.limit).toBe(1);
+    await f.daddy.settings(group.id, { workerLimit: 2 });
+    expect(f.daddy.board(group.id).workers.limit).toBe(1);
     await f.worker.tick();
-    expect(f.daddy.board(group.id).writers).toMatchObject({
+    expect(f.daddy.board(group.id).workers).toMatchObject({
       limit: 2,
       target: 2,
       hostLimit: 2,
       pending: false,
     });
-    await f.daddy.settings(group.id, { writerLimit: 1 });
-    await f.daddy.settings(group.id, { writerLimit: 2 });
+    await f.daddy.settings(group.id, { workerLimit: 1 });
+    await f.daddy.settings(group.id, { workerLimit: 2 });
     await f.worker.tick();
-    expect(f.daddy.board(group.id).writers.limit).toBe(2);
+    expect(f.daddy.board(group.id).workers.limit).toBe(2);
   } finally {
     await f.close();
   }
@@ -250,7 +250,7 @@ it('enforces same-session task scope and acyclic prerequisites before dispatch',
     await f.close();
   }
 });
-it('allows writer defaults to change while daddy works, but preserves his active model', async () => {
+it('allows worker defaults to change while daddy works, but preserves his active model', async () => {
   const f = daddyFixture();
   let started = false,
     done!: () => void;
@@ -267,11 +267,11 @@ it('allows writer defaults to change while daddy works, but preserves his active
     f.daddy.tick();
     await vi.waitFor(() => expect(started).toBe(true));
     await f.daddy.settings(group.id, {
-      profiles: { ...profiles, writer: { ...profiles.writer, effort: 'medium' } },
+      profiles: { ...profiles, worker: { ...profiles.worker, effort: 'medium' } },
     });
     expect(f.store.getGroup(group.id).generation).toBe(group.generation);
     await expect(
-      f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.writer } }),
+      f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.worker } }),
     ).rejects.toThrow('idle');
     expect(f.store.getGroup(group.id).daddy).toEqual(profiles.daddy);
   } finally {
