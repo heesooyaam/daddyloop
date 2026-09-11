@@ -7,7 +7,7 @@
 ## 1. Install
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.13.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.13.1/install.sh | bash
 ```
 
 Choose modules with **↑/↓**, toggle with **Space**, confirm with **Enter**. Codex and GitHub are selected initially. GitLab uses its REST API; Arcadia uses your existing corporate tools. The installer downloads the CLI packages selected by your choices, installs Node and the local speech model, then starts a systemd service. No tmux setup is needed.
@@ -15,7 +15,7 @@ Choose modules with **↑/↓**, toggle with **Space**, confirm with **Enter**. 
 For an unattended installation:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.13.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.13.1/install.sh | bash -s -- --yes --modules codex,github,arcadia
 ```
 
 Linux x64 and ARM64 are supported. The script needs curl and tar; it can install Git through apt. One-time sudo access may be needed for Git and the persistent service. macOS and Windows can use the website. See [modules](../modules/en.md) and [operations](../operations/en.md).

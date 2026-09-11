@@ -370,7 +370,8 @@ export const daddyRu: Record<string, string> = {
     'Отдавай задачу папочке. Раздам работу, спрошу с каждого и принесу результат.',
   'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.':
     'Выбери воркспейс и скажи папочке, что нужно. Бригада, проверки и «ну что там?» — это уже моя забота.',
-  'You set the goal. daddy handles the headaches.': 'С тебя задача. Головная боль — папочкина.',
+  'You set the goal. daddy handles the headaches.':
+    'С тебя задача. Остальное папочка берёт на себя.',
   'A task, a ticket or a wild idea…': 'Задачу, тикет или смелую идею — сюда…',
   'One worker to start. Pick the crew size; daddy will put everyone to work.':
     'Начнём с одного воркера. Выбери размер бригады — папочка найдёт каждому дело.',
