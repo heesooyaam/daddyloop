@@ -38,7 +38,25 @@ daddy new --workspace Work --repo ~/arcadia2 --scope alice "Investigate the sear
 daddy talk SESSION_ID "Take the next ticket" --repo ~/arcadia --scope alice
 ```
 
-On the website use the repository fields in the new-session form or beneath the composer. In Telegram and the interactive CLI, use `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.
+On the website, describe the task first, then choose a workspace. Its saved folder appears below the selector. **Change** opens settings for this session only; the subfolder and branch are under **Subfolder and starting branch**. Click **Apply settings** to validate the folder before starting. **Cancel** keeps the previous selection.
+
+![Task and workspace selection](../media/en/daddy-new-session.png)
+
+In an existing conversation, **Change** beside the folder applies to the next message only. After sending, the session folder is selected again. Sending is paused while you edit folder settings: apply or cancel them first.
+
+The server folder picker works like this:
+
+1. **Open folder** or a named row navigates inside to show its contents.
+2. **Parent folder** moves up; **All server folders** returns to the server's allowed roots.
+3. **Select this folder** puts the displayed path into the form. Then use **Apply settings** or **Save workspace**.
+
+![Browse and explicitly select a server folder](../media/en/daddy-folder-picker.png)
+
+In **Workspaces**, names, repository types and paths are separate. A card opens its saved defaults; **Add workspace** creates another entry. Coming here from a new task preserves its draft and selects the newly saved workspace when you return.
+
+![Saved workspaces](../media/en/daddy-workspaces.png)
+
+In Telegram and the interactive CLI, use `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.
 
 ## What happens to the source repository?
 

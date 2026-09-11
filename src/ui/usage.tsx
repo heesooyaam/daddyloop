@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ChevronRight, CircleHelp } from 'lucide-react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { UsageView, AgentUsageView, ResetPlan } from '../core/usage.js';
 import { resetOutcomeText, usageDate, windowLabel } from '../client/usage.js';
@@ -9,44 +10,72 @@ function AgentStrip({
   connected,
   onDetails,
 }: {
-  usage?: AgentUsageView;
+  usage: AgentUsageView;
   connected: boolean;
-  onDetails: () => void;
+  onDetails: (engine: string) => void;
 }) {
   const { t, locale } = useLocale();
   const stale =
-    !!usage &&
+    usage.available &&
     (usage.stale ||
       !connected ||
       (usage.retrievedAt ? Date.now() - Date.parse(usage.retrievedAt) > 120000 : false));
+  const open = () => onDetails(usage.engine);
+  const label = t('View {provider} limits', { provider: usage.name });
   return (
     <section
-      className={'daddy-usage-strip' + (stale ? ' stale' : '')}
+      className={
+        'daddy-usage-strip' + (stale ? ' stale' : '') + (!usage.available ? ' unavailable' : '')
+      }
       aria-label={t('Current usage')}
     >
       <div className="daddy-usage-caption">
-        <strong>{usage?.name ?? t('Current usage')}</strong>
-        <span>{t('Shared account · remaining')}</span>
+        <button type="button" onClick={open} aria-label={label}>
+          <strong>{usage.name}</strong>
+          <ChevronRight size={14} />
+        </button>
+        {usage.available && (
+          <span>
+            {t(
+              usage.buckets.some((bucket) => bucket.windows.length)
+                ? 'Remaining quota'
+                : 'Account balance',
+            )}
+          </span>
+        )}
         {stale && <small role="status">{t('Last known usage')}</small>}
-        {usage?.ordinaryUsageAllowed === false && (
+        {usage.ordinaryUsageAllowed === false && (
           <small role="status">{t('Included usage is blocked')}</small>
         )}
       </div>
       <div className="daddy-usage-windows">
-        {!usage ? (
-          <span className="daddy-muted">{t('Reading usage…')}</span>
-        ) : !usage.available ? (
-          <span className="daddy-muted">{t('Usage unavailable')}</span>
+        {!usage.available ? (
+          <span className="daddy-muted">{t('No quota readings yet')}</span>
         ) : (
           usage.buckets.flatMap((bucket) => [
             ...bucket.windows.map((window, index) => (
-              <div className="daddy-usage-window" key={bucket.id + ':' + index}>
+              <button
+                type="button"
+                className="daddy-usage-window"
+                key={bucket.id + ':' + index}
+                onClick={open}
+                aria-label={t('Details: {provider}, {window}', {
+                  provider: bucket.name,
+                  window: window.label ?? windowLabel(window.durationMinutes, locale),
+                })}
+              >
                 <div>
                   <span>
-                    {bucket.name} · {window.label ?? windowLabel(window.durationMinutes, locale)}
+                    {bucket.name === usage.name
+                      ? (window.label ?? windowLabel(window.durationMinutes, locale))
+                      : bucket.name +
+                        ' · ' +
+                        (window.label ?? windowLabel(window.durationMinutes, locale))}
                   </span>
                   <strong>
-                    {window.remainingPercent == null ? '—' : Math.round(window.remainingPercent)}%
+                    {window.remainingPercent == null
+                      ? t('No reading')
+                      : t('{remaining}% left', { remaining: Math.round(window.remainingPercent) })}
                   </strong>
                 </div>
                 <progress
@@ -66,18 +95,31 @@ function AgentStrip({
                     {t('Resets: {time}', { time: usageDate(window.resetsAt, locale) })}
                   </time>
                 )}
-              </div>
+              </button>
             )),
-            ...(bucket.credits?.unlimited || bucket.credits?.balance != null
+            // A zero extra balance must not look like an exhausted subscription quota.
+            ...(bucket.credits &&
+            (bucket.credits.unlimited || bucket.credits.balance != null) &&
+            (!bucket.windows.length ||
+              bucket.credits.unlimited ||
+              Number(bucket.credits.balance) > 0)
               ? [
-                  <div className="daddy-usage-window" key={bucket.id + ':credits'}>
-                    <span>{bucket.name}</span>
+                  <button
+                    type="button"
+                    className="daddy-usage-window daddy-credit-summary"
+                    key={bucket.id + ':credits'}
+                    onClick={open}
+                    aria-label={t('About {provider} credits', { provider: usage.name })}
+                  >
+                    <span>
+                      {t(bucket.windows.length ? 'Additional credits' : 'Provider credits')}
+                      <CircleHelp size={13} />
+                    </span>
                     <strong>
-                      {bucket.credits.unlimited
-                        ? t('Credits: unlimited')
-                        : t('Credit balance: {balance}', { balance: bucket.credits.balance! })}
+                      {bucket.credits.unlimited ? t('Unlimited') : bucket.credits.balance}
                     </strong>
-                  </div>,
+                    <small>{t('Separate from quota percentages')}</small>
+                  </button>,
                 ]
               : []),
             ...(bucket.blocked
@@ -90,8 +132,8 @@ function AgentStrip({
           ])
         )}
       </div>
-      {usage?.activity && (
-        <small className="daddy-muted">
+      {usage.activity && (
+        <small className="daddy-usage-activity">
           {t('Last agent turn: {input} in / {output} out · ~${cost}', {
             input: usage.activity.inputTokens,
             output: usage.activity.outputTokens,
@@ -100,43 +142,55 @@ function AgentStrip({
         </small>
       )}
       <button
+        type="button"
         className="daddy-usage-details"
-        onClick={onDetails}
-        aria-label={t('Usage details and resets')}
+        onClick={open}
+        aria-label={t('Usage details for {provider}', { provider: usage.name })}
       >
-        <strong>
-          {usage?.resets.availableCount == null
-            ? t('Resets: unknown')
-            : t('Resets available: {count}', { count: usage.resets.availableCount })}
-        </strong>
-        <span>{t('Details and reset')} ↗</span>
+        {usage.resets.availableCount != null && (
+          <strong>{t('Resets available: {count}', { count: usage.resets.availableCount })}</strong>
+        )}
+        <span>
+          {t('View details')} <ChevronRight size={13} />
+        </span>
       </button>
     </section>
   );
 }
-export function UsageStrip(props: {
+export function UsageStrip({
+  usage,
+  connected,
+  onDetails,
+}: {
   usage?: UsageView;
   connected: boolean;
-  onDetails: () => void;
+  onDetails: (engine: string) => void;
 }) {
+  const { t } = useLocale();
   return (
-    <>
-      {props.usage?.agents.map((agent) => (
-        <AgentStrip key={agent.engine} {...props} usage={agent} />
-      )) ?? <AgentStrip connected={props.connected} onDetails={props.onDetails} />}
-    </>
+    <div className="daddy-usage-overview">
+      <div className="daddy-usage-heading">
+        <strong>{t('Agent limits')}</strong>
+        <span>{t('Readings reported by providers')}</span>
+      </div>
+      {usage?.agents.map((agent) => (
+        <AgentStrip key={agent.engine} usage={agent} connected={connected} onDetails={onDetails} />
+      )) ?? <p className="daddy-muted daddy-usage-loading">{t('Reading usage…')}</p>}
+    </div>
   );
 }
 export function UsagePanel({
   api,
   onUpdate,
+  initialEngine,
 }: {
   api: DaddyApi;
+  initialEngine?: string;
   onUpdate?: (usage: UsageView) => void;
 }) {
   const { t, locale } = useLocale();
   const [overview, setUsage] = useState<UsageView>(),
-    [engine, setEngine] = useState<string>(),
+    [engine, setEngine] = useState<string | undefined>(initialEngine),
     [plan, setPlan] = useState<ResetPlan>();
   const usage = overview?.agents.find((agent) => agent.engine === engine) ?? overview?.agents[0];
   const [busy, setBusy] = useState(false),
@@ -192,7 +246,15 @@ export function UsagePanel({
           </option>
         ))}
       </select>
-      <p className="daddy-muted">{t('daddy and workers share their provider account limits.')}</p>
+      <p className="daddy-muted">
+        {t(
+          'These limits belong to the {provider} account connected on this server. daddy and its workers use this account together.',
+          { provider: usage?.name ?? '' },
+        )}
+      </p>
+      <p className="daddy-muted">
+        {t('Percentages show how much of each quota is left. Each period renews at its own time.')}
+      </p>
       {usage && !usage.available && <p>{t('This provider has no current quota readings.')}</p>}
       {usage?.activity && (
         <p>
@@ -241,12 +303,24 @@ export function UsagePanel({
               )}
             </div>
           ))}
-          {bucket.credits?.unlimited ? (
-            <p>{t('Credits: unlimited')}</p>
-          ) : (
-            bucket.credits?.balance != null && (
-              <p>{t('Credit balance: {balance}', { balance: bucket.credits.balance })}</p>
-            )
+          {bucket.credits && (
+            <div className="daddy-credit-explanation">
+              <strong>
+                {t(bucket.windows.length ? 'Additional credits' : 'Provider credits')}
+              </strong>
+              <p>
+                {bucket.credits.unlimited
+                  ? t('Credits: unlimited')
+                  : bucket.credits.balance != null
+                    ? t('Credit balance: {balance}', { balance: bucket.credits.balance })
+                    : t('Credit balance is not reported')}
+              </p>
+              <p>
+                {t(
+                  'Credits are a separate payment balance held by the provider. A zero credit balance does not mean your quota percentages are exhausted.',
+                )}
+              </p>
+            </div>
           )}
         </section>
       ))}

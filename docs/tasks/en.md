@@ -2,7 +2,7 @@
 
 # Tasks and the worker pool
 
-Start a session in the CLI with `/new`, use **New session** on the website, or send `/new` to the bot. Pick a workspace and describe the goal. You can paste a GitHub issue, a Tracker ticket, or an existing GitHub/GitLab/Arcadia PR.
+Start a session in the CLI with `/new`, use **New session** on the website, or send `/new` to the bot. On the website, describe the goal first, then choose a workspace; its saved folder usually needs no changes. In the CLI and Telegram, follow the `/new` steps. You can paste a GitHub issue, a Tracker ticket, or an existing GitHub/GitLab/Arcadia PR.
 
 ```bash
 daddy new --workspace App "https://github.com/acme/app/issues/42"

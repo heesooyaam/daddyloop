@@ -57,9 +57,13 @@ test('uses a one-request repository from a phone and resets the composer without
   await create(page, 'Per-task workspace', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   const fields = page.locator('.daddy-composer .daddy-workspace-fields');
-  await fields.locator('summary').click();
+  await fields.getByRole('button', { name: 'Change folder for the next message' }).click();
   const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
   await fields.getByLabel('Repository on this server').fill(alternate);
+  await fields.getByRole('button', { name: 'Apply settings' }).click();
+  await expect(
+    fields.getByRole('button', { name: 'Change folder for the next message' }),
+  ).toBeVisible();
   const sent = page.waitForResponse(
     (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
   );
@@ -72,9 +76,10 @@ test('uses a one-request repository from a phone and resets the composer without
   const board = await response.json();
   expect(board.messages.at(-1).workspace.repoPath).toBe(alternate);
   expect(board.workspace.repoPath).toBe(resolve('.daddyloop/e2e/fixture-repository'));
-  await expect(fields.getByLabel('Repository on this server')).toHaveValue(
+  await expect(fields.locator('.daddy-repository-summary code')).toHaveText(
     board.workspace.repoPath,
   );
+  await expect(fields.getByText('Only the next message uses this folder.')).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
   await expect(page.locator('.daddy-work-item')).toHaveCount(2);
@@ -105,14 +110,8 @@ test('supports the phone task board, pool controls and workspace directory choos
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await page.getByRole('button', { name: /Workspaces/ }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
-  await page
-    .getByText('Detected repositories', { exact: true })
-    .click()
-    .catch(() => {});
-  const repoButton = page
-    .getByRole('dialog')
-    .getByRole('button', { name: 'fixture-repository', exact: true });
-  if (await repoButton.isVisible()) await repoButton.click();
+  await page.getByRole('button', { name: 'Edit workspace Fixture workspace' }).click();
+  await page.getByRole('button', { name: 'Browse server folders' }).click();
   await expect(page.getByLabel('Server directory')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

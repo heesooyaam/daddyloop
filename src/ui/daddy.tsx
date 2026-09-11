@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  ArrowLeft,
   ArrowUpRight,
   Check,
-  ChevronRight,
   CircleCheck,
   Folder,
   FolderGit2,
@@ -34,6 +32,7 @@ import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import { WorkspaceFields } from './workspace-fields.js';
+import { FolderBrowser } from './folder-browser.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageStrip, UsagePanel } from './usage.js';
@@ -69,6 +68,10 @@ function safeUrl(value: string) {
 }
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
+  const [usageEngine, setUsageEngine] = useState<string>();
+  const [repositoryEditing, setRepositoryEditing] = useState(false);
+  const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
+  const [returnToNew, setReturnToNew] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
   );
@@ -156,7 +159,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </button>
           ))}
           {!state.sessions.length && (
-            <p className="daddy-empty-small">{t('No sessions yet. Send the first job.')}</p>
+            <p className="daddy-empty-small">{t('No sessions yet. Give daddy the first task.')}</p>
           )}
         </nav>
         <div className="daddy-sidebar-bottom">
@@ -222,7 +225,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('What’s the job?')}</h1>
+            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
           <ThemeButton />
           {board && (
@@ -248,7 +251,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <UsageStrip
           usage={state.usage}
           connected={state.connected}
-          onDetails={() => setModal('limits')}
+          onDetails={(engine) => {
+            setUsageEngine(engine);
+            setModal('limits');
+          }}
         />
         {state.error && (
           <div className="daddy-error" role="alert">
@@ -323,13 +329,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    void model.send();
+                    if (!repositoryEditing) void model.send();
                   }}
                 >
                   <WorkspaceFields
                     key={board.group.id}
                     api={model.api}
                     workspace={board.workspace!}
+                    sessionId={board.group.id}
+                    onEditingChange={setRepositoryEditing}
                     value={state.overrides[state.selected]}
                     onChange={(value) => model.repository(value)}
                     compact
@@ -353,21 +361,28 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                         !event.nativeEvent.isComposing
                       ) {
                         event.preventDefault();
-                        void model.send();
+                        if (!repositoryEditing) void model.send();
                       }
                     }}
                   />
                   <footer>
                     <span>
-                      {board.workers.active
-                        ? t('Workers at work: {count}', { count: board.workers.active })
-                        : t('You set the goal. daddy handles the headaches.')}
+                      {repositoryEditing
+                        ? t('Apply or cancel folder settings before sending.')
+                        : board.workers.active
+                          ? t('Workers at work: {count}', { count: board.workers.active })
+                          : t('You set the goal. daddy handles the headaches.')}
                     </span>
                     <button
                       type="submit"
                       className="daddy-send"
                       aria-label={t('Send message')}
-                      disabled={state.busy || paused || !state.drafts[state.selected]?.trim()}
+                      disabled={
+                        state.busy ||
+                        paused ||
+                        repositoryEditing ||
+                        !state.drafts[state.selected]?.trim()
+                      }
                     >
                       <Send size={17} />
                     </button>
@@ -508,7 +523,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </p>
             <button
               className="daddy-button primary"
-              onClick={() => setModal(state.workspaces.length ? 'new' : 'workspaces')}
+              onClick={() => {
+                if (!state.workspaces.length) setReturnToNew(true);
+                setModal(state.workspaces.length ? 'new' : 'workspaces');
+              }}
             >
               <Plus size={17} />
               {t(state.workspaces.length ? 'Start a session' : 'Add your first workspace')}
@@ -535,10 +553,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <NewSession
             workspaces={state.workspaces}
             busy={state.busy}
-            onWorkspaces={() => setModal('workspaces')}
+            onWorkspaces={() => {
+              setReturnToNew(true);
+              setModal('workspaces');
+            }}
+            draft={newDraft}
+            onDraft={setNewDraft}
             api={model.api}
             onCreate={async (workspaceId, message, title, repository) => {
               await model.create(workspaceId, message, title, repository);
+              setNewDraft({});
               setModal(null);
               setPane('chat');
               setMenu(false);
@@ -547,11 +571,29 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         </Dialog>
       )}
       {modal === 'workspaces' && (
-        <Dialog title={t('Workspaces on this server')} onClose={() => setModal(null)} wide>
+        <Dialog
+          title={t('Workspaces on this server')}
+          onClose={() => {
+            setModal(returnToNew ? 'new' : null);
+            setReturnToNew(false);
+          }}
+          wide
+        >
           <WorkspaceManager
             api={api}
             workspaces={state.workspaces}
-            onSaved={() => void model.refresh()}
+            onSaved={async (workspace) => {
+              await model.refresh();
+              if (returnToNew) {
+                setNewDraft((draft) => ({
+                  ...draft,
+                  workspaceId: workspace.id,
+                  repository: undefined,
+                }));
+                setReturnToNew(false);
+                setModal('new');
+              }
+            }}
           />
         </Dialog>
       )}
@@ -579,7 +621,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'limits' && (
         <Dialog title={t('Limits')} onClose={() => setModal(null)}>
-          <UsagePanel api={model.api} onUpdate={model.setUsage} />
+          <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
       {modal === 'notifications' && (
@@ -616,12 +658,20 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     </div>
   );
 }
+interface NewSessionDraft {
+  workspaceId?: string;
+  message?: string;
+  title?: string;
+  repository?: RepositorySelection;
+}
 function NewSession({
   workspaces,
   busy,
   onCreate,
   onWorkspaces,
   api,
+  draft,
+  onDraft,
 }: {
   workspaces: Workspace[];
   busy: boolean;
@@ -633,94 +683,108 @@ function NewSession({
   ) => Promise<void>;
   api: DaddyApi;
   onWorkspaces: () => void;
+  draft: NewSessionDraft;
+  onDraft: (draft: NewSessionDraft) => void;
 }) {
   const { t } = useLocale(),
-    [workspace, setWorkspace] = useState(workspaces[0]?.id ?? ''),
-    [message, setMessage] = useState(''),
-    [title, setTitle] = useState(''),
-    [repository, setRepository] = useState<RepositorySelection>(),
-    [error, setError] = useState('');
+    [error, setError] = useState(''),
+    [editingFolder, setEditingFolder] = useState(false);
+  const workspace = workspaces.find((item) => item.id === draft.workspaceId) ?? workspaces[0];
   return (
     <form
-      className="daddy-form"
+      className="daddy-form daddy-new-session"
       onSubmit={(event) => {
         event.preventDefault();
         setError('');
+        if (!workspace || editingFolder) return;
         void onCreate(
-          workspace,
-          message,
-          title || message.split('\n')[0].slice(0, 80) || undefined,
-          repository,
+          workspace.id,
+          draft.message,
+          draft.title || draft.message?.split('\n')[0].slice(0, 80) || undefined,
+          draft.repository,
         ).catch((error) => setError(error.message));
       }}
     >
-      <label>
-        {t('Workspace')}
-        <select
-          value={workspace}
-          onChange={(event) => {
-            setWorkspace(event.target.value);
-            setRepository(undefined);
-          }}
-          required
-        >
-          {!workspaces.length && <option value="">{t('Add a workspace first')}</option>}
-          {workspaces.map((workspace) => (
-            <option key={workspace.id} value={workspace.id}>
-              {workspace.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      {workspace && (
-        <WorkspaceFields
-          key={workspace}
-          api={api}
-          workspace={workspaces.find((item) => item.id === workspace)!}
-          value={repository}
-          onChange={setRepository}
-        />
-      )}
-      <button type="button" className="daddy-text-button" onClick={onWorkspaces}>
-        <Plus size={15} />
-        {t('Register another workspace')}
-      </button>
-      <label>
+      <label className="daddy-goal-field">
         {t('What should daddy do?')}
         <textarea
-          rows={5}
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          placeholder={t(
-            'Describe the goal or paste one or more ticket links. You can start with a discussion.',
-          )}
+          rows={4}
+          data-autofocus
+          value={draft.message ?? ''}
+          onChange={(event) => onDraft({ ...draft, message: event.target.value })}
+          placeholder={t('Tell daddy the goal, paste a ticket, or start with a question.')}
         />
       </label>
+      <div className="daddy-source-choice">
+        <label>
+          {t('Workspace')}
+          <select
+            aria-label={t('Workspace')}
+            value={workspace?.id ?? ''}
+            onChange={(event) =>
+              onDraft({ ...draft, workspaceId: event.target.value, repository: undefined })
+            }
+            required
+          >
+            {!workspaces.length && <option value="">{t('Add a workspace first')}</option>}
+            {workspaces.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="daddy-muted">
+          {t(
+            'A workspace is a saved source folder. daddy prepares separate working copies for the task.',
+          )}
+        </p>
+        {workspace && (
+          <WorkspaceFields
+            key={workspace.id}
+            api={api}
+            workspace={workspace}
+            value={draft.repository}
+            onEditingChange={setEditingFolder}
+            onChange={(repository) => onDraft({ ...draft, repository })}
+          />
+        )}
+        <button type="button" className="daddy-text-button" onClick={onWorkspaces}>
+          <Plus size={15} />
+          {t('Add another workspace')}
+        </button>
+      </div>
       <label>
         {t('Session name (optional)')}
-        <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} />
+        <input
+          value={draft.title ?? ''}
+          onChange={(event) => onDraft({ ...draft, title: event.target.value })}
+          maxLength={200}
+          placeholder={t('From the first line of your task')}
+        />
       </label>
       <p className="daddy-muted">
-        {t('One worker to start. Pick the crew size; daddy will put everyone to work.')}
+        {t(
+          'Start with one worker. Choose models in session settings and crew size beside the task list.',
+        )}
       </p>
+      {editingFolder && (
+        <p className="daddy-muted">
+          {t('Apply or cancel folder settings before starting the session.')}
+        </p>
+      )}
       {error && (
         <p role="alert" className="daddy-field-error">
           {t(error)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy || !workspace}>
-        {busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}{' '}
+      <button className="daddy-button primary" disabled={busy || !workspace || editingFolder}>
+        {busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}
         {t('Start session')}
       </button>
     </form>
   );
 }
-type DirectoryList = {
-  path: string;
-  parent: string | null;
-  directories: { name: string; path: string }[];
-  truncated: boolean;
-};
 function WorkspaceManager({
   api,
   workspaces,
@@ -728,56 +792,50 @@ function WorkspaceManager({
 }: {
   api: DaddyApi;
   workspaces: Workspace[];
-  onSaved: () => void;
+  onSaved: (workspace: Workspace) => Promise<void>;
 }) {
-  const { t } = useLocale(),
-    [suggestions, setSuggestions] = useState<{ name: string; path: string }[]>([]),
-    [editing, setEditing] = useState<string>(),
-    [listing, setListing] = useState<DirectoryList>(),
-    [path, setPath] = useState(''),
+  const { t } = useLocale();
+  const [suggestions, setSuggestions] = useState<{ name: string; path: string }[]>([]);
+  const [editing, setEditing] = useState<string>(),
+    [showForm, setShowForm] = useState(!workspaces.length),
+    [picking, setPicking] = useState(false);
+  const [path, setPath] = useState(''),
     [name, setName] = useState(''),
-    [base, setBase] = useState(''),
-    [busy, setBusy] = useState(false),
+    [base, setBase] = useState('');
+  const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
-  const sequence = useRef(0);
-  const browse = async (value: string, keepName = false) => {
-    const at = ++sequence.current;
-    setBusy(true);
+  const create = (path = '') => {
+    setEditing(undefined);
+    setName(path.split('/').at(-1) ?? '');
+    setPath(path);
+    setBase('');
     setError('');
-    try {
-      const next = await api<DirectoryList>(
-        '/workspaces/directories' + (value ? '?path=' + encodeURIComponent(value) : ''),
-      );
-      if (at !== sequence.current) return;
-      setListing(next);
-      setPath(next.path);
-      if (next.path && !editing && !keepName) setName(next.path.split('/').at(-1) ?? '');
-    } catch (error) {
-      if (at === sequence.current) setError((error as Error).message);
-    } finally {
-      if (at === sequence.current) setBusy(false);
-    }
+    setPicking(false);
+    setShowForm(true);
   };
   useEffect(() => {
-    void api<{ name: string; path: string }[]>('/workspaces/suggestions')
+    const controller = new AbortController();
+    void api<{ name: string; path: string }[]>(
+      '/workspaces/suggestions',
+      undefined,
+      controller.signal,
+    )
       .then(setSuggestions)
-      .catch((error) => setError(error.message));
-    void browse('');
-    return () => {
-      sequence.current++;
-    };
-  }, []);
+      .catch(() => {});
+    return () => controller.abort();
+  }, [api]);
   const save = async () => {
+    if (busy || picking) return;
     setBusy(true);
     setError('');
     try {
-      await api(editing ? `/workspaces/${editing}/defaults` : '/workspaces', {
-        name,
-        path,
-        ...(base ? { base } : {}),
-      });
-      onSaved();
-      setError('');
+      const saved = await api<Workspace>(
+        editing ? `/workspaces/${editing}/defaults` : '/workspaces',
+        { name: name.trim(), path: path.trim(), ...(base ? { base } : {}) },
+      );
+      await onSaved(saved);
+      setShowForm(false);
+      setPicking(false);
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -787,151 +845,174 @@ function WorkspaceManager({
   return (
     <div className="daddy-workspace-manager">
       <p className="daddy-muted">
-        {t(
-          'Register the source folder once. Agents use separate working copies; your checkout and local edits stay in place.',
-        )}
+        {t('Save a folder under a familiar name, then choose it when giving daddy a task.')}
       </p>
       {!!workspaces.length && (
         <div className="daddy-workspace-chips">
           {workspaces.map((workspace) => (
             <button
+              type="button"
               key={workspace.id}
+              className={
+                'daddy-workspace-card' + (editing === workspace.id && showForm ? ' selected' : '')
+              }
+              aria-label={t('Edit workspace {name}', { name: workspace.name })}
               onClick={() => {
-                void browse(
-                  workspace.repoPath + (workspace.scope ? '/' + workspace.scope : ''),
-                  true,
-                );
                 setEditing(workspace.id);
                 setName(workspace.name);
+                setPath(workspace.repoPath + (workspace.scope ? '/' + workspace.scope : ''));
                 setBase(workspace.base ?? '');
+                setError('');
+                setPicking(false);
+                setShowForm(true);
               }}
             >
-              <FolderGit2 size={15} />
+              <FolderGit2 size={20} />
               <span>
-                {workspace.name}
+                <strong>{workspace.name}</strong>
                 <small>
-                  {workspace.vcs === 'arcadia' ? 'Arcadia' : 'Git'} ·{' '}
-                  {workspace.scope || t('Repository root')}
+                  <span className="daddy-vcs-badge">
+                    {workspace.vcs === 'arcadia'
+                      ? 'Arcadia'
+                      : workspace.provider === 'gitlab'
+                        ? 'GitLab'
+                        : workspace.provider === 'github'
+                          ? 'GitHub'
+                          : 'Git'}
+                  </span>
+                  <span>{workspace.scope || t('Repository root')}</span>
                 </small>
+                <code>{workspace.repoPath}</code>
               </span>
+              <Settings2 size={16} />
             </button>
           ))}
         </div>
       )}
-      {!!suggestions.length && (
-        <details className="daddy-suggestions" open={!workspaces.length}>
-          <summary>{t('Detected repositories')}</summary>
-          <div>
-            {suggestions.map((item) => (
-              <button key={item.path} onClick={() => void browse(item.path)}>
-                <FolderGit2 size={15} />
-                {item.name}
-                <ChevronRight size={15} />
-              </button>
-            ))}
-          </div>
-        </details>
+      {!showForm && (
+        <button type="button" className="daddy-button outline" onClick={() => create()}>
+          <Plus size={16} />
+          {t('Add workspace')}
+        </button>
       )}
-      <div className="daddy-folder-browser">
-        <div className="daddy-folder-path">
-          <button
-            className="daddy-icon"
-            aria-label={t('Parent directory')}
-            onClick={() => void browse(listing?.parent ?? '')}
-            disabled={busy}
-          >
-            <ArrowLeft size={16} />
-          </button>
-          <input
-            aria-label={t('Server directory')}
-            value={path}
-            placeholder={t('Absolute path on the server')}
-            onChange={(event) => setPath(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                void browse(path);
-              }
-            }}
-          />
-          <button className="daddy-button quiet" disabled={busy} onClick={() => void browse(path)}>
-            {t('Open')}
-          </button>
-        </div>
-        <div className="daddy-directories">
-          {listing?.directories.map((entry) => (
-            <button key={entry.path} disabled={busy} onClick={() => void browse(entry.path)}>
-              <Folder size={16} />
-              <span>{entry.name}</span>
-              <ChevronRight size={15} />
-            </button>
-          ))}
-          {!listing?.directories.length && (
-            <span className="daddy-muted">{t('No subdirectories')}</span>
-          )}
-        </div>
-        {listing?.truncated && (
-          <p className="daddy-muted">
-            {t('Only the first 150 folders are shown. Enter a more specific path above.')}
-          </p>
-        )}
-      </div>
-      <form
-        className="daddy-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
-        {editing && (
-          <p className="daddy-muted">
-            {t(
-              'Default changes apply to new sessions on this server. Existing sessions keep their settings.',
-            )}{' '}
+      {showForm && (
+        <form
+          className="daddy-form daddy-workspace-editor"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <div className="daddy-form-heading">
+            <h3>{t(editing ? 'Edit workspace defaults' : 'Add workspace')}</h3>
             <button
               type="button"
               className="daddy-text-button"
               onClick={() => {
-                setEditing(undefined);
-                setName('');
+                setShowForm(false);
+                setPicking(false);
               }}
             >
-              {t('Register another workspace')}
+              {t('Back to workspaces')}
             </button>
+          </div>
+          <p className="daddy-muted">
+            {t(
+              editing
+                ? 'These defaults apply to new sessions. Existing sessions keep their folders.'
+                : 'Choose a source repository or a subfolder. daddy will leave your original checkout in place.',
+            )}
           </p>
-        )}
-        <div className="daddy-form-columns">
+          {!editing &&
+            suggestions.some(
+              (item) => !workspaces.some((workspace) => workspace.repoPath === item.path),
+            ) && (
+              <details className="daddy-suggestions">
+                <summary>{t('Choose from detected repositories')}</summary>
+                <div>
+                  {suggestions
+                    .filter(
+                      (item) => !workspaces.some((workspace) => workspace.repoPath === item.path),
+                    )
+                    .map((item) => (
+                      <button type="button" key={item.path} onClick={() => create(item.path)}>
+                        <FolderGit2 size={15} />
+                        <span>
+                          <strong>{item.name}</strong>
+                          <code>{item.path}</code>
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              </details>
+            )}
           <label>
             {t('Workspace name')}
             <input
+              data-autofocus
               value={name}
               onChange={(event) => setName(event.target.value)}
               required
               maxLength={100}
+              placeholder={t('For example Work or My app')}
             />
           </label>
-          <label>
-            {t('Base branch (optional)')}
+          <label style={picking ? { display: 'none' } : undefined}>
+            {t('Source folder')}
             <input
-              value={base}
-              onChange={(event) => setBase(event.target.value)}
-              placeholder="main / trunk"
+              aria-label={t('Repository on this server')}
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder={t('Absolute path on the server')}
+              required
             />
           </label>
-        </div>
-        <p className="daddy-muted">
-          {t('Selecting a subdirectory sets the agent’s starting folder inside each working copy.')}
-        </p>
-        {error && (
-          <p className="daddy-field-error" role="alert">
-            {t(error)}
-          </p>
-        )}
-        <button disabled={busy || !path || !name.trim()} className="daddy-button primary">
-          {busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}{' '}
-          {t('Save workspace')}
-        </button>
-      </form>
+          {!picking && (
+            <button type="button" className="daddy-button outline" onClick={() => setPicking(true)}>
+              <Folder size={16} />
+              {t('Browse server folders')}
+            </button>
+          )}
+          {picking && (
+            <FolderBrowser
+              api={api}
+              initialPath={path}
+              onSelect={(path) => {
+                setPath(path);
+                if (!name.trim()) setName(path.split('/').at(-1) ?? '');
+                setPicking(false);
+              }}
+              onCancel={() => setPicking(false)}
+            />
+          )}
+          <details className="daddy-advanced-settings">
+            <summary>{t('Starting branch (advanced)')}</summary>
+            <label>
+              {t('Base branch (optional)')}
+              <input
+                value={base}
+                onChange={(event) => setBase(event.target.value)}
+                placeholder={t('Repository default')}
+              />
+              <small>
+                {t('The branch daddy starts from. Leave it empty to use the repository default.')}
+              </small>
+            </label>
+          </details>
+          {error && (
+            <p className="daddy-field-error" role="alert">
+              {t(error)}
+            </p>
+          )}
+          <button
+            disabled={busy || picking || !path.trim() || !name.trim()}
+            className="daddy-button primary"
+          >
+            {busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+            {t('Save workspace')}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

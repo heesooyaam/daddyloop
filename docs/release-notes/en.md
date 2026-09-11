@@ -1,6 +1,15 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.13.1
+# daddyloop 0.14.0
+
+- The dashboard separates task intake from clearly labelled, clickable provider quotas. Credit balances have their own explanation; zero extra credits no longer clutter percentage windows.
+- Workspace cards separate names, VCS labels and source paths. One folder browser distinguishes navigation from selection and protects pending requests.
+- New sessions start with the goal. Repository overrides are optional, validated before application, and explicitly scoped to a session or the next message. Adding a workspace preserves the task draft.
+- English/Russian guides and screenshots follow the new flow. Fixes [issue #19](https://github.com/heesooyaam/daddyloop/issues/19).
+
+Configuration 3 and SQLite 7 are unchanged. Reload open web pages after upgrading.
+
+## 0.13.1
 
 Refines the Russian idle-chat prompt to natural wording.
 

@@ -18,16 +18,21 @@ export function Dialog({
   close.current = onClose;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement;
-    ref.current?.querySelector<HTMLElement>('button,input,select,textarea')?.focus();
+    (
+      ref.current?.querySelector<HTMLElement>('[data-autofocus]') ??
+      ref.current?.querySelector<HTMLElement>('button,input,select,textarea')
+    )?.focus();
     const key = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         close.current();
       }
       if (event.key === 'Tab') {
-        const nodes = ref.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]),input:not([disabled]),select,textarea,a[href]',
-        );
+        const nodes = [
+          ...(ref.current?.querySelectorAll<HTMLElement>(
+            'button,input,select,textarea,a[href],summary',
+          ) ?? []),
+        ].filter((node) => !node.matches(':disabled') && node.getClientRects().length > 0);
         if (!nodes?.length) return;
         const first = nodes[0],
           last = nodes[nodes.length - 1];
