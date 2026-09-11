@@ -1,4 +1,4 @@
-export type ProviderName = 'github' | 'gitlab' | 'arcadia' | 'demo';
+export type ProviderName = string;
 export type Role = 'author' | 'reviewer';
 export type State =
   | 'discussing'
@@ -47,12 +47,12 @@ export type TaskRef = PRRef | TicketRef;
 /** Validated against the selected CLI model catalogue before use. */
 export type ReasoningEffort = string;
 export interface AgentProfile {
-  engine: 'codex';
+  engine: string;
   model?: string;
   effort?: ReasoningEffort;
 }
 export interface AgentProfiles {
-  writer: AgentProfile;
+  worker: AgentProfile;
   daddy: AgentProfile;
 }
 export interface TicketSource {
@@ -80,13 +80,13 @@ export interface ReviewGroup {
   updatedAt: string;
   workspaceId?: string;
   orchestrated?: boolean;
-  writerLimit?: number;
-  requestedWriterLimit?: number;
+  workerLimit?: number;
+  requestedWorkerLimit?: number;
   /** Occupied slots survive author turns, review, pauses and restarts. */
-  writerTasks?: string[];
+  workerTasks?: string[];
   /** Snapshot: later edits to workspace defaults affect new sessions only. */
   workspace?: Workspace;
-  writer?: AgentProfile;
+  worker?: AgentProfile;
   daddyState?: 'active' | 'paused' | 'needs_input' | 'archived';
   summary?: string;
   autoTurns?: number;
@@ -102,7 +102,7 @@ export interface Workspace {
   repoPath: string;
   scope: string;
   vcs: 'git' | 'arcadia';
-  provider: 'github' | 'gitlab' | 'arcadia';
+  provider: ProviderName;
   host: string;
   repo: string;
   base?: string;

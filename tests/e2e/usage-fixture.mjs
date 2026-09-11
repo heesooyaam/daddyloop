@@ -12,6 +12,11 @@ export function usageFixture() {
         name: 'Codex',
         plan: 'pro',
         windows: [
+          {
+            remainingPercent: 68,
+            durationMinutes: 300,
+            resetsAt: new Date(Date.now() + 4 * 3600000).toISOString(),
+          },
           { remainingPercent: 27, durationMinutes: 10080, resetsAt: '2026-09-15T12:00:00.000Z' },
         ],
       },
@@ -26,7 +31,7 @@ export function usageFixture() {
   };
   const plans = new Map();
   return {
-    read: async () => structuredClone(view),
+    read: async () => ({ ...structuredClone(view), retrievedAt: new Date().toISOString() }),
     prepare: async (owner) => {
       const plan = {
         id: crypto.randomUUID(),
@@ -47,7 +52,8 @@ export function usageFixture() {
         plan.outcome = 'reset';
         view.resets.availableCount--;
         view.resets.canUse = view.resets.availableCount > 0;
-        view.buckets[0].windows[0].remainingPercent = 100;
+        for (const bucket of view.buckets)
+          for (const window of bucket.windows) window.remainingPercent = 100;
       }
       return { plan: { ...plan }, usage: structuredClone(view) };
     },

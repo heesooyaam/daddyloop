@@ -17,11 +17,11 @@ async function create(page: Page, title: string, issue: number) {
   await page.getByLabel('Session name (optional)').fill(title);
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
   await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
-  await expect(page.getByText('Your writers share one daddy.', { exact: false })).toBeVisible({
+  await expect(page.getByText('Your workers share one daddy.', { exact: false })).toBeVisible({
     timeout: 20000,
   });
 }
-test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a writer chat', async ({
+test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,
 }) => {
   const errors: string[] = [];
@@ -29,8 +29,8 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await login(page);
   const issue = Date.now();
   await create(page, 'One daddy, several tasks', issue);
-  await expect(page.getByLabel('Maximum writers')).toHaveValue('1');
-  await page.getByLabel('Maximum writers').selectOption('2');
+  await expect(page.getByLabel('Maximum workers')).toHaveValue('1');
+  await page.getByLabel('Maximum workers').selectOption('2');
   await page
     .getByLabel('Message daddy')
     .fill(`https://github.com/fixture/planning/issues/${issue + 1}`);
@@ -40,11 +40,11 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await expect(page.getByText('Read-only worker reports', { exact: true })).toBeVisible();
   await expect(page.getByRole('dialog').locator('textarea')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(page.getByLabel('Maximum writers')).toHaveValue('2');
+  await expect(page.getByLabel('Maximum workers')).toHaveValue('2');
   await expect(
     page.locator('.daddy-pool-hint').filter({ hasText: 'Occupied by tasks: 2' }),
   ).toBeVisible();
-  await page.getByLabel('Maximum writers').selectOption('1');
+  await page.getByLabel('Maximum workers').selectOption('1');
   await expect(
     page.getByText('Pool: 2 → 1. Changes apply in the background.', { exact: true }),
   ).toBeVisible();
@@ -98,9 +98,9 @@ test('supports the phone task board, pool controls and workspace directory choos
   await create(page, 'Phone session', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await expect(page.getByLabel('Maximum writers')).toBeVisible();
-  await page.getByLabel('Maximum writers').selectOption('3');
-  await expect(page.getByLabel('Maximum writers')).toHaveValue('3');
+  await expect(page.getByLabel('Maximum workers')).toBeVisible();
+  await page.getByLabel('Maximum workers').selectOption('3');
+  await expect(page.getByLabel('Maximum workers')).toHaveValue('3');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await page.getByRole('button', { name: /Workspaces/ }).click();
@@ -128,7 +128,7 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
-  await expect(page.getByLabel('Новые писатели Модель')).toHaveValue('gpt-5.6-sol');
+  await expect(page.getByLabel('Новые воркеры Модель')).toHaveValue('gpt-5.6-sol');
   const refreshed = page.waitForRequest((request) =>
     request.url().includes('/api/agents?refresh=1'),
   );

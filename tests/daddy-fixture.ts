@@ -46,9 +46,9 @@ export function daddyFixture(persist = false) {
   vi.spyOn(checkouts, 'prepareTicket').mockResolvedValue(dir);
   vi.spyOn(checkouts, 'commitTicket').mockResolvedValue('b'.repeat(40));
   const tickets = new TicketWorkflow(engine, checkouts);
-  const writer = {
+  const agentRuntime = {
     run: vi.fn(async (input: AgentInput): Promise<AgentResult> => {
-      input.onSession(`writer-${input.task.id}`);
+      input.onSession(`agentRuntime-${input.task.id}`);
       return {
         status: 'completed',
         summary: 'Implemented and verified.',
@@ -62,7 +62,7 @@ export function daddyFixture(persist = false) {
       return { status: 'completed', summary: 'Ready.', checkedHead: '' };
     }),
   };
-  const worker = new Worker(engine, checkouts, writer, writer, healthy, 30000, 1);
+  const worker = new Worker(engine, checkouts, agentRuntime, agentRuntime, healthy, 30000, 1);
   const context = {
     prepare: vi.fn(async () => ({ cwd: dir, context: {} as Task })),
     release: vi.fn(async () => {}),
@@ -85,7 +85,7 @@ export function daddyFixture(persist = false) {
     workspace,
     checkouts,
     tickets,
-    writer,
+    agentRuntime,
     runtime,
     worker,
     daddy,

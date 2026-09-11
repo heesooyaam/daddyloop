@@ -111,9 +111,9 @@ it('binds a forum selected by the paired owner, creates one topic per session an
       ).toBe(true),
     );
     await bot.handle(click(`dad:pool:${group.id}:3`, -10042, 7, 17));
-    expect(f.daddy.group(group.id).requestedWriterLimit).toBe(3);
+    expect(f.daddy.group(group.id).requestedWorkerLimit).toBe(3);
     await bot.handle(click(`dad:pool:${group.id}:8`, -10042, 99, 17));
-    expect(f.daddy.group(group.id).requestedWriterLimit).toBe(3);
+    expect(f.daddy.group(group.id).requestedWorkerLimit).toBe(3);
     expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1);
     const task = await f.tickets.local({
       workspace: f.workspace,

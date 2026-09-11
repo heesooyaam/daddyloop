@@ -13,7 +13,7 @@ export function registerPlanningCommands(program: Command) {
     role: keyof AgentProfiles,
   ): AgentProfile => ({
     ...base,
-    engine: 'codex',
+    engine: options[role + 'Engine'] ? String(options[role + 'Engine']) : base.engine,
     ...(options[role + 'Model'] ? { model: String(options[role + 'Model']) } : {}),
     ...(options[role + 'Effort']
       ? { effort: options[role + 'Effort'] as AgentProfile['effort'] }
@@ -26,12 +26,14 @@ export function registerPlanningCommands(program: Command) {
     .action(async (options) => print(await api(options.refresh ? '/agents?refresh=1' : '/agents')));
   const agents = program
     .command('agents')
-    .description('Choose independent writer and daddy profiles');
+    .description('Choose independent worker and daddy profiles');
   agents.command('show', { isDefault: true }).action(async () => print(await api('/agents')));
   agents
     .command('defaults')
-    .option('--writer-model <model>')
-    .option('--writer-effort <effort>')
+    .option('--worker-engine <module>', 'agent module for workers')
+    .option('--daddy-engine <module>', 'agent module for daddy')
+    .option('--worker-model <model>')
+    .option('--worker-effort <effort>')
     .option('--daddy-model <model>')
     .option('--daddy-effort <effort>')
     .option('--max-agents <number>', 'total concurrent agent limit', Number)
@@ -40,7 +42,7 @@ export function registerPlanningCommands(program: Command) {
       print(
         await api('/agents/defaults', {
           profiles: {
-            writer: profile(current.defaults.writer, options, 'writer'),
+            worker: profile(current.defaults.worker, options, 'worker'),
             daddy: profile(current.defaults.daddy, options, 'daddy'),
           },
           ...(options.maxAgents !== undefined ? { maxConcurrentAgents: options.maxAgents } : {}),

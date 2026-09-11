@@ -149,7 +149,7 @@ it('switches English/Russian only for the bound user and reads fresh model choic
     await bot.handle(update(3, '/language ru', 99));
     expect(f.store.setting<{ locale: string }>('preferences')?.locale).toBe('en');
     await bot.handle(update(4, '/models'));
-    expect(t.sent.at(-1)?.body.text).toContain(profiles.writer.model);
+    expect(t.sent.at(-1)?.body.text).toContain(profiles.worker.model);
     expect(list).toHaveBeenCalledWith(false);
     await bot.handle({
       update_id: 5,

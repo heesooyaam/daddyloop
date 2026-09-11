@@ -26,7 +26,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
     if (
-      (version !== 0 && version !== 6) ||
+      (version !== 0 && version !== 7) ||
       (version === 0 &&
         this.db
           .prepare(
@@ -37,7 +37,7 @@ export class Store {
       this.db.close();
       throw new AppError(
         'schema_version',
-        'This daddyloop release requires schema 6. Use a converted database or an empty data directory.',
+        'This daddyloop release requires schema 7. Use a converted database or an empty data directory.',
         500,
       );
     }
@@ -66,7 +66,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
       CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
-      PRAGMA user_version=6;
+      PRAGMA user_version=7;
     `);
     this.changes.setMaxListeners(100);
   }
@@ -148,8 +148,8 @@ export class Store {
       profile:
         role === 'reviewer' && group
           ? group.daddy
-          : (task.agents?.[role === 'author' ? 'writer' : 'daddy'] ??
-            defaults?.[role === 'author' ? 'writer' : 'daddy']),
+          : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
+            defaults?.[role === 'author' ? 'worker' : 'daddy']),
       groupId: group?.id,
       groupGeneration: group?.generation,
       actionId,

@@ -48,7 +48,7 @@ it('checks the viewed revision after acquiring the task lock before a human appr
     await f.close();
   }
 });
-it('authenticates workspace/session controls, deduplicates messages and closes public writer chat', async () => {
+it('authenticates workspace/session controls, deduplicates messages and closes public worker chat', async () => {
   const f = daddyFixture(),
     server = await buildApp({
       dataDir: f.dir,
@@ -110,7 +110,7 @@ it('authenticates workspace/session controls, deduplicates messages and closes p
           method: 'POST',
           url: `/api/daddy/sessions/${first.group.id}/settings`,
           headers,
-          payload: { writerLimit: 9 },
+          payload: { workerLimit: 9 },
         })
       ).statusCode,
     ).toBe(400);

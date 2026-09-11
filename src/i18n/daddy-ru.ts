@@ -38,7 +38,6 @@ export const daddyRu: Record<string, string> = {
   'Send /group in the private bot chat to connect a Telegram group.':
     'Для подключения группы отправь /group в личном чате с ботом.',
   'Group selection expired. Send /group again.': 'Выбор группы истёк. Отправь /group ещё раз.',
-
   'Codex currently blocks included usage.':
     'Codex сейчас ограничивает использование включённой квоты.',
   'Resolve pending reset': 'Завершить ожидающий сброс',
@@ -47,8 +46,8 @@ export const daddyRu: Record<string, string> = {
   'Use a reset': 'Использовать сброс',
   'Refresh limits': 'Обновить лимиты',
   'Confirm: use one reset': 'Подтвердить: использовать один сброс',
-  'daddy and writers share the Codex account limits on this server.':
-    'daddy и писатели используют общие лимиты аккаунта Codex на этом сервере.',
+  'daddy and workers share the Codex account limits on this server.':
+    'daddy и воркеры используют общие лимиты аккаунта Codex на этом сервере.',
   'Limits are unavailable. Sign in to Codex and refresh.':
     'Лимиты недоступны. Войди в Codex и обнови данные.',
   'These readings are outdated. Refresh before using a reset.':
@@ -96,12 +95,11 @@ export const daddyRu: Record<string, string> = {
     'Аккаунт Codex изменился. Запрос сброса не отправлен.',
   'The selected reset is no longer available. Open limits again.':
     'Выбранный сброс больше не доступен. Открой лимиты ещё раз.',
-
   'Pool: {limit} → {target}. Changes apply in the background.':
     'Пул: {limit} → {target}. Изменение применяется в фоне.',
   'Pool: {limit}. Occupied by tasks: {occupied}.': 'Пул: {limit}. Занято задачами: {occupied}.',
-  'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.':
-    'Размер пула меняется в фоне. Занятые писатели завершают задачи, включая исправления после ревью.',
+  'Pool changes apply in the background. Busy workers finish their tasks, including review fixes.':
+    'Размер пула меняется в фоне. Занятые воркеры завершают задачи, включая исправления после ревью.',
   'Repository on this server': 'Репозиторий на этом сервере',
   'Browse server folders': 'Выбрать папку на сервере',
   'Parent folder': 'Родительская папка',
@@ -125,7 +123,6 @@ export const daddyRu: Record<string, string> = {
     'Этот тикет уже выполняется в другой рабочей копии. Начатую работу нельзя перенести.',
   'Use /repo <path> for the next message, or /repo default to reset.':
     '/repo <путь> — репозиторий для следующего сообщения; /repo default — сброс.',
-
   'Your daddyloop workspace.': 'Твоё рабочее пространство daddyloop.',
   'Previous work history': 'История прежних задач',
   'Open the topic for the session you want to continue.':
@@ -141,7 +138,7 @@ export const daddyRu: Record<string, string> = {
   'Your next workspace starts with a conversation.': 'Следующий воркспейс начинается с разговора.',
   Workspaces: 'Воркспейсы',
   Workspace: 'Воркспейс',
-  'Select writer and daddy models independently.': 'Выбирай модели писателя и daddy независимо.',
+  'Select worker and daddy models independently.': 'Выбирай модели воркера и daddy независимо.',
   Notifications: 'Уведомления',
   'CLI updates': 'Обновления CLI',
   'Running on your server': 'Работает на твоём сервере',
@@ -150,19 +147,19 @@ export const daddyRu: Record<string, string> = {
   'What are we building?': 'Что будем делать?',
   'Session settings': 'Настройки сессии',
   'Conversation with daddy': 'Разговор с daddy',
-  'Send me the goal. I will take care of the writers, reviews and follow-through.':
-    'Расскажи, что нужно сделать. Я займусь писателями, ревью и доведу работу до результата.',
+  'Send me the goal. I will take care of the workers, reviews and follow-through.':
+    'Расскажи, что нужно сделать. Я займусь воркерами, ревью и доведу работу до результата.',
   'daddy is working': 'daddy работает',
   'Message daddy': 'Написать daddy',
   'Resume daddy to continue': 'Сними паузу, чтобы продолжить',
   'A goal, a ticket link, or a question…': 'Задача, ссылка на тикет или вопрос…',
-  'Writers at work: {count}': 'Работают писатели: {count}',
+  'Workers at work: {count}': 'Работают воркеры: {count}',
   'daddy handles the details.': 'Деталями занимается daddy.',
   'Enter to send · Shift+Enter for a new line · Closing this page keeps work running':
     'Enter — отправить · Shift+Enter — новая строка · Можно закрыть страницу: работа продолжится',
   'Your team': 'Твоя команда',
-  'Writer pool': 'Пул писателей',
-  'Maximum writers': 'Максимум писателей',
+  'Worker pool': 'Пул воркеров',
+  'Maximum workers': 'Максимум воркеров',
   'daddy decides what can run in parallel.': 'daddy сам решает, что можно выполнять параллельно.',
   'Prerequisites: {count}': 'Зависимостей: {count}',
   'daddy will put the plan and work items here as you discuss the goal.':
@@ -172,8 +169,8 @@ export const daddyRu: Record<string, string> = {
   'Meet your coding team': 'ТВОЯ КОМАНДА ДЛЯ РАЗРАБОТКИ',
   'You bring the idea.': 'С тебя идея.',
   'daddy takes it from here.': 'Дальше займётся daddy.',
-  'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.':
-    'Выбери воркспейс и общайся с одним агентом. daddy разложит цель на задачи, распределит работу между писателями и проверит результат.',
+  'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of workers and reviews their work.':
+    'Выбери воркспейс и общайся с одним агентом. daddy разложит цель на задачи, распределит работу между воркерами и проверит результат.',
   'Start a session': 'Начать сессию',
   'Add your first workspace': 'Добавить первый воркспейс',
   'Choose a workspace': 'Выбрать воркспейс',
@@ -193,8 +190,8 @@ export const daddyRu: Record<string, string> = {
   'Describe the goal or paste one or more ticket links. You can start with a discussion.':
     'Опиши цель или вставь ссылки на тикеты. Можно начать с обсуждения.',
   'Session name (optional)': 'Название сессии (необязательно)',
-  'Starts with one writer. Change the pool size at any time; daddy decides when to use more.':
-    'По умолчанию один писатель. Размер пула можно изменить в любой момент; daddy сам решит, когда нужны дополнительные писатели.',
+  'Starts with one worker. Change the pool size at any time; daddy decides when to use more.':
+    'По умолчанию один воркер. Размер пула можно изменить в любой момент; daddy сам решит, когда нужны дополнительные воркеры.',
   'Start session': 'Начать сессию',
   'Register the source folder once. Agents use separate working copies; your checkout and local edits stay in place.':
     'Зарегистрируй исходную папку один раз. Агенты используют отдельные рабочие копии; твоя папка и локальные изменения сохраняются.',
@@ -212,22 +209,22 @@ export const daddyRu: Record<string, string> = {
   'Selecting a subdirectory sets the agent’s starting folder inside each working copy.':
     'Выбранная подпапка станет стартовой папкой агента внутри каждой рабочей копии.',
   'Save workspace': 'Сохранить воркспейс',
-  'New writers': 'Новые писатели',
+  'New workers': 'Новые воркеры',
   Model: 'Модель',
   'Reasoning effort': 'Уровень рассуждений',
   Default: 'По умолчанию',
-  'Writer defaults apply to new tasks. Changing daddy’s model requires his session to be idle.':
-    'Настройки писателей применяются к новым задачам. Модель daddy можно менять, когда его сессия свободна.',
+  'Worker defaults apply to new tasks. Changing daddy’s model requires his session to be idle.':
+    'Настройки воркеров применяются к новым задачам. Модель daddy можно менять, когда его сессия свободна.',
   'Save settings': 'Сохранить настройки',
   'Open native review': 'Открыть ревью',
   'Approve plan': 'Подтвердить план',
   'Original requirements': 'Исходные требования',
-  'Read-only worker reports': 'Отчёты писателей — только чтение',
-  'Discuss changes with daddy in the main conversation. He will send the instructions to the right writer.':
-    'Обсуждай изменения с daddy в основном разговоре. Он передаст инструкции нужному писателю.',
-  Writer: 'Писатель',
-  Writers: 'Писатели',
-  writers: 'писателей',
+  'Read-only worker reports': 'Отчёты воркеров — только чтение',
+  'Discuss changes with daddy in the main conversation. He will send the instructions to the right worker.':
+    'Обсуждай изменения с daddy в основном разговоре. Он передаст инструкции нужному воркеру.',
+  Worker: 'Воркер',
+  Workers: 'Воркеры',
+  workers: 'воркеров',
   new: 'новая',
   sessions: 'сессии',
   'Waiting for daddy': 'Ожидает daddy',
@@ -238,22 +235,22 @@ export const daddyRu: Record<string, string> = {
   'Waiting for CI': 'Ожидает CI',
   'daddy is checking': 'daddy разбирается',
   Working: 'В работе',
-  'Give daddy a goal or a ticket. He plans the work, manages writers and reviews the result.':
-    'Отправь daddy цель или тикет. Он составит план, распределит работу между писателями и проверит результат.',
+  'Give daddy a goal or a ticket. He plans the work, manages workers and reviews the result.':
+    'Отправь daddy цель или тикет. Он составит план, распределит работу между воркерами и проверит результат.',
   'Telegram group': 'Группа с темами',
-  'Workspaces are folders on the server. daddy creates separate working copies for writers.':
-    'Воркспейсы — это папки на сервере. daddy создаёт отдельные рабочие копии для писателей.',
+  'Workspaces are folders on the server. daddy creates separate working copies for workers.':
+    'Воркспейсы — это папки на сервере. daddy создаёт отдельные рабочие копии для воркеров.',
   'Find workspaces on the server': 'Найти воркспейсы на сервере',
-  'Writers: {active} / {limit}': 'Писатели: {active} / {limit}',
+  'Workers: {active} / {limit}': 'Воркеры: {active} / {limit}',
   'Completed: {done} / {total}': 'Готово: {done} / {total}',
-  'Send another ticket or describe what you need in this conversation. daddy handles the writers.':
-    'Присылай сюда новые тикеты или описывай, что нужно сделать. Писателями занимается daddy.',
+  'Send another ticket or describe what you need in this conversation. daddy handles the workers.':
+    'Присылай сюда новые тикеты или описывай, что нужно сделать. Воркерами занимается daddy.',
   'Open session topic': 'Открыть тему сессии',
   'Add tasks': 'Добавить задачи',
   'Resume daddy': 'Продолжить с daddy',
   'Pause daddy': 'Поставить daddy на паузу',
-  'Choose the maximum number of writers working at once. daddy decides which tasks can run in parallel. Existing work finishes when the limit is reduced.':
-    'Выбери максимум одновременно работающих писателей. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
+  'Choose the maximum number of workers working at once. daddy decides which tasks can run in parallel. Existing work finishes when the limit is reduced.':
+    'Выбери максимум одновременно работающих воркеров. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
   Back: 'Назад',
   'Telegram group connected': 'Группа подключена',
   'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.':
@@ -274,8 +271,8 @@ export const daddyRu: Record<string, string> = {
     'Выбор истёк. Начни создание сессии ещё раз.',
   'Send a ticket link, several tickets, or a description of the next task. daddy will add it to this session.':
     'Отправь ссылку на тикет, несколько тикетов или описание следующей задачи. daddy добавит работу в эту сессию.',
-  'Write to daddy here. He sends instructions to the writers.':
-    'Пиши здесь daddy. Он сам передаст инструкции писателям.',
+  'Write to daddy here. He sends instructions to the workers.':
+    'Пиши здесь daddy. Он сам передаст инструкции воркерам.',
   'Open a session topic, or send /new here to create one.':
     'Открой тему сессии или отправь здесь /new, чтобы создать новую.',
   'The topic may already exist. Open it and send /attach {id} to reconnect this session.':
@@ -283,14 +280,14 @@ export const daddyRu: Record<string, string> = {
   'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.':
     'Telegram уже мог создать тему. Открой её и отправь /attach с ID сессии daddy, чтобы восстановить связь.',
   'Could not complete the action': 'Не удалось выполнить действие',
-  'Tasks and writer pool': 'Задачи и пул писателей',
+  'Tasks and worker pool': 'Задачи и пул воркеров',
   'Start a daddy session first.': 'Сначала создай сессию daddy.',
   'Use /help to see the daddy commands.': 'Список команд daddy доступен по /help.',
   'daddyloop commands': 'Команды daddyloop',
   'Choose a role': 'Чью модель настроить?',
   'Choose a model': 'Выбрать модель',
-  'Talk to daddy in plain language. Paste goals or ticket links; he handles the writers.':
-    'Общайся с daddy обычным текстом. Отправляй цели и ссылки на тикеты; писателями занимается он.',
+  'Talk to daddy in plain language. Paste goals or ticket links; he handles the workers.':
+    'Общайся с daddy обычным текстом. Отправляй цели и ссылки на тикеты; воркерами занимается он.',
   'Ctrl+N new session · Ctrl+T sessions · Tab chat/tasks · PgUp/PgDn scroll · Ctrl+Q exit':
     'Ctrl+N — новая сессия · Ctrl+T — сессии · Tab — чат/задачи · PgUp/PgDn — прокрутка · Ctrl+Q — выход',
   'Register folders with daddy workspaces add <path> --name <name>, or use Workspaces on the website.':
@@ -310,26 +307,26 @@ export const daddyRu: Record<string, string> = {
   'Only important updates': 'Только важные уведомления',
   'All updates': 'Все уведомления',
   'Mute notifications': 'Выключить уведомления',
-  'One daddy, a pool of writers, and persistent work on your server':
-    'Один daddy, пул писателей и непрерывная работа на твоём сервере',
+  'One daddy, a pool of workers, and persistent work on your server':
+    'Один daddy, пул воркеров и непрерывная работа на твоём сервере',
   'Register and choose workspace folders on the server':
     'Регистрация и выбор папок воркспейсов на сервере',
   'Find repositories on the server': 'Найти репозитории на сервере',
   'Browse server directories': 'Посмотреть папки на сервере',
   'Register a workspace once for phone, web and CLI':
     'Зарегистрировать воркспейс для телефона, сайта и CLI',
-  'List daddy sessions and writer pools': 'Показать сессии daddy и пулы писателей',
-  'maximum simultaneous writers': 'максимум одновременно работающих писателей',
+  'List daddy sessions and worker pools': 'Показать сессии daddy и пулы воркеров',
+  'maximum simultaneous workers': 'максимум одновременно работающих воркеров',
   'Give daddy a goal in a registered workspace':
     'Поручить daddy цель в зарегистрированном воркспейсе',
   'Send a goal, ticket or question to daddy': 'Отправить daddy цель, тикет или вопрос',
-  'Inspect or resize a session’s writer pool': 'Посмотреть или изменить пул писателей сессии',
-  'Send instructions to daddy; writers receive tasks only from him':
-    'Отправь инструкции daddy; писатели получают задачи только от него',
+  'Inspect or resize a session’s worker pool': 'Посмотреть или изменить пул воркеров сессии',
+  'Send instructions to daddy; workers receive tasks only from him':
+    'Отправь инструкции daddy; воркеры получают задачи только от него',
   'Resume daddy before sending another message': 'Сними daddy с паузы перед новым сообщением',
   'Wait for this session to become idle before changing its models':
     'Дождись завершения текущего хода daddy перед сменой его модели',
-  'Choose between 1 and 8 writers': 'Выбери от 1 до 8 писателей',
+  'Choose between 1 and 8 workers': 'Выбери от 1 до 8 воркеров',
   'Use a relative directory inside the repository': 'Укажи относительную папку внутри репозитория',
   'Choose an absolute directory on the server': 'Выбери абсолютный путь к папке на сервере',
   'Choose a directory inside a configured workspace root':
@@ -337,8 +334,64 @@ export const daddyRu: Record<string, string> = {
   'Choose a Git or mounted Arcadia repository': 'Выбери Git-репозиторий или смонтированную Arcadia',
   'Add a GitHub or GitLab remote before registering this workspace':
     'Перед регистрацией добавь в репозиторий remote GitHub или GitLab',
-  'Waiting for a free, clean Arc workspace. Existing source checkouts and writer changes are preserved.':
-    'Ожидаем свободную чистую рабочую копию Arcadia. Исходные папки и изменения писателей сохранены.',
-  'Waiting for an Arc writer slot; one workspace is reserved for daddy and review.':
-    'Ожидаем свободный слот Arcadia для писателя; одна рабочая копия зарезервирована для daddy и ревью.',
+  'Waiting for a free, clean Arc workspace. Existing source checkouts and worker changes are preserved.':
+    'Ожидаем свободную чистую рабочую копию Arcadia. Исходные папки и изменения воркеров сохранены.',
+  'Waiting for an Arc worker slot; one workspace is reserved for daddy and review.':
+    'Ожидаем свободный слот Arcadia для воркера; одна рабочая копия зарезервирована для daddy и ревью.',
+  'What’s the job?': 'Что берём в работу?',
+  'Meet the crew': 'Команда daddy',
+  'Your task.': 'Твоя задача.',
+  'My crew.': 'Моя команда.',
+  'No sessions yet. Send the first job.': 'Пока тихо. Давай команде первую задачу.',
+  'Drop the task here. I’ll get the crew moving and check the work myself.':
+    'Кидай задачу. Раздам работу, проверю результат. Халтура не пройдёт.',
+  'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.':
+    'Выбирай воркспейс и кидай задачу. Соберу команду, спрошу за результат и принесу всё сюда.',
+  'The crew is my problem. The goal is yours.': 'Команда на мне. С тебя — задача.',
+  'A task, a ticket or a wild idea…': 'Задачу, тикет или смелую идею — сюда…',
+  'One worker to start. Set the crew size; I’ll handle the assignments.':
+    'Начнём с одного воркера. Ты задаёшь размер команды, я раздаю работу.',
+  'Bring it to daddy in the main chat. I’ll get the right worker on it.':
+    'Неси в основной чат. Нужного воркера я подключу сам.',
+  'Worker on it': 'Воркер работает',
+  'Change theme': 'Выбрать тему',
+  Theme: 'Тема',
+  'Make yourself at home': 'Обживайся',
+  'Pick your colors. The crew keeps working.': 'Выбирай цвета. Команда продолжает работать.',
+  'Follow system': 'Как в системе',
+  'Light or dark, with your device': 'Светлая или тёмная — вслед за устройством',
+  'Saved in this browser. Your phone can have its own theme.':
+    'Тема сохраняется в этом браузере. На телефоне можно выбрать другую.',
+  'Current theme: {name}': 'Сейчас: {name}',
+  Glacier: 'Лёд',
+  Pearl: 'Жемчуг',
+  Mint: 'Мята',
+  Lilac: 'Сирень',
+  Graphite: 'Графит',
+  Midnight: 'Полночь',
+  Forest: 'Хвоя',
+  Plum: 'Слива',
+  'Current usage': 'Текущий usage',
+  'Shared account · remaining': 'Общий аккаунт · осталось',
+  'Last known usage': 'Последние данные',
+  'Included usage is blocked': 'Codex ограничил использование',
+  'Reading usage…': 'Смотрю лимиты…',
+  'Usage unavailable': 'Usage недоступен',
+  'Usage details and resets': 'Подробности usage и сбросы',
+  'Resets: unknown': 'Сбросы: нет данных',
+  'Resets available: {count}': 'Сбросов: {count}',
+  'Details and reset': 'Подробнее и сброс',
+  Guides: 'Инструкции',
+  'Open the site from your computer or phone': 'Как подключить компьютер или телефон',
+  'Agent module': 'Модуль агента',
+  'Engine configuration': 'Настройки движка',
+  Repositories: 'Репозитории',
+  Agent: 'Агент',
+  'Choose your modules': 'Выбирай модули',
+  '↑/↓ move · Space toggle · Enter install · Esc cancel':
+    '↑/↓ выбор · Пробел — галочка · Enter — установка · Esc — отмена',
+  'Choose at least one agent and one repository module.':
+    'Выбери хотя бы один модуль агента и один модуль репозитория.',
+  'Refresh queries the enabled agent modules.': 'Обновление запрашивает включённые модули агентов.',
+  'Drop a task or ticket. I’ll take it from here.': 'Кидай задачу или тикет. Дальше на мне.',
 };

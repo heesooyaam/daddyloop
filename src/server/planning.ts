@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Engine } from '../core/engine.js';
-import { ModelCatalogue, profileSchema, profilesSchema } from '../core/agents.js';
+import { profileSchema, profilesSchema } from '../core/agents.js';
 import { type AgentProfiles } from '../core/types.js';
 import { notificationPreferences, notificationsSchema } from '../integrations/notifications.js';
 import { redact } from '../core/security.js';
-export type Catalogue = Pick<ModelCatalogue, 'list' | 'validate'> &
-  Partial<Pick<ModelCatalogue, 'metadata'>>;
+export type { AgentCatalogue as Catalogue } from '../modules/contracts.js';
+import type { AgentCatalogue as Catalogue } from '../modules/contracts.js';
 export function registerPlanning(
   app: FastifyInstance,
   engine: Engine,
@@ -15,7 +15,7 @@ export function registerPlanning(
 ) {
   const validate = async (profiles?: AgentProfiles) => {
     if (profiles)
-      await Promise.all([catalogue.validate(profiles.writer), catalogue.validate(profiles.daddy)]);
+      await Promise.all([catalogue.validate(profiles.worker), catalogue.validate(profiles.daddy)]);
   };
   app.get<{ Querystring: { refresh?: string } }>('/api/agents', async (request) => {
     let models: Awaited<ReturnType<Catalogue['list']>> = [],
@@ -30,7 +30,9 @@ export function registerPlanning(
       models,
       error,
       maxConcurrentAgents: engine.store.setting<number>('worker.maxAgents') ?? maxAgents,
-      engines: ['codex'],
+      engines:
+        catalogue.engines?.() ??
+        [...new Set(models.map((model) => model.engine))].map((id) => ({ id, name: id })),
       catalogue: catalogue.metadata?.(),
     };
   });
@@ -54,7 +56,7 @@ export function registerPlanning(
     };
   });
   app.post<{ Params: { role: string } }>('/api/agents/defaults/:role', async (request) => {
-    const role = z.enum(['writer', 'daddy']).parse(request.params.role),
+    const role = z.enum(['worker', 'daddy']).parse(request.params.role),
       profile = profileSchema.parse(request.body);
     await catalogue.validate(profile);
     return { defaults: engine.setDefaultAgents({ ...engine.defaultAgents(), [role]: profile }) };

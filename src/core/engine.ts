@@ -116,7 +116,7 @@ export class Engine {
       createdByAction: input.createdByAction,
       agents: {
         ...this.defaultAgents(),
-        ...(group?.writer ? { writer: group.writer } : {}),
+        ...(group?.worker ? { worker: group.worker } : {}),
         ...input.agents,
         ...(group ? { daddy: group.daddy } : {}),
       },
@@ -762,6 +762,16 @@ export class Engine {
               'Wait for the shared reviewer queue to become idle before changing its model',
             );
           const group = this.store.getGroup(task.groupId);
+          if (group.daddy.engine !== profile.engine) {
+            this.store.event(id, 'agent.engine_changed', {
+              previous: group.daddy.engine,
+              current: profile.engine,
+              coordination: group.daddyThreadId,
+              review: group.reviewerThreadId,
+            });
+            group.daddyThreadId = undefined;
+            group.reviewerThreadId = undefined;
+          }
           group.daddy = profile;
           group.generation++;
           this.store.saveGroup(group);
@@ -771,9 +781,19 @@ export class Engine {
               'task_busy',
               'Wait for this task to become idle before changing its model',
             );
+          const old = this.effectiveAgents(task)[role === 'author' ? 'worker' : 'daddy'];
+          if (old.engine !== profile.engine) {
+            const field = role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
+            this.store.event(id, 'agent.engine_changed', {
+              previous: old.engine,
+              current: profile.engine,
+              thread: task[field],
+            });
+            task[field] = undefined;
+          }
           task.agents = {
             ...this.effectiveAgents(task),
-            [role === 'author' ? 'writer' : 'daddy']: profile,
+            [role === 'author' ? 'worker' : 'daddy']: profile,
           };
           task.contextVersion++;
           task.generation++;
@@ -890,7 +910,7 @@ export class Engine {
         createdByAction: input.createdByAction,
         dependsOn: input.dependsOn,
         agents: {
-          writer: input.agents?.writer ?? group.writer ?? this.defaultAgents().writer,
+          worker: input.agents?.worker ?? group.worker ?? this.defaultAgents().worker,
           daddy: group.daddy,
         },
         policy: {

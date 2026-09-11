@@ -34,6 +34,11 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     });
   }
   async runSession(input: SessionInput): Promise<AgentResult> {
+    if (input.profile?.effort === 'ultra')
+      throw new AppError(
+        'unsupported_profile',
+        'Codex delegation mode is not supported by this module',
+      );
     // Capture once per turn. Updating the selection never touches an existing process.
     const rpc = new CodexConnection(selectedExecutable(this.options.executable), this.options.args);
     const profile = input.profile,

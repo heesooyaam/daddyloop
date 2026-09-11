@@ -2,7 +2,7 @@
 
 This project is a standalone Git repository. It is unrelated to the machine's Arcadia working copies.
 
-- Read `docs/architecture.md` before changing workflow behavior. Later product decisions in that document supersede early design sketches.
+- Read `docs/architecture/en.md` or `docs/architecture/ru.md` before changing workflow behavior. Later product decisions in that document supersede early design sketches.
 - Keep native comment Markdown intact. The reviewer writes comments through scoped tools; the author receives the published snapshot, not draft chat.
 - Bind review results, policy decisions and CI to the exact revision and run generation. Never replace incomplete work with a successful state during recovery.
 - Preserve existing local author changes and normal non-force push semantics. Keep side-effect intent and confirmed result separate.
@@ -11,3 +11,7 @@ This project is a standalone Git repository. It is unrelated to the machine's Ar
 - `scripts/smoke-codex.ts` is opt-in and makes two live model calls. Ordinary tests are offline and must not write to real PRs.
 - The installed Codex app-server schema validated for this version is `0.154.0`. Validate protocol changes against the installed CLI and official documentation.
 - Follow the user's host resource rules. Never delete another project's worktrees, caches, runtime files or services to make this project fit.
+
+- Every product document must have `docs/<topic>/en.md` and `docs/<topic>/ru.md`; update both in the same change. Keep the root English/Russian READMEs and topic indexes aligned. Do not add flat, single-language guides.
+- Module additions implement `src/modules/contracts.ts` and register through the module catalogs. The scheduler must not select an engine by model name or call a provider-specific submission protocol.
+- Use worker terminology and lowercase daddy. Keep destructive actions explicit even when other copy is informal.

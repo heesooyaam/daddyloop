@@ -9,7 +9,7 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
       .add(
         '\n\n' +
           t(
-            'Give daddy a goal or a ticket. He plans the work, manages writers and reviews the result.',
+            'Give daddy a goal or a ticket. He plans the work, manages workers and reviews the result.',
           ),
       );
   return {
@@ -41,7 +41,7 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[]): Telegr
       .add(
         '\n\n' +
           t(
-            'Workspaces are folders on the server. daddy creates separate working copies for writers.',
+            'Workspaces are folders on the server. daddy creates separate working copies for workers.',
           ),
       );
   return {
@@ -65,7 +65,7 @@ export function daddyBoard(
       .add('👨‍💻 ' + board.group.title, 'bold')
       .add('\n' + (board.workspace?.name ?? t('Workspace')))
       .add('\n' + (board.workspace?.repoPath ?? ''), 'code')
-      .add('\n\n' + t('Writers: {active} / {limit}', board.writers))
+      .add('\n\n' + t('Workers: {active} / {limit}', board.workers))
       .add(
         '\n' +
           t('Completed: {done} / {total}', {
@@ -93,7 +93,7 @@ export function daddyBoard(
   text.add(
     '\n\n' +
       t(
-        'Send another ticket or describe what you need in this conversation. daddy handles the writers.',
+        'Send another ticket or describe what you need in this conversation. daddy handles the workers.',
       ),
   );
   return {
@@ -102,7 +102,7 @@ export function daddyBoard(
       ...(topicUrl ? [[{ text: '🧵 ' + t('Open session topic'), url: topicUrl }]] : []),
       [
         { text: '＋ ' + t('Add tasks'), callback_data: `dad:add:${board.group.id}` },
-        { text: t('Writer pool'), callback_data: `dad:pool:${board.group.id}` },
+        { text: t('Worker pool'), callback_data: `dad:pool:${board.group.id}` },
       ],
       [{ text: t('Models'), callback_data: `dad:models:${board.group.id}` }],
       [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
@@ -124,31 +124,31 @@ export function daddyBoard(
   };
 }
 export function poolCard(locale: Locale, board: ReturnType<Daddy['board']>): TelegramCard {
-  const { group, writers } = board;
+  const { group, workers } = board;
   const t = translator(locale),
     text = new TelegramText()
-      .add('⚙️ ' + t('Writer pool'), 'bold')
+      .add('⚙️ ' + t('Worker pool'), 'bold')
       .add('\n\n' + group.title)
       .add(
         '\n\n' +
           t(
-            writers.pending
+            workers.pending
               ? 'Pool: {limit} → {target}. Changes apply in the background.'
               : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-            writers,
+            workers,
           ),
       )
       .add(
         '\n\n' +
           t(
-            'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.',
+            'Pool changes apply in the background. Busy workers finish their tasks, including review fixes.',
           ),
       );
   return {
     ...text,
     buttons: [
       [1, 2, 3, 4, 6, 8].map((limit) => ({
-        text: (writers.target === limit ? '✓ ' : '') + limit,
+        text: (workers.target === limit ? '✓ ' : '') + limit,
         callback_data: `dad:pool:${group.id}:${limit}`,
       })),
       [{ text: t('Back'), callback_data: `dad:open:${group.id}` }],

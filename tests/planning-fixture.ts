@@ -1,11 +1,12 @@
 import type { AgentProfiles, TicketRef, TicketSource } from '../src/core/types.js';
 export const profiles: AgentProfiles = {
-  writer: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
+  worker: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' },
   daddy: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
 };
 export const catalogue = {
   list: async () =>
     Object.values(profiles).map((profile) => ({
+      engine: profile.engine,
       id: profile.model!,
       name: profile.model!,
       efforts: ['medium', 'max'],

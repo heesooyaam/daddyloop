@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { daddyFixture } from './daddy-fixture.js';
 import { Store } from '../src/core/store.js';
-import { reconcileWriterPools, writerPool } from '../src/core/writer-pool.js';
+import { reconcileWorkerPools, workerPool } from '../src/core/worker-pool.js';
 
 it('pins defaults and per-request repositories through queued turns, tool calls and a restart', async () => {
   const f = daddyFixture(true);
@@ -95,10 +95,10 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
   }
 });
 
-it('recovers occupied writers and pending retirements from durable state', async () => {
+it('recovers occupied workers and pending retirements from durable state', async () => {
   const f = daddyFixture(true);
   try {
-    const group = f.daddy.create({ workspaceId: f.workspace.id, writerLimit: 2 });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
     for (let n = 0; n < 2; n++) {
       const task = await f.tickets.local({
         workspace: f.workspace,
@@ -108,17 +108,17 @@ it('recovers occupied writers and pending retirements from durable state', async
         requirements: 'Finish the review cycle',
         createdByAction: `test-${n}`,
       });
-      group.writerTasks!.push(task.id);
+      group.workerTasks!.push(task.id);
       f.store.saveGroup(group);
-      task.authorThreadId = `writer-${n}`;
+      task.authorThreadId = `worker-${n}`;
       task.state = 'awaiting_checks';
       f.store.saveTask(task);
     }
-    await f.daddy.settings(group.id, { writerLimit: 1 });
+    await f.daddy.settings(group.id, { workerLimit: 1 });
     const restarted = new Store(join(f.dir, 'state.sqlite'));
     try {
-      reconcileWriterPools(restarted);
-      expect(writerPool(restarted, restarted.getGroup(group.id))).toMatchObject({
+      reconcileWorkerPools(restarted);
+      expect(workerPool(restarted, restarted.getGroup(group.id))).toMatchObject({
         limit: 2,
         target: 1,
         occupied: 2,
@@ -128,8 +128,8 @@ it('recovers occupied writers and pending retirements from durable state', async
       const task = restarted.tasks()[0];
       task.state = 'complete';
       restarted.saveTask(task);
-      reconcileWriterPools(restarted);
-      expect(writerPool(restarted, restarted.getGroup(group.id))).toMatchObject({
+      reconcileWorkerPools(restarted);
+      expect(workerPool(restarted, restarted.getGroup(group.id))).toMatchObject({
         limit: 1,
         target: 1,
         occupied: 1,

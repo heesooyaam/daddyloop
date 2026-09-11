@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { AppError, now, type Workspace } from './types.js';
 import type { Store } from './store.js';
 import { git } from '../runtime/workspaces.js';
+import { allRepositories } from '../modules/repositories/index.js';
+import type { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 
 export const workspaceSchema = z
@@ -15,6 +17,10 @@ export const workspaceSchema = z
     path: z.string().min(1).max(4000),
     scope: z.string().max(1000).optional(),
     base: z.string().max(200).optional(),
+    provider: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,31}$/)
+      .optional(),
   })
   .strict();
 export const repositorySelectionSchema = workspaceSchema
@@ -37,6 +43,7 @@ export class WorkspaceRegistry {
     readonly store: Store,
     roots = [homedir()],
     private arc = new ArcBridge(),
+    private repositories: RepositoryRegistry = allRepositories(),
   ) {
     this.roots = roots.filter(existsSync).map((root) => realpathSync(root));
   }
@@ -107,6 +114,10 @@ export class WorkspaceRegistry {
     }
     let host: string, repo: string, provider: Workspace['provider'];
     if (vcs === 'arcadia') {
+      this.repositories.forRepository(
+        { vcs: 'arcadia', host: 'a.yandex-team.ru', remotes: [] },
+        input.provider,
+      );
       const mount = (await this.arc.mounts()).find(
         (mount) => mount.path === root && mount.object_store_ok,
       );
@@ -118,7 +129,10 @@ export class WorkspaceRegistry {
         );
       host = 'a.yandex-team.ru';
       repo = 'arcadia';
-      provider = 'arcadia';
+      provider = this.repositories.forRepository(
+        { vcs: 'arcadia', host, remotes: [] },
+        input.provider,
+      ).id;
     } else if (vcs === 'git') {
       root = realpathSync(await git(['rev-parse', '--show-toplevel'], path));
       this.path(root);
@@ -151,13 +165,14 @@ export class WorkspaceRegistry {
       repo = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
       if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(repo))
         throw new Error('Unsupported repository name');
-      provider = host.includes('gitlab') || remotes.includes('gitlab') ? 'gitlab' : 'github';
+      provider = this.repositories.forRepository({ vcs: 'git', host, remotes }, input.provider).id;
     } else
       throw new AppError(
         'project_repository_missing',
         'Choose a Git or mounted Arcadia repository',
         422,
       );
+    this.repositories.get(provider);
     const scope = workspaceScope(input.scope ?? relative(root, path).split(sep).join('/'));
     if (scope) {
       const cwd = realpathSync(join(root, scope));
@@ -181,9 +196,15 @@ export class WorkspaceRegistry {
     };
   }
   async selection(workspace: Workspace, input?: RepositorySelection): Promise<Workspace> {
+    this.repositories.get(workspace.provider);
     if (!input || !Object.keys(input).length) return { ...workspace };
     input = repositorySelectionSchema.parse(input);
+    const sameSource =
+      !input.path ||
+      this.path(input.path) === workspace.repoPath ||
+      this.path(input.path).startsWith(workspace.repoPath + sep);
     const selected = await this.inspect({
+      provider: input.provider ?? (sameSource ? workspace.provider : undefined),
       name: workspace.name,
       path: input.path ?? workspace.repoPath,
       scope: input.scope ?? (input.path ? undefined : workspace.scope),
@@ -196,6 +217,7 @@ export class WorkspaceRegistry {
       value.base ?? '',
       value.host,
       value.repo,
+      value.provider,
     ];
     const changed = JSON.stringify(identity(selected)) !== JSON.stringify(identity(workspace));
     const hash = createHash('sha256')
@@ -207,7 +229,14 @@ export class WorkspaceRegistry {
     return { ...selected, id, createdAt: workspace.createdAt };
   }
   async register(input: z.infer<typeof workspaceSchema>, id?: string): Promise<Workspace> {
-    const workspace = await this.inspect(input);
+    const previous = id ? this.get(id) : undefined;
+    const path = this.path(input.path);
+    const sameSource =
+      previous && (path === previous.repoPath || path.startsWith(previous.repoPath + sep));
+    const workspace = await this.inspect({
+      ...input,
+      provider: input.provider ?? (sameSource ? previous.provider : undefined),
+    });
     const existing = id
       ? this.get(id)
       : this.store
@@ -236,7 +265,9 @@ export class WorkspaceRegistry {
       }
     }
     try {
-      for (const mount of await this.arc.mounts())
+      for (const mount of this.repositories.list().some((module) => module.vcs === 'arcadia')
+        ? await this.arc.mounts()
+        : [])
         if (mount.object_store_ok) candidates.add(mount.path);
     } catch {
       /* Git-only installations need no Arc CLI. */
@@ -255,7 +286,11 @@ export class WorkspaceRegistry {
     return this.store.workspace(id);
   }
   list() {
-    return this.store.workspaces();
+    return this.store
+      .workspaces()
+      .filter((workspace) =>
+        this.repositories.list().some((module) => module.id === workspace.provider),
+      );
   }
   cwd(root: string, scope = '') {
     const base = realpathSync(root),

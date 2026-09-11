@@ -75,7 +75,7 @@ it('retains the named author branch when its pushed head becomes the next review
     rmSync(dir, { recursive: true });
   }
 });
-it('keeps a control workspace available when the writer pool would consume the last Arc mount', async () => {
+it('keeps a control workspace available when the worker pool would consume the last Arc mount', async () => {
   const f = await fixture({
     repoPath: '/fake/arc-source',
     revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },

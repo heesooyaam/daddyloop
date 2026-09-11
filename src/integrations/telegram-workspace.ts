@@ -389,23 +389,23 @@ export class TelegramWorkspace {
       ],
     });
   }
-  private async models(groupId: string, destination: Destination, role?: 'writer' | 'daddy') {
+  private async models(groupId: string, destination: Destination, role?: 'worker' | 'daddy') {
     const group = this.authorize(destination, groupId);
     const text = new TelegramText()
       .add('🤖 ' + this.t('Models'), 'bold')
-      .add('\n\nDaddy: ')
-      .add(group.daddy.model ?? this.t('Codex configuration'), 'code')
+      .add('\n\ndaddy: ')
+      .add(group.daddy.model ?? this.t('Engine configuration'), 'code')
       .add(' / ' + (group.daddy.effort ?? this.t('Default')))
-      .add('\n' + this.t('New writers') + ': ')
-      .add(group.writer?.model ?? this.t('Codex configuration'), 'code')
-      .add(' / ' + (group.writer?.effort ?? this.t('Default')));
+      .add('\n' + this.t('New workers') + ': ')
+      .add(group.worker?.model ?? this.t('Engine configuration'), 'code')
+      .add(' / ' + (group.worker?.effort ?? this.t('Default')));
     if (!role) {
       await this.api.send(destination, {
         ...text,
         buttons: [
           [
             { text: 'daddy', callback_data: `dad:models:${groupId}:daddy` },
-            { text: this.t('New writers'), callback_data: `dad:models:${groupId}:writer` },
+            { text: this.t('New workers'), callback_data: `dad:models:${groupId}:worker` },
           ],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
         ],
@@ -427,7 +427,7 @@ export class TelegramWorkspace {
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         }),
       );
-      return [{ text: model.name, callback_data: id }];
+      return [{ text: model.engine + ' · ' + model.name, callback_data: id }];
     });
     await this.api.send(destination, { ...text, buttons });
   }
@@ -716,8 +716,14 @@ export class TelegramWorkspace {
         throw new Error(this.t('This model selection expired. Open Models again.'));
       const action = JSON.parse(row.data as string) as {
         groupId: string;
-        role: 'writer' | 'daddy';
-        model: { id: string; name: string; efforts: string[]; defaultEffort: string };
+        role: 'worker' | 'daddy';
+        model: {
+          id: string;
+          engine: string;
+          name: string;
+          efforts: string[];
+          defaultEffort: string;
+        };
         chatId: number;
         threadId?: number;
         expiresAt: string;
@@ -744,9 +750,9 @@ export class TelegramWorkspace {
         if (!effort) throw new Error('Unsupported reasoning effort');
         const profiles: AgentProfiles = {
           daddy: group.daddy,
-          writer: group.writer ?? { engine: 'codex' },
+          worker: group.worker ?? group.daddy,
         };
-        profiles[action.role] = { engine: 'codex', model: action.model.id, effort };
+        profiles[action.role] = { engine: action.model.engine, model: action.model.id, effort };
         await this.daddy.settings(group.id, { profiles });
         this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
         await this.models(group.id, destination);
@@ -805,9 +811,9 @@ export class TelegramWorkspace {
       );
       return true;
     }
-    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(writer|daddy))?$/);
+    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(worker|daddy))?$/);
     if (models) {
-      await this.models(models[1], destination, models[2] as 'writer' | 'daddy' | undefined);
+      await this.models(models[1], destination, models[2] as 'worker' | 'daddy' | undefined);
       return true;
     }
     const match = data.match(/^dad:(new|open|add|pause|resume|pool):([a-f0-9-]{36})(?::([1-8]))?$/);
@@ -844,7 +850,7 @@ export class TelegramWorkspace {
     }
     const group = this.authorize(destination, id);
     if (action === 'pool') {
-      if (limit) await this.daddy.settings(id, { writerLimit: Number(limit) });
+      if (limit) await this.daddy.settings(id, { workerLimit: Number(limit) });
       await this.api.send(destination, poolCard(this.locale(), this.daddy.board(id)));
       return true;
     }
@@ -1056,7 +1062,7 @@ export class TelegramWorkspace {
       if (/^\/(author|reviewer)\b/.test(text)) {
         await this.api.send(
           destination,
-          this.t('Write to daddy here. He sends instructions to the writers.'),
+          this.t('Write to daddy here. He sends instructions to the workers.'),
         );
         return true;
       }
@@ -1211,7 +1217,7 @@ export class TelegramWorkspace {
         const card: TelegramCard = {
           ...text,
           buttons: [
-            [{ text: this.t('Tasks and writer pool'), callback_data: `dad:open:${group.id}` }],
+            [{ text: this.t('Tasks and worker pool'), callback_data: `dad:open:${group.id}` }],
           ],
         };
         await this.api.send(destination, card);

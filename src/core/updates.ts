@@ -61,6 +61,7 @@ export class UpdateMonitor {
   constructor(
     private store: Store,
     private options: {
+      enabled?: string[];
       codex?: Executable;
       managedRoot?: string;
       claude?: string;
@@ -77,6 +78,9 @@ export class UpdateMonitor {
   status(): UpdateStatus {
     return {
       ...(this.store.setting<UpdateStatus>('updates.status') ?? { tools: [] }),
+      tools: (this.store.setting<UpdateStatus>('updates.status')?.tools ?? []).filter(
+        (tool) => !this.options.enabled || this.options.enabled.includes(tool.id),
+      ),
       intervalHours: this.options.intervalHours ?? 6,
       checking: !!this.pending,
       notifications: this.store.setting<boolean>('updates.notifications') ?? true,
@@ -143,55 +147,57 @@ export class UpdateMonitor {
     const previous = this.status(),
       checkedAt = new Date().toISOString();
     const entries = await Promise.all(
-      tools.map(async (tool) => {
-        const local = await this.probe(selectedExecutable(this.options[tool.id] ?? tool.id));
-        const result: ToolVersion = {
-          id: tool.id,
-          name: tool.name,
-          supported: tool.supported,
-          source: local.source,
-          executable: local.path,
-          installed: local.version,
-          error: local.error,
-          updateAvailable: false,
-          releaseUrl: tool.releaseUrl,
-        };
-        if (!local.version || this.stopped) return result;
-        const before = previous.tools.find((item) => item.id === tool.id)?.installed;
-        if (before && before !== local.version) result.changedFrom = before;
-        const operation = this.store.setting<CodexUpdateOperation>('codex.update.operation');
-        if (
-          tool.id === 'codex' &&
-          result.changedFrom &&
-          operation?.phase === 'complete' &&
-          operation.from.version === result.changedFrom &&
-          operation.target.version === local.version &&
-          executablePath(operation.target.executable ?? '') === local.path &&
-          operation.finishedAt &&
-          operation.finishedAt >= (previous.checkedAt ?? '') &&
-          operation.id !== this.store.setting<string>('updates.accountedOperation')
-        )
-          result.managedOperationId = operation.id;
-        try {
-          const response = await (this.options.fetcher ?? fetch)(
-            `https://registry.npmjs.org/${encodeURIComponent(tool.package)}/latest`,
-            {
-              redirect: 'error',
-              headers: { Accept: 'application/json' },
-              signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(15000)]),
-            },
-          );
-          if (!response.ok) throw new Error(`Version registry returned HTTP ${response.status}`);
-          const value = (await response.json()) as { version?: string };
-          if (!value.version || !/^\d+\.\d+\.\d+$/.test(value.version))
-            throw new Error('Version registry returned an invalid stable version');
-          result.latest = value.version;
-          result.updateAvailable = isNewerVersion(value.version, local.version);
-        } catch (error) {
-          result.error = redact(String(error));
-        }
-        return result;
-      }),
+      tools
+        .filter((tool) => (this.options.enabled ?? tools.map((item) => item.id)).includes(tool.id))
+        .map(async (tool) => {
+          const local = await this.probe(selectedExecutable(this.options[tool.id] ?? tool.id));
+          const result: ToolVersion = {
+            id: tool.id,
+            name: tool.name,
+            supported: tool.supported,
+            source: local.source,
+            executable: local.path,
+            installed: local.version,
+            error: local.error,
+            updateAvailable: false,
+            releaseUrl: tool.releaseUrl,
+          };
+          if (!local.version || this.stopped) return result;
+          const before = previous.tools.find((item) => item.id === tool.id)?.installed;
+          if (before && before !== local.version) result.changedFrom = before;
+          const operation = this.store.setting<CodexUpdateOperation>('codex.update.operation');
+          if (
+            tool.id === 'codex' &&
+            result.changedFrom &&
+            operation?.phase === 'complete' &&
+            operation.from.version === result.changedFrom &&
+            operation.target.version === local.version &&
+            executablePath(operation.target.executable ?? '') === local.path &&
+            operation.finishedAt &&
+            operation.finishedAt >= (previous.checkedAt ?? '') &&
+            operation.id !== this.store.setting<string>('updates.accountedOperation')
+          )
+            result.managedOperationId = operation.id;
+          try {
+            const response = await (this.options.fetcher ?? fetch)(
+              `https://registry.npmjs.org/${encodeURIComponent(tool.package)}/latest`,
+              {
+                redirect: 'error',
+                headers: { Accept: 'application/json' },
+                signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(15000)]),
+              },
+            );
+            if (!response.ok) throw new Error(`Version registry returned HTTP ${response.status}`);
+            const value = (await response.json()) as { version?: string };
+            if (!value.version || !/^\d+\.\d+\.\d+$/.test(value.version))
+              throw new Error('Version registry returned an invalid stable version');
+            result.latest = value.version;
+            result.updateAvailable = isNewerVersion(value.version, local.version);
+          } catch (error) {
+            result.error = redact(String(error));
+          }
+          return result;
+        }),
     );
     if (!this.stopped && executable !== selectedExecutable(this.options.codex)) return this.load();
     const result: UpdateStatus = {

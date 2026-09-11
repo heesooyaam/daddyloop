@@ -1,5 +1,5 @@
 import { afterEach, it, expect, vi } from 'vitest';
-import { ModelCatalogue } from '../src/core/agents.js';
+import { CodexCatalogue } from '../src/modules/agents/codex/models.js';
 import { CodexConnection } from '../src/runtime/protocol.js';
 it('reloads the catalogue after runtime selection and fences a response from the previous executable', async () => {
   vi.spyOn(CodexConnection.prototype, 'start').mockResolvedValue({ userAgent: 'codex-cli/2.0.0' });
@@ -25,7 +25,7 @@ it('reloads the catalogue after runtime selection and fences a response from the
     } as never;
   });
   let executable = '/old/codex';
-  const catalogue = new ModelCatalogue(() => executable);
+  const catalogue = new CodexCatalogue(() => executable);
   const pending = catalogue.list();
   await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
   executable = '/new/codex';
@@ -58,7 +58,7 @@ it('loads models dynamically, reuses the cache and force-refreshes new model IDs
         nextCursor: null,
       }) as never,
   );
-  const catalog = new ModelCatalogue('/test/codex');
+  const catalog = new CodexCatalogue('/test/codex');
   expect((await catalog.list())[0].id).toBe('model-today');
   name = 'brand-new-model';
   effort = 'new-effort';
@@ -101,7 +101,7 @@ it('follows model pagination and reloads after the five-minute cache expires', a
         nextCursor: params?.cursor ? null : 'page-two',
       }) as never,
   );
-  const catalog = new ModelCatalogue();
+  const catalog = new CodexCatalogue();
   expect((await catalog.list()).map((model) => model.id)).toEqual(['first', 'second']);
   expect(request).toHaveBeenCalledTimes(2);
   await catalog.list();

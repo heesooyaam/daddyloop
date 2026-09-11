@@ -14,7 +14,11 @@ import { providers } from '../providers/index.js';
 import { type ReviewProvider } from '../providers/provider.js';
 import { Workspaces } from '../runtime/workspaces.js';
 import { Worker } from '../runtime/worker.js';
-import { CodexRuntime } from '../runtime/codex.js';
+import { AgentRegistry } from '../modules/agents/registry.js';
+import { createAgents } from '../modules/agents/index.js';
+import { RepositoryRegistry } from '../modules/repositories/registry.js';
+import { repositoryModules } from '../modules/repositories/index.js';
+import { moduleCatalogue } from '../modules/catalogue.js';
 import { DemoRuntime } from '../runtime/demo.js';
 import { loadConfig, saveConfig, validateServerUrl, type Config } from '../ops/config.js';
 import { Access, allowedRequest } from './access.js';
@@ -22,16 +26,15 @@ import { VERSION } from '../version.js';
 import { Telegram, connectTelegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
-import { ModelCatalogue } from '../core/agents.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
-import { TicketReader } from '../integrations/tickets.js';
+import { TicketReader } from '../modules/repositories/tickets.js';
 import { registerPlanning, type Catalogue } from './planning.js';
 import type { AgentRuntime } from '../runtime/agent.js';
 import { randomUUID } from 'node:crypto';
 import { preferences, preferenceInput, setLocale } from '../core/preferences.js';
 import { UpdateMonitor } from '../core/updates.js';
 import { CodexUpdater } from '../core/codex-updater.js';
-import { executablePath } from '../runtime/executable.js';
+import { moduleExecutable } from '../runtime/executable.js';
 import { WorkspaceRegistry } from '../core/workspace-registry.js';
 import { Daddy } from '../core/daddy.js';
 import { registerDaddy } from './daddy.js';
@@ -42,6 +45,8 @@ import { registerUsage } from './usage.js';
 import { LocalSpeech, type Speech } from '../runtime/speech.js';
 
 export interface ServerOptions {
+  agents?: AgentRegistry;
+  repositories?: RepositoryRegistry;
   speech?: Speech;
   usage?: UsageBackend;
   workspaces?: WorkspaceRegistry;
@@ -75,24 +80,50 @@ export async function buildApp(options: ServerOptions) {
   const dataDir = resolve(options.dataDir);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const store = options.store ?? new Store(join(dataDir, 'daddyloop.sqlite'));
-  const engine = new Engine(store, options.provider ?? providers(store), config.agents);
+  const repositories =
+    options.repositories ??
+    new RepositoryRegistry(
+      repositoryModules().filter((module) => config.modules.includes(module.id)),
+    );
+  const engine = new Engine(
+    store,
+    options.provider ?? providers(store, repositories),
+    config.agents,
+  );
   if (!store.setting('preferences'))
     store.setSetting('preferences', { locale: config.locale, version: 0 });
   if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
   const checkouts = options.checkouts ?? new Workspaces(dataDir);
-  let configuredExecutable = config.codex.executable;
+  let configuredExecutable = config.executables.codex;
   const executable = () =>
-    process.env.DADDYLOOP_CODEX_BIN ?? configuredExecutable ?? executablePath('codex') ?? 'codex';
-  const catalogue = options.catalogue ?? new ModelCatalogue(executable);
+    moduleExecutable('codex', {
+      executables: {
+        ...config.executables,
+        ...(configuredExecutable ? { codex: configuredExecutable } : {}),
+      },
+    });
+  const agents =
+    options.agents ??
+    createAgents(config.modules, {
+      executable: (id) => (id === 'codex' ? executable : () => moduleExecutable(id, config)),
+    });
+  const catalogue = options.catalogue ?? agents;
   const updates =
     options.updateMonitor ??
     new UpdateMonitor(store, {
+      enabled: config.modules.filter((id) => agents.engines().some((engine) => engine.id === id)),
       codex: executable,
       intervalHours: config.updates.intervalHours,
       managedRoot: join(dataDir, 'runtimes/codex'),
     });
-  const tickets = new TicketWorkflow(engine, checkouts, options.ticketReader);
+  const tickets = new TicketWorkflow(
+    engine,
+    checkouts,
+    options.ticketReader,
+    undefined,
+    repositories,
+  );
   const getResources =
     options.resourceCheck ??
     (() =>
@@ -106,7 +137,7 @@ export async function buildApp(options: ServerOptions) {
     new CodexUpdater(store, {
       dataDir,
       executable,
-      enabled: !process.env.DADDYLOOP_CODEX_BIN,
+      enabled: config.modules.includes('codex') && !process.env.DADDYLOOP_CODEX_BIN,
       resourceCheck: () => {
         const status = getResources();
         if (!status.ok || status.diskAvailableGiB < 2)
@@ -118,9 +149,9 @@ export async function buildApp(options: ServerOptions) {
       },
       activate: (expected, next) => {
         const current = loadConfig();
-        if (executable() !== expected || current.codex.executable !== configuredExecutable)
+        if (executable() !== expected || current.executables.codex !== configuredExecutable)
           throw new Error('Codex configuration changed during the update');
-        current.codex.executable = next;
+        current.executables.codex = next;
         saveConfig(current);
         configuredExecutable = next;
       },
@@ -132,15 +163,15 @@ export async function buildApp(options: ServerOptions) {
             .filter((group) => group.orchestrated)
             .map((group) => ({
               daddy: group.daddy,
-              writer: group.writer ?? engine.defaultAgents().writer,
+              worker: group.worker ?? engine.defaultAgents().worker,
             })),
           ...store
             .tasks()
             .filter((task) => task.state !== 'complete')
             .map((task) => engine.effectiveAgents(task)),
         ];
-        for (const profile of profiles.flatMap((pair) => [pair.writer, pair.daddy])) {
-          if (!profile.model) continue;
+        for (const profile of profiles.flatMap((pair) => [pair.worker, pair.daddy])) {
+          if (profile.engine !== 'codex' || !profile.model) continue;
           const model = models.find((model) => model.id === profile.model);
           if (!model || (profile.effort && !model.efforts.includes(profile.effort)))
             throw new Error(
@@ -150,7 +181,10 @@ export async function buildApp(options: ServerOptions) {
       },
     });
   const checkUpdates =
-    options.startWorker !== false && options.startUpdateCheck !== false && config.updates.enabled;
+    options.startWorker !== false &&
+    options.startUpdateCheck !== false &&
+    config.updates.enabled &&
+    config.modules.includes('codex');
   const refreshRuntime = (event: Event) => {
     if (event.type === 'runtime.update_finished' && checkUpdates)
       void updates.check(true).catch(() => {});
@@ -160,18 +194,16 @@ export async function buildApp(options: ServerOptions) {
   const worker = new Worker(
     engine,
     checkouts,
-    options.liveRuntime ??
-      new CodexRuntime({
-        executable,
-        model: process.env.DADDYLOOP_CODEX_MODEL,
-      }),
+    options.liveRuntime ?? agents,
     new DemoRuntime(),
     getResources,
     15000,
     config.maxConcurrentAgents,
   );
   worker.autoSubmit = (id) => tickets.submit(id);
-  const workspaces = options.workspaces ?? new WorkspaceRegistry(store, config.workspaces.roots);
+  const workspaces =
+    options.workspaces ??
+    new WorkspaceRegistry(store, config.workspaces.roots, undefined, repositories);
   checkouts.protectSources(() =>
     [
       ...workspaces.list(),
@@ -192,7 +224,7 @@ export async function buildApp(options: ServerOptions) {
     workspaces,
     tickets,
     worker,
-    options.daddyRuntime ?? new CodexRuntime({ executable }),
+    options.daddyRuntime ?? agents,
     getResources,
     catalogue,
     options.daddyWorkspace,
@@ -274,9 +306,29 @@ export async function buildApp(options: ServerOptions) {
     if (_request.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
     return payload;
   });
+  app.get('/api/modules', async () =>
+    moduleCatalogue.map((module) => ({ ...module, enabled: config.modules.includes(module.id) })),
+  );
   app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
   registerDaddy(app, daddy);
-  const usage = options.usage ?? new CodexUsage(store, executable);
+  const unavailableUsage: UsageBackend = {
+    read: async () => ({
+      source: 'codex-app-server:account/rateLimits/read',
+      available: false,
+      stale: false,
+      buckets: [],
+      resets: { availableCount: null, canUse: false, credits: [] },
+    }),
+    prepare: async () => {
+      throw new AppError('agent_module_disabled', 'The Codex module is not enabled', 422);
+    },
+    consume: async () => {
+      throw new AppError('agent_module_disabled', 'The Codex module is not enabled', 422);
+    },
+  };
+  const usage =
+    options.usage ??
+    (config.modules.includes('codex') ? new CodexUsage(store, executable) : unavailableUsage);
   registerUsage(app, usage);
   app.post('/api/session', async (request, reply) => {
     const input = z
@@ -485,7 +537,7 @@ export async function buildApp(options: ServerOptions) {
               title: task.title,
               state: task.state,
               parentTaskId: task.parentTaskId,
-              writer: engine.effectiveAgents(task).writer,
+              worker: engine.effectiveAgents(task).worker,
             }))
         : [],
       messages: store.messages(id),

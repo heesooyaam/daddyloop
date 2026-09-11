@@ -5,8 +5,8 @@
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
-  color: #24312f;
-  background: #f6f7f9;
+  color: var(--ink);
+  background: var(--surface);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   font-size: 13px;
@@ -40,14 +40,14 @@ textarea:focus-visible,
 input:focus-visible,
 select:focus-visible,
 summary:focus-visible {
-  outline: 3px solid #5caa9580;
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 button {
   color: inherit;
 }
 a {
-  color: #287760;
+  color: var(--ink);
   text-decoration: none;
 }
 a:hover {
@@ -74,7 +74,7 @@ button {
   font-size: 24px;
   font-weight: 750;
   letter-spacing: -1px;
-  color: #193e33;
+  color: var(--ink);
   padding: 0 10px;
 }
 .brand-icon {
@@ -84,11 +84,11 @@ button {
   border-radius: 9px;
   width: 33px;
   height: 33px;
-  background: #286b57;
+  background: var(--primary);
   color: white;
 }
 .brand-period {
-  color: #65ab8e;
+  color: var(--muted);
 }
 .main {
   margin-left: 232px;
@@ -96,7 +96,7 @@ button {
   flex: 1;
 }
 .button {
-  border: 1px solid #dfe5e1;
+  border: 1px solid var(--line);
   background: white;
   border-radius: 6px;
   display: inline-flex;
@@ -107,19 +107,19 @@ button {
   font-size: 11px;
   font-weight: 550;
   white-space: nowrap;
-  box-shadow: 0 1px 2px #172f2010;
+  box-shadow: 0 1px 2px var(--shadow);
 }
 .button:hover {
-  background: #f6f9f7;
-  border-color: #cbd7ce;
+  background: var(--accent);
+  border-color: var(--line);
 }
 .button.primary {
-  background: #2b6c55;
-  border-color: #2b6c55;
+  background: var(--primary);
+  border-color: var(--line);
   color: white;
 }
 .button.primary:hover {
-  background: #245e49;
+  background: var(--primary);
 }
 .button.small {
   font-size: 10px;
@@ -136,8 +136,8 @@ button {
   white-space: nowrap;
 }
 .pill.neutral {
-  background: #eff2f0;
-  color: #839088;
+  background: var(--panel);
+  color: var(--muted);
 }
 .messages {
   padding: 10px 21px 18px;
@@ -152,22 +152,22 @@ button {
   line-height: 1.8;
 }
 .message.user {
-  background: #f3f6f4;
+  background: var(--surface);
   padding: 12px 14px;
-  border: 1px solid #e6ece7;
+  border: 1px solid var(--line);
   border-radius: 7px;
   margin-left: 25px;
 }
 .composer {
-  border: 1px solid #dce6de;
+  border: 1px solid var(--line);
   border-radius: 7px;
-  box-shadow: 0 2px 3px #263d2a05;
+  box-shadow: 0 2px 3px var(--shadow);
   margin: 0 18px 20px;
   overflow: hidden;
 }
 .composer:focus-within {
-  border-color: #92b39a;
-  box-shadow: 0 0 0 2px #dcebe160;
+  border-color: var(--line);
+  box-shadow: 0 0 0 2px var(--shadow);
 }
 .composer textarea {
   width: 100%;
@@ -175,15 +175,15 @@ button {
   min-height: 64px;
   max-height: 250px;
   border: 0;
-  background: #fff;
+  background: var(--surface);
   outline: none;
   padding: 13px;
-  color: #566c5d;
+  color: var(--ink);
   font-size: 10px;
   line-height: 1.7;
 }
 .composer textarea::placeholder {
-  color: #a4b0a7;
+  color: var(--muted);
 }
 .composer > div {
   padding: 0 10px 9px 12px;
@@ -196,32 +196,32 @@ button {
   gap: 4px;
   align-items: center;
   font-size: 8px;
-  color: #a4afa6;
+  color: var(--muted);
 }
 .discuss {
   display: flex;
   gap: 5px;
   align-items: center;
-  border-top: 1px solid #edf1ee;
+  border-top: 1px solid var(--line);
   width: 100%;
   padding: 11px 0 0;
   margin-top: 12px;
   font-size: 9px;
-  color: #668b72;
+  color: var(--muted);
 }
 .discuss > svg:last-child {
   margin-left: auto;
 }
 .planning-note {
   padding: 12px 14px;
-  border: 1px solid #dce7df;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #f3f8f4;
+  background: var(--surface);
   font-size: 12px;
   line-height: 1.7;
 }
 .event {
-  border-left: 1px solid #e5ece6;
+  border-left: 1px solid var(--line);
   padding: 0 0 14px 18px;
   margin-left: 6px;
 }
@@ -234,23 +234,23 @@ button {
 }
 .event summary strong {
   font-size: 10px;
-  color: #799282;
+  color: var(--muted);
   font-weight: 500;
 }
 .event summary time {
   margin-left: auto;
-  color: #aab8ae;
+  color: var(--muted);
   font-size: 8px;
 }
 .event > div {
   font-size: 9px;
   padding: 12px 0;
-  color: #96a89a;
+  color: var(--muted);
 }
 .event pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: #f6f8f6;
+  background: var(--surface);
   padding: 12px;
   border-radius: 5px;
   font-size: 9px;
@@ -264,7 +264,7 @@ button {
   overflow: auto;
   width: min(590px, 100%);
   border-radius: 12px;
-  box-shadow: 0 20px 70px #132b2340;
+  box-shadow: 0 20px 70px var(--shadow);
 }
 .task-form {
   padding: 22px 28px;
@@ -275,18 +275,18 @@ button {
   flex-direction: column;
   gap: 7px;
   font-size: 11px;
-  color: #758c7c;
+  color: var(--muted);
   margin-bottom: 17px;
 }
 .task-form input,
 .task-form textarea,
 .task-form select,
 .login-card input {
-  border: 1px solid #dce5df;
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 10px 11px;
   width: 100%;
-  color: #556f5f;
+  color: var(--ink);
   background: white;
   font-size: 11px;
   line-height: 1.6;
@@ -294,7 +294,7 @@ button {
 .task-form input::placeholder,
 .task-form textarea::placeholder,
 .login-card input::placeholder {
-  color: #b2bdb5;
+  color: var(--muted);
 }
 .task-form textarea {
   resize: vertical;
@@ -302,7 +302,7 @@ button {
 }
 .task-form small {
   font-size: 9px;
-  color: #a7b4ab;
+  color: var(--muted);
   line-height: 1.7;
 }
 .task-form .checkbox-label {
@@ -315,7 +315,7 @@ button {
   width: 14px;
   height: 14px;
   margin: 2px 0 0;
-  accent-color: #36795a;
+  accent-color: var(--focus);
   flex-shrink: 0;
 }
 .checkbox-label strong {
@@ -330,7 +330,7 @@ button {
 .field-error {
   font-size: 11px;
   line-height: 1.7;
-  color: #bc7c6b;
+  color: var(--danger);
   margin: 10px 0;
 }
 .login-page {
@@ -339,7 +339,7 @@ button {
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  background: radial-gradient(ellipse at 50% 40%, #fff, #eef3ef);
+  background: radial-gradient(ellipse at 50% 40%, var(--surface), var(--panel));
   padding: 35px;
 }
 .login-page > .brand {
@@ -347,8 +347,8 @@ button {
 }
 .login-card {
   background: white;
-  border: 1px solid #e2eae4;
-  box-shadow: 0 12px 50px #183b2407;
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 50px var(--shadow);
   border-radius: 12px;
   padding: 37px;
   width: min(425px, 100%);
@@ -357,8 +357,8 @@ button {
 .login-lock {
   display: inline-grid;
   place-items: center;
-  background: #edf4ef;
-  color: #7d9f86;
+  background: var(--panel);
+  color: var(--muted);
   border-radius: 50%;
   padding: 17px;
 }
@@ -370,7 +370,7 @@ button {
 }
 .login-card > p {
   font-size: 11px;
-  color: #95a59a;
+  color: var(--muted);
   line-height: 1.9;
 }
 .login-card form {
@@ -383,7 +383,7 @@ button {
 }
 .login-page > small {
   font-size: 9px;
-  color: #a5b3a9;
+  color: var(--muted);
   margin-top: 23px;
 }
 .loading-screen {
@@ -393,7 +393,7 @@ button {
   flex-direction: column;
   gap: 25px;
   min-height: 100vh;
-  color: #7d9e86;
+  color: var(--muted);
 }
 .loading-screen > span {
   font-size: 11px;
@@ -474,12 +474,12 @@ button {
   display: grid;
   gap: 8px;
   padding: 14px;
-  border: 1px solid #dce5df;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #f7faf8;
+  background: var(--surface);
 }
 .runtime-card small {
-  color: #687b72;
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 .runtime-card code {

@@ -29,7 +29,7 @@ type MenuState = {
   query: string;
   items?: { name: string; path: string }[];
   models?: ModelOption[];
-  role?: 'daddy' | 'writer';
+  role?: 'daddy' | 'worker';
   model?: ModelOption;
   message?: string;
   updates?: UpdateStatus;
@@ -171,8 +171,8 @@ export function DaddyTerminal({
     if (menu.kind === 'pool')
       return [1, 2, 3, 4, 5, 6, 7, 8].map((limit) => ({
         id: String(limit),
-        label: `${limit} ${t('writers')}`,
-        detail: limit === state.board?.writers.target ? '✓' : '',
+        label: `${limit} ${t('workers')}`,
+        detail: limit === state.board?.workers.target ? '✓' : '',
       }));
     if (menu.kind === 'notifications')
       return [
@@ -185,18 +185,22 @@ export function DaddyTerminal({
         {
           id: 'daddy',
           label: 'daddy',
-          detail: state.board?.group.daddy.model ?? t('Codex configuration'),
+          detail: state.board?.group.daddy.model ?? t('Engine configuration'),
         },
         {
-          id: 'writer',
-          label: t('New writers'),
-          detail: state.board?.group.writer?.model ?? t('Codex configuration'),
+          id: 'worker',
+          label: t('New workers'),
+          detail: state.board?.group.worker?.model ?? t('Engine configuration'),
         },
       ];
     if (menu.kind === 'model')
       return (menu.models ?? [])
         .filter((model) => model.id.toLowerCase().includes(menu.query.toLowerCase()))
-        .map((model) => ({ id: model.id, label: model.name, detail: model.id }));
+        .map((model) => ({
+          id: model.engine + ':' + model.id,
+          label: model.name,
+          detail: model.engine + ' · ' + model.id,
+        }));
     if (menu.kind === 'effort')
       return (menu.model?.efforts ?? []).map((effort) => ({
         id: effort,
@@ -256,7 +260,7 @@ export function DaddyTerminal({
         await model.refresh();
         setMenu({ ...menu, kind: 'workspaces', query: '', index: 0 });
       } else if (menu.kind === 'pool') {
-        await model.action('settings', { writerLimit: Number(item.id) });
+        await model.action('settings', { workerLimit: Number(item.id) });
         if (!model.snapshot().error) setMenu(undefined);
       } else if (menu.kind === 'notifications') {
         await model.api('/notifications', {
@@ -274,17 +278,17 @@ export function DaddyTerminal({
           index: 0,
           query: '',
           models: result.models,
-          role: item.id as 'writer' | 'daddy',
+          role: item.id as 'worker' | 'daddy',
         });
       } else if (menu.kind === 'model') {
-        const selected = menu.models?.find((model) => model.id === item.id);
+        const selected = menu.models?.find((model) => model.engine + ':' + model.id === item.id);
         if (selected) setMenu({ ...menu, kind: 'effort', model: selected, index: 0, query: '' });
       } else if (menu.kind === 'effort' && state.board && menu.role && menu.model) {
         const profiles: AgentProfiles = {
           daddy: state.board.group.daddy,
-          writer: state.board.group.writer ?? { engine: 'codex' },
+          worker: state.board.group.worker ?? state.board.group.daddy,
         };
-        profiles[menu.role] = { engine: 'codex', model: menu.model.id, effort: item.id };
+        profiles[menu.role] = { engine: menu.model.engine, model: menu.model.id, effort: item.id };
         await model.action('settings', { profiles });
         if (!model.snapshot().error) setMenu(undefined);
       }
@@ -362,7 +366,7 @@ export function DaddyTerminal({
       return;
     }
     if (name === '/pool') {
-      if (argument) await model.action('settings', { writerLimit: Number(argument) });
+      if (argument) await model.action('settings', { workerLimit: Number(argument) });
       else open('pool');
       return;
     }
@@ -382,7 +386,7 @@ export function DaddyTerminal({
       sessions: 'Sessions',
       workspaces: 'Choose a workspace',
       discover: 'Workspaces on this server',
-      pool: 'Writer pool',
+      pool: 'Worker pool',
       limits: 'Codex limits',
       help: 'daddyloop commands',
       updates: 'CLI updates',
@@ -409,7 +413,7 @@ export function DaddyTerminal({
       content.push(
         ...markdown(
           t(
-            'Talk to daddy in plain language. Paste goals or ticket links; he handles the writers.',
+            'Talk to daddy in plain language. Paste goals or ticket links; he handles the workers.',
           ) +
             '\n\n' +
             commands.join('  ') +
@@ -469,11 +473,11 @@ export function DaddyTerminal({
     }
   } else if (!state.board) {
     content.push(
-      { text: t('You bring the idea. daddy takes it from here.'), kind: 'heading' },
+      { text: t('Your task. My crew.'), kind: 'heading' },
       { text: '' },
       ...markdown(
         t(
-          'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+          'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.',
         ),
         width,
       ),
@@ -486,10 +490,10 @@ export function DaddyTerminal({
     content.push(
       {
         text: t(
-          state.board.writers.pending
+          state.board.workers.pending
             ? 'Pool: {limit} → {target}. Changes apply in the background.'
             : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-          state.board.writers,
+          state.board.workers,
         ),
         kind: 'heading',
       },
@@ -516,7 +520,7 @@ export function DaddyTerminal({
       content.push(
         { text: 'daddy', kind: 'heading' },
         ...markdown(
-          t('Send me the goal. I will take care of the writers, reviews and follow-through.'),
+          t('Drop the task here. I’ll get the crew moving and check the work myself.'),
           width,
         ),
         { text: '' },
@@ -698,7 +702,7 @@ export function DaddyTerminal({
         <Box flexDirection="column" flexGrow={1} paddingX={1} minWidth={0}>
           <Box height={2}>
             <Text bold color={colors.ink}>
-              {clip(state.board?.group.title ?? t('What are we building?'), width - 8)}
+              {clip(state.board?.group.title ?? t('What’s the job?'), width - 8)}
             </Text>
             <Box flexGrow={1} />
             <Text color={colors.muted}>{view === 'chat' ? 'daddy' : t('Tasks')}</Text>
@@ -744,7 +748,9 @@ export function DaddyTerminal({
                 </Text>
               ))
             ) : (
-              <Text color={colors.muted}>{t('A goal, a ticket link, or a question…')}</Text>
+              <Text color={colors.muted}>
+                {t('Drop a task or ticket. I’ll take it from here.')}
+              </Text>
             )}
             <Box flexGrow={1} />
             <Text color={colors.muted}>
@@ -753,9 +759,9 @@ export function DaddyTerminal({
                   (state.busy
                     ? '…'
                     : state.board
-                      ? (state.board.writers.pending
-                          ? `${state.board.writers.limit} → ${state.board.writers.target}`
-                          : t('Writers: {active} / {limit}', state.board.writers)) +
+                      ? (state.board.workers.pending
+                          ? `${state.board.workers.limit} → ${state.board.workers.target}`
+                          : t('Workers: {active} / {limit}', state.board.workers)) +
                         ' · ' +
                         (state.overrides[state.selected]?.path ??
                           state.board.workspace?.repoPath ??

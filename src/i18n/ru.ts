@@ -238,7 +238,7 @@ Object.assign(ru, {
   'CI waiver reason': 'Причина исключения CI',
   CONNECTIONS: 'ПОДКЛЮЧЕНИЯ',
   'Child of': 'Дочерняя задача для',
-  'Choose a separate writer for each task and a shared reviewer for its group.':
+  'Choose a separate worker for each task and a shared reviewer for its group.':
     'Выбери отдельного автора для каждой задачи и общего ревьюера группы.',
   'Choose which updates reach your private Telegram chat.':
     'Выбери, какие обновления получать в личном чате Telegram.',

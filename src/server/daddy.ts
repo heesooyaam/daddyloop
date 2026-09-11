@@ -44,7 +44,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       return {
         ...group,
         workspace: board.workspace,
-        writers: board.writers,
+        workers: board.workers,
         daddyBusy: board.daddyBusy,
         total: board.tasks.length,
         complete: board.tasks.filter((task) => task.state === 'complete').length,
@@ -58,7 +58,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         repository: repositorySelectionSchema.optional(),
         title: z.string().trim().min(1).max(200).optional(),
         message: z.string().trim().min(1).max(20000).optional(),
-        writerLimit: z.number().int().min(1).max(8).optional(),
+        workerLimit: z.number().int().min(1).max(8).optional(),
         requestId: id.optional(),
         publication: z.enum(['auto', 'human']).optional(),
         autoPush: z.boolean().optional(),
@@ -70,6 +70,11 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       daddy.workspaces.get(input.workspaceId),
       repository,
     );
+    const defaults = daddy.engine.defaultAgents();
+    await Promise.all([
+      daddy.catalogue.validate(defaults.worker),
+      daddy.catalogue.validate(defaults.daddy),
+    ]);
     const group = daddy.create({ ...options, workspace, requirements: input.message });
     return reply.code(201).send(daddy.board(group.id));
   });
@@ -102,7 +107,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       id.parse(request.params.id),
       z
         .object({
-          writerLimit: z.number().int().min(1).max(8).optional(),
+          workerLimit: z.number().int().min(1).max(8).optional(),
           profiles: profilesSchema.optional(),
         })
         .strict()

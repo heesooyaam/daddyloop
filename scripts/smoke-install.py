@@ -15,12 +15,14 @@ from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 assets = root / '.daddyloop/releases'
 corrupt_checksum = False
+requested_assets = []
 
 class Mirror(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
     def do_GET(self):
+        requested_assets.append(self.path)
         if corrupt_checksum and self.path.endswith('.sha256'):
             self.send_response(200)
             self.end_headers()
@@ -36,8 +38,8 @@ try:
         prefix = Path(temporary) / 'prefix with spaces'
         bin_dir = Path(temporary) / 'bin'
         env = {**os.environ, 'DADDYLOOP_DOWNLOAD_BASE': f'http://127.0.0.1:{server.server_port}', 'DADDYLOOP_INSTALL_DIR': str(prefix), 'DADDYLOOP_BIN_DIR': str(bin_dir)}
-        def install(ok=True):
-            result = subprocess.run(['bash', str(root / 'install.sh'), '--no-setup'], env=env, capture_output=True, text=True)
+        def install(ok=True, modules=None):
+            result = subprocess.run(['bash', str(root / 'install.sh'), '--no-setup'] + (['--modules', modules] if modules else []), env=env, capture_output=True, text=True)
             if (result.returncode == 0) != ok:
                 raise RuntimeError(result.stderr[-2000:] + result.stdout[-1000:])
             return result
@@ -79,6 +81,18 @@ try:
         install()
         assert (data / 'keep.txt').read_text() == 'user state'
         target = os.readlink(prefix / 'current')
+        assert sorted(p.name for p in (prefix/'current/modules').iterdir()) == ['codex','github']
+        requested_assets.clear()
+        install(modules='codex,gitlab')
+        alternate = os.readlink(prefix/'current')
+        assert alternate != target, 'Each module selection must have an immutable variant'
+        assert (Path(target)/'.archive-sha256').exists(), 'The preceding variant must not be overwritten'
+        assert sorted(p.name for p in (prefix/'current/modules').iterdir()) == ['codex']
+        assert json.loads((prefix/'current/installed-modules.json').read_text())['modules'] == ['codex','gitlab']
+        assert not any('daddyloop-github-' in path for path in requested_assets), 'An unchecked module was downloaded'
+        assert (data/'keep.txt').read_text() == 'user state'
+        install()
+        assert os.readlink(prefix/'current') == target, 'Reusing the same selection must select the original variant'
         corrupt_checksum = True
         failure = install(False)
         assert 'checksum mismatch' in failure.stderr
@@ -90,7 +104,7 @@ try:
         assert cli.read_text() == 'unrelated user command'
         assert os.readlink(prefix / 'current') == target
         print('PASS: fresh install, paths with spaces, bundled TUI in a PTY, idempotent reinstall, checksum rejection and preservation.')
-        (assets / 'installer-smoke.json').write_text(json.dumps({'passed': True, 'version': version, 'checks': ['fresh', 'spaces', 'bundled-tui-pty', 'idempotent', 'checksum', 'command-collision', 'preserved-state']}, indent=2))
+        (assets / 'installer-smoke.json').write_text(json.dumps({'passed': True, 'version': version, 'checks': ['fresh', 'spaces', 'bundled-tui-pty', 'idempotent', 'checksum', 'command-collision', 'preserved-state', 'selected-downloads', 'immutable-module-variants']}, indent=2))
 finally:
     server.shutdown()
     server.server_close()

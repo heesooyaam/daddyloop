@@ -32,7 +32,14 @@ function updaterFixture(store = new Store(':memory:')) {
     validate: vi.fn(async (path: string) => ({
       version: path === '/previous/codex' ? '1.0.0' : '2.0.0',
       models: [
-        { id: 'test-model', name: 'Test', efforts: ['max'], defaultEffort: 'max', isDefault: true },
+        {
+          id: 'test-model',
+          engine: 'codex',
+          name: 'Test',
+          efforts: ['max'],
+          defaultEffort: 'max',
+          isDefault: true,
+        },
       ],
     })),
   };

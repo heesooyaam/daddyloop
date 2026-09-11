@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client';
 import { ArrowRight, LoaderCircle, LockKeyhole, RefreshCw } from 'lucide-react';
 import './style.css';
 import '@fontsource-variable/inter';
+import { ThemeProvider, ThemeButton } from './themes.js';
 class ApiError extends Error {
   constructor(
     message: string,
@@ -107,6 +108,7 @@ function Login({
   return (
     <div className="login-page">
       <Brand />
+      <ThemeButton />
       <select
         className="language-select"
         aria-label={tr('Interface language')}
@@ -170,14 +172,24 @@ function Login({
           </button>
         </form>
       </div>
-      <small>{tr('Local by default. Reach a remote machine through an SSH tunnel.')}</small>
+      <small>
+        <a
+          href={`https://github.com/heesooyaam/daddyloop/blob/main/docs/web/${locale}.md`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {tr('Open the site from your computer or phone')}
+        </a>
+      </small>
     </div>
   );
 }
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LocaleProvider>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </LocaleProvider>
   </React.StrictMode>,
 );

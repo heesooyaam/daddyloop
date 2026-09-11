@@ -104,6 +104,7 @@ export function registerDaddyCommands(program: Command) {
     .command('add')
     .argument('<path>')
     .requiredOption('--name <name>')
+    .option('--provider <module>', 'repository module for this remote')
     .option('--scope <directory>')
     .option('--base <branch>')
     .description('Register a workspace once for phone, web and CLI')
@@ -112,6 +113,7 @@ export function registerDaddyCommands(program: Command) {
         await api('/workspaces', {
           path,
           name: options.name,
+          provider: options.provider,
           ...(options.scope !== undefined ? { scope: options.scope } : {}),
           ...(options.base ? { base: options.base } : {}),
         }),
@@ -119,14 +121,14 @@ export function registerDaddyCommands(program: Command) {
     );
   program
     .command('sessions')
-    .description('List daddy sessions and writer pools')
+    .description('List daddy sessions and worker pools')
     .action(async () => print(await api('/daddy/sessions')));
   program
     .command('new')
     .argument('[message]')
     .option('--workspace <name>', 'workspace to use')
     .option('--title <title>')
-    .option('--writers <count>', 'maximum simultaneous writers', '1')
+    .option('--workers <count>', 'maximum simultaneous workers', '1')
     .option('--repo <path>', 'repository for this session only')
     .option('--scope <directory>', 'relative starting directory for this session')
     .option('--base <branch>', 'base branch for this session')
@@ -139,7 +141,7 @@ export function registerDaddyCommands(program: Command) {
         repository: workspaceOptions(options),
         message,
         title: options.title,
-        writerLimit: Number(options.writers),
+        workerLimit: Number(options.workers),
         requestId: crypto.randomUUID(),
       });
       print(board);
@@ -167,14 +169,14 @@ export function registerDaddyCommands(program: Command) {
   program
     .command('pool')
     .argument('<session>')
-    .argument('[writers]')
-    .description('Inspect or resize a session’s writer pool')
-    .action(async (name, writers) => {
+    .argument('[workers]')
+    .description('Inspect or resize a session’s worker pool')
+    .action(async (name, workers) => {
       const group = await session(name);
       print(
         await api(
-          `/daddy/sessions/${group.id}${writers ? '/settings' : ''}`,
-          writers ? { writerLimit: Number(writers) } : undefined,
+          `/daddy/sessions/${group.id}${workers ? '/settings' : ''}`,
+          workers ? { workerLimit: Number(workers) } : undefined,
         ),
       );
     });

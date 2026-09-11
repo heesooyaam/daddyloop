@@ -1,14 +1,15 @@
 """Capture real daddyloop PTY output and verify terminal/daemon lifetime."""
 import codecs, fcntl, json, os, pty, re, select, signal, struct, subprocess, sys, termios, time, urllib.request
 node, entry, config_file, output_file, session_id = sys.argv[1:]
-config=json.load(open(config_file));origin=config['serverUrl']
+config=json.load(open(config_file));origin=config['serverUrl'];locale=config.get('locale','en')
+def tr(en,ru):return ru if locale=='ru' else en
 def health():
     with urllib.request.urlopen(origin+'/api/health') as response:return json.load(response)
 pid=health()['pid'];events=[];snapshots=[]
 master,slave=pty.openpty();before=termios.tcgetattr(slave)
 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',38,124,0,0))
 env={**os.environ,'DADDYLOOP_CONFIG':config_file,'TERM':'xterm-256color','COLORTERM':'truecolor','FORCE_COLOR':'3'};env.pop('NO_COLOR',None)
-child=subprocess.Popen([node,entry,'--language','ru','console',session_id],stdin=slave,stdout=slave,stderr=slave,env=env,start_new_session=True)
+child=subprocess.Popen([node,entry,'--language',locale,'console',session_id],stdin=slave,stdout=slave,stderr=slave,env=env,start_new_session=True)
 decoder=codecs.getincrementaldecoder('utf-8')();plain='';ansi=re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 def drain(seconds=.15):
     global plain
@@ -30,10 +31,10 @@ def wait(text):
 def send(text):os.write(master,text.encode());drain(.3)
 def snapshot(name):drain(.6);snapshots.append({'name':name,'at':len(events)})
 try:
-    wait('daddyloop.');wait('Писатели:');snapshot('daddy-cli')
-    send('/pool');send('\r');wait('Пул писателей');snapshot('daddy-cli-pool')
-    send('\x1b');send('/limits');send('\r');wait('Лимиты Codex');wait('Доступно сбросов:');snapshot('daddy-cli-limits')
-    send('\x1b');send('/new');send('\r');wait('Выбрать воркспейс');snapshot('daddy-cli-workspaces')
+    wait('daddyloop.');wait(tr('Workers:','Воркеры:'));snapshot('daddy-cli')
+    send('/pool');send('\r');wait(tr('Worker pool','Пул воркеров'));snapshot('daddy-cli-pool')
+    send('\x1b');send('/limits');send('\r');wait(tr('Codex limits','Лимиты Codex'));wait(tr('Available resets:','Доступно сбросов:'));snapshot('daddy-cli-limits')
+    send('\x1b');send('/new');send('\r');wait(tr('Choose a workspace','Выбрать воркспейс'));snapshot('daddy-cli-workspaces')
     send('\x1b');send('\x11')
     deadline=time.monotonic()+10
     while child.poll() is None and time.monotonic()<deadline:drain(.1)

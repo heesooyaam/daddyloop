@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -19,9 +19,9 @@ import {
   Plus,
   Send,
   Settings2,
-  X,
   Users,
   Bell,
+  BookOpen,
   RefreshCw,
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
@@ -34,14 +34,16 @@ import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import { WorkspaceFields } from './workspace-fields.js';
-import { UsagePanel } from './usage.js';
+import { Dialog } from './dialog.js';
+import { ThemeButton } from './themes.js';
+import { UsageStrip, UsagePanel } from './usage.js';
 import { usageSummary } from '../client/usage.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const stateCopy: Record<string, string> = {
   discussing: 'Waiting for daddy',
-  implementing: 'Writing code',
+  implementing: 'Worker on it',
   ready_for_review: 'Ready for review',
   submitting: 'Creating PR',
   queued: 'Queued for review',
@@ -64,76 +66,6 @@ function safeUrl(value: string) {
   } catch {
     return;
   }
-}
-function Dialog({
-  title,
-  children,
-  onClose,
-  wide = false,
-}: {
-  title: string;
-  children: ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-}) {
-  const { t } = useLocale();
-  const ref = useRef<HTMLDivElement>(null),
-    close = useRef(onClose);
-  close.current = onClose;
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement;
-    ref.current?.querySelector<HTMLElement>('button,input,select,textarea')?.focus();
-    const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        close.current();
-      }
-      if (event.key === 'Tab') {
-        const nodes = ref.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]),input:not([disabled]),select,textarea,a[href]',
-        );
-        if (!nodes?.length) return;
-        const first = nodes[0],
-          last = nodes[nodes.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener('keydown', key);
-    return () => {
-      document.removeEventListener('keydown', key);
-      previous?.focus();
-    };
-  }, []);
-  return (
-    <div
-      className="daddy-overlay"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={ref}
-        className={'daddy-dialog' + (wide ? ' wide' : '')}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-      >
-        <header>
-          <h2>{title}</h2>
-          <button className="daddy-icon" aria-label={t('Close')} onClick={onClose}>
-            <X size={19} />
-          </button>
-        </header>
-        {children}
-      </div>
-    </div>
-  );
 }
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
@@ -207,7 +139,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   'daddy-session-dot ' +
                   (group.daddyState === 'needs_input'
                     ? 'attention'
-                    : group.daddyBusy || group.writers.active
+                    : group.daddyBusy || group.workers.active
                       ? 'working'
                       : '')
                 }
@@ -218,18 +150,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   {group.workspace?.name} · {group.complete}/{group.total} {t('done')}
                 </small>
               </span>
-              {group.writers.active > 0 && (
-                <span className="daddy-count">{group.writers.active}</span>
+              {group.workers.active > 0 && (
+                <span className="daddy-count">{group.workers.active}</span>
               )}
             </button>
           ))}
           {!state.sessions.length && (
-            <p className="daddy-empty-small">
-              {t('Your next workspace starts with a conversation.')}
-            </p>
+            <p className="daddy-empty-small">{t('No sessions yet. Send the first job.')}</p>
           )}
         </nav>
         <div className="daddy-sidebar-bottom">
+          <a
+            className="daddy-docs-link"
+            href={`https://github.com/heesooyaam/daddyloop/blob/main/docs/index/${locale}.md`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <BookOpen size={17} />
+            {t('Guides')}
+          </a>
           <button onClick={() => setModal('workspaces')}>
             <FolderGit2 size={17} />
             {t('Workspaces')}
@@ -283,8 +222,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('What are we building?')}</h1>
+            <h1>{board?.group.title ?? t('What’s the job?')}</h1>
           </div>
+          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button
@@ -305,6 +245,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
           )}
         </header>
+        <UsageStrip
+          usage={state.usage}
+          connected={state.connected}
+          onDetails={() => setModal('limits')}
+        />
         {state.error && (
           <div className="daddy-error" role="alert">
             {t(state.error)}
@@ -336,7 +281,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       <strong>daddy</strong>
                       <p>
                         {t(
-                          'Send me the goal. I will take care of the writers, reviews and follow-through.',
+                          'Drop the task here. I’ll get the crew moving and check the work myself.',
                         )}
                       </p>
                     </div>
@@ -393,7 +338,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     ref={composer}
                     aria-label={t('Message daddy')}
                     placeholder={t(
-                      paused ? 'Resume daddy to continue' : 'A goal, a ticket link, or a question…',
+                      paused
+                        ? 'Resume daddy to continue'
+                        : 'Drop a task or ticket. I’ll take it from here.',
                     )}
                     value={state.drafts[state.selected] ?? ''}
                     disabled={paused}
@@ -412,9 +359,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   />
                   <footer>
                     <span>
-                      {board.writers.active
-                        ? t('Writers at work: {count}', { count: board.writers.active })
-                        : t('daddy handles the details.')}
+                      {board.workers.active
+                        ? t('Workers at work: {count}', { count: board.workers.active })
+                        : t('The crew is my problem. The goal is yours.')}
                     </span>
                     <button
                       type="submit"
@@ -436,21 +383,21 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 <div className="daddy-board-header">
                   <div>
                     <span className="daddy-eyebrow">{t('Your team')}</span>
-                    <h2>{t('Writer pool')}</h2>
+                    <h2>{t('Worker pool')}</h2>
                   </div>
                   <span className="daddy-pool-count">
-                    {board.writers.active}
-                    <small>/{board.writers.limit}</small>
+                    {board.workers.active}
+                    <small>/{board.workers.limit}</small>
                   </span>
                 </div>
                 <label className="daddy-pool-control">
-                  {t('Maximum writers')}
+                  {t('Maximum workers')}
                   <select
-                    aria-label={t('Maximum writers')}
-                    value={board.writers.target}
+                    aria-label={t('Maximum workers')}
+                    value={board.workers.target}
                     disabled={state.busy}
                     onChange={(event) =>
-                      void model.action('settings', { writerLimit: Number(event.target.value) })
+                      void model.action('settings', { workerLimit: Number(event.target.value) })
                     }
                   >
                     {[1, 2, 3, 4, 5, 6, 7, 8].map((number) => (
@@ -462,15 +409,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </label>
                 <p className="daddy-pool-hint" role="status">
                   {t(
-                    board.writers.pending
+                    board.workers.pending
                       ? 'Pool: {limit} → {target}. Changes apply in the background.'
                       : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-                    board.writers,
+                    board.workers,
                   )}
                 </p>
                 <p className="daddy-pool-hint">
                   {t(
-                    'Pool changes apply in the background. Busy writers finish their tasks, including review fixes.',
+                    'Pool changes apply in the background. Busy workers finish their tasks, including review fixes.',
                   )}
                 </p>
                 <div className="daddy-section-label">
@@ -537,7 +484,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   <span>
                     {t('One daddy. Shared context.')}
                     <small>
-                      {board.group.daddy.model ?? t('Codex configuration')}{' '}
+                      {board.group.daddy.model ?? t('Engine configuration')}{' '}
                       {board.group.daddy.effort && '· ' + board.group.daddy.effort}
                     </small>
                   </span>
@@ -548,15 +495,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         ) : (
           <div className="daddy-welcome">
             <span className="daddy-mark large">d.</span>
-            <div className="daddy-eyebrow">{t('Meet your coding team')}</div>
+            <div className="daddy-eyebrow">{t('Meet the crew')}</div>
             <h2>
-              {t('You bring the idea.')}
+              {t('Your task.')}
               <br />
-              <span>{t('daddy takes it from here.')}</span>
+              <span>{t('My crew.')}</span>
             </h2>
             <p>
               {t(
-                'Choose a workspace and talk to one agent. daddy turns the goal into tasks, manages a pool of writers and reviews their work.',
+                'Pick a workspace and give me the job. I’ll line up the workers, keep them moving and bring the result back here.',
               )}
             </p>
             <button
@@ -601,7 +548,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'workspaces' && (
         <Dialog title={t('Workspaces on this server')} onClose={() => setModal(null)} wide>
-          <ProjectManager
+          <WorkspaceManager
             api={api}
             workspaces={state.workspaces}
             onSaved={() => void model.refresh()}
@@ -632,7 +579,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'limits' && (
         <Dialog title={t('Limits')} onClose={() => setModal(null)}>
-          <UsagePanel api={model.api} />
+          <UsagePanel api={model.api} onUpdate={model.setUsage} />
         </Dialog>
       )}
       {modal === 'notifications' && (
@@ -754,9 +701,7 @@ function NewSession({
         <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} />
       </label>
       <p className="daddy-muted">
-        {t(
-          'Starts with one writer. Change the pool size at any time; daddy decides when to use more.',
-        )}
+        {t('One worker to start. Set the crew size; I’ll handle the assignments.')}
       </p>
       {error && (
         <p role="alert" className="daddy-field-error">
@@ -776,7 +721,7 @@ type DirectoryList = {
   directories: { name: string; path: string }[];
   truncated: boolean;
 };
-function ProjectManager({
+function WorkspaceManager({
   api,
   workspaces,
   onSaved,
@@ -1002,17 +947,21 @@ function SessionSettings({
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
-      writer: board.group.writer ?? { engine: 'codex' },
+      worker: board.group.worker ?? board.group.daddy,
     }),
     [models, setModels] = useState<ModelOption[]>([]),
+    [engines, setEngines] = useState<{ id: string; name: string }[]>([]),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const load = async (refresh = false) => {
     try {
-      const result = await api<{ models: ModelOption[]; error?: string }>(
-        '/agents' + (refresh ? '?refresh=1' : ''),
-      );
+      const result = await api<{
+        models: ModelOption[];
+        engines: { id: string; name: string }[];
+        error?: string;
+      }>('/agents' + (refresh ? '?refresh=1' : ''));
       setModels(result.models);
+      setEngines(result.engines);
       setError(result.error ?? '');
     } catch (error) {
       setError((error as Error).message);
@@ -1032,31 +981,53 @@ function SessionSettings({
           .finally(() => setBusy(false));
       }}
     >
-      {(['daddy', 'writer'] as const).map((role) => {
+      {(['daddy', 'worker'] as const).map((role) => {
         const profile = profiles[role],
-          model = models.find((model) => model.id === profile.model);
+          choices = models.filter((model) => model.engine === profile.engine),
+          model = choices.find((model) => model.id === profile.model);
         return (
           <fieldset key={role}>
-            <legend>{role === 'daddy' ? 'daddy' : t('New writers')}</legend>
+            <legend>{role === 'daddy' ? 'daddy' : t('New workers')}</legend>
+            <label>
+              {t('Agent module')}
+              <select
+                aria-label={
+                  (role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Agent module')
+                }
+                value={profile.engine}
+                onChange={(event) =>
+                  setProfiles({ ...profiles, [role]: { engine: event.target.value } })
+                }
+              >
+                {!engines.some((engine) => engine.id === profile.engine) && (
+                  <option value={profile.engine}>{profile.engine}</option>
+                )}
+                {engines.map((engine) => (
+                  <option key={engine.id} value={engine.id}>
+                    {engine.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               {t('Model')}
               <select
-                aria-label={(role === 'daddy' ? 'daddy' : t('New writers')) + ' ' + t('Model')}
+                aria-label={(role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Model')}
                 value={profile.model ?? ''}
                 onChange={(event) => {
-                  const model = models.find((model) => model.id === event.target.value);
+                  const model = choices.find((model) => model.id === event.target.value);
                   setProfiles({
                     ...profiles,
                     [role]: {
-                      engine: 'codex',
+                      engine: profile.engine,
                       ...(model ? { model: model.id, effort: model.defaultEffort } : {}),
                     },
                   });
                 }}
               >
-                <option value="">{t('Codex configuration')}</option>
+                <option value="">{t('Engine configuration')}</option>
                 {profile.model && !model && <option value={profile.model}>{profile.model}</option>}
-                {models.map((model) => (
+                {choices.map((model) => (
                   <option value={model.id} key={model.id}>
                     {model.name}
                   </option>
@@ -1092,7 +1063,7 @@ function SessionSettings({
       </button>
       <p className="daddy-muted">
         {t(
-          'Writer defaults apply to new tasks. Changing daddy’s model requires his session to be idle.',
+          'Worker defaults apply to new tasks. Changing daddy’s model requires his session to be idle.',
         )}
       </p>
       {error && (
@@ -1213,16 +1184,14 @@ function TaskReport({
           </div>
           <h4>{t('Read-only worker reports')}</h4>
           <p className="daddy-muted">
-            {t(
-              'Discuss changes with daddy in the main conversation. He will send the instructions to the right writer.',
-            )}
+            {t('Bring it to daddy in the main chat. I’ll get the right worker on it.')}
           </p>
           {value.messages
             .filter((message) => message.sender === 'agent')
             .slice(-8)
             .map((message) => (
               <div className="daddy-report-message" key={message.id}>
-                <strong>{message.role === 'reviewer' ? 'daddy' : t('Writer')}</strong>
+                <strong>{message.role === 'reviewer' ? 'daddy' : t('Worker')}</strong>
                 <time>{stamp(message.at)}</time>
                 <div className="daddy-prose">
                   <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>

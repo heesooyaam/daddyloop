@@ -1,3 +1,5 @@
+import { moduleCatalogue } from '../modules/catalogue.js';
+import type { Config } from '../ops/config.js';
 import { accessSync, constants, realpathSync, existsSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 export type Executable = string | (() => string | undefined) | undefined;
@@ -39,4 +41,18 @@ export function isNewerVersion(candidate: string, current: string): boolean {
   for (let i = 0; i < 3; i++)
     if (left.numbers[i] !== right.numbers[i]) return left.numbers[i] > right.numbers[i];
   return !left.prerelease && !!right.prerelease;
+}
+
+export function moduleExecutable(id: string, config: Pick<Config, 'executables'>) {
+  const entry = moduleCatalogue.find((module) => module.id === id);
+  const binary = entry && 'command' in entry ? entry.command : id;
+  const environment = process.env['DADDYLOOP_' + id.toUpperCase().replaceAll('-', '_') + '_BIN'];
+  const root = bundledRoot();
+  return (
+    environment ??
+    config.executables[id] ??
+    (root && existsSync(join(root, 'modules', id, 'bin', binary))
+      ? join(root, 'modules', id, 'bin', binary)
+      : (executablePath(binary) ?? binary))
+  );
 }

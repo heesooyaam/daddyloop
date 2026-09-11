@@ -1,3 +1,4 @@
+import { allRepositories } from '../modules/repositories/index.js';
 import {
   AppError,
   type PRRef,
@@ -27,7 +28,7 @@ export interface ReviewProvider {
   publish(ref: PRRef, review: ReviewHandle): Promise<void>;
 }
 export const tag = (marker: string) => `<!-- ${marker} -->`;
-export function parsePR(url: string, provider?: 'github' | 'gitlab' | 'arcadia'): PRRef {
+export function parsePR(url: string, provider?: string): PRRef {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -47,38 +48,9 @@ export function parsePR(url: string, provider?: 'github' | 'gitlab' | 'arcadia')
       'Use a clean HTTPS PR URL without credentials, port, query or fragment',
       400,
     );
-  const arc =
-    parsed.hostname === 'a.yandex-team.ru'
-      ? parsed.pathname.match(/^(?:\/review\/|\/arc\/[^?#]+\/pull\/)([1-9]\d*)\/?$/)
-      : null;
-  if (arc)
-    return {
-      provider: 'arcadia',
-      host: parsed.hostname,
-      repo: 'arcadia',
-      number: Number(arc[1]),
-      url: `https://a.yandex-team.ru/review/${arc[1]}`,
-    };
-  if (provider === 'arcadia')
-    throw new AppError('invalid_url', 'Use an a.yandex-team.ru review URL', 400);
-  const github = parsed.pathname.match(/^\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)\/?$/);
-  const gitlab = parsed.pathname.match(/^\/(.+)\/-\/merge_requests\/([1-9]\d*)\/?$/);
-  const kind = provider ?? (github ? 'github' : 'gitlab');
-  const match = kind === 'github' ? github : gitlab;
-  if (
-    !match ||
-    !/^[\w.-]+(?:\/[\w.-]+)+$/.test(match[1]) ||
-    match[1].split('/').some((x) => x === '.' || x === '..')
-  )
-    throw new AppError('invalid_url', 'URL must point to a pull request or merge request', 400);
-  return {
-    provider: kind,
-    host: parsed.hostname,
-    repo: match[1],
-    number: Number(match[2]),
-    url: `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`,
-  };
+  return allRepositories().parse(parsed, provider);
 }
+
 export function assertDraft(snapshot: ReviewSnapshot) {
   if (snapshot.status !== 'draft')
     throw new AppError(

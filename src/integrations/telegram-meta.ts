@@ -37,32 +37,31 @@ export function modelsCard(
 ): TelegramCard {
   const t = translator(locale),
     text = new TelegramText().add('🤖 ' + t('Models'), 'bold').add('\n\n');
-  for (const role of ['writer', 'daddy'] as const)
+  for (const role of ['worker', 'daddy'] as const)
     text
-      .add((role === 'writer' ? t('Writer') : 'daddy') + ': ', 'bold')
-      .add(profiles[role].model ?? t('Codex configuration'), 'code')
+      .add((role === 'worker' ? t('Worker') : 'daddy') + ': ', 'bold')
+      .add(profiles[role].model ?? t('Engine configuration'), 'code')
       .add(profiles[role].effort ? ` / ${profiles[role].effort}` : '')
       .add('\n');
   text
     .add('\n')
-    .add(t('Select writer and daddy models independently.'))
+    .add(t('Select worker and daddy models independently.'))
     .add('\n')
-    .add('/defaults', 'code')
+    .add('daddy agents defaults', 'code')
     .add(' · ')
     .add('/models', 'code')
     .add(' — daddy\n\n');
   for (const model of models)
-    text.add(model.id, 'code').add('\n' + model.efforts.join(' · ') + '\n\n');
-  text.add(t('Source: Codex app-server model/list')).add('\n');
-  if (info?.cliVersion) text.add('Codex CLI ' + info.cliVersion).add('\n');
-  if (info?.retrievedAt)
     text
-      .add(t('Retrieved: {time}', { time: new Date(info.retrievedAt).toLocaleString(locale) }))
+      .add(model.engine + ' · ' + model.id, 'code')
+      .add('\n' + model.efforts.join(' · ') + '\n\n');
+  for (const source of info?.modules ?? (info ? [{ engine: '', ...info }] : [])) {
+    text
+      .add((source.engine || 'Agent') + (source.cliVersion ? ' CLI ' + source.cliVersion : ''))
       .add('\n');
-  text
-    .add(t('Cached for up to 5 minutes. Refresh queries the CLI again.'))
-    .add('\n\n')
-    .add(t('Claude integration is not implemented yet.'));
+    if (source.source) text.add(source.source).add('\n');
+  }
+  text.add(t('Refresh queries the enabled agent modules.'));
   return {
     ...text,
     buttons: [
