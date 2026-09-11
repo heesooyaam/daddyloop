@@ -246,7 +246,7 @@ export const daddyRu: Record<string, string> = {
     'Открой тему сессии, которую хочешь продолжить.',
   'Private setup and CLI updates': 'Подключение и обновления CLI в личке',
   'This model selection expired. Open Models again.': 'Выбор модели истёк. Открой модели ещё раз.',
-  'One daddy. No babysitting.': 'Папочка один. Заботы — его.',
+  'daddy will handle it.': 'Папочка всё порешает.',
   'New session': 'Новая сессия',
   'Your sessions': 'Твои сессии',
   'YOUR SESSIONS': 'ТВОИ СЕССИИ',
@@ -459,8 +459,8 @@ export const daddyRu: Record<string, string> = {
   'daddy’s got it.': 'Папочка порешает.',
   'Hand it to daddy. I’ll get the crew moving, check their work and bring you the result.':
     'Отдавай задачу папочке. Раздам работу, спрошу с каждого и принесу результат.',
-  'Pick the workspace. Tell daddy what you need. I’ll take the crew, the checks and the follow-ups off your hands.':
-    'Выбери воркспейс и скажи папочке, что нужно. Бригада, проверки и «ну что там?» — это уже моя забота.',
+  'Describe the task or drop a ticket link. daddy will take it from here.':
+    'Опиши задачу или скинь тикет. Дальше папочка разберётся.',
   'You set the goal. daddy handles the headaches.':
     'С тебя задача. Остальное папочка берёт на себя.',
   'A task, a ticket or a wild idea…': 'Задачу, тикет или смелую идею — сюда…',
