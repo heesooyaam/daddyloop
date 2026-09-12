@@ -1,11 +1,26 @@
 import type { SessionInstructions, SkillSnapshot } from '../core/instructions.js';
 import { translator, type Locale } from '../i18n/index.js';
+import { effectiveInstructions } from '../core/instruction-compose.js';
+import { clearInstructionRole } from './presets.js';
 
 export function instructionLines(value: SessionInstructions | undefined, locale: Locale): string[] {
   const t = translator(locale),
-    current = value ?? { daddy: {}, worker: {} };
+    current = {
+      daddy: effectiveInstructions(value, 'daddy') ?? {},
+      worker: effectiveInstructions(value, 'worker') ?? {},
+    };
   return [
     t('Instructions for this session'),
+    ...(value?.presets?.some((preset) => preset.enabled)
+      ? [
+          t('Presets') +
+            ': ' +
+            value.presets
+              .filter((preset) => preset.enabled)
+              .map((preset) => preset.preset.name)
+              .join(', '),
+        ]
+      : []),
     '',
     ...(['daddy', 'worker'] as const).flatMap((role) => [
       role === 'daddy' ? 'daddy' : t('All workers'),
@@ -19,6 +34,8 @@ export function instructionLines(value: SessionInstructions | undefined, locale:
     '/skill worker <GitHub URL>',
     '/instructions daddy --clear',
     '/instructions worker --clear',
+    '/presets',
+    '/preset <name>',
   ];
 }
 export async function instructionCommand(
@@ -35,7 +52,7 @@ export async function instructionCommand(
   const role = match[2] as 'daddy' | 'worker',
     value = structuredClone(current ?? { daddy: {}, worker: {} });
   if (match[1] === 'instructions') {
-    if (match[3].trim() === '--clear') value[role] = {};
+    if (match[3].trim() === '--clear') return clearInstructionRole(value, role);
     else value[role].prompt = match[3];
   } else {
     const skill = await importSkill(match[3].trim()),

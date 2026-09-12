@@ -34,6 +34,7 @@ import type { RepositorySelection } from '../core/workspace-registry.js';
 import { WorkspaceFields } from './workspace-fields.js';
 import { FolderBrowser } from './folder-browser.js';
 import { InstructionFields } from './instructions.js';
+import { PresetLibrary } from './preset-library.js';
 import type { SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
@@ -80,7 +81,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, setModal] = useState<
-      'new' | 'workspaces' | 'settings' | 'updates' | 'notifications' | 'limits' | null
+      'new' | 'workspaces' | 'settings' | 'updates' | 'notifications' | 'limits' | 'presets' | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
@@ -182,6 +183,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
             {t('Notifications')}
+          </button>
+          <button onClick={() => setModal('presets')}>
+            <Settings2 size={17} />
+            {t('Presets')}
           </button>
           <button onClick={() => setModal('updates')}>
             <RefreshCw size={17} />
@@ -605,6 +610,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               if (!model.snapshot().error) setModal(null);
             }}
           />
+        </Dialog>
+      )}
+      {modal === 'presets' && (
+        <Dialog title={t('Preset library')} onClose={() => setModal(null)} wide>
+          <PresetLibrary api={api} />
         </Dialog>
       )}
       {modal === 'updates' && (

@@ -1,6 +1,15 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.15.0
+# daddyloop 0.16.0
+
+- Shared preset library with independent daddy/worker contents. Sessions can combine several presets and switch individual prompts and skills on or off. Library edits are version checked; existing sessions retain their selected snapshots.
+- Portable backups include the complete library, selected versions, component choices and text. Active preset components are combined and frozen before an agent turn is queued.
+- Browser folder picker with a reviewable Markdown/text file list. Only selected files are uploaded; cancellation or a failed file does not partially attach the folder. Browsers without folder selection can use multiple files.
+- Web, CLI and Telegram support preset selection. Paired documentation and screenshots cover the new flows.
+
+Configuration 3 and SQLite 7 are unchanged. Reload the website after upgrading.
+
+## 0.15.0
 
 - Task-specific instruction sets: separate custom prompts and multiple skills for daddy and all workers in one session. Import from GitHub, server folders, device files or pasted text; export and reuse JSON sets. Web, CLI and Telegram controls share the same settings.
 - Each queued turn freezes its instructions. Backups carry the selected text and checksums, so restoring needs neither the old skill folder nor a GitHub download. Model defaults and other sessions are unaffected.

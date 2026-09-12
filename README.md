@@ -15,7 +15,7 @@ A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he a
 You need a **Linux server** with access to your repositories and an account for your chosen agent. Run this on that server:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.15.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.16.0/install.sh | bash
 ```
 
 Arrows select a module; Space checks it. Codex and GitHub start checked. Add Claude, GitLab or Arcadia if you need them. The installer provides the selected engines, the `daddy` CLI, local voice recognition and a persistent background service. No manual tmux setup.
@@ -99,6 +99,8 @@ Models and effort levels come from the CLI, not a hand-maintained daddyloop list
 
 Want a different style for this task? Give daddy one instruction set and all its workers another. Combine your own prompts with skills from GitHub, local files or pasted Markdown. The texts belong to the session and travel in its backup. [Instructions and skills](docs/instructions/en.md).
 
+Save reusable sets in **Presets**, then enable several for a session and choose individual components inside each. The library and session choices travel in backups. The browser can also import selected instruction files from a local folder.
+
 ## What daddy takes off your hands
 
 - Assigning work and following up with workers. You have one conversation with daddy.
@@ -144,4 +146,4 @@ Agents share execution, model catalogue and usage contracts. Repository modules 
 
 Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/media-guide/en.md).
 
-[Release 0.15.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.15.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Release 0.16.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.16.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

@@ -10,7 +10,7 @@ Start with installation, then open the site or the CLI. Every topic has the same
 - [Tasks, sessions and worker pools](../tasks/en.md)
 - [Agent modules, models and CLI updates](../agents/en.md)
 - [Module selection and developer contracts](../modules/en.md)
-- [Task-specific instructions and skills](../instructions/en.md)
+- [Instructions, skills and presets](../instructions/en.md)
 - [Themes and current usage](../appearance/en.md)
 - [Bot, groups and topics](../telegram/en.md)
 - [Voice messages](../voice/en.md)

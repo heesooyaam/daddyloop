@@ -1,48 +1,24 @@
-import { useEffect, useRef, useState, type ChangeEventHandler } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FileText, LoaderCircle, Plus, Trash2 } from 'lucide-react';
 import type { SessionInstructions, SkillSnapshot } from '../core/instructions.js';
 import type { DaddyApi } from '../client/daddy.js';
 import { useLocale } from './i18n.js';
-
-function InstructionFile({
-  label,
-  accept,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  accept: string;
-  disabled: boolean;
-  onChange: ChangeEventHandler<HTMLInputElement>;
-}) {
-  const { t } = useLocale();
-  return (
-    <span className={'daddy-file-picker' + (disabled ? ' disabled' : '')}>
-      <span className="daddy-button outline" aria-hidden="true">
-        <FileText size={15} />
-        {t('Choose a file')}
-      </span>
-      <input
-        type="file"
-        aria-label={label}
-        accept={accept}
-        disabled={disabled}
-        onChange={onChange}
-      />
-    </span>
-  );
-}
+import { PresetPicker } from './preset-picker.js';
+import { InstructionFile } from './instruction-file.js';
+import { FolderSkills } from './folder-skills.js';
 
 export function InstructionFields({
   api,
   value,
   onChange,
   onBusyChange,
+  scope = 'session',
 }: {
   api: DaddyApi;
   value?: SessionInstructions;
   onChange: (value: SessionInstructions) => void;
   onBusyChange?: (busy: boolean) => void;
+  scope?: 'session' | 'preset';
 }) {
   const { t } = useLocale();
   const [role, setRole] = useState<'daddy' | 'worker'>('daddy');
@@ -50,8 +26,11 @@ export function InstructionFields({
     [kind, setKind] = useState('github');
   const [source, setSource] = useState(''),
     [name, setName] = useState('');
-  const [busy, setBusy] = useState(false),
+  const [importBusy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const [presetBusy, setPresetBusy] = useState(false);
+  const [folderBusy, setFolderBusy] = useState(false);
+  const busy = importBusy || presetBusy || folderBusy;
   const request = useRef<AbortController | undefined>(undefined);
   const current = useRef(value);
   current.current = value;
@@ -98,6 +77,7 @@ export function InstructionFields({
   return (
     <details
       className="daddy-instructions"
+      open={scope === 'preset' ? true : undefined}
       onKeyDown={(event) => {
         if (
           event.key === 'Enter' &&
@@ -114,13 +94,26 @@ export function InstructionFields({
     >
       <summary>
         <FileText size={16} />
-        {t('Style and skills for this session')}
+        {t(scope === 'preset' ? 'Preset contents' : 'Style and skills for this session')}
       </summary>
       <p className="daddy-muted">
         {t(
-          'Only this session. Choose separate instructions for daddy and for all its workers. Saved text travels with your backup.',
+          scope === 'preset'
+            ? 'Build a reusable set for daddy and workers. Sessions choose which parts to use.'
+            : 'Only this session. Choose separate instructions for daddy and for all its workers. Saved text travels with your backup.',
         )}
       </p>
+      {scope === 'session' && (
+        <PresetPicker
+          api={api}
+          value={value?.presets}
+          onChange={(presets) =>
+            change.current({ ...(current.current ?? { daddy: {}, worker: {} }), presets })
+          }
+          onBusyChange={setPresetBusy}
+          disabled={importBusy || folderBusy}
+        />
+      )}
       <div className="daddy-instruction-roles">
         {(['daddy', 'worker'] as const).map((item) => (
           <button
@@ -198,6 +191,7 @@ export function InstructionFields({
               <option value="github">GitHub</option>
               <option value="local">{t('Folder or file on the server')}</option>
               <option value="file">{t('File from this device')}</option>
+              <option value="folder">{t('Folder from this device')}</option>
               <option value="text">{t('Paste skill text')}</option>
             </select>
           </label>
@@ -206,7 +200,23 @@ export function InstructionFields({
               'Attach the Markdown instructions from SKILL.md. Native plugin installers, scripts and hooks are not run.',
             )}
           </p>
-          {kind === 'file' ? (
+          {kind === 'folder' ? (
+            <FolderSkills
+              api={api}
+              onBusyChange={setFolderBusy}
+              disabled={importBusy || presetBusy}
+              onImported={(added) => {
+                const next = current.current ?? { daddy: {}, worker: {} },
+                  skills = [...(next[role].skills ?? [])];
+                for (const skill of added)
+                  if (!skills.some((other) => other.checksum === skill.checksum))
+                    skills.push(skill);
+                if (skills.length > 12) throw new Error('Choose at most 12 skills per role');
+                change.current({ ...next, [role]: { ...next[role], skills } });
+                setAdding(false);
+              }}
+            />
+          ) : kind === 'file' ? (
             <label>
               {t('Markdown file')}
               <InstructionFile
@@ -350,7 +360,7 @@ export function InstructionFields({
                 .then(async (text) => {
                   if (controller.signal.aborted) return;
                   const next = await api<SessionInstructions>(
-                    '/instructions/validate',
+                    '/instructions/validate' + (scope === 'preset' ? '?flatten=1' : ''),
                     JSON.parse(text),
                     controller.signal,
                   );
@@ -368,7 +378,9 @@ export function InstructionFields({
       </div>
       <p className="daddy-muted">
         {t(
-          'Changes affect newly queued turns. Running and already queued turns keep their saved instructions.',
+          scope === 'preset'
+            ? 'Saving changes the library version. Existing sessions keep their selected copy.'
+            : 'Changes affect newly queued turns. Running and already queued turns keep their saved instructions.',
         )}
       </p>
     </details>

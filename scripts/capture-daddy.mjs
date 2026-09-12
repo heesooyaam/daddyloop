@@ -11,6 +11,8 @@ import { usageFixture } from '../tests/e2e/usage-fixture.mjs';
 import { configSchema } from '../dist/server/ops/config.js';
 import { Store } from '../dist/server/core/store.js';
 import { WorkspaceRegistry } from '../dist/server/core/workspace-registry.js';
+import { InstructionPresets } from '../dist/server/core/instruction-presets.js';
+import { InstructionSources } from '../dist/server/ops/instruction-sources.js';
 const locale = process.env.DADDYLOOP_MEDIA_LOCALE === 'ru' ? 'ru' : 'en';
 const t = translator(locale);
 const root = resolve(import.meta.dirname, '..'),
@@ -101,6 +103,57 @@ const server = await buildApp({
   startUpdateCheck: false,
   catalogue,
 });
+const presetLibrary = new InstructionPresets(store);
+const presetSkill = await new InstructionSources().import({
+  kind: 'text',
+  name: locale === 'ru' ? 'Точные названия' : 'Exact names',
+  text:
+    locale === 'ru'
+      ? 'Сохраняй точные имена API и коды ошибок.'
+      : 'Preserve exact API names and error codes.',
+});
+const shortPreset = presetLibrary.save({
+  name: locale === 'ru' ? 'Коротко и по делу' : 'Brief updates',
+  description:
+    locale === 'ru' ? 'Короткие ответы и точные формулировки' : 'Short answers and precise wording',
+  instructions: {
+    daddy: {
+      prompt:
+        locale === 'ru'
+          ? 'Начинай с результата. Коротко объясняй решения.'
+          : 'Lead with the result. Explain decisions briefly.',
+      skills: [presetSkill],
+    },
+    worker: {
+      prompt:
+        locale === 'ru'
+          ? 'Коротко описывай, что изменено и проверено.'
+          : 'Briefly describe the change and its checks.',
+    },
+  },
+});
+const checkPreset = presetLibrary.save({
+  name: locale === 'ru' ? 'Внимательная проверка' : 'Careful checks',
+  description:
+    locale === 'ru'
+      ? 'Граничные случаи и проверка результата'
+      : 'Edge cases and result verification',
+  instructions: {
+    daddy: {},
+    worker: {
+      prompt:
+        locale === 'ru'
+          ? 'Проверяй повторные запросы, отмену и потерю ответа.'
+          : 'Check retries, cancellation and lost responses.',
+      skills: [presetSkill],
+    },
+  },
+});
+const skillFolder = join(scratch, 'skills');
+for (const name of ['brief', 'testing']) mkdirSync(join(skillFolder, name), { recursive: true });
+writeFileSync(join(skillFolder, 'brief/SKILL.md'), '---\nname: brief\n---\nKeep answers short.');
+writeFileSync(join(skillFolder, 'testing/SKILL.md'), '---\nname: testing\n---\nVerify the change.');
+writeFileSync(join(skillFolder, 'notes.md'), 'Optional instructions.');
 const fixture = {
   en: {
     title: 'Payments without duplicate charges',
@@ -276,6 +329,39 @@ try {
   await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
   await page.screenshot({ path: join(output, 'daddy-new-session.png'), animations: 'disabled' });
   await page.getByText(t('Style and skills for this session'), { exact: true }).click();
+  for (const preset of [shortPreset, checkPreset]) {
+    await page
+      .getByRole('checkbox', { name: t('Use preset {name}', { name: preset.name }), exact: true })
+      .check();
+    await expect(
+      page.getByRole('checkbox', {
+        name: t('Use preset {name}', { name: preset.name }),
+        exact: true,
+      }),
+    ).toBeChecked();
+  }
+  const selection = page.locator('.daddy-preset-choice').filter({
+    has: page.getByRole('checkbox', {
+      name: t('Use preset {name}', { name: shortPreset.name }),
+      exact: true,
+    }),
+  });
+  await selection.getByText(t('Choose components'), { exact: false }).click();
+  await selection
+    .getByRole('checkbox', {
+      name: t('{preset}: {role}: {part}', {
+        preset: shortPreset.name,
+        role: t('All workers'),
+        part: t('Prompt'),
+      }),
+      exact: true,
+    })
+    .uncheck();
+  await page.locator('.daddy-preset-picker').scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: join(output, 'daddy-preset-selection.png'),
+    animations: 'disabled',
+  });
   await page
     .getByLabel(t('Your instructions for {role}', { role: 'daddy' }))
     .fill(
@@ -299,6 +385,12 @@ try {
   await expect(page.getByRole('button', { name: t('Attach a skill'), exact: true })).toBeVisible();
   await page.locator('.daddy-instructions').scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(output, 'daddy-instructions.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Attach a skill'), exact: true }).click();
+  await page.getByLabel(t('Skill source')).selectOption('folder');
+  await page.getByLabel(t('Skill folder on this device')).setInputFiles(skillFolder);
+  await page.getByRole('region', { name: t('Skills from a folder') }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(output, 'daddy-skill-folder.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Cancel'), exact: true }).click();
   await page.getByText(t('Style and skills for this session'), { exact: true }).click();
   await page.getByRole('button', { name: t('Change folder for this session') }).click();
   await page.getByRole('button', { name: t('Browse server folders') }).click();
@@ -324,6 +416,15 @@ try {
   await page.getByRole('button', { name: t('Session settings') }).click();
   await expect(page.getByLabel('daddy ' + t('Model'))).toHaveValue('gpt-6-astra');
   await page.screenshot({ path: join(output, 'daddy-models.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+  await page.getByRole('button', { name: t('Presets'), exact: true }).click();
+  await expect(
+    page.getByRole('button', {
+      name: t('Edit preset {name}', { name: shortPreset.name }),
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.screenshot({ path: join(output, 'daddy-preset-library.png'), animations: 'disabled' });
   await page.getByRole('button', { name: t('Close'), exact: true }).click();
   await page
     .locator('.daddy-sidebar-bottom')
@@ -414,6 +515,9 @@ try {
         screens: [
           'daddy-home',
           'daddy-instructions',
+          'daddy-preset-selection',
+          'daddy-skill-folder',
+          'daddy-preset-library',
           'daddy-desktop',
           'daddy-models',
           'daddy-phone-chat',

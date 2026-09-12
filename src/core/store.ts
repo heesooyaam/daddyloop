@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
   now,
@@ -151,7 +152,9 @@ export class Store {
           : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
             defaults?.[role === 'author' ? 'worker' : 'daddy']),
       groupId: group?.id,
-      instructions: structuredClone(group?.instructions?.[role === 'author' ? 'worker' : 'daddy']),
+      instructions: structuredClone(
+        effectiveInstructions(group?.instructions, role === 'author' ? 'worker' : 'daddy'),
+      ),
       groupGeneration: group?.generation,
       actionId,
     };

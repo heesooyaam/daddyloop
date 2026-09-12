@@ -4,6 +4,8 @@ import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
+import { InstructionPresets } from '../src/core/instruction-presets.js';
+import { effectiveInstructions } from '../src/core/instructions.js';
 afterEach(() => vi.restoreAllMocks());
 it('changes only the selected session role from a private chat or topic and ignores other senders', async () => {
   const f = daddyFixture();
@@ -49,6 +51,27 @@ it('changes only the selected session role from a private chat or topic and igno
       message('/instructions worker --clear', 7, -10042, destination!.threadId),
     );
     expect(f.daddy.group(second.id).instructions?.worker).toEqual({});
+    new InstructionPresets(f.store).save({
+      name: 'Shared style',
+      instructions: {
+        daddy: { prompt: 'Preset daddy style' },
+        worker: { prompt: 'Preset worker style' },
+      },
+    });
+    await workspace.handle(message('/preset Shared style', 99, -10042, destination!.threadId));
+    expect(f.daddy.group(second.id).instructions?.presets).toBeUndefined();
+    await workspace.handle(message('/preset Shared style', 7, -10042, destination!.threadId));
+    expect(effectiveInstructions(f.daddy.group(second.id).instructions, 'worker')?.prompt).toBe(
+      'Preset worker style',
+    );
+    expect(f.daddy.group(first.id).instructions?.presets).toBeUndefined();
+    await workspace.handle(
+      message('/instructions worker --clear', 7, -10042, destination!.threadId),
+    );
+    expect(effectiveInstructions(f.daddy.group(second.id).instructions, 'worker')).toEqual({});
+    expect(effectiveInstructions(f.daddy.group(second.id).instructions, 'daddy')?.prompt).toBe(
+      'Preset daddy style',
+    );
   } finally {
     await workspace.stop();
     await f.close();

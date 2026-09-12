@@ -7,7 +7,7 @@
 ## 1. Установка
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.15.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.16.0/install.sh | bash
 ```
 
 Выбирай модули стрелками **↑/↓**, переключай галочку **пробелом**, подтверждай **Enter**. Изначально выбраны Codex и GitHub. GitLab работает через REST API, Arcadia — через уже установленные корпоративные инструменты. Установщик скачивает выбранные CLI, ставит Node и локальную модель распознавания речи, затем запускает сервис systemd. Настраивать tmux не нужно.
@@ -15,7 +15,7 @@ curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.15.0/ins
 Без интерактивных вопросов:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.15.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.16.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
 ```
 
 Поддерживаются Linux x64 и ARM64. Нужны curl и tar; Git скрипт умеет поставить через apt. Для Git и постоянного сервиса может понадобиться одноразовый доступ через sudo. На macOS и Windows можно пользоваться сайтом. Подробнее: [модули](../modules/ru.md), [эксплуатация](../operations/ru.md).

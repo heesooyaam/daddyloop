@@ -24,13 +24,15 @@ Each daddy session gets a topic. Send goals and tickets there; workers report to
 
 ## Commands
 
-| Where                                     | Commands                                                                                                                                                                                         |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
-| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                     |
+| Where                                     | Commands                                                                                                                                                                                                                |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
+| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                                            |
 
 `/web` creates a browser login link after [permanent HTTPS access](../web/en.md) is configured. CLI updates and account confirmations stay in the private chat. Work continues when the phone and laptop are offline.
 
 Send `/notifications` to choose quiet completion/decision notices, all updates, or mute. Voice messages follow the same session routing; see [voice](../voice/en.md).
 
 The session card opens **Instructions for this session**. `/instructions daddy <text>` and `/instructions worker <text>` set separate prompts; `/skill <role> <GitHub URL>` adds a skill. These commands work in private conversations and their group topics. See [task instructions](../instructions/en.md).
+
+`/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected in the website’s session settings.

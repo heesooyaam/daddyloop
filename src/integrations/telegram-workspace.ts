@@ -19,6 +19,8 @@ import { notificationsCard } from './telegram-cards.js';
 import { languageCard } from './telegram-meta.js';
 import { instructionCommand, instructionLines } from '../client/instructions.js';
 import { InstructionSources } from '../ops/instruction-sources.js';
+import { InstructionPresets } from '../core/instruction-presets.js';
+import { findPreset, selectPreset, presetLines } from '../client/presets.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
@@ -1075,6 +1077,38 @@ export class TelegramWorkspace {
           new TelegramText().add(
             instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
           ),
+        );
+        return true;
+      }
+      if (text === '/presets') {
+        await this.api.send(
+          destination,
+          new TelegramText()
+            .add('🧩 ' + this.t('Presets'), 'bold')
+            .add(
+              '\n\n' +
+                presetLines(new InstructionPresets(this.store).list(), this.locale()).join('\n'),
+            ),
+        );
+        return true;
+      }
+      const presetName = text.match(/^\/preset\s+(.+)$/)?.[1];
+      if (presetName) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        this.authorize(destination, groupId);
+        const library = new InstructionPresets(this.store),
+          preset = library.get(findPreset(library.list(), presetName).id);
+        await this.daddy.settings(groupId, {
+          instructions: selectPreset(this.daddy.group(groupId).instructions, preset),
+        });
+        await this.api.send(
+          destination,
+          new TelegramText()
+            .add(this.t('Preset enabled for this session'), 'bold')
+            .add(
+              '\n\n' +
+                instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
+            ),
         );
         return true;
       }

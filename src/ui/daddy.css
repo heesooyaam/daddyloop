@@ -2184,3 +2184,145 @@ body {
 .daddy-file-picker.disabled {
   opacity: 0.5;
 }
+.daddy-preset-picker {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin: 14px 0;
+  padding: 12px;
+}
+.daddy-preset-heading,
+.daddy-preset-choice-header,
+.daddy-preset-parts-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.daddy-preset-choice {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 9px;
+  padding: 10px;
+}
+.daddy-preset-choice.selected {
+  border-color: var(--primary);
+}
+.daddy-preset-choice label {
+  display: flex;
+  flex-direction: row;
+  align-items: start;
+  gap: 9px;
+  margin: 6px 0;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+.daddy-preset-choice label strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.daddy-preset-choice label > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.daddy-preset-choice label small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.daddy-preset-choice input[type='checkbox'] {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+.daddy-preset-components {
+  margin-top: 8px;
+}
+.daddy-preset-components summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+.daddy-preset-components fieldset,
+.daddy-preset-editor > fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.daddy-preset-parts-actions {
+  justify-content: start;
+  margin-bottom: 12px;
+}
+.daddy-preset-library-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 9px;
+  margin: 14px 0;
+}
+.daddy-preset-library-card {
+  display: grid;
+  gap: 7px;
+  background: var(--paper);
+  color: var(--ink);
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 13px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.daddy-preset-library-card small {
+  color: var(--muted);
+}
+.daddy-preset-editor {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 14px;
+}
+.daddy-folder-skill-list {
+  display: grid;
+  gap: 5px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+.daddy-folder-skill-list label {
+  display: flex;
+  flex-direction: row;
+  align-items: start;
+  gap: 9px;
+  margin: 4px 0;
+  cursor: pointer;
+}
+.daddy-folder-skill-list input[type='checkbox'] {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+.daddy-folder-skill-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: grid;
+  gap: 3px;
+}
+.daddy-folder-skill-list small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.daddy-folder-skills > .daddy-text-button {
+  display: block;
+  margin-top: 10px;
+}

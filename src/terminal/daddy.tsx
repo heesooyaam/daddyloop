@@ -11,6 +11,8 @@ import { VERSION } from '../version.js';
 import type { ResetPlan, UsageView } from '../core/usage.js';
 import { resetOutcomeText, usageLines, usageSummary } from '../client/usage.js';
 import { instructionCommand, instructionLines } from '../client/instructions.js';
+import { findPreset, selectPreset, presetLines } from '../client/presets.js';
+import type { InstructionPreset } from '../core/instructions.js';
 
 type MenuKind =
   | 'instructions'
@@ -40,6 +42,8 @@ type MenuState = {
   notice?: string;
 };
 const commands = [
+  '/presets',
+  '/preset',
   '/instructions',
   '/skill',
   '/new',
@@ -337,6 +341,40 @@ export function DaddyTerminal({
         query: '',
         notice: instructionLines(model.snapshot().board?.group.instructions, locale).join('\n'),
       });
+      return;
+    }
+    if (name === '/presets') {
+      const presets =
+        await model.api<{ id: string; name: string; description: string }[]>(
+          '/instructions/presets',
+        );
+      setMenu({
+        kind: 'instructions',
+        index: 0,
+        query: '',
+        notice: presetLines(presets, locale).join('\n'),
+      });
+      return;
+    }
+    if (name === '/preset') {
+      if (!state.board) throw new Error(t('Start a daddy session first.'));
+      const library =
+        await model.api<{ id: string; name: string; description: string }[]>(
+          '/instructions/presets',
+        );
+      const preset = await model.api<InstructionPreset>(
+        '/instructions/presets/' + findPreset(library, argument).id,
+      );
+      await model.action('settings', {
+        instructions: selectPreset(model.snapshot().board?.group.instructions, preset),
+      });
+      if (!model.snapshot().error)
+        setMenu({
+          kind: 'instructions',
+          index: 0,
+          query: '',
+          notice: instructionLines(model.snapshot().board?.group.instructions, locale).join('\n'),
+        });
       return;
     }
     if (name === '/tasks') {

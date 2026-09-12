@@ -18,7 +18,13 @@ import { Store } from '../src/core/store.js';
 import { fixture } from './helpers.js';
 import { Workspaces, git as runGit } from '../src/runtime/workspaces.js';
 import { InstructionSources } from '../src/ops/instruction-sources.js';
-import { sessionInstructionsSchema, withInstructions } from '../src/core/instructions.js';
+import {
+  sessionInstructionsSchema,
+  withInstructions,
+  effectiveInstructions,
+  type SessionInstructions,
+} from '../src/core/instructions.js';
+import { InstructionPresets } from '../src/core/instruction-presets.js';
 const git = (...args: Parameters<typeof runGit>) =>
   runGit(...args).catch((error) => {
     const info: Record<string, unknown> = {};
@@ -88,10 +94,19 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
       `---\nname: portable-style\n---\nKeep explanations short. Original source: ${repo}\n`,
     );
     const skill = await new InstructionSources().import({ kind: 'local', path: skillDirectory });
-    const instructions = {
+    const instructions: SessionInstructions = {
       daddy: { prompt: 'Explain decisions in Russian.', skills: [skill] },
       worker: { prompt: 'Check the implementation carefully.' },
     };
+    const library = new InstructionPresets(store);
+    const preset = library.save({
+      name: 'Portable preset',
+      instructions: {
+        daddy: { prompt: 'Preset daddy prompt', skills: [skill] },
+        worker: { prompt: 'Do not include this part' },
+      },
+    });
+    instructions.presets = [{ preset, enabled: true, omit: ['worker:prompt'] }];
     const groupId = '839e11c0-f019-49db-b300-184b9697c6a2';
     store.saveGroup({
       id: groupId,
@@ -107,6 +122,14 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     task.groupId = groupId;
     store.saveTask(task);
     const job = store.enqueue(task, 'author', 'chat', 'Continue after moving');
+    library.save(
+      {
+        name: preset.name,
+        instructions: { daddy: { prompt: 'New library version' }, worker: {} },
+        expectedRevision: preset.revision,
+      },
+      preset.id,
+    );
     store.setSetting('preferences', { locale: 'ru' });
     store.setSetting('telegram.pairing', { secret: 'must-not-transfer' });
     store.event(task.id, 'review.evidence', { markdown: '**Keep this review**' });
@@ -127,6 +150,15 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
         restored.getGroup(groupId).instructions,
       );
       expect(savedInstructions).toEqual(instructions);
+      expect(new InstructionPresets(restored).get(preset.id).revision).toBe(2);
+      expect(savedInstructions.presets?.[0].preset.revision).toBe(1);
+      expect(savedInstructions.presets?.[0].omit).toEqual(['worker:prompt']);
+      expect(effectiveInstructions(savedInstructions, 'daddy')?.prompt).toContain(
+        'Preset daddy prompt',
+      );
+      expect(effectiveInstructions(savedInstructions, 'daddy')?.prompt).not.toContain(
+        'New library version',
+      );
       expect(withInstructions('Workflow policy', savedInstructions.daddy)).toContain(skill.text);
       expect(restored.jobs().find((item) => item.id === job.id)?.instructions).toEqual(
         instructions.worker,
