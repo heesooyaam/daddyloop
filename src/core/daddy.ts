@@ -26,6 +26,7 @@ import { parsePR } from '../providers/provider.js';
 import { workerPool } from './worker-pool.js';
 import {
   sessionInstructionsSchema,
+  effectiveInstructions,
   withInstructions,
   type SessionInstructions,
 } from './instructions.js';
@@ -246,7 +247,8 @@ export class Daddy {
     const pending =
       queued &&
       JSON.stringify(queued.workspace) === JSON.stringify(workspace) &&
-      JSON.stringify(queued.instructions) === JSON.stringify(group.instructions?.daddy)
+      JSON.stringify(queued.instructions) ===
+        JSON.stringify(effectiveInstructions(group.instructions, 'daddy'))
         ? queued
         : undefined;
     if (pending) {
@@ -264,7 +266,7 @@ export class Daddy {
       trigger,
       input,
       profile: group.daddy,
-      instructions: structuredClone(group.instructions?.daddy),
+      instructions: structuredClone(effectiveInstructions(group.instructions, 'daddy')),
       workspace,
       status: 'queued',
       createdAt: now(),

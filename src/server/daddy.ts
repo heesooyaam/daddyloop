@@ -53,7 +53,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       };
     }),
   );
-  app.post('/api/daddy/sessions', async (request, reply) => {
+  app.post('/api/daddy/sessions', { bodyLimit: 1048576 }, async (request, reply) => {
     const input = z
       .object({
         workspaceId: id,
@@ -105,18 +105,21 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       workspace,
     );
   });
-  app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/settings', async (request) =>
-    daddy.settings(
-      id.parse(request.params.id),
-      z
-        .object({
-          workerLimit: z.number().int().min(1).max(8).optional(),
-          profiles: profilesSchema.optional(),
-          instructions: sessionInstructionsSchema.optional(),
-        })
-        .strict()
-        .parse(request.body),
-    ),
+  app.post<{ Params: { id: string } }>(
+    '/api/daddy/sessions/:id/settings',
+    { bodyLimit: 1048576 },
+    async (request) =>
+      daddy.settings(
+        id.parse(request.params.id),
+        z
+          .object({
+            workerLimit: z.number().int().min(1).max(8).optional(),
+            profiles: profilesSchema.optional(),
+            instructions: sessionInstructionsSchema.optional(),
+          })
+          .strict()
+          .parse(request.body),
+      ),
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/pause', async (request) =>
     daddy.pause(id.parse(request.params.id)),

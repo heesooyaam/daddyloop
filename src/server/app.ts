@@ -486,7 +486,7 @@ export async function buildApp(options: ServerOptions) {
     return updates.status();
   });
   registerPlanning(app, engine, catalogue, config.maxConcurrentAgents);
-  registerInstructions(app);
+  registerInstructions(app, store);
   app.post('/api/demo', async (_request, reply) => {
     if (!options.demo)
       throw new AppError('demo_disabled', 'Start with --demo to enable demo fixtures', 404);

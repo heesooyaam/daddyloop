@@ -132,7 +132,7 @@ function scrubIdentity(db: DatabaseSync) {
   for (const table of ['devices', 'pairings', 'bot_receipts', 'bot_actions', 'notifications'])
     db.exec(`DELETE FROM ${table}`);
   db.exec(
-    "DELETE FROM settings WHERE key NOT IN ('preferences', 'agents.defaults', 'updates.notifications')",
+    "DELETE FROM settings WHERE key NOT IN ('preferences', 'agents.defaults', 'updates.notifications', 'instructions.presets')",
   );
 }
 export async function createBackup(dataDir: string, output: string, config: Config, maxGiB = 20) {

@@ -13,7 +13,24 @@ export const instructionSourceSchema = z.discriminatedUnion('kind', [
     .object({ kind: z.literal('text'), name: z.string().max(100), text: z.string().max(65536) })
     .strict(),
   z
-    .object({ kind: z.literal('file'), name: z.string().max(100), text: z.string().max(65536) })
+    .object({
+      kind: z.literal('file'),
+      name: z.string().max(100),
+      text: z.string().max(65536),
+      path: z
+        .string()
+        .min(1)
+        .max(2048)
+        .refine(
+          (path) =>
+            !path.startsWith('/') &&
+            !/^[A-Za-z]:/.test(path) &&
+            !/[\\\0]/.test(path) &&
+            path.split('/').every((part) => part && part !== '.' && part !== '..'),
+          'Use a relative folder path',
+        )
+        .optional(),
+    })
     .strict(),
   z.object({ kind: z.literal('local'), path: z.string().min(1).max(2048) }).strict(),
   z.object({ kind: z.literal('github'), url: z.string().min(1).max(2048) }).strict(),
@@ -104,8 +121,8 @@ export class InstructionSources {
     signal?.throwIfAborted();
     if (source.kind === 'text' || source.kind === 'file')
       return snapshot(source.text, source.name, {
-        kind: source.kind,
-        ...(source.kind === 'file' ? { location: source.name } : {}),
+        kind: source.kind === 'file' && source.path ? 'folder' : source.kind,
+        ...(source.kind === 'file' ? { location: source.path ?? source.name } : {}),
       });
     if (source.kind === 'local') return local(source.path);
     return this.github(source.url, signal);

@@ -1,4 +1,75 @@
 export const daddyRu: Record<string, string> = {
+  Presets: 'Пресеты',
+  'Preset library': 'Библиотека пресетов',
+  'Session presets': 'Пресеты сессии',
+  'Refresh list': 'Обновить список',
+  'Combine presets and choose their individual parts. Your own instructions below are applied last.':
+    'Выбирай пресеты и нужные части внутри них. Твои инструкции ниже применяются последними.',
+  'Create reusable sets in Presets in the sidebar.':
+    'Создать общий набор можно в разделе «Пресеты» в боковом меню.',
+  'Use preset {name}': 'Подключить пресет {name}',
+  'Remove preset {name} from this session': 'Убрать пресет {name} из этой сессии',
+  'Choose components': 'Выбрать компоненты',
+  'Saved version {revision}. Library edits do not change this copy.':
+    'В этой сессии сохранён снимок версии {revision}.',
+  'Select all': 'Выбрать всё',
+  'Clear selection': 'Снять выбор',
+  Prompt: 'Промпт',
+  '{preset}: {role}: {part}': '{preset}: {role}: {part}',
+  'Loading preset…': 'Загружаю пресет…',
+  'Choose at most 16 presets per session': 'В сессию можно добавить до 16 пресетов',
+  'Save reusable sets here, then choose any number of them for a session. Each session keeps its own selected version.':
+    'Сохраняй здесь наборы инструкций, чтобы потом выбирать их для задач. У каждой сессии останется своя выбранная версия.',
+  'Edit preset {name}': 'Редактировать пресет {name}',
+  '{count} components': 'Компонентов: {count}',
+  'No presets yet. Create your first reusable instruction set.':
+    'Пресетов пока нет. Собери первый набор инструкций.',
+  'Create preset': 'Создать пресет',
+  'Preset name': 'Название пресета',
+  'Preset description (optional)': 'Описание пресета (необязательно)',
+  'Save preset': 'Сохранить пресет',
+  'Delete preset': 'Удалить пресет',
+  'Preset saved. Choose it when creating a session.':
+    'Пресет сохранён. Теперь его можно выбрать при создании сессии.',
+  'Preset contents': 'Содержимое пресета',
+  'Build a reusable set for daddy and workers. Sessions choose which parts to use.':
+    'Собери набор для daddy и воркеров. В каждой сессии можно будет выбрать нужные части.',
+  'Saving changes the library version. Existing sessions keep their selected copy.':
+    'Сохранение обновит версию в библиотеке. Уже созданные сессии сохранят свой набор.',
+  'Preset not found': 'Пресет не найден',
+  'This preset changed. Reload it before saving.':
+    'Пресет уже изменился. Открой его заново перед сохранением.',
+  'This preset changed. Reload it before deleting.':
+    'Пресет уже изменился. Открой его заново перед удалением.',
+  'Choose a unique preset name': 'Выбери другое название пресета: это уже занято',
+  'Choose a unique preset name or ID': 'Укажи однозначное название или ID пресета',
+  'The preset library is limited to 50 presets and 4 MiB': 'Лимит библиотеки — 50 пресетов и 4 МиБ',
+  'Preset enabled for this session': 'Пресет подключён к этой сессии',
+  'Open the website or CLI for the full preset list.':
+    'Полный список пресетов доступен на сайте и в CLI.',
+  'Choose individual preset components in the session settings on the website.':
+    'Выбрать отдельные части пресета можно в настройках сессии на сайте.',
+  'Choose a folder': 'Выбрать папку',
+  'Choose files': 'Выбрать файлы',
+  'Folder from this device': 'Папка с этого устройства',
+  'Skills from a folder': 'Навыки из папки',
+  'Choose a folder on this device, then select its instruction files. Only selected Markdown or text files are uploaded.':
+    'Выбери папку на этом устройстве, затем отметь нужные файлы инструкций. Загрузятся выбранные Markdown- и текстовые файлы.',
+  'This browser has no folder picker. Select several instruction files instead.':
+    'В этом браузере нет выбора папки. Можно выбрать несколько файлов инструкций.',
+  'Skill folder on this device': 'Папка навыков на этом устройстве',
+  'Instruction files on this device': 'Файлы инструкций на этом устройстве',
+  'Choose a smaller folder with instruction files': 'Выбери папку поменьше, с нужными инструкциями',
+  'No Markdown or text instruction files were found':
+    'В этой папке нет Markdown- или текстовых файлов инструкций',
+  'Choose individual files instead': 'Выбрать отдельные файлы',
+  'Choose a whole folder instead': 'Выбрать папку целиком',
+  'Include file {path}': 'Включить файл {path}',
+  'File too large': 'Файл слишком большой',
+  '{count} files selected': 'Выбрано файлов: {count}',
+  'Attach selected files': 'Добавить выбранные файлы',
+  'Choose up to 12 files totalling at most 128 KiB':
+    'Выбери до 12 файлов общим размером до 128 КиБ',
   'Choose a file': 'Выбрать файл',
   'Style and skills for this session': 'Стиль и навыки этой сессии',
   'Only this session. Choose separate instructions for daddy and for all its workers. Saved text travels with your backup.':

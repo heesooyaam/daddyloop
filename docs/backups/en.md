@@ -73,3 +73,5 @@ For **Arcadia**, inspect `recovery/arcadia/<task>/<role>/state.json`, acquire a 
 The first format has no built-in remote storage scheduler or encryption. Use your normal encrypted storage and scheduling after verifying a restore. Creating an archive is not a substitute for testing that you can recover it.
 
 Session instruction sets and queued-turn snapshots include the actual skill text and checksums. Restored work needs no old skill folder or GitHub download; source locations remain attribution. See [instructions](../instructions/en.md).
+
+The preset library is included in full, along with each session’s frozen preset copies and individual component choices. A library revision can differ from a session’s selected revision; restoring preserves both.
