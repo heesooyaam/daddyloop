@@ -97,7 +97,7 @@ daddy agents defaults \
 
 Codex и Claude обновляются через **Обновления CLI** на сайте или `/updates` в Telegram. Папочка проверит новую версию, а запущенные агенты спокойно закончат на своей. Из терминала: `daddy runtime update --engine claude --yes`.
 
-[Агенты, лимиты и обновления](docs/agents/ru.md) · [Команды CLI](docs/terminal/ru.md) · [Настройка Claude](docs/claude/ru.md)
+[Агенты, лимиты и обновления](docs/agents/ru.md) · [Команды CLI](docs/terminal/ru.md) · [Настройка Claude](docs/agents/ru.md#claude)
 
 Папочка подстроится под задачу: задай ему один набор инструкций, а всем его воркерам — другой. Можно сочетать свои промпты с навыками из GitHub, локальных файлов или вставленного Markdown. Тексты относятся только к этой сессии и переезжают вместе с бекапом. [Инструкции и навыки](docs/instructions/ru.md).
 
@@ -138,14 +138,14 @@ daddy up
 
 ![Тёмная тема Graphite](docs/media/ru/daddy-dark.png)
 
-[Темы](docs/appearance/ru.md) · [Эксплуатация](docs/operations/ru.md)
+[Темы](docs/web/ru.md#темы) · [Эксплуатация](docs/operations/ru.md)
 
 ## Принеси свой модуль
 
 У агентов общий контракт выполнения, каталога моделей и usage; у репозиториев — ревью, отправки изменений, тикетов и экспорта внешних рабочих копий. daddy делегирует работу через этот интерфейс, не угадывая модель внутри воркера.
 
-[Выбор модулей](docs/modules/ru.md) · [Как написать свой адаптер](docs/module-development/ru.md) · [Архитектура](docs/architecture/ru.md) · [Как принести PR](docs/contributing/ru.md)
+[Выбор модулей](docs/start/ru.md#модули) · [Как написать свой адаптер](docs/module-development/ru.md) · [Архитектура](docs/architecture/ru.md) · [Как принести PR](docs/contributing/ru.md)
 
-Все инструкции ведём парами `docs/<тема>/en.md` и `ru.md`. Картинки показывают изолированные примеры; Telegram-карточка — иллюстрация сценария. [Как обновить медиа](docs/media-guide/ru.md).
+Все инструкции ведём парами `docs/<тема>/en.md` и `ru.md`. Картинки показывают изолированные примеры; Telegram-карточка — иллюстрация сценария. [Как обновить медиа](docs/contributing/ru.md#воспроизведение-картинок).
 
 [Релиз 0.17.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.17.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

@@ -1,10 +1,36 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# Agent modules and models
+# Agents, models and limits
 
-An **engine** is an installed agent module. A **model** and its reasoning effort belong to that engine. daddy and workers can use independent profiles. The scheduler dispatches work through `AgentRuntime` / `SessionRuntime`; it does not interpret model names or speak a CLI's protocol.
+Choose Codex or Claude independently for daddy and workers. An **engine** is the installed agent module; its **model** and reasoning **effort** control a turn. Select the modules during [installation](../start/en.md#modules).
 
-The shipped agent modules are **Codex and Claude**. Both use the shared [module contract](../modules/en.md); daddy can coordinate a worker running a different engine. [Set up Claude](../claude/en.md).
+## Connect an account
+
+Run authentication commands on the service host.
+
+### Codex
+
+```bash
+daddy auth agent codex
+```
+
+Complete the device login, then run `daddy models --refresh` to see the account's catalogue.
+
+### Claude
+
+```bash
+daddy auth agent claude
+# Or use an existing private API-key file:
+daddy auth agent claude --token-file /private/anthropic-key
+```
+
+The hidden prompt saves the key to `~/.tokens/anthropic`. `ANTHROPIC_API_KEY` in the service environment takes precedence; `DADDYLOOP_CLAUDE_API_KEY_FILE` selects another private file. API access is billed separately from a Claude Pro/Max subscription. This integration uses the [official Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview).
+
+Claude command execution requires Bubblewrap and socat, installed on supported apt-based hosts when you select the module. The host must allow user namespaces. Workers can edit their working copies; coordination and review are read-only. If the sandbox is unavailable, execution stops with an error.
+
+## Choose models
+
+On the website open **Session settings**; in the CLI or Telegram use `/models`. Choose an engine, model and effort separately for daddy and workers. CLI defaults can also be set explicitly:
 
 ```bash
 daddy models --refresh
@@ -13,11 +39,13 @@ daddy agents defaults \
   --daddy-engine codex --daddy-model gpt-6-astra --daddy-effort max
 ```
 
-Use model IDs that your `daddy models` response actually offers. The names above are examples, not a product-maintained list. The Codex module reads `model/list` from the selected CLI, follows pagination and caches successful results for five minutes. Refresh requests it again. Effort values are taken from that response; new values are not filtered by a local list.
+The model names above are examples. Use IDs returned by your CLI. Codex reads `model/list`; Claude reads `supportedModels()`, including returned aliases and effort levels. Results are cached for five minutes; Refresh queries again. The provider checks model access when a turn runs.
 
-On the website open **Session settings**. Choose the module, model and effort for daddy and future workers. In the CLI or bot use `/models`; each choice carries its engine. Changing worker defaults affects future tasks. Changing daddy requires an idle session. Switching engines records previous context handles and starts a new native context; a Codex session is never passed into a different runtime.
+Worker defaults affect future tasks. Changing daddy requires an idle session. Switching engines starts a fresh native context while preserving the daddyloop conversation. Queued turns keep their saved profiles. See [tasks and pools](../tasks/en.md) and the [adapter contract](../module-development/en.md).
 
-## CLI versions
+## Update a CLI
+
+Open **CLI updates** on the website or `/updates` in Telegram. Each installed engine has its own update and rollback controls:
 
 ```bash
 daddy updates --check
@@ -27,25 +55,27 @@ daddy runtime rollback --engine claude --yes
 daddy runtime update-status
 ```
 
-Open **Updates** on the website or `/updates` in Telegram. Each installed adapter has its own version, update and rollback controls. The CLI requires `--engine` when more than one CLI is installed. A module without a managed installer can report new releases, but the interface links to installation instructions instead of promising an update button.
+Confirm the displayed versions. daddy verifies the official package checksum, CLI/catalogue compatibility and saved profiles, including queued turns, before switching. Failed validation preserves the selected CLI. Running agents finish on their captured version; subsequent turns use the new one. The bot sends one completion notice per operation.
 
-Confirm the displayed old and new versions. The server downloads an official, checksum-verified artifact into a private immutable directory, validates the CLI and its model catalogue, then checks saved profiles for that engine. A failed validation preserves the selected version. Existing agent processes finish on their captured executable; subsequent turns use the new selection. Each completed operation produces one result message, without a duplicate version-change notice.
+Managed updates support Linux x64/ARM64; Claude requires glibc. An environment override disables switching and names the setting to change. Modules without an installer link to release instructions. Updating a CLI does not update daddyloop's adapter or SDK.
 
-Codex and Claude Code support managed updates on Linux x64/ARM64 (Claude requires glibc). A service environment override makes its updater unavailable and explains which setting must change. Updating a CLI does not update daddyloop's adapter or SDK; an incompatible CLI is rejected during validation.
+To choose another installed executable on the service host, use `daddy runtime use /absolute/path/to/claude --engine claude`, or `daddy runtime use bundled --engine codex`. This validates the CLI and restarts the service when jobs and updates are idle. [Service updates](../operations/en.md) are separate.
 
-To select another executable on the service host:
+## Limits
+
+The strip above the conversation shows each agent's quotas on desktop and phone. Click the provider or a period card for details and refresh. Unknown or stale readings are labelled. Additional credits are a separate payment balance; zero credits do not mean the included quota is exhausted. Zero balances stay in details unless credits are the only reported allowance.
+
+- **Codex:** reads account quotas from the selected CLI, cached for one minute. Returned windows, reset times, plan and extra model buckets are preserved. A weekly-only plan shows only a week; Spark or other model quotas appear separately when reported. Agents using the same account share its quota.
+- **Claude:** displays provider `rate_limit_event` observations, stale after two minutes. Refresh cannot fetch an unsupported account-quota endpoint. Last-turn tokens and estimated API cost are activity data, not an account balance. Missing quota data remains unknown. This adapter does not expose a quota reset.
 
 ```bash
-daddy runtime use /absolute/path/to/claude --engine claude
-daddy runtime use bundled --engine codex
+daddy limits --refresh
+daddy limits reset
+daddy limits reset --request REQUEST_ID --yes
 ```
 
-`use` validates through the selected adapter, verifies ownership of the connected service, and restarts only when no jobs or updates are pending. `daddy doctor` diagnoses enabled agent adapters without a model turn. See [module development](../module-development/en.md) for the common lifecycle contract and [appearance and usage](../appearance/en.md) for quotas.
+Preparing a reset does not spend it. Confirm the displayed request to consume one; retries reuse its ID. Conversations and files remain in place. daddy does not buy credits or consume resets automatically. The available reset count comes from the provider, not a subscription table.
 
-## Actual account quotas
+## Troubleshooting
 
-`daddy limits --refresh` and the always-visible web strip combine enabled adapters. The Codex module calls `account/rateLimits/read`: it uses `rateLimitsByLimitId` and retains an additional base bucket when needed. It renders only returned windows, their `windowDurationMins`, `usedPercent`, `resetsAt`, provider label, plan and credits. A weekly-only account stays weekly-only. Model-specific buckets, including Spark when returned, are independent. There is no subscription-to-window table.
-
-The available reset count comes from `availableCount`; missing detail rows do not imply zero credits. Reset requests still require confirmation and reuse an idempotency key. Claude usage follows its documented event capability; unknown and stale observations remain clearly marked. See the [official Codex protocol](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt) and [Claude limits](../claude/en.md).
-
-A breaking CLI protocol change can make usage unavailable. The adapter reports the error and marks cached data stale; it does not infer a fresh percentage or offer a reset against stale data. Protocol updates belong in the adapter.
+Run `daddy doctor` for enabled-adapter diagnostics without a model turn. For authentication failures, check the account/key on the host; for an empty catalogue, run `daddy models --refresh`. A CLI protocol or sandbox error leaves work unfinished. Inspect the error, fix the cause and resume; use rollback after an incompatible CLI update.

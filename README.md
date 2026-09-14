@@ -97,7 +97,7 @@ Models and effort levels come from the CLI, not a hand-maintained daddyloop list
 
 Update Codex or Claude from **CLI updates** on the website or `/updates` in Telegram. daddy checks the selected version before switching; running agents finish on their current CLI. From the terminal: `daddy runtime update --engine claude --yes`.
 
-[Agents, limits and updates](docs/agents/en.md) · [CLI commands](docs/terminal/en.md) · [Claude setup](docs/claude/en.md)
+[Agents, limits and updates](docs/agents/en.md) · [CLI commands](docs/terminal/en.md) · [Claude setup](docs/agents/en.md#claude)
 
 Want a different style for this task? Give daddy one instruction set and all its workers another. Combine your own prompts with skills from GitHub, local files or pasted Markdown. The texts belong to the session and travel in its backup. [Instructions and skills](docs/instructions/en.md).
 
@@ -138,14 +138,14 @@ Eight themes: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest and Plum. 
 
 ![The dark Graphite theme](docs/media/en/daddy-dark.png)
 
-[Appearance](docs/appearance/en.md) · [Operations](docs/operations/en.md)
+[Appearance](docs/web/en.md#themes) · [Operations](docs/operations/en.md)
 
 ## Bring your own module
 
 Agents share execution, model catalogue and usage contracts. Repository modules own reviews, submissions, tickets and exports of external working copies. daddy delegates through these interfaces without guessing what model powers a worker.
 
-[Module selection](docs/modules/en.md) · [Write an adapter](docs/module-development/en.md) · [Architecture](docs/architecture/en.md) · [Contributing](docs/contributing/en.md)
+[Module selection](docs/start/en.md#modules) · [Write an adapter](docs/module-development/en.md) · [Architecture](docs/architecture/en.md) · [Contributing](docs/contributing/en.md)
 
-Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/media-guide/en.md).
+Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/contributing/en.md#reproduce-the-visuals).
 
 [Release 0.17.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.17.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

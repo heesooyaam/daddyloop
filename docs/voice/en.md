@@ -21,4 +21,8 @@ The interface language selects recognition language too. Choose the language you
 
 Recognition quality depends on the recording. The package tests an offline speech fixture; that is not a guarantee for every accent or noisy recording. For source development prepare the model with `npm run speech:prepare`.
 
-See [model attribution](../voice-model/en.md) and [resources](../operations/en.md).
+## Model and license
+
+The bundled model is the quantized Whisper Small ONNX export from `onnx-community/whisper-small` (about 240 MiB). Its exact revision, files and SHA-256 digests are pinned in [speech-model.json](../../scripts/speech-model.json) and verified during preparation by [prepare-speech.mjs](../../scripts/prepare-speech.mjs). Downloads happen during installation/source preparation, not for each voice message. Inference uses Transformers.js and ONNX Runtime on the CPU.
+
+The model export declares Apache-2.0; the [original license](../licenses/Apache-2.0.txt) is retained verbatim. Dependencies carry their own notices. See [resources and cleanup](../operations/en.md).

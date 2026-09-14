@@ -29,7 +29,7 @@ flowchart LR
 - `core/store.ts` persists tasks, conversations, jobs, decisions, workspace snapshots, worker slots and receipts.
 - `client/daddy.ts` owns session selection, per-session drafts, reconnects and request idempotency for browser and terminal.
 
-Module selection is persisted in config. Disabled repositories cannot accept a source or create work; disabled engines cannot receive an agent turn. The composition root registers modules, while the queue and daddy use contracts. [Module development](../modules/en.md) explains extension points.
+Module selection is persisted in config. Disabled repositories cannot accept a source or create work; disabled engines cannot receive an agent turn. The composition root registers modules, while the queue and daddy use contracts. [Module development](../module-development/en.md) explains extension points.
 
 ## Workflow authority
 

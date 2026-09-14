@@ -1,31 +1,34 @@
-[English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
+[English](en.md) · [Русский](ru.md)
 
-# daddyloop documentation
+# daddyloop guides
 
-Start with installation, then open the site or the CLI. Every topic has the same English/Russian pair.
+New here? [Install daddy](../start/en.md), then open the [website](../web/en.md), [CLI](../terminal/en.md) or [Telegram bot](../telegram/en.md).
 
-- [Install and start](../start/en.md)
-- [Open the site on a computer or phone](../web/en.md)
-- [Choose repositories and directories](../workspaces/en.md)
-- [Tasks, sessions and worker pools](../tasks/en.md)
-- [Agent modules, models and CLI updates](../agents/en.md)
-- [Module selection and developer contracts](../modules/en.md)
-- [Instructions, skills and presets](../instructions/en.md)
-- [Themes and current usage](../appearance/en.md)
-- [Bot, groups and topics](../telegram/en.md)
+## Get started
+
+- [Installation, module selection and accounts](../start/en.md)
+- [Website: laptop, phone and themes](../web/en.md)
+- [Interactive CLI and commands](../terminal/en.md)
+- [Telegram: bot setup and task topics](../telegram/en.md)
 - [Voice messages](../voice/en.md)
-- [Interactive CLI](../terminal/en.md)
-- [Arcadia and Tracker setup](../arcadia/en.md)
+
+## Give daddy work
+
+- [Workspaces and repository directories](../workspaces/en.md)
+- [Tasks, sessions and worker pools](../tasks/en.md)
+- [Codex and Claude: models, updates and limits](../agents/en.md)
+- [Instructions, skills and presets](../instructions/en.md)
+- [Arcadia and Tracker](../arcadia/en.md)
+
+## Look after the server
+
 - [Service, access, resources and cleanup](../operations/en.md)
-- [Workflow and boundaries](../architecture/en.md)
-- [Contributing and validation](../contributing/en.md)
-- [Reproduce the screenshots](../media-guide/en.md)
-- [Speech model attribution](../voice-model/en.md)
-- [Release notes](../release-notes/en.md)
-- [Review scope](../review/en.md)
+- [Backups and moving to another machine](../backups/en.md)
 
-- [Claude setup](../claude/en.md)
-- [Back up and restore](../backups/en.md)
-- [Write your own module](../module-development/en.md)
+## Develop daddyloop
 
-- [Agent adapter review (0.17)](../agent-adapter-review/en.md)
+- [Architecture and workflow rules](../architecture/en.md)
+- [Write an agent or repository module](../module-development/en.md)
+- [Contribute, run checks and update screenshots](../contributing/en.md)
+
+Changes by version: [GitHub Releases](https://github.com/heesooyaam/daddyloop/releases).

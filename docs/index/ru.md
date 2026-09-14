@@ -1,31 +1,34 @@
-[English](en.md) · [Русский](ru.md) · [Все инструкции](../index/ru.md)
+[English](en.md) · [Русский](ru.md)
 
-# Документация daddyloop
+# Руководства daddyloop
 
-Начни с установки, затем открой сайт или CLI. У каждой темы есть одинаковая пара английской и русской страниц.
+Впервые здесь? [Установи daddy](../start/ru.md), затем открой [сайт](../web/ru.md), [CLI](../terminal/ru.md) или [бота Telegram](../telegram/ru.md).
 
-- [Установка и первый запуск](../start/ru.md)
-- [Открыть сайт на компьютере или телефоне](../web/ru.md)
-- [Репозитории и папки](../workspaces/ru.md)
-- [Задачи, сессии и пул воркеров](../tasks/ru.md)
-- [Агенты, модели и обновления CLI](../agents/ru.md)
-- [Выбор модулей и контракты разработчика](../modules/ru.md)
-- [Инструкции, навыки и пресеты](../instructions/ru.md)
-- [Темы и текущий usage](../appearance/ru.md)
-- [Бот, группы и темы](../telegram/ru.md)
+## Начать
+
+- [Установка, выбор модулей и аккаунты](../start/ru.md)
+- [Сайт: ноутбук, телефон и темы](../web/ru.md)
+- [Интерактивный CLI и команды](../terminal/ru.md)
+- [Telegram: настройка бота и темы задач](../telegram/ru.md)
 - [Голосовые сообщения](../voice/ru.md)
-- [Интерактивный CLI](../terminal/ru.md)
-- [Настройка Arcadia и Tracker](../arcadia/ru.md)
+
+## Дать папочке работу
+
+- [Воркспейсы и папки репозиториев](../workspaces/ru.md)
+- [Задачи, сессии и пул воркеров](../tasks/ru.md)
+- [Codex и Claude: модели, обновления и лимиты](../agents/ru.md)
+- [Инструкции, навыки и пресеты](../instructions/ru.md)
+- [Arcadia и Tracker](../arcadia/ru.md)
+
+## Присмотреть за сервером
+
 - [Сервис, доступ, ресурсы и очистка](../operations/ru.md)
-- [Workflow и границы компонентов](../architecture/ru.md)
-- [PR и проверки](../contributing/ru.md)
-- [Воспроизвести скриншоты](../media-guide/ru.md)
-- [Источник модели речи](../voice-model/ru.md)
-- [Что нового](../release-notes/ru.md)
-- [Область ревью](../review/ru.md)
+- [Бекапы и переезд на другую машину](../backups/ru.md)
 
-- [Настройка Claude](../claude/ru.md)
-- [Бэкапы и восстановление](../backups/ru.md)
-- [Написать свой модуль](../module-development/ru.md)
+## Доработать daddyloop
 
-- [Ревью адаптеров агентов (0.17)](../agent-adapter-review/ru.md)
+- [Архитектура и правила работы](../architecture/ru.md)
+- [Свой модуль агента или репозитория](../module-development/ru.md)
+- [Как внести изменения, запустить проверки и обновить скриншоты](../contributing/ru.md)
+
+Изменения по версиям: [GitHub Releases](https://github.com/heesooyaam/daddyloop/releases).

@@ -1,6 +1,14 @@
 // Actual application and terminal render, with clearly illustrative offline fixture data.
 import { chromium, expect } from '@playwright/test';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  readdirSync,
+  copyFileSync,
+} from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -16,13 +24,15 @@ import { InstructionSources } from '../dist/server/ops/instruction-sources.js';
 const locale = process.env.DADDYLOOP_MEDIA_LOCALE === 'ru' ? 'ru' : 'en';
 const t = translator(locale);
 const root = resolve(import.meta.dirname, '..'),
-  output = join(root, 'docs/media', locale);
-mkdirSync(output, { recursive: true });
+  published = join(root, 'docs/media', locale);
+mkdirSync(published, { recursive: true });
 const base = join(tmpdir(), 'daddyloop-media');
 mkdirSync(base, { recursive: true, mode: 0o700 });
 const scratch = mkdtempSync(join(base, 'capture-')),
+  output = join(scratch, 'media'),
   data = join(scratch, 'data'),
   repo = join(scratch, 'payments');
+mkdirSync(output);
 mkdirSync(data);
 mkdirSync(repo);
 for (const child of ['services/api', 'services/web', 'docs', 'tests'])
@@ -511,11 +521,25 @@ try {
     await screen.screenshot({ path: join(output, snapshot.name + '.png') });
     await screen.close();
   }
+  const documents = [
+    join(root, 'README.md'),
+    join(root, 'README.ru.md'),
+    ...readdirSync(join(root, 'docs'), { recursive: true })
+      .filter((file) => file.endsWith('.md'))
+      .map((file) => join(root, 'docs', file)),
+  ]
+    .map((file) => readFileSync(file, 'utf8'))
+    .join('\n');
+  const publishedScreens = readdirSync(output).filter((file) =>
+    documents.includes(`media/${locale}/${file}`),
+  );
+  for (const file of publishedScreens) copyFileSync(join(output, file), join(published, file));
   writeFileSync(
     join(base, 'proof-' + locale + '.json'),
     JSON.stringify(
       {
         fixtureData: true,
+        publishedScreens,
         terminalVerified: capture.verified,
         screens: [
           'daddy-home',

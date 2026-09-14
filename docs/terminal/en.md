@@ -30,7 +30,7 @@ daddy console SESSION_ID
 daddy talk SESSION_ID "Take the next ticket"
 ```
 
-The plain console is a basic client for the same daddy workflow. Closing either console restores terminal modes and leaves the service running. The eight web themes are separate browser preferences; see [appearance](../appearance/en.md).
+The plain console is a basic client for the same daddy workflow. Closing either console restores terminal modes and leaves the service running. The eight web themes are separate browser preferences; see [appearance](../web/en.md#themes).
 
 For a CLI on another machine, build the source client with a supported Node version, then run `daddy connect https://your-host` and enter its token. The website needs no local Node installation: [open it from your computer](../web/en.md).
 
