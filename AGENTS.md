@@ -16,4 +16,4 @@ This project is a standalone Git repository. It is unrelated to the machine's Ar
 - Module additions implement `src/modules/contracts.ts` and register through the module catalogs. The scheduler must not select an engine by model name or call a provider-specific submission protocol.
 - Use worker terminology and lowercase daddy. Keep destructive actions explicit even when other copy is informal.
 
-- Write docs briefly in plain language: overview and a concrete example first, optional details next. Explain a component’s purpose before introducing its code names. Prefer code links over exhaustive field lists.
+- Write docs in plain language: overview and a concrete example first, then the relevant technical detail. Architecture docs must explain component connections, interfaces, state transitions and enforced invariants; keep these visible, with links to their checks in code. Be concise by removing repetition, not by removing the explanation. Explain terms before using them and avoid exhaustive field lists.
