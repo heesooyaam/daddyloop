@@ -18,6 +18,8 @@ A PR should explain the user-visible change, relevant validation and limitations
 
 ## Documentation is paired
 
+Write briefly, using familiar words. Start with the overall picture and one concrete example; put deeper details in optional sections. Explain a technical term before using it, and link to code instead of listing every internal field.
+
 Every topic belongs at `docs/<topic>/en.md` and `docs/<topic>/ru.md`. Update both in the same PR. The docs check rejects missing language pairs, broken local links, guides missing from the index and unreferenced images. Update the corresponding index links and both root READMEs when navigation or onboarding changes.
 
 Legal license originals are retained in `docs/licenses/`; explanatory pages still have both languages. Screenshots live in `docs/media/` and are referenced from the paired guides. Keep user data, credentials and private bot chats out of published media.
