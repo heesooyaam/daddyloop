@@ -18,7 +18,7 @@ A PR should explain the user-visible change, relevant validation and limitations
 
 ## Documentation is paired
 
-Write briefly, using familiar words. Start with the overall picture and one concrete example; put deeper details in optional sections. Explain a technical term before using it, and link to code instead of listing every internal field.
+Write in plain language. Start with the overall picture and one concrete example, then explain the relevant technical details. For architecture, show who calls whom, what crosses each interface, how state changes and where invariants are enforced. Keep that explanation visible and link to its checks in code. Cut repetition rather than substance; explain terms and avoid listing every internal field.
 
 Every topic belongs at `docs/<topic>/en.md` and `docs/<topic>/ru.md`. Update both in the same PR. The docs check rejects missing language pairs, broken local links, guides missing from the index and unreferenced images. Update the corresponding index links and both root READMEs when navigation or onboarding changes.
 
