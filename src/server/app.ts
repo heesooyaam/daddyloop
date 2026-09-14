@@ -35,7 +35,7 @@ import type { AgentRuntime } from '../runtime/agent.js';
 import { randomUUID } from 'node:crypto';
 import { preferences, preferenceInput, setLocale } from '../core/preferences.js';
 import { UpdateMonitor } from '../core/updates.js';
-import { CodexUpdater } from '../core/codex-updater.js';
+import { RuntimeUpdater, RuntimeUpdaters } from '../core/runtime-updater.js';
 import { moduleExecutable } from '../runtime/executable.js';
 import { WorkspaceRegistry } from '../core/workspace-registry.js';
 import { Daddy } from '../core/daddy.js';
@@ -54,7 +54,7 @@ export interface ServerOptions {
   workspaces?: WorkspaceRegistry;
   daddyRuntime?: SessionRuntime;
   daddyWorkspace?: Pick<DaddyWorkspace, 'prepare' | 'release'>;
-  codexUpdater?: CodexUpdater;
+  updaters?: RuntimeUpdaters;
   updateMonitor?: UpdateMonitor;
   startUpdateCheck?: boolean;
   catalogue?: Catalogue;
@@ -97,31 +97,16 @@ export async function buildApp(options: ServerOptions) {
   if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
   const checkouts = options.checkouts ?? new Workspaces(dataDir);
-  let configuredExecutable = config.executables.codex;
-  const executable = () =>
-    moduleExecutable('codex', {
-      executables: {
-        ...config.executables,
-        ...(configuredExecutable ? { codex: configuredExecutable } : {}),
-      },
-    });
+  const configuredExecutables = { ...config.executables };
+  const executable = (id: string) => moduleExecutable(id, { executables: configuredExecutables });
   const agents =
     options.agents ??
     createAgents(config.modules, {
       store,
       dataDir,
-      executable: (id) => (id === 'codex' ? executable : () => moduleExecutable(id, config)),
+      executable: (id) => () => executable(id),
     });
   const catalogue = options.catalogue ?? agents;
-  const updates =
-    options.updateMonitor ??
-    new UpdateMonitor(store, {
-      enabled: config.modules.filter((id) => agents.engines().some((engine) => engine.id === id)),
-      codex: executable,
-      claude: moduleExecutable('claude', config),
-      intervalHours: config.updates.intervalHours,
-      managedRoot: join(dataDir, 'runtimes/codex'),
-    });
   const tickets = new TicketWorkflow(
     engine,
     checkouts,
@@ -137,65 +122,107 @@ export async function buildApp(options: ServerOptions) {
         maxDiskPercent: options.maxDiskPercent ?? config.resources.maxDiskPercent,
         minMemoryGiB: options.minMemoryGiB ?? config.resources.minMemoryGiB,
       }));
-  const updater =
-    options.codexUpdater ??
-    new CodexUpdater(store, {
+  const cliModules = agents.all().filter((module) => module.cli);
+  const updaters =
+    options.updaters ??
+    new RuntimeUpdaters(
+      cliModules.map((module) => {
+        const id = module.id,
+          cli = module.cli!;
+        const environment = 'DADDYLOOP_' + id.toUpperCase().replaceAll('-', '_') + '_BIN';
+        return new RuntimeUpdater(store, {
+          dataDir,
+          engine: id,
+          cli,
+          executable: () => executable(id),
+          enabled: !process.env[environment],
+          disabledReason: process.env[environment]
+            ? `${environment} overrides the selected CLI`
+            : undefined,
+          resourceCheck: () => {
+            const status = getResources();
+            if (!status.ok || status.diskAvailableGiB < 2)
+              throw new AppError(
+                'update_resources',
+                status.reasons.join('; ') || 'Not enough disk space for an agent CLI update',
+                422,
+              );
+          },
+          activate: (expected, next) => {
+            const current = loadConfig();
+            if (
+              !current.modules.includes(id) ||
+              executable(id) !== expected ||
+              current.executables[id] !== configuredExecutables[id]
+            )
+              throw new Error(`${cli.name} configuration changed during the update`);
+            current.executables[id] = next;
+            saveConfig(current);
+            configuredExecutables[id] = next;
+          },
+          validateModels: (models) => {
+            const profiles = [
+              engine.defaultAgents(),
+              ...store
+                .groups()
+                .filter((group) => group.orchestrated)
+                .map((group) => ({
+                  daddy: group.daddy,
+                  worker: group.worker ?? engine.defaultAgents().worker,
+                })),
+              ...store
+                .tasks()
+                .filter((task) => task.state !== 'complete')
+                .map((task) => engine.effectiveAgents(task)),
+            ];
+            const queuedProfiles = [
+              ...store
+                .jobs()
+                .filter((job) => job.status === 'queued')
+                .map((job) => job.profile),
+              ...store
+                .daddyJobs()
+                .filter((job) => job.status === 'queued')
+                .map((job) => job.profile),
+            ];
+            for (const profile of [
+              ...profiles.flatMap((pair) => [pair.worker, pair.daddy]),
+              ...queuedProfiles,
+            ]) {
+              if (!profile) continue;
+              if (profile.engine !== id || !profile.model) continue;
+              const model = models.find((model) => model.id === profile.model);
+              if (!model || (profile.effort && !model.efforts.includes(profile.effort)))
+                throw new Error(
+                  `The new ${cli.name} catalogue does not support the saved profile ${profile.model} / ${profile.effort ?? 'default'}`,
+                );
+            }
+          },
+        });
+      }),
+    );
+  const updates =
+    options.updateMonitor ??
+    new UpdateMonitor(store, {
+      agents: cliModules.map(({ id, cli }) => ({
+        id,
+        cli: cli!,
+        managedUpdates: updaters.get(id).status().enabled,
+      })),
+      intervalHours: config.updates.intervalHours,
       dataDir,
-      executable,
-      enabled: config.modules.includes('codex') && !process.env.DADDYLOOP_CODEX_BIN,
-      resourceCheck: () => {
-        const status = getResources();
-        if (!status.ok || status.diskAvailableGiB < 2)
-          throw new AppError(
-            'update_resources',
-            status.reasons.join('; ') || 'Not enough disk space for a Codex update',
-            422,
-          );
-      },
-      activate: (expected, next) => {
-        const current = loadConfig();
-        if (executable() !== expected || current.executables.codex !== configuredExecutable)
-          throw new Error('Codex configuration changed during the update');
-        current.executables.codex = next;
-        saveConfig(current);
-        configuredExecutable = next;
-      },
-      validateModels: (models) => {
-        const profiles = [
-          engine.defaultAgents(),
-          ...store
-            .groups()
-            .filter((group) => group.orchestrated)
-            .map((group) => ({
-              daddy: group.daddy,
-              worker: group.worker ?? engine.defaultAgents().worker,
-            })),
-          ...store
-            .tasks()
-            .filter((task) => task.state !== 'complete')
-            .map((task) => engine.effectiveAgents(task)),
-        ];
-        for (const profile of profiles.flatMap((pair) => [pair.worker, pair.daddy])) {
-          if (profile.engine !== 'codex' || !profile.model) continue;
-          const model = models.find((model) => model.id === profile.model);
-          if (!model || (profile.effort && !model.efforts.includes(profile.effort)))
-            throw new Error(
-              `The new Codex catalogue does not support the saved profile ${profile.model} / ${profile.effort ?? 'default'}`,
-            );
-        }
-      },
     });
   const checkUpdates =
     options.startWorker !== false &&
     options.startUpdateCheck !== false &&
     config.updates.enabled &&
-    config.modules.includes('codex');
+    cliModules.length > 0;
   const refreshRuntime = (event: Event) => {
     if (event.type === 'runtime.update_finished' && checkUpdates)
       void updates.check(true).catch(() => {});
   };
   store.changes.on('event', refreshRuntime);
-  await updater.recover();
+  await updaters.recover();
   const worker = new Worker(
     engine,
     checkouts,
@@ -428,16 +455,18 @@ export async function buildApp(options: ServerOptions) {
       application: 'daddyloop',
       preferences: preferences(store),
       instanceId: store.setting('server.instanceId'),
-      runtime: {
-        source: process.env.DADDYLOOP_CODEX_BIN
+      runtimes: cliModules.map(({ id, cli }) => ({
+        engine: id,
+        name: cli!.name,
+        source: process.env['DADDYLOOP_' + id.toUpperCase().replaceAll('-', '_') + '_BIN']
           ? 'environment'
-          : configuredExecutable
+          : configuredExecutables[id]
             ? 'configuration'
             : 'path',
-        executable: executable(),
-      },
+        executable: executable(id),
+      })),
       updates: updates.status(),
-      codexUpdater: updater.status(),
+      updaters: updaters.status(),
       queuedJobs:
         store.jobs().filter((job) => job.status === 'queued').length +
         store.daddyJobs().filter((job) => job.status === 'queued').length,
@@ -463,20 +492,27 @@ export async function buildApp(options: ServerOptions) {
     setLocale(store, preferenceInput.parse(request.body).locale),
   );
   app.get('/api/updates', async () => updates.status());
-  app.get('/api/runtime/update', async () => updater.status());
-  app.post('/api/runtime/update/prepare', async (request) => {
+  app.get('/api/runtimes', async () => updaters.status());
+  const runtimeUpdater = (params: unknown) =>
+    updaters.get(
+      z.object({ engine: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/) }).parse(params).engine,
+    );
+  app.get('/api/runtimes/:engine/update', async (request) =>
+    runtimeUpdater(request.params).status(),
+  );
+  app.post('/api/runtimes/:engine/update/prepare', async (request) => {
     const { action } = z
       .object({ action: z.enum(['install', 'rollback']) })
       .strict()
       .parse(request.body);
-    return updater.prepare(action, 'api');
+    return runtimeUpdater(request.params).prepare(action, 'api');
   });
-  app.post('/api/runtime/update/confirm', async (request, reply) => {
+  app.post('/api/runtimes/:engine/update/confirm', async (request, reply) => {
     const { id } = z
       .object({ id: z.string().regex(/^[A-Za-z0-9_-]{24}$/) })
       .strict()
       .parse(request.body);
-    const result = updater.confirm(id, 'api');
+    const result = runtimeUpdater(request.params).confirm(id, 'api');
     return reply.code(202).send(result);
   });
   app.post('/api/updates/check', async () => updates.check(true));
@@ -607,7 +643,7 @@ export async function buildApp(options: ServerOptions) {
   app.addHook('preClose', async () => {
     await daddy.stop();
     store.changes.off('event', refreshRuntime);
-    await updater.stop();
+    await updaters.stop();
     await updates.stop();
     for (const stop of eventStreams) stop();
     await worker.stop();
@@ -618,8 +654,15 @@ export async function buildApp(options: ServerOptions) {
   app.addHook('onReady', async () => {
     if (checkUpdates) {
       updates.start();
-      const finishedAt = updater.status().operation?.finishedAt;
-      if (finishedAt && finishedAt > (updates.status().checkedAt ?? ''))
+      if (
+        updaters
+          .status()
+          .some(
+            (item) =>
+              item.operation?.finishedAt &&
+              item.operation.finishedAt > (updates.status().checkedAt ?? ''),
+          )
+      )
         void updates.check(true).catch(() => {});
     }
     if (options.startWorker !== false && config.telegram.enabled) {
@@ -640,7 +683,7 @@ export async function buildApp(options: ServerOptions) {
           telegram.configure({
             catalogue,
             updates,
-            updater,
+            updaters,
             daddy,
             usage,
             voice: {

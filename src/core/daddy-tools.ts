@@ -54,7 +54,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   list_workspaces:
     'List repositories the user registered on this server. Choose only these workspace IDs.',
   list_models:
-    'Read the actual Codex model catalogue and supported reasoning efforts before choosing a different worker model.',
+    'Read the enabled agent model catalogues and supported reasoning efforts before choosing a different worker model.',
   read_task:
     'Read a task in this session, including its worker reports and pinned native review status.',
   import_ticket:

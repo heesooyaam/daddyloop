@@ -15,7 +15,7 @@
 Нужен **Linux-сервер** с доступом к твоим репозиториям и аккаунтом выбранного агента. Выполни на нём:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.16.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.17.0/install.sh | bash
 ```
 
 Стрелки — выбрать модуль, пробел — поставить галочку. Codex и GitHub отмечены сразу; Claude, GitLab и Arcadia можно добавить по желанию. Установщик поставит выбранные движки, CLI `daddy`, локальное распознавание голосовых и фоновый сервис. Вручную поднимать tmux не нужно.
@@ -95,6 +95,8 @@ daddy agents defaults \
 
 ![CLI daddyloop с разговором и бригадой](docs/media/ru/daddy-cli.png)
 
+Codex и Claude обновляются через **Обновления CLI** на сайте или `/updates` в Telegram. Папочка проверит новую версию, а запущенные агенты спокойно закончат на своей. Из терминала: `daddy runtime update --engine claude --yes`.
+
 [Агенты, лимиты и обновления](docs/agents/ru.md) · [Команды CLI](docs/terminal/ru.md) · [Настройка Claude](docs/claude/ru.md)
 
 Папочка подстроится под задачу: задай ему один набор инструкций, а всем его воркерам — другой. Можно сочетать свои промпты с навыками из GitHub, локальных файлов или вставленного Markdown. Тексты относятся только к этой сессии и переезжают вместе с бекапом. [Инструкции и навыки](docs/instructions/ru.md).
@@ -146,4 +148,4 @@ daddy up
 
 Все инструкции ведём парами `docs/<тема>/en.md` и `ru.md`. Картинки показывают изолированные примеры; Telegram-карточка — иллюстрация сценария. [Как обновить медиа](docs/media-guide/ru.md).
 
-[Релиз 0.16.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.16.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Релиз 0.17.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.17.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

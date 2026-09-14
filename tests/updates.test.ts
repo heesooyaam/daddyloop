@@ -1,155 +1,210 @@
 import { it, expect, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, symlinkSync, unlinkSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Store } from '../src/core/store.js';
 import { UpdateMonitor } from '../src/core/updates.js';
-import { isNewerVersion } from '../src/runtime/executable.js';
-it('marks the exact managed version transition once while retaining notices for later external changes', async () => {
+import type { AgentCli } from '../src/modules/contracts.js';
+import { isNewerVersion, executablePath, requireExecutable } from '../src/runtime/executable.js';
+import {
+  updateCard,
+  runtimeConfirmationCard,
+  updatesCard,
+} from '../src/integrations/telegram-meta.js';
+function fixture(id = 'atlas') {
   const store = new Store(':memory:');
-  let installed = '1.0.0';
-  const monitor = new UpdateMonitor(store, {
-    probe: async (command) =>
-      command === 'codex'
-        ? { source: 'managed', path: process.execPath, version: installed }
-        : { source: 'missing' },
-    fetcher: async () => new Response('{"version":"2.0.0"}'),
-  });
+  let version = '1.0.0',
+    path = process.execPath;
+  const cli: AgentCli = {
+    name: id === 'claude' ? 'Claude Code' : 'Atlas',
+    executable: () => path,
+    releaseUrl: 'https://example.test/releases',
+    probe: vi.fn(async (executable) => ({ executable, version })),
+    latestVersion: vi.fn(async () => '2.0.0'),
+    validate: async () => ({ models: [] }),
+  };
+  const monitor = new UpdateMonitor(store, { agents: [{ id, cli, managedUpdates: true }] });
+  return {
+    store,
+    cli,
+    monitor,
+    setVersion: (v: string) => {
+      version = v;
+    },
+    setPath: (v: string) => {
+      path = v;
+    },
+    close: async () => {
+      await monitor.stop();
+      store.close();
+    },
+  };
+}
+it.each(['claude', 'atlas'])(
+  'deduplicates only the exact managed transition for %s and preserves later external-change notices',
+  async (engine) => {
+    const f = fixture(engine);
+    try {
+      await f.monitor.check(true);
+      f.store.setSetting(`runtime.${engine}.update.operation`, {
+        engine,
+        id: 'managed-update',
+        phase: 'complete',
+        from: { version: '1.0.0' },
+        target: { version: '2.0.0', executable: process.execPath },
+        finishedAt: new Date().toISOString(),
+      });
+      f.setVersion('2.0.0');
+      expect((await f.monitor.check(true)).tools[0].managedOperationId).toBe('managed-update');
+      f.setVersion('1.0.0');
+      await f.monitor.check(true);
+      f.setVersion('2.0.0');
+      expect((await f.monitor.check(true)).tools[0].managedOperationId).toBeUndefined();
+    } finally {
+      await f.close();
+    }
+  },
+);
+it('caches update checks and marks unavailable registry results unknown', async () => {
+  const f = fixture();
   try {
-    await monitor.check(true);
-    store.setSetting('codex.update.operation', {
-      id: 'managed-update',
-      action: 'install',
-      phase: 'complete',
-      from: { version: '1.0.0', executable: '/old' },
-      target: { version: '2.0.0', executable: process.execPath },
-      finishedAt: new Date().toISOString(),
+    const first = await f.monitor.check();
+    expect(first.tools.map((tool) => tool.id)).toEqual(['atlas']);
+    expect(first.tools[0]).toMatchObject({
+      installed: '1.0.0',
+      latest: '2.0.0',
+      updateAvailable: true,
     });
-    installed = '2.0.0';
-    const managed = await monitor.check(true);
-    expect(managed.tools[0].managedOperationId).toBe('managed-update');
-    installed = '1.0.0';
-    await monitor.check(true);
-    installed = '2.0.0';
-    expect((await monitor.check(true)).tools[0].managedOperationId).toBeUndefined();
+    await f.monitor.check();
+    expect(f.cli.latestVersion).toHaveBeenCalledOnce();
+    vi.mocked(f.cli.latestVersion).mockRejectedValue(new Error('registry HTTP 503'));
+    const failed = (await f.monitor.check(true)).tools[0];
+    expect(failed.latest).toBeUndefined();
+    expect(failed.error).toContain('503');
+    expect(failed.installed).toBe('1.0.0');
   } finally {
-    await monitor.stop();
-    store.close();
+    await f.close();
   }
 });
-it('compares numeric CLI versions and recognizes a stable release after a prerelease', () => {
+it('rechecks a non-Codex selection changed while a registry request was pending', async () => {
+  const f = fixture('claude');
+  let finish!: (value: string) => void;
+  vi.mocked(f.cli.latestVersion).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  try {
+    const pending = f.monitor.check(true);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    f.setPath('/new/claude');
+    f.setVersion('2.0.0');
+    finish('2.0.0');
+    const status = await pending;
+    expect(status.tools[0]).toMatchObject({ installed: '2.0.0', updateAvailable: false });
+    expect(f.cli.probe).toHaveBeenLastCalledWith('/new/claude', expect.any(AbortSignal));
+  } finally {
+    await f.close();
+  }
+});
+it('cancels pending adapter requests and never persists an incomplete shutdown check', async () => {
+  const f = fixture();
+  vi.mocked(f.cli.latestVersion).mockImplementation(
+    (signal) =>
+      new Promise((_resolve, reject) =>
+        signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }),
+      ),
+  );
+  try {
+    const pending = f.monitor.check();
+    await vi.waitFor(() => expect(f.cli.latestVersion).toHaveBeenCalled());
+    await f.monitor.stop();
+    await pending;
+    expect(f.store.setting('updates.status')).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+it('uses adapter names and actual update capability in every language, independent of installation source', async () => {
+  const f = fixture('claude');
+  try {
+    const status = await f.monitor.check();
+    for (const locale of ['en', 'ru'] as const) {
+      const card = updateCard(locale, {
+        kind: 'available',
+        tool: status.tools[0],
+        checkedAt: status.checkedAt!,
+      });
+      expect(card.text).toContain('Claude Code');
+      expect(card.text).not.toContain('Codex');
+      expect(card.text.match(/Claude Code/g)).toHaveLength(2);
+      const manual = updateCard(locale, {
+        kind: 'available',
+        tool: { ...status.tools[0], managedUpdates: false },
+        checkedAt: status.checkedAt!,
+      });
+      expect(manual.text).not.toMatch(/directly|прямо/);
+    }
+    const plan = {
+      id: 'a'.repeat(24),
+      engine: 'a'.repeat(32),
+      name: 'Atlas',
+      action: 'install' as const,
+      from: { version: '1', executable: '/a' },
+      target: { version: '2' },
+      expiresAt: '',
+    };
+    expect(
+      Buffer.byteLength(runtimeConfirmationCard('ru', plan).buttons![0][0].callback_data!),
+    ).toBeLessThanOrEqual(64);
+    expect(
+      updatesCard('en', status, [
+        { engine: 'claude', name: 'Claude Code', enabled: false, busy: false },
+      ])
+        .buttons?.flat()
+        .some((button) => button.callback_data?.startsWith('u:')),
+    ).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+it('compares numeric versions including stable after prerelease', () => {
   expect(isNewerVersion('0.154.0', '0.153.4')).toBe(true);
   expect(isNewerVersion('1.10.0', '1.9.9')).toBe(true);
   expect(isNewerVersion('1.2.3', '1.2.3-rc.1')).toBe(true);
   expect(isNewerVersion('1.2.3', '1.2.3')).toBe(false);
   expect(isNewerVersion('1.2.2', '1.2.3')).toBe(false);
 });
-it('checks the selected CLI, caches registry queries and records an externally changed version', async () => {
-  const store = new Store(':memory:');
-  let installed = '1.0.0';
-  const fetcher = vi.fn(async () => new Response(JSON.stringify({ version: '1.1.0' })));
-  const monitor = new UpdateMonitor(store, {
-    codex: '/custom/codex',
-    probe: async (command) =>
-      command === '/custom/codex'
-        ? { path: command, version: installed, source: 'external' }
-        : { source: 'missing' },
-    fetcher,
-  });
+it('keeps the native launcher path and notices a replaced symlink during a pending check', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cli-link-')),
+    f = fixture();
   try {
-    const first = await monitor.check();
-    expect(first.tools[0]).toMatchObject({
-      installed: '1.0.0',
-      latest: '1.1.0',
-      updateAvailable: true,
-      executable: '/custom/codex',
-    });
-    expect(first.tools[1].supported).toBe(true);
-    expect(first.tools[1].source).toBe('missing');
-    await monitor.check();
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    installed = '1.1.0';
-    const next = await monitor.check(true);
-    expect(next.tools[0]).toMatchObject({
-      changedFrom: '1.0.0',
-      installed: '1.1.0',
-      updateAvailable: false,
-    });
-    expect(store.events('_system').some((event) => event.type === 'runtime.version_changed')).toBe(
-      true,
-    );
-    store.setSetting('updates.notifications', false);
-    expect(monitor.status().notifications).toBe(false);
-  } finally {
-    await monitor.stop();
-    store.close();
-  }
-});
-it('reports a failed registry check as unknown rather than up to date', async () => {
-  const store = new Store(':memory:'),
-    monitor = new UpdateMonitor(store, {
-      probe: async (command) =>
-        command === 'codex'
-          ? { source: 'bundled', path: '/bundle/codex', version: '1.0.0' }
-          : { source: 'missing' },
-      fetcher: async () => new Response('', { status: 503 }),
-    });
-  try {
-    const status = await monitor.check();
-    expect(status.tools[0].latest).toBeUndefined();
-    expect(status.tools[0].error).toContain('503');
-    expect(status.tools[0].installed).toBe('1.0.0');
-  } finally {
-    await monitor.stop();
-    store.close();
-  }
-});
-it('cancels pending registry requests and does not persist incomplete checks after shutdown', async () => {
-  const store = new Store(':memory:');
-  const fetcher = vi.fn(
-    (_url, options) =>
-      new Promise<Response>((_resolve, reject) =>
-        options.signal.addEventListener('abort', () => reject(new Error('cancelled')), {
-          once: true,
-        }),
-      ),
-  );
-  const monitor = new UpdateMonitor(store, {
-    probe: async (command) =>
-      command === 'codex'
-        ? { source: 'external', path: '/codex', version: '1.0.0' }
-        : { source: 'missing' },
-    fetcher,
-  });
-  try {
-    const pending = monitor.check();
-    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
-    await monitor.stop();
-    await pending;
-    expect(store.setting('updates.status')).toBeUndefined();
-  } finally {
-    store.close();
-  }
-});
-
-it('keeps a stable executable symlink so native updater replacements take effect', async () => {
-  const { mkdtempSync, writeFileSync, symlinkSync, unlinkSync, rmSync, realpathSync } =
-    await import('node:fs');
-  const { join } = await import('node:path');
-  const { tmpdir } = await import('node:os');
-  const { requireExecutable, executablePath } = await import('../src/runtime/executable.js');
-  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-cli-link-'));
-  try {
-    const launcher = join(dir, 'codex'),
-      old = join(dir, 'old-version'),
-      next = join(dir, 'new-version');
+    const old = join(dir, 'old'),
+      next = join(dir, 'next'),
+      launcher = join(dir, 'agent');
     writeFileSync(old, '#!/bin/sh\n', { mode: 0o700 });
     writeFileSync(next, '#!/bin/sh\n', { mode: 0o700 });
     symlinkSync(old, launcher);
-    const configured = requireExecutable(launcher);
-    expect(configured).toBe(launcher);
-    expect(executablePath(configured)).toBe(realpathSync(old));
+    expect(requireExecutable(launcher)).toBe(launcher);
+    f.setPath(launcher);
+    let finish!: (value: string) => void;
+    vi.mocked(f.cli.latestVersion).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = f.monitor.check();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
     unlinkSync(launcher);
     symlinkSync(next, launcher);
-    expect(executablePath(configured)).toBe(realpathSync(next));
+    f.setVersion('2.0.0');
+    finish('2.0.0');
+    expect((await pending).tools[0].executable).toBe(executablePath(next));
+    expect(f.cli.probe).toHaveBeenCalledTimes(2);
   } finally {
+    await f.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

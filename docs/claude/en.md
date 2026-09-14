@@ -37,7 +37,7 @@ Usage comes from CLI `rate_limit_event` observations, when provided. The adapter
 
 ## Versions and troubleshooting
 
-The release pairs SDK `0.3.268` with Claude CLI `2.1.268`. The selected executable is captured per turn. `daddy updates --check` reports CLI version changes and available releases. Managed update/rollback buttons currently update Codex; update bundled Claude by installing a newer daddyloop release, or select a tested host executable through `executables.claude` in the configuration and restart while idle.
+The release bundles SDK `0.3.268` and Claude CLI `2.1.268`. Update Claude independently with **Updates → Update Claude Code** on the website or in Telegram, or `daddy runtime update --engine claude --yes`. The updater checks the official package checksum, native version, SDK catalogue handshake and saved Claude profiles before switching. The selected executable is captured per turn. `daddy runtime rollback --engine claude --yes` restores the previous verified CLI. The SDK itself updates with daddyloop. The 2.1.270 native package was checked with this release’s SDK without a paid turn. See [CLI versions](../agents/en.md).
 
 - **Authentication failed:** check the API key on the service host and API account billing.
 - **No models:** run `daddy models --refresh`; inspect CLI errors without posting keys or token files.

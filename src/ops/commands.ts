@@ -146,7 +146,7 @@ export function registerOperations(program: Command) {
         );
       }
       output(
-        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse daddy auth agent codex / daddy auth github / daddy auth gitlab to connect accounts.\nUse daddy web and daddy phone to connect your browser and phone.\nUse daddy telegram setup to connect your bot.`,
+        `Configuration: ${configPath()}\nWeb panel: ${config.publicOrigin ?? config.serverUrl}\nUse daddy auth --help to connect accounts.\nUse daddy web and daddy phone to connect your browser and phone.\nUse daddy telegram setup to connect your bot.`,
       );
     });
   program

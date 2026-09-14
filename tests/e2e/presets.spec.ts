@@ -36,6 +36,7 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await page.getByText('Style and skills for this session', { exact: true }).click();
+  await page.getByRole('button', { name: 'Add presets', exact: true }).click();
   for (const name of ['Brief fixture', 'Careful fixture']) {
     await page.getByRole('checkbox', { name: 'Use preset ' + name, exact: true }).check();
     await expect(
@@ -67,6 +68,7 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await page.getByText('Style and skills for this session', { exact: true }).click();
+  await page.getByRole('button', { name: 'Add presets', exact: true }).click();
   await expect(
     page.getByRole('checkbox', { name: 'Use preset Brief fixture', exact: true }),
   ).not.toBeChecked();
@@ -164,4 +166,34 @@ test('does not partially attach a folder when a later file fails to import', asy
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('creates a preset from the session editor without losing its draft or creating the session early', async ({
+  page,
+}) => {
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill('Inline preset fixture');
+  await page.getByLabel('What should daddy do?').fill('Keep my task draft.');
+  await page.getByText('Style and skills for this session', { exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Refresh list', exact: true })).toHaveCount(0);
+  await page.getByLabel('Your instructions for daddy').fill('My session rule.');
+  await page.getByRole('button', { name: 'Create preset', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start session', exact: true })).toBeDisabled();
+  await page.getByLabel('Preset name', { exact: true }).fill('Inline reusable fixture');
+  await page.getByLabel('Your instructions for daddy').fill('My reusable rule.');
+  await page.getByRole('button', { name: 'Save and use in this session', exact: true }).click();
+  await expect(
+    page.getByRole('checkbox', { name: 'Use preset Inline reusable fixture' }),
+  ).toBeChecked();
+  await expect(page.getByLabel('Your instructions for daddy')).toHaveValue('My session rule.');
+  await expect(page.getByLabel('What should daddy do?')).toHaveValue('Keep my task draft.');
+  await expect(page.getByRole('button', { name: 'Start session', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Inline preset fixture' })).toBeVisible();
+  const saved = await board(page);
+  expect(saved.group.instructions.daddy.prompt).toBe('My session rule.');
+  expect(saved.group.instructions.presets[0].preset.instructions.daddy.prompt).toBe(
+    'My reusable rule.',
+  );
 });

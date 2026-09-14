@@ -40,7 +40,7 @@ export class DemoRuntime implements AgentRuntime {
         'Demo fixture: added a generation check and a stale callback regression test. The demo provider will now advance its revision for independent verification.';
     else {
       summary =
-        'Demo session: the issue is about callback ordering, even on a single event loop. The callback captured session A, but its result arrives after B becomes current. In live mode this conversation continues in the same Codex thread.';
+        'Demo session: the issue is about callback ordering, even on a single event loop. The callback captured session A, but its result arrives after B becomes current. In live mode this conversation continues in the same agent context.';
       if (
         input.job.role === 'reviewer' &&
         /^(remove|delete|удали|убери)\b/i.test(input.job.input.trim()) &&

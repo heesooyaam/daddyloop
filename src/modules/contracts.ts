@@ -15,12 +15,46 @@ export interface AgentCatalogue {
   metadata?(): ModelCatalogueInfo;
   engines?(): { id: string; name: string }[];
 }
+export interface AgentInstallation {
+  executable: string;
+  version: string;
+}
+export interface AgentPackage {
+  version: string;
+  platform: string;
+  url: string;
+  integrity: string;
+}
+/** Native packaging and validation belong to the adapter; activation belongs to the host. */
+export interface AgentCli {
+  name: string;
+  executable(): string;
+  releaseUrl: string;
+  probe(executable: string, signal: AbortSignal): Promise<AgentInstallation>;
+  latestVersion(signal: AbortSignal): Promise<string>;
+  validate(
+    executable: string,
+    signal: AbortSignal,
+  ): Promise<{ version?: string; models: ModelOption[] }>;
+  diagnose?(signal: AbortSignal): Promise<Record<string, unknown>>;
+  updates?: {
+    unavailableReason?: string;
+    latest(signal: AbortSignal): Promise<AgentPackage>;
+    install(
+      pkg: AgentPackage,
+      root: string,
+      signal: AbortSignal,
+      resourceCheck: () => void,
+    ): Promise<string>;
+  };
+}
 export interface AgentModule {
   id: string;
   name: string;
   runtime: AgentRuntime & SessionRuntime;
   catalogue: AgentCatalogue;
   usage?: AgentUsage;
+  cli?: AgentCli;
 }
 export interface SubmissionContext {
   reader: TicketReader;

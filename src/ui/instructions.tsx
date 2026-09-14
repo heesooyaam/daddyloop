@@ -3,6 +3,7 @@ import { FileText, LoaderCircle, Plus, Trash2 } from 'lucide-react';
 import type { SessionInstructions, SkillSnapshot } from '../core/instructions.js';
 import type { DaddyApi } from '../client/daddy.js';
 import { useLocale } from './i18n.js';
+import { PresetLibrary } from './preset-library.js';
 import { PresetPicker } from './preset-picker.js';
 import { InstructionFile } from './instruction-file.js';
 import { FolderSkills } from './folder-skills.js';
@@ -21,6 +22,9 @@ export function InstructionFields({
   scope?: 'session' | 'preset';
 }) {
   const { t } = useLocale();
+  const [creatingPreset, setCreatingPreset] = useState(false);
+  const [presetEditorBusy, setPresetEditorBusy] = useState(false);
+  const [opened, setOpened] = useState(scope === 'preset');
   const [role, setRole] = useState<'daddy' | 'worker'>('daddy');
   const [adding, setAdding] = useState(false),
     [kind, setKind] = useState('github');
@@ -40,9 +44,9 @@ export function InstructionFields({
   const selected = instructions[role];
   useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
-    onBusyChange?.(busy);
+    onBusyChange?.(busy || creatingPreset);
     return () => onBusyChange?.(false);
-  }, [busy, onBusyChange]);
+  }, [busy, creatingPreset, onBusyChange]);
   const cancel = () => {
     request.current?.abort();
     setBusy(false);
@@ -74,10 +78,41 @@ export function InstructionFields({
       if (!controller.signal.aborted) setBusy(false);
     }
   };
+  if (creatingPreset)
+    return (
+      <section className="daddy-instructions">
+        <button
+          type="button"
+          className="daddy-text-button"
+          disabled={presetEditorBusy}
+          onClick={() => setCreatingPreset(false)}
+        >
+          ← {t('Back to session instructions')}
+        </button>
+        <PresetLibrary
+          api={api}
+          createOnOpen
+          onBusyChange={setPresetEditorBusy}
+          onApply={(preset) => {
+            const next = current.current ?? { daddy: {}, worker: {} };
+            if ((next.presets?.length ?? 0) >= 16)
+              throw new Error('Choose at most 16 presets per session');
+            change.current({
+              ...next,
+              presets: [...(next.presets ?? []), { preset, enabled: true, omit: [] }],
+            });
+            setCreatingPreset(false);
+          }}
+        />
+      </section>
+    );
   return (
     <details
       className="daddy-instructions"
-      open={scope === 'preset' ? true : undefined}
+      open={opened}
+      onToggle={(event) => {
+        if (event.target === event.currentTarget) setOpened(event.currentTarget.open);
+      }}
       onKeyDown={(event) => {
         if (
           event.key === 'Enter' &&
@@ -100,12 +135,13 @@ export function InstructionFields({
         {t(
           scope === 'preset'
             ? 'Build a reusable set for daddy and workers. Sessions choose which parts to use.'
-            : 'Only this session. Choose separate instructions for daddy and for all its workers. Saved text travels with your backup.',
+            : 'Tell daddy how to work: tone, rules and skills. Everything here applies only to this session.',
         )}
       </p>
       {scope === 'session' && (
         <PresetPicker
           api={api}
+          onCreate={() => setCreatingPreset(true)}
           value={value?.presets}
           onChange={(presets) =>
             change.current({ ...(current.current ?? { daddy: {}, worker: {} }), presets })
@@ -114,6 +150,7 @@ export function InstructionFields({
           disabled={importBusy || folderBusy}
         />
       )}
+      <strong>{t('Who are these instructions for?')}</strong>
       <div className="daddy-instruction-roles">
         {(['daddy', 'worker'] as const).map((item) => (
           <button
@@ -318,7 +355,8 @@ export function InstructionFields({
           {t(error)}
         </p>
       )}
-      <div className="daddy-instruction-import">
+      <details className="daddy-instruction-import">
+        <summary>{t('Import or export instructions')}</summary>
         <button
           type="button"
           className="daddy-text-button"
@@ -375,7 +413,7 @@ export function InstructionFields({
             }}
           />
         </label>
-      </div>
+      </details>
       <p className="daddy-muted">
         {t(
           scope === 'preset'

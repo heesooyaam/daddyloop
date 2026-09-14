@@ -39,14 +39,26 @@ function setup() {
                   instanceId: 'fixture-installation',
                   activeJobs: busy ? 1 : 0,
                   queuedJobs: 0,
-                  runtime: { source: 'path' },
+                  runtimes: [{ engine: 'codex', source: 'path' }],
+                  updaters: [],
                 }
-              : { tools: [] },
+              : String(url).endsWith('/runtimes')
+                ? [{ engine: 'codex', name: 'Codex', enabled: true, busy: false }]
+                : { tools: [] },
           ),
         ),
     ),
   );
-  vi.spyOn(CodexCatalogue.prototype, 'list').mockResolvedValue([]);
+  vi.spyOn(CodexCatalogue.prototype, 'list').mockResolvedValue([
+    {
+      engine: 'codex',
+      id: 'fixture',
+      name: 'Test',
+      efforts: [],
+      defaultEffort: '',
+      isDefault: true,
+    },
+  ]);
   vi.spyOn(process.stdout, 'write').mockReturnValue(true);
   const program = () => {
     const command = new Command();

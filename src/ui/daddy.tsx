@@ -619,11 +619,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'updates' && (
         <Dialog title={t('CLI updates')} onClose={() => setModal(null)}>
-          <p className="daddy-muted">
-            {t(
-              'Install or roll back Codex from /updates in Telegram, or use daddy runtime update --yes.',
-            )}
-          </p>
           <UpdatesPanel api={api} />
         </Dialog>
       )}

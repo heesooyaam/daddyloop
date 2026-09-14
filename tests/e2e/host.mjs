@@ -7,6 +7,8 @@ import { buildApp } from '../../dist/server/server/app.js';
 import { TicketReader } from '../../dist/server/modules/repositories/tickets.js';
 import { Workspaces } from '../../dist/server/runtime/workspaces.js';
 import { Store } from '../../dist/server/core/store.js';
+import { RuntimeUpdater, RuntimeUpdaters } from '../../dist/server/core/runtime-updater.js';
+import { AgentRegistry } from '../../dist/server/modules/agents/registry.js';
 import { UpdateMonitor } from '../../dist/server/core/updates.js';
 import { configSchema } from '../../dist/server/ops/config.js';
 import { WorkspaceRegistry } from '../../dist/server/core/workspace-registry.js';
@@ -118,15 +120,79 @@ store.setSetting('preferences', {
   locale: 'en',
   version: (store.setting('preferences')?.version ?? 0) + 1,
 });
-const updates = new UpdateMonitor(store, {
-  probe: async (name) =>
-    name === 'codex'
-      ? { path: '/fixture/codex', version: '0.153.4', source: 'bundled' }
-      : { source: 'missing' },
-  fetcher: async () => new Response(JSON.stringify({ version: '0.153.5' })),
+// Every updater is an offline adapter; browser tests never fetch or install native CLIs.
+const cliModules = ['codex', 'claude', 'atlas'].map((id) => {
+  let version = '1.0.0',
+    selected = `/fixture/${id}/1.0.0`;
+  const cli = {
+    name: { codex: 'Codex CLI', claude: 'Claude Code', atlas: 'Atlas' }[id],
+    executable: () => selected,
+    releaseUrl: 'https://example.test/releases',
+    probe: async (path) => ({ executable: path, version: path.split('/').at(-1) }),
+    latestVersion: async () => '2.0.0',
+    validate: async (path) => ({
+      version: path.split('/').at(-1),
+      models: [
+        {
+          engine: id,
+          id: 'fixture',
+          name: 'Fixture',
+          efforts: [],
+          defaultEffort: '',
+          isDefault: true,
+        },
+      ],
+    }),
+    updates: {
+      latest: async () => ({
+        version: '2.0.0',
+        platform: 'fixture',
+        url: 'fixture',
+        integrity: 'fixture',
+      }),
+      install: async () => {
+        await delay(600);
+        return `/fixture/${id}/2.0.0`;
+      },
+    },
+  };
+  const updater = new RuntimeUpdater(store, {
+    engine: id,
+    cli,
+    dataDir: dir,
+    executable: () => selected,
+    resourceCheck: () => {},
+    activate: (expected, next) => {
+      if (selected !== expected) throw new Error('selection changed');
+      selected = next;
+      version = next.split('/').at(-1);
+    },
+  });
+  return { id, cli, updater };
 });
+const updates = new UpdateMonitor(store, {
+  agents: cliModules.map(({ id, cli }) => ({ id, cli, managedUpdates: true })),
+});
+await updates.check(true);
 const { app } = await buildApp({
   usage: usageFixture(),
+  updaters: new RuntimeUpdaters(cliModules.map((module) => module.updater)),
+  agents: new AgentRegistry(
+    cliModules.map(({ id, cli }) => ({
+      id,
+      name: cli.name,
+      cli,
+      catalogue: { list: async () => [], validate: async () => {} },
+      runtime: {
+        run: async () => {
+          throw new Error('Use fixture runtime');
+        },
+        runSession: async () => {
+          throw new Error('Use fixture runtime');
+        },
+      },
+    })),
+  ),
   startUpdateCheck: false,
   store,
   workspaces,

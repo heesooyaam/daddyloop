@@ -2,7 +2,7 @@ import { it, expect, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { CodexRuntime } from '../src/runtime/codex.js';
+import { CodexRuntime } from '../src/modules/agents/codex/runtime.js';
 import { fixture } from './helpers.js';
 it('captures the executable for a running turn and reads the new selection only on the next turn', async () => {
   const f = await fixture();

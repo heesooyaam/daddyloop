@@ -500,7 +500,7 @@ export function DaddyTerminal({
       content.push(
         ...markdown(
           t(
-            'Install or roll back Codex from /updates in Telegram, or use daddy runtime update --yes.',
+            'Install or roll back an agent CLI in Updates on the website or Telegram, or use daddy runtime update --engine <id> --yes.',
           ),
           width,
         ),
@@ -818,7 +818,7 @@ export function DaddyTerminal({
             <Box flexGrow={1} />
             <Text color={colors.muted}>
               {clip(
-                (usageSummary(state.usage) ? `Codex ${usageSummary(state.usage)} · ` : '') +
+                (usageSummary(state.usage) ? `${usageSummary(state.usage)} · ` : '') +
                   (state.busy
                     ? '…'
                     : state.board

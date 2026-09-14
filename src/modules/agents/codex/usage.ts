@@ -1,8 +1,9 @@
+import { codexExecutable } from './executable.js';
 import type { AgentUsage, AgentUsageView, ResetPlan } from '../../../core/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { CodexConnection } from '../../../runtime/protocol.js';
-import { selectedExecutable, versionNumber, type Executable } from '../../../runtime/executable.js';
+import { CodexConnection } from './protocol.js';
+import { versionNumber, type Executable } from '../../../runtime/executable.js';
 import { AppError, now } from '../../../core/types.js';
 import { redact } from '../../../core/security.js';
 import type { Store } from '../../../core/store.js';
@@ -84,7 +85,7 @@ export class CodexUsage implements AgentUsage {
       new CodexConnection(executable),
   ) {}
   private async withRpc<T>(fn: (rpc: Rpc, executable: string, cliVersion?: string) => Promise<T>) {
-    const executable = selectedExecutable(this.executable),
+    const executable = codexExecutable(this.executable),
       rpc = this.connection(executable);
     try {
       const initialized = await rpc.start(process.cwd());
@@ -156,7 +157,7 @@ export class CodexUsage implements AgentUsage {
     };
   }
   read(refresh = false): Promise<AgentUsageView> {
-    const executable = selectedExecutable(this.executable),
+    const executable = codexExecutable(this.executable),
       epoch = this.epoch;
     if (!refresh && this.cached?.executable === executable && Date.now() - this.cached.at < 60000)
       return Promise.resolve(this.cached.view);
@@ -164,14 +165,14 @@ export class CodexUsage implements AgentUsage {
       return this.pending.result;
     const result = this.withRpc(async (rpc, selected, version) => {
       const data = await this.fetch(rpc);
-      if (selected !== selectedExecutable(this.executable) || epoch !== this.epoch)
+      if (selected !== codexExecutable(this.executable) || epoch !== this.epoch)
         return this.read(true);
       const view = this.view(data, version);
       if (epoch === this.epoch) this.cached = { at: Date.now(), executable: selected, view };
       return view;
     })
       .catch((error) => {
-        if (epoch !== this.epoch || executable !== selectedExecutable(this.executable))
+        if (epoch !== this.epoch || executable !== codexExecutable(this.executable))
           return this.read(true);
         const view = {
           ...(this.cached?.executable === executable ? this.cached.view : empty()),
@@ -179,7 +180,7 @@ export class CodexUsage implements AgentUsage {
           error: redact(String(error)).slice(0, 500),
         };
         view.resets = { ...view.resets, canUse: false };
-        if (epoch === this.epoch && executable === selectedExecutable(this.executable))
+        if (epoch === this.epoch && executable === codexExecutable(this.executable))
           this.cached = { at: Date.now(), executable, view };
         return view;
       })
@@ -256,7 +257,7 @@ export class CodexUsage implements AgentUsage {
             'reset_account_changed',
             'The Codex account changed. This reset was not sent.',
           );
-        if (executable !== selectedExecutable(this.executable))
+        if (executable !== codexExecutable(this.executable))
           throw new AppError('usage_runtime_changed', 'Codex changed. Refresh the limits again.');
         if (plan.status === 'ready' && executable !== plan.executable)
           throw new AppError('usage_runtime_changed', 'Codex changed. Refresh the limits again.');

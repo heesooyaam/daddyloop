@@ -38,3 +38,10 @@ export function checkedModules(ids: string[]) {
     throw new Error('Choose module IDs from daddy modules list');
   return [...ids].sort();
 }
+
+/** Installer recommendation is the explicit product default, never an unknown-engine fallback. */
+export function defaultAgentId() {
+  const agent = moduleCatalogue.find((module) => module.kind === 'agent' && module.recommended);
+  if (!agent) throw new Error('No recommended agent module is registered');
+  return agent.id;
+}

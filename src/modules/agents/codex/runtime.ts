@@ -1,3 +1,4 @@
+import { codexExecutable } from './executable.js';
 import { z } from 'zod';
 import { CodexConnection, type RpcMessage } from './protocol.js';
 import {
@@ -7,11 +8,11 @@ import {
   type AgentInput,
   type SessionInput,
   type SessionRuntime,
-} from './agent.js';
-import { dynamicTools } from '../core/broker.js';
-import { AppError, type AgentResult } from '../core/types.js';
-import { redact } from '../core/security.js';
-import { selectedExecutable, type Executable } from './executable.js';
+} from '../../../runtime/agent.js';
+import { dynamicTools } from '../../../core/broker.js';
+import { AppError, type AgentResult } from '../../../core/types.js';
+import { redact } from '../../../core/security.js';
+import { type Executable } from '../../../runtime/executable.js';
 
 export class CodexRuntime implements AgentRuntime, SessionRuntime {
   constructor(
@@ -26,13 +27,8 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     return this.runSession(taskSession(input));
   }
   async runSession(input: SessionInput): Promise<AgentResult> {
-    if (input.profile?.effort === 'ultra')
-      throw new AppError(
-        'unsupported_profile',
-        'Codex delegation mode is not supported by this module',
-      );
     // Capture once per turn. Updating the selection never touches an existing process.
-    const rpc = new CodexConnection(selectedExecutable(this.options.executable), this.options.args);
+    const rpc = new CodexConnection(codexExecutable(this.options.executable), this.options.args);
     const profile = input.profile,
       readOnly = input.readOnly;
     let threadId = input.threadId;

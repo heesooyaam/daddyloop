@@ -138,7 +138,7 @@ it('switches English/Russian only for the bound user and reads fresh model choic
     t = transport(),
     bot = new Telegram(f.engine, t.api, 'test_bot');
   const list = vi.fn(catalogue.list),
-    updates = new UpdateMonitor(f.store, { probe: async () => ({ source: 'missing' }) });
+    updates = new UpdateMonitor(f.store, { agents: [] });
   bot.configure({ catalogue: { ...catalogue, list }, updates });
   try {
     f.engine.setDefaultAgents(profiles);

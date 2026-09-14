@@ -158,6 +158,8 @@ export class Store {
       groupGeneration: group?.generation,
       actionId,
     };
+    if (!job.profile)
+      throw new AppError('agent_profile_missing', 'Choose an agent profile before queuing a turn');
     this.saveJob(job);
     this.event(task.id, 'job.queued', { role, kind }, job.id);
     return job;

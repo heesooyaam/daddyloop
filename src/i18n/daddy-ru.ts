@@ -280,18 +280,11 @@ export const daddyRu: Record<string, string> = {
   'Send /group in the private bot chat to connect a Telegram group.':
     'Для подключения группы отправь /group в личном чате с ботом.',
   'Group selection expired. Send /group again.': 'Выбор группы истёк. Отправь /group ещё раз.',
-  'Codex currently blocks included usage.':
-    'Codex сейчас ограничивает использование включённой квоты.',
   'Resolve pending reset': 'Завершить ожидающий сброс',
   Limits: 'Лимиты',
-  'Codex limits': 'Лимиты Codex',
   'Use a reset': 'Использовать сброс',
   'Refresh limits': 'Обновить лимиты',
   'Confirm: use one reset': 'Подтвердить: использовать один сброс',
-  'daddy and workers share the Codex account limits on this server.':
-    'daddy и воркеры используют общие лимиты аккаунта Codex на этом сервере.',
-  'Limits are unavailable. Sign in to Codex and refresh.':
-    'Лимиты недоступны. Войди в Codex и обнови данные.',
   'These readings are outdated. Refresh before using a reset.':
     'Данные устарели. Перед использованием сброса обнови лимиты.',
   'Quota window': 'Период квоты',
@@ -307,8 +300,6 @@ export const daddyRu: Record<string, string> = {
   '{title} · expires {time}': '{title} · действует до {time}',
   'Expires: {time}': 'Действует до {time}',
   'Checked: {time}': 'Проверено: {time}',
-  'Use one available reset for the Codex account on this server? Existing conversations and files are kept.':
-    'Использовать один доступный сброс лимитов аккаунта Codex на этом сервере? Существующие разговоры и файлы сохранятся.',
   'If the response is lost, retry this same operation. It will not spend a second reset.':
     'Если ответ потеряется, повтори эту же операцию. Второй сброс не спишется.',
   'One reset was used. Limits were requested again from the provider.':
@@ -532,8 +523,6 @@ export const daddyRu: Record<string, string> = {
     'Ctrl+N — новая сессия · Ctrl+T — сессии · Tab — чат/задачи · PgUp/PgDn — прокрутка · Ctrl+Q — выход',
   'Register folders with daddy workspaces add <path> --name <name>, or use Workspaces on the website.':
     'Зарегистрировать папку можно командой daddy workspaces add <path> --name <name> или в разделе «Воркспейсы» на сайте.',
-  'Install or roll back Codex from /updates in Telegram, or use daddy runtime update --yes.':
-    'Обновить или откатить Codex можно через /updates в Telegram или командой daddy runtime update --yes.',
   '↑ ↓ choose · Enter confirm · Esc back': '↑ ↓ — выбрать · Enter — подтвердить · Esc — назад',
   'You bring the idea. daddy takes it from here.': 'С тебя идея. Дальше займётся daddy.',
   'Commands and shortcuts': 'Команды и сочетания клавиш',

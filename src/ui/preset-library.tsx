@@ -6,11 +6,21 @@ import type { InstructionPresets } from '../core/instruction-presets.js';
 import { InstructionFields } from './instructions.js';
 import { useLocale } from './i18n.js';
 
-export function PresetLibrary({ api }: { api: DaddyApi }) {
+export function PresetLibrary({
+  api,
+  onApply,
+  createOnOpen = false,
+  onBusyChange,
+}: {
+  api: DaddyApi;
+  onBusyChange?: (busy: boolean) => void;
+  onApply?: (preset: InstructionPreset) => void;
+  createOnOpen?: boolean;
+}) {
   const { t } = useLocale();
   const [library, setLibrary] = useState<ReturnType<InstructionPresets['list']>>([]);
   const [editing, setEditing] = useState<InstructionPreset>(),
-    [open, setOpen] = useState(false);
+    [open, setOpen] = useState(createOnOpen);
   const [name, setName] = useState(''),
     [description, setDescription] = useState('');
   const [instructions, setInstructions] = useState<SessionInstructions>({ daddy: {}, worker: {} });
@@ -18,6 +28,10 @@ export function PresetLibrary({ api }: { api: DaddyApi }) {
     [importing, setImporting] = useState(false);
   const [error, setError] = useState(''),
     [saved, setSaved] = useState(false);
+  useEffect(() => {
+    onBusyChange?.(busy || importing);
+    return () => onBusyChange?.(false);
+  }, [busy, importing, onBusyChange]);
   const request = useRef<AbortController | undefined>(undefined);
   const load = async () =>
     setLibrary(await api<ReturnType<InstructionPresets['list']>>('/instructions/presets'));
@@ -78,6 +92,7 @@ export function PresetLibrary({ api }: { api: DaddyApi }) {
       setInstructions(preset.instructions);
       await load();
       setSaved(true);
+      onApply?.(preset);
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -138,13 +153,7 @@ export function PresetLibrary({ api }: { api: DaddyApi }) {
         {t('Create preset')}
       </button>
       {open && (
-        <form
-          className="daddy-form daddy-preset-editor"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void save();
-          }}
-        >
+        <div className="daddy-form daddy-preset-editor">
           <fieldset disabled={busy}>
             <label>
               {t('Preset name')}
@@ -181,9 +190,14 @@ export function PresetLibrary({ api }: { api: DaddyApi }) {
             />
           </fieldset>
           <div className="daddy-form-actions">
-            <button className="daddy-button primary" disabled={busy || importing || !name.trim()}>
+            <button
+              type="button"
+              onClick={() => void save()}
+              className="daddy-button primary"
+              disabled={busy || importing || !name.trim()}
+            >
               <Save size={15} />
-              {t('Save preset')}
+              {t(onApply ? 'Save and use in this session' : 'Save preset')}
             </button>
             <button
               type="button"
@@ -210,7 +224,7 @@ export function PresetLibrary({ api }: { api: DaddyApi }) {
               {t('Preset saved. Choose it when creating a session.')}
             </p>
           )}
-        </form>
+        </div>
       )}
       {error && (
         <p role="alert" className="daddy-field-error">

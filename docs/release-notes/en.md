@@ -1,6 +1,15 @@
 [English](en.md) · [Русский](ru.md) · [All guides](../index/en.md)
 
-# daddyloop 0.16.0
+# daddyloop 0.17.0
+
+- Agent adapters own CLI discovery, diagnostics, installation and validation. Codex and Claude updates/rollback share one per-engine controller and are available from the website, CLI and Telegram. Claude-only installations check updates; notifications use the correct engine name and suppress duplicate managed transitions.
+- Model efforts come from the native catalogue without a local `ultra` blacklist. Missing profiles no longer silently select Codex or inherit changed defaults at execution.
+- The session instruction editor explains presets, supports inline creation without losing the task draft, and folds import/export controls away. Fixes issue #19 item 11.
+- [Adapter review](../agent-adapter-review/en.md) and bilingual module docs describe the boundaries and validation.
+
+Configuration 3 and SQLite 7 are unchanged. Reload open websites after upgrading. CLI management now uses `--engine` when multiple agents are installed, and API clients use `/api/runtimes/:engine/update`. Retired Codex-only endpoints/callbacks are removed; pending old update confirmations must be opened again. Existing selected executable paths, models, sessions and backups are preserved. The new per-engine rollback ledger starts with the next managed update.
+
+## 0.16.0
 
 - Shared preset library with independent daddy/worker contents. Sessions can combine several presets and switch individual prompts and skills on or off. Library edits are version checked; existing sessions retain their selected snapshots.
 - Portable backups include the complete library, selected versions, component choices and text. Active preset components are combined and frozen before an agent turn is queued.

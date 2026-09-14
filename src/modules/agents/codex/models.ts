@@ -1,7 +1,8 @@
-import { CodexConnection } from '../../../runtime/protocol.js';
+import { codexExecutable } from './executable.js';
+import { CodexConnection } from './protocol.js';
 import { AppError, type AgentProfile } from '../../../core/types.js';
 import { profileSchema, type ModelOption, type ModelCatalogueInfo } from '../../../core/agents.js';
-import { versionNumber, selectedExecutable, type Executable } from '../../../runtime/executable.js';
+import { versionNumber, type Executable } from '../../../runtime/executable.js';
 export class CodexCatalogue {
   private cached?: { at: number; models: ModelOption[] };
   private pending?: Promise<ModelOption[]>;
@@ -10,11 +11,11 @@ export class CodexCatalogue {
   constructor(private executable?: Executable) {
     this.info = {
       source: 'codex-app-server:model/list',
-      executable: selectedExecutable(executable),
+      executable: codexExecutable(executable),
     };
   }
   private current() {
-    const executable = selectedExecutable(this.executable);
+    const executable = codexExecutable(this.executable);
     if (this.selected?.metadata().executable !== executable)
       this.selected = new CodexCatalogue(executable);
     return this.selected;
@@ -39,7 +40,7 @@ export class CodexCatalogue {
     return this.pending;
   }
   private async load(signal?: AbortSignal) {
-    const rpc = new CodexConnection(selectedExecutable(this.executable));
+    const rpc = new CodexConnection(codexExecutable(this.executable));
     const abort = () => rpc.close();
     signal?.addEventListener('abort', abort, { once: true });
     const models: ModelOption[] = [];
@@ -64,9 +65,7 @@ export class CodexCatalogue {
             id: model.model || model.id,
             engine: 'codex',
             name: model.displayName,
-            efforts: model.supportedReasoningEfforts
-              .map((item) => item.reasoningEffort)
-              .filter((effort) => effort !== 'ultra'),
+            efforts: model.supportedReasoningEfforts.map((item) => item.reasoningEffort),
             defaultEffort: model.defaultReasoningEffort,
             isDefault: model.isDefault,
           });
@@ -86,7 +85,7 @@ export class CodexCatalogue {
   }
   async validate(profile: AgentProfile) {
     profileSchema.parse(profile);
-    if (profile.engine !== 'codex' || profile.effort === 'ultra')
+    if (profile.engine !== 'codex')
       throw new AppError(
         'unsupported_profile',
         'This profile is not supported by the Codex module',
