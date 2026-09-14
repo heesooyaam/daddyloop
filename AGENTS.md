@@ -15,3 +15,5 @@ This project is a standalone Git repository. It is unrelated to the machine's Ar
 - Every product document must have `docs/<topic>/en.md` and `docs/<topic>/ru.md`; update both in the same change. Keep the root English/Russian READMEs and topic indexes aligned. Do not add flat, single-language guides.
 - Module additions implement `src/modules/contracts.ts` and register through the module catalogs. The scheduler must not select an engine by model name or call a provider-specific submission protocol.
 - Use worker terminology and lowercase daddy. Keep destructive actions explicit even when other copy is informal.
+
+- Write docs briefly in plain language: overview and a concrete example first, optional details next. Explain a component’s purpose before introducing its code names. Prefer code links over exhaustive field lists.

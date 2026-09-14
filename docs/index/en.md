@@ -27,7 +27,7 @@ New here? [Install daddy](../start/en.md), then open the [website](../web/en.md)
 
 ## Develop daddyloop
 
-- [Architecture: components, review/fix loop and recovery](../architecture/en.md)
+- [Architecture: overview, then the parts](../architecture/en.md)
 - [Write an agent or repository module](../module-development/en.md)
 - [Contribute, run checks and update screenshots](../contributing/en.md)
 
