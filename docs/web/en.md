@@ -94,4 +94,19 @@ The application itself stays on loopback. The public origin must exactly match t
 - `daddy web status`: check the configured URL. `localhost` on a phone means that phone.
 - After changing the HTTPS origin, restart daddyloop. Old one-use links may already be consumed or expired; create a new one.
 
-See [appearance and usage](../appearance/en.md) for themes and the persistent usage panel, and [operations](../operations/en.md) for service logs and device revocation.
+## Themes
+
+Click the **palette icon** in the top bar, or on the login screen. Eight themes are available:
+
+| Light   | Dark     |
+| ------- | -------- |
+| Glacier | Graphite |
+| Pearl   | Midnight |
+| Mint    | Forest   |
+| Lilac   | Plum     |
+
+**Follow system** uses Glacier for light mode and Graphite for dark mode. An explicit choice is saved in this browser, survives reloads, and synchronizes across its tabs. Your phone can use a different theme. Choosing colors does not change tasks, drafts, models or server settings.
+
+The web palettes cover the conversation, task board, dialogs, forms and login screen. The terminal separately supports `daddy --theme dark` and `daddy --theme light`.
+
+The panel above the conversation shows [agent quotas](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).

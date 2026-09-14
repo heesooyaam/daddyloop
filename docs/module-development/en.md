@@ -71,7 +71,7 @@ Optional `AgentModule.cli: AgentCli` owns the executable resolver, display name,
 
 The server enumerates `AgentRegistry.all()`. `RuntimeUpdaters` maintains separate audience-bound confirmations and operation/rollback records per engine. Activation compares the selected executable and configuration before switching, and validates the saved profiles for that engine. New turns resolve the selection dynamically and capture it once. `UpdateMonitor`, browser, CLI and Telegram use the same capability data; they must not contain provider-specific fallbacks. API routes are `/api/runtimes` and `/api/runtimes/:engine/update[/prepare|/confirm]`.
 
-Factories can declare `privatePaths()` for native credentials outside the shared token folder; backups exclude these even for disabled modules. Installed CLI versions are packaging pins, while models and effort values come from the live catalogue. Never derive module identity from a model name. See the [audit](../agent-adapter-review/en.md) and the third-engine lifecycle, failure/recovery and notification tests.
+Factories can declare `privatePaths()` for native credentials outside the shared token folder; backups exclude these even for disabled modules. Installed CLI versions are packaging pins, while models and effort values come from the live catalogue. Never derive module identity from a model name. See the [third-engine update/recovery tests](../../tests/runtime-updater.test.ts) and [notification tests](../../tests/updates.test.ts).
 
 ## Repository module
 
