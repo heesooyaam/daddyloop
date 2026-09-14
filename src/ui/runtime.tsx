@@ -104,7 +104,7 @@ export function UpdatesPanel({ api }: { api: Api }) {
                 {updater.operation.error && `: ${updater.operation.error}`}
               </p>
             )}
-            {updater?.reason && <p>{updater.reason}</p>}
+            {updater?.reason && <p>{t(updater.reason)}</p>}
             {updater?.enabled && (
               <div className="daddy-settings-actions">
                 {tool.updateAvailable && (

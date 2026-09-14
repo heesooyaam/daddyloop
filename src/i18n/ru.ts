@@ -1,5 +1,38 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Inspect or choose an agent CLI used by this service':
+    'Посмотреть или выбрать CLI агента для этого сервиса',
+  'Install the latest stable agent CLI on the service host':
+    'Установить актуальную стабильную версию CLI агента на сервере',
+  'Restore the previous agent CLI version': 'Вернуть предыдущую версию CLI агента',
+  'Inspect server-side agent CLI updates': 'Показать состояние обновлений CLI агентов',
+  'Choose an agent executable on the service host; restart when idle':
+    'Выбрать CLI агента на сервере и перезапустить свободный сервис',
+  'Check resources, credentials and enabled agent adapters without running a model':
+    'Проверить ресурсы, аккаунты и включённые адаптеры без запуска модели',
+  'query enabled agent model catalogues again':
+    'Повторно запросить каталоги моделей включённых агентов',
+  'List available agent models and reasoning efforts':
+    'Показать доступные модели агентов и уровни рассуждений',
+  'agent module ID': 'ID модуля агента',
+  'agent CLI is already up to date': 'Уже установлена актуальная версия CLI агента',
+  'No matching previous agent CLI version is available':
+    'Подходящая предыдущая версия CLI недоступна',
+  'This agent CLI confirmation expired or was already used. Open Updates again.':
+    'Подтверждение смены CLI истекло или уже использовано. Открой «Обновления» заново.',
+  'Agent CLI updates are disabled': 'Обновления CLI агентов отключены',
+  'A {name} update is already in progress': 'Обновление {name} уже выполняется',
+  'agent CLI update interrupted. The selected CLI was preserved; open Updates to retry.':
+    'Обновление CLI прервано. Выбранная версия сохранена; открой «Обновления», чтобы повторить попытку.',
+  'Agent CLI package checksum mismatch': 'Контрольная сумма пакета CLI не совпала',
+  'Managed updates are not provided by this adapter':
+    'Этот адаптер не поддерживает установку обновлений через daddy',
+  'Managed updates require Linux x64 or ARM64':
+    'Для управляемых обновлений нужен Linux x64 или ARM64',
+  'Managed updates require Linux glibc x64 or ARM64':
+    'Для управляемых обновлений нужен Linux с glibc, x64 или ARM64',
+  '{name} overrides the selected CLI': 'Выбранный CLI переопределён переменной {name}',
+
   'Open Updates to install {name} directly on this server.':
     'Открой «Обновления», чтобы установить {name} прямо на этом сервере.',
   'Open the release notes for installation instructions.':

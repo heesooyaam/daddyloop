@@ -176,7 +176,7 @@ export function updatesCard(
           '\n' +
           t(updater.operation.error ?? ''),
       );
-    if (updater.reason) text.add('\n\n' + updater.name + ': ' + updater.reason);
+    if (updater.reason) text.add('\n\n' + updater.name + ': ' + t(updater.reason));
   }
   return {
     ...text,
