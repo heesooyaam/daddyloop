@@ -1,20 +1,13 @@
-import { command } from '../ops/process.js';
-import {
-  bundledRoot,
-  executablePath,
-  isNewerVersion,
-  versionNumber,
-  selectedExecutable,
-  type Executable,
-} from '../runtime/executable.js';
+import { bundledRoot, executablePath, isNewerVersion } from '../runtime/executable.js';
+import { join } from 'node:path';
 import { redact } from './security.js';
 import type { Store } from './store.js';
-import type { CodexUpdateOperation } from './codex-updater.js';
-
+import type { RuntimeUpdateOperation } from './runtime-updater.js';
+import type { AgentCli } from '../modules/contracts.js';
 export interface ToolVersion {
-  id: 'codex' | 'claude';
+  id: string;
   name: string;
-  supported: boolean;
+  managedUpdates: boolean;
   executable?: string;
   source: 'bundled' | 'external' | 'managed' | 'missing';
   installed?: string;
@@ -37,22 +30,11 @@ export interface UpdateNotice {
   tool: ToolVersion;
   checkedAt: string;
 }
-const tools = [
-  {
-    id: 'codex' as const,
-    name: 'Codex CLI',
-    package: '@openai/codex',
-    supported: true,
-    releaseUrl: 'https://github.com/openai/codex/releases',
-  },
-  {
-    id: 'claude' as const,
-    name: 'Claude Code',
-    package: '@anthropic-ai/claude-code',
-    supported: true,
-    releaseUrl: 'https://code.claude.com/docs/en/changelog',
-  },
-];
+export interface MonitoredCli {
+  id: string;
+  cli: AgentCli;
+  managedUpdates: boolean;
+}
 export class UpdateMonitor {
   private pending?: Promise<UpdateStatus>;
   private timer?: NodeJS.Timeout;
@@ -61,32 +43,31 @@ export class UpdateMonitor {
   constructor(
     private store: Store,
     private options: {
-      enabled?: string[];
-      codex?: Executable;
-      managedRoot?: string;
-      claude?: string;
+      agents: MonitoredCli[];
+      dataDir?: string;
       intervalHours?: number;
-      fetcher?: typeof fetch;
-      probe?: (command: string) => Promise<{
-        path?: string;
-        version?: string;
-        source: ToolVersion['source'];
-        error?: string;
-      }>;
-    } = {},
+    },
   ) {}
   status(): UpdateStatus {
+    const saved = this.store.setting<UpdateStatus>('updates.status');
     return {
-      ...(this.store.setting<UpdateStatus>('updates.status') ?? { tools: [] }),
-      tools: (this.store.setting<UpdateStatus>('updates.status')?.tools ?? []).filter(
-        (tool) => !this.options.enabled || this.options.enabled.includes(tool.id),
-      ),
+      ...saved,
+      tools: this.options.agents.map(({ id, cli, managedUpdates }) => ({
+        id,
+        source: 'missing',
+        updateAvailable: false,
+        ...saved?.tools.find((tool) => tool.id === id),
+        name: cli.name,
+        releaseUrl: cli.releaseUrl,
+        managedUpdates,
+      })),
       intervalHours: this.options.intervalHours ?? 6,
       checking: !!this.pending,
       notifications: this.store.setting<boolean>('updates.notifications') ?? true,
     };
   }
   start() {
+    if (this.timer || this.stopped) return;
     const check = () => {
       void this.check().catch(() => {});
     };
@@ -104,9 +85,10 @@ export class UpdateMonitor {
     if (this.pending) return this.pending;
     const status = this.status();
     if (
-      !force &&
-      status.checkedAt &&
-      Date.now() - Date.parse(status.checkedAt) < status.intervalHours * 3600000
+      this.stopped ||
+      (!force &&
+        status.checkedAt &&
+        Date.now() - Date.parse(status.checkedAt) < status.intervalHours * 3600000)
     )
       return Promise.resolve(status);
     this.pending = this.load().finally(() => {
@@ -114,105 +96,84 @@ export class UpdateMonitor {
     });
     return this.pending;
   }
-  private async probe(executable: string) {
-    if (this.options.probe) return this.options.probe(executable);
-    const path = executablePath(executable),
-      root = bundledRoot();
-    if (!path) return { source: 'missing' as const };
-    const source =
-      this.options.managedRoot && path.startsWith(this.options.managedRoot + '/')
-        ? ('managed' as const)
-        : root && path.startsWith(root + '/')
-          ? ('bundled' as const)
-          : ('external' as const);
-    try {
-      const result = await command(path, ['--version'], {
-        timeoutMs: 10000,
-        maxBytes: 8000,
-        signal: this.controller.signal,
-      });
-      const version = versionNumber(result.stdout);
-      return {
-        path,
-        source,
-        version,
-        ...(!version ? { error: 'CLI did not report a recognizable version' } : {}),
-      };
-    } catch (error) {
-      return { path, source, error: redact(String(error)) };
-    }
+  private selection(cli: AgentCli) {
+    const selected = cli.executable();
+    return { selected, path: executablePath(selected) };
   }
   private async load(): Promise<UpdateStatus> {
-    const executable = selectedExecutable(this.options.codex);
     const previous = this.status(),
       checkedAt = new Date().toISOString();
+    const selections = this.options.agents.map(({ cli }) => this.selection(cli));
     const entries = await Promise.all(
-      tools
-        .filter((tool) => (this.options.enabled ?? tools.map((item) => item.id)).includes(tool.id))
-        .map(async (tool) => {
-          const local = await this.probe(selectedExecutable(this.options[tool.id] ?? tool.id));
-          const result: ToolVersion = {
-            id: tool.id,
-            name: tool.name,
-            supported: tool.supported,
-            source: local.source,
-            executable: local.path,
-            installed: local.version,
-            error: local.error,
-            updateAvailable: false,
-            releaseUrl: tool.releaseUrl,
-          };
-          if (!local.version || this.stopped) return result;
-          const before = previous.tools.find((item) => item.id === tool.id)?.installed;
+      this.options.agents.map(async ({ id, cli, managedUpdates }, index) => {
+        const { selected, path } = selections[index],
+          bundle = bundledRoot();
+        const result: ToolVersion = {
+          id,
+          name: cli.name,
+          managedUpdates,
+          executable: path,
+          releaseUrl: cli.releaseUrl,
+          source: !path
+            ? 'missing'
+            : this.options.dataDir &&
+                path.startsWith(join(this.options.dataDir, 'runtimes', id) + '/')
+              ? 'managed'
+              : bundle && path.startsWith(bundle + '/')
+                ? 'bundled'
+                : 'external',
+          updateAvailable: false,
+        };
+        try {
+          const local = await cli.probe(selected, this.controller.signal);
+          result.installed = local.version;
+          const before = previous.tools.find((item) => item.id === id)?.installed;
           if (before && before !== local.version) result.changedFrom = before;
-          const operation = this.store.setting<CodexUpdateOperation>('codex.update.operation');
+          const operation = this.store.setting<RuntimeUpdateOperation>(
+            `runtime.${id}.update.operation`,
+          );
           if (
-            tool.id === 'codex' &&
             result.changedFrom &&
-            operation?.phase === 'complete' &&
+            operation?.engine === id &&
+            operation.phase === 'complete' &&
             operation.from.version === result.changedFrom &&
             operation.target.version === local.version &&
-            executablePath(operation.target.executable ?? '') === local.path &&
+            path &&
+            executablePath(operation.target.executable ?? '') === path &&
             operation.finishedAt &&
             operation.finishedAt >= (previous.checkedAt ?? '') &&
-            operation.id !== this.store.setting<string>('updates.accountedOperation')
+            operation.id !== this.store.setting<string>(`updates.${id}.accountedOperation`)
           )
             result.managedOperationId = operation.id;
-          try {
-            const response = await (this.options.fetcher ?? fetch)(
-              `https://registry.npmjs.org/${encodeURIComponent(tool.package)}/latest`,
-              {
-                redirect: 'error',
-                headers: { Accept: 'application/json' },
-                signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(15000)]),
-              },
-            );
-            if (!response.ok) throw new Error(`Version registry returned HTTP ${response.status}`);
-            const value = (await response.json()) as { version?: string };
-            if (!value.version || !/^\d+\.\d+\.\d+$/.test(value.version))
-              throw new Error('Version registry returned an invalid stable version');
-            result.latest = value.version;
-            result.updateAvailable = isNewerVersion(value.version, local.version);
-          } catch (error) {
-            result.error = redact(String(error));
-          }
-          return result;
-        }),
+          result.latest = await cli.latestVersion(this.controller.signal);
+          result.updateAvailable = isNewerVersion(result.latest, local.version);
+        } catch (error) {
+          result.error = redact(String(error));
+        }
+        return result;
+      }),
     );
-    if (!this.stopped && executable !== selectedExecutable(this.options.codex)) return this.load();
-    const result: UpdateStatus = {
+    // Every engine can change while registry requests are in flight, including launcher symlinks.
+    if (
+      !this.stopped &&
+      this.options.agents.some(({ cli }, index) => {
+        const current = this.selection(cli),
+          before = selections[index];
+        return current.selected !== before.selected || current.path !== before.path;
+      })
+    )
+      return this.load();
+    const result = {
       checkedAt,
       intervalHours: previous.intervalHours,
-      notifications: previous.notifications,
+      notifications: this.status().notifications,
       tools: entries,
     };
     if (!this.stopped) {
       this.store.setSetting('updates.status', result);
-      const managed = entries.find((tool) => tool.managedOperationId)?.managedOperationId;
-      if (managed) this.store.setSetting('updates.accountedOperation', managed);
       for (const tool of entries) {
-        // Unsupported engines are visible for clarity but do not send irrelevant alerts.
-        if (!tool.supported) continue;
+        if (tool.managedOperationId)
+          this.store.setSetting(`updates.${tool.id}.accountedOperation`, tool.managedOperationId);
         if (tool.updateAvailable)
           this.store.event('_system', 'runtime.update_available', {
             kind: 'available',

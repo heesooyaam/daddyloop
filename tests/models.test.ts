@@ -1,6 +1,6 @@
 import { afterEach, it, expect, vi } from 'vitest';
 import { CodexCatalogue } from '../src/modules/agents/codex/models.js';
-import { CodexConnection } from '../src/runtime/protocol.js';
+import { CodexConnection } from '../src/modules/agents/codex/protocol.js';
 it('reloads the catalogue after runtime selection and fences a response from the previous executable', async () => {
   vi.spyOn(CodexConnection.prototype, 'start').mockResolvedValue({ userAgent: 'codex-cli/2.0.0' });
   let release!: () => void,
@@ -103,6 +103,10 @@ it('follows model pagination and reloads after the five-minute cache expires', a
   );
   const catalog = new CodexCatalogue();
   expect((await catalog.list()).map((model) => model.id)).toEqual(['first', 'second']);
+  expect((await catalog.list())[0].efforts).toEqual(['medium', 'ultra']);
+  await expect(
+    catalog.validate({ engine: 'codex', model: 'first', effort: 'ultra' }),
+  ).resolves.toBeUndefined();
   expect(request).toHaveBeenCalledTimes(2);
   await catalog.list();
   expect(request).toHaveBeenCalledTimes(2);

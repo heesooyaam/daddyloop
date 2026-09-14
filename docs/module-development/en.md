@@ -27,6 +27,7 @@ interface AgentModule {
   runtime: AgentRuntime & SessionRuntime;
   catalogue: AgentCatalogue;
   usage?: AgentUsage;
+  cli?: AgentCli;
 }
 ```
 
@@ -63,6 +64,14 @@ interface AgentUsage {
 Return every provider-reported bucket and window. Names, duration, reset time, plan and credits come from the provider. `remainingPercent: null` means unknown; a missing window must not be synthesized. Include source, timestamp and stale/unavailable states. Event-only providers must label old readings stale rather than pretending a refresh fetched new data.
 
 Only expose `reset` if the provider supports it. `prepare` must not consume anything. A confirmation must bind the owner, account, selected runtime and expiry; a retry must reuse the same durable idempotency key. [`codex/usage.ts`](../../src/modules/agents/codex/usage.ts) implements those fences. `ModuleUsage` combines provider readings and routes reset confirmations without interpreting subscription tiers.
+
+## CLI lifecycle is a capability of the adapter
+
+Optional `AgentModule.cli: AgentCli` owns the executable resolver, display name, release URL, `probe`, `latestVersion`, `validate`, optional `diagnose`, and optional managed `updates.latest` / `updates.install`. Keep package URLs, platform layouts, authentication probes and native handshakes inside the adapter. Return `unavailableReason` for unsupported installer platforms. An adapter without `cli` still runs through the registry; one without `updates` gets no install/rollback action.
+
+The server enumerates `AgentRegistry.all()`. `RuntimeUpdaters` maintains separate audience-bound confirmations and operation/rollback records per engine. Activation compares the selected executable and configuration before switching, and validates the saved profiles for that engine. New turns resolve the selection dynamically and capture it once. `UpdateMonitor`, browser, CLI and Telegram use the same capability data; they must not contain provider-specific fallbacks. API routes are `/api/runtimes` and `/api/runtimes/:engine/update[/prepare|/confirm]`.
+
+Factories can declare `privatePaths()` for native credentials outside the shared token folder; backups exclude these even for disabled modules. Installed CLI versions are packaging pins, while models and effort values come from the live catalogue. Never derive module identity from a model name. See the [audit](../agent-adapter-review/en.md) and the third-engine lifecycle, failure/recovery and notification tests.
 
 ## Repository module
 

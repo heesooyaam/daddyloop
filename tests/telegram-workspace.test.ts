@@ -101,7 +101,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     return new Response(JSON.stringify({ ok: true, result }));
   });
   const bot = new Telegram(f.engine, api, 'fixture_bot'),
-    updates = new UpdateMonitor(f.store, { probe: async () => ({ source: 'missing' }) });
+    updates = new UpdateMonitor(f.store, { agents: [] });
   bot.configure({ daddy: f.daddy, catalogue, updates });
   f.store.setSetting('telegram.botId', 101);
   let id = 1;

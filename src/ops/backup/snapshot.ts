@@ -1,3 +1,4 @@
+import { agentFactories } from '../../modules/agents/index.js';
 import { VERSION } from '../../version.js';
 import { createRepositories } from '../../modules/repositories/index.js';
 import { DatabaseSync, backup } from 'node:sqlite';
@@ -142,12 +143,10 @@ export async function createBackup(dataDir: string, output: string, config: Conf
   if (existsSync(output)) throw new Error('Backup output already exists');
   const credentialPaths = [
     join(homedir(), '.tokens'),
-    join(homedir(), '.codex/auth.json'),
-    join(homedir(), '.claude/.credentials.json'),
+    ...agentFactories.flatMap((module) => module.privatePaths?.() ?? []),
     join(dataDir, 'access-token'),
     config.clientTokenFile,
     config.telegram.tokenFile,
-    process.env.DADDYLOOP_CLAUDE_API_KEY_FILE,
   ]
     .filter((path): path is string => !!path)
     .map((path) => resolve(path));

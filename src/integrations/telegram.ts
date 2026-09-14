@@ -16,15 +16,15 @@ import { preferences, setLocale } from '../core/preferences.js';
 import type { Locale } from '../i18n/index.js';
 import type { Catalogue } from '../server/planning.js';
 import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
-import type { CodexUpdater, CodexUpdateOperation } from '../core/codex-updater.js';
+import type { RuntimeUpdaters, RuntimeUpdateOperation } from '../core/runtime-updater.js';
 import type { Daddy } from '../core/daddy.js';
 import { TelegramWorkspace } from './telegram-workspace.js';
 import { daddyHome } from './daddy-cards.js';
 import type { Speech } from '../runtime/speech.js';
 import type { ResourceStatus } from '../core/types.js';
 import {
-  codexConfirmationCard,
-  codexOperationCard,
+  runtimeConfirmationCard,
+  runtimeOperationCard,
   languageCard,
   modelsCard,
   updateCard,
@@ -276,7 +276,7 @@ export class Telegram {
   private integrations?: {
     catalogue: Catalogue;
     updates: UpdateMonitor;
-    updater?: CodexUpdater;
+    updaters?: RuntimeUpdaters;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
     voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
@@ -284,7 +284,7 @@ export class Telegram {
   configure(value: {
     catalogue: Catalogue;
     updates: UpdateMonitor;
-    updater?: CodexUpdater;
+    updaters?: RuntimeUpdaters;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
     voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
@@ -354,7 +354,7 @@ export class Telegram {
   private onEvent = (event: Event) => {
     if (this.workspace?.onEvent(event)) return;
     if (event.type === 'runtime.update_finished') {
-      this.codexResult(event.data as CodexUpdateOperation);
+      this.runtimeResult(event.data as RuntimeUpdateOperation);
       return;
     }
     if (['runtime.update_available', 'runtime.version_changed'].includes(event.type)) {
@@ -473,21 +473,24 @@ export class Telegram {
     }
   }
   private async navigate(data: string, chatId: number): Promise<boolean> {
-    if (data.startsWith('codex:')) {
-      const updater = this.integrations?.updater,
-        pair = this.paired();
-      if (!updater || !pair) throw new Error('Codex updates are unavailable');
+    if (data.startsWith('u:')) {
+      const match = /^u:([a-z][a-z0-9-]{0,31}):(install|rollback|c)(?::([A-Za-z0-9_-]{24}))?$/.exec(
+        data,
+      );
+      const pair = this.paired();
+      if (!match || !pair || !this.integrations?.updaters)
+        throw new Error('CLI updates are unavailable');
+      const updater = this.integrations.updaters.get(match[1]);
       const audience = `telegram:${pair.chatId}:${pair.userId}`;
-      if (data === 'codex:install' || data === 'codex:rollback') {
-        const plan = await updater.prepare(
-          data === 'codex:install' ? 'install' : 'rollback',
-          audience,
+      if (match[2] === 'c' && match[3]) {
+        await this.api.send(
+          chatId,
+          runtimeOperationCard(this.locale(), updater.confirm(match[3], audience)),
         );
-        await this.api.send(chatId, codexConfirmationCard(this.locale(), plan));
-      } else if (/^codex:confirm:[A-Za-z0-9_-]{24}$/.test(data)) {
-        const operation = updater.confirm(data.slice('codex:confirm:'.length), audience);
-        await this.api.send(chatId, codexOperationCard(this.locale(), operation));
-      } else throw new Error('Invalid Codex update action');
+      } else if ((match[2] === 'install' || match[2] === 'rollback') && !match[3]) {
+        const plan = await updater.prepare(match[2], audience);
+        await this.api.send(chatId, runtimeConfirmationCard(this.locale(), plan));
+      } else throw new Error('Invalid CLI update action');
       return true;
     }
     const language = data.match(/^language:(en|ru|show)$/);
@@ -544,12 +547,15 @@ export class Telegram {
       : this.integrations.updates.status();
     await this.api.send(
       chatId,
-      updatesCard(this.locale(), status, this.integrations.updater?.status()),
+      updatesCard(this.locale(), status, this.integrations.updaters?.status()),
     );
   }
   private currentUpdates() {
-    const operation = this.integrations?.updater?.status().operation;
-    if (operation && ['complete', 'failed'].includes(operation.phase)) this.codexResult(operation);
+    for (const item of this.integrations?.updaters?.status() ?? []) {
+      const operation = item.operation;
+      if (operation && ['complete', 'failed'].includes(operation.phase))
+        this.runtimeResult(operation);
+    }
     const status = this.integrations?.updates.status();
     if (!status?.checkedAt) return;
     for (const tool of status.tools) {
@@ -559,16 +565,16 @@ export class Telegram {
         this.updateNotice({ kind: 'changed', tool, checkedAt: status.checkedAt });
     }
   }
-  private codexResult(operation: CodexUpdateOperation) {
+  private runtimeResult(operation: RuntimeUpdateOperation) {
     const store = this.engine.store;
     this.notices = this.notices
       .then(async () => {
         const pair = this.paired();
         if (this.stopped || !pair) return;
-        const id = `telegram:codex-update:${operation.id}`;
+        const id = `telegram:runtime-update:${operation.engine}:${operation.id}`;
         if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
         store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        await this.api.send(pair.chatId, codexOperationCard(this.locale(), operation));
+        await this.api.send(pair.chatId, runtimeOperationCard(this.locale(), operation));
         store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
@@ -577,7 +583,7 @@ export class Telegram {
   private updateNotice(notice: UpdateNotice) {
     // The managed operation already has its own durable completion message.
     if (notice.kind === 'changed' && notice.tool.managedOperationId) return;
-    if (!notice.tool.supported || !this.paired()) return;
+    if (!this.paired()) return;
     const store = this.engine.store;
     const enabled = () =>
       notificationPreferences(store).enabled &&

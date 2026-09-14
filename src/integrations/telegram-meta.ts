@@ -4,10 +4,10 @@ import type { AgentProfiles } from '../core/types.js';
 import type { ModelOption, ModelCatalogueInfo } from '../core/agents.js';
 import type { UpdateNotice, UpdateStatus } from '../core/updates.js';
 import type {
-  CodexUpdatePlan,
-  CodexUpdateOperation,
-  CodexUpdaterStatus,
-} from '../core/codex-updater.js';
+  RuntimeUpdatePlan,
+  RuntimeUpdateOperation,
+  RuntimeUpdaterStatus,
+} from '../core/runtime-updater.js';
 export function languageCard(locale: Locale): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
@@ -99,9 +99,12 @@ export function updateCard(locale: Locale, notice: UpdateNotice): TelegramCard {
     .add('\n\n')
     .add(
       t(
-        tool.source === 'bundled'
-          ? 'Open Updates to install Codex directly on this server.'
-          : 'No running session has been restarted.',
+        notice.kind === 'available' && tool.managedUpdates
+          ? 'Open Updates to install {name} directly on this server.'
+          : notice.kind === 'available'
+            ? 'Open the release notes for installation instructions.'
+            : 'No running session has been restarted.',
+        { name: tool.name },
       ),
     );
   return {
@@ -115,7 +118,7 @@ export function updateCard(locale: Locale, notice: UpdateNotice): TelegramCard {
 export function updatesCard(
   locale: Locale,
   status: UpdateStatus,
-  updater?: CodexUpdaterStatus,
+  updaters: RuntimeUpdaterStatus[] = [],
 ): TelegramCard {
   const t = translator(locale),
     text = new TelegramText().add('⬆️ ' + t('Updates'), 'bold');
@@ -136,7 +139,7 @@ export function updatesCard(
                   : 'External CLI',
           ),
       );
-    if (!tool.supported) text.add('\n' + t('Integration not available'));
+
     if (tool.installed) text.add('\n' + t('Installed') + ': ').add(tool.installed, 'code');
     if (tool.latest) text.add('\n' + t('Available') + ': ').add(tool.latest, 'code');
     text.add(
@@ -164,27 +167,49 @@ export function updatesCard(
         { hours: status.intervalHours },
       ),
   );
-  if (updater?.busy) text.add('\n\n⏳ ' + t('Codex update in progress'));
-  if (updater?.operation?.phase === 'failed')
-    text.add('\n\n⚠️ ' + t('Last update failed') + '\n' + t(updater.operation.error ?? ''));
+  for (const updater of updaters) {
+    if (updater.busy) text.add('\n\n⏳ ' + t('{name} update in progress', { name: updater.name }));
+    if (updater.operation?.phase === 'failed')
+      text.add(
+        '\n\n⚠️ ' +
+          t('{name} update failed', { name: updater.name }) +
+          '\n' +
+          t(updater.operation.error ?? ''),
+      );
+    if (updater.reason) text.add('\n\n' + updater.name + ': ' + updater.reason);
+  }
   return {
     ...text,
     buttons: [
-      ...(updater?.enabled &&
-      !updater.busy &&
-      status.tools.some((tool) => tool.id === 'codex' && tool.updateAvailable)
-        ? [[{ text: '⬆️ ' + t('Update Codex'), callback_data: 'codex:install' }]]
-        : []),
-      ...(updater?.enabled && !updater.busy && updater.rollback
-        ? [
-            [
-              {
-                text: '↩️ ' + t('Roll back to {version}', { version: updater.rollback }),
-                callback_data: 'codex:rollback',
-              },
-            ],
-          ]
-        : []),
+      ...updaters.flatMap((updater) => [
+        ...(updater.enabled &&
+        !updater.busy &&
+        status.tools.some((tool) => tool.id === updater.engine && tool.updateAvailable)
+          ? [
+              [
+                {
+                  text: '⬆️ ' + t('Update {name}', { name: updater.name }),
+                  callback_data: `u:${updater.engine}:install`,
+                },
+              ],
+            ]
+          : []),
+        ...(updater.enabled && !updater.busy && updater.rollback
+          ? [
+              [
+                {
+                  text:
+                    '↩️ ' +
+                    t('Roll back {name} to {version}', {
+                      name: updater.name,
+                      version: updater.rollback,
+                    }),
+                  callback_data: `u:${updater.engine}:rollback`,
+                },
+              ],
+            ]
+          : []),
+      ]),
       [{ text: '↻ ' + t('Check now'), callback_data: 'updates:check' }],
       [
         {
@@ -196,12 +221,12 @@ export function updatesCard(
     ],
   };
 }
-export function codexConfirmationCard(locale: Locale, plan: CodexUpdatePlan): TelegramCard {
+export function runtimeConfirmationCard(locale: Locale, plan: RuntimeUpdatePlan): TelegramCard {
   const t = translator(locale),
     text = new TelegramText()
       .add(
         (plan.action === 'install' ? '⬆️ ' : '↩️ ') +
-          t(plan.action === 'install' ? 'Update Codex' : 'Roll back Codex'),
+          t(plan.action === 'install' ? 'Update {name}' : 'Roll back {name}', { name: plan.name }),
         'bold',
       )
       .add('\n\n')
@@ -224,12 +249,15 @@ export function codexConfirmationCard(locale: Locale, plan: CodexUpdatePlan): Te
   return {
     ...text,
     buttons: [
-      [{ text: '✅ ' + t('Confirm'), callback_data: `codex:confirm:${plan.id}` }],
+      [{ text: '✅ ' + t('Confirm'), callback_data: `u:${plan.engine}:c:${plan.id}` }],
       [{ text: t('Back to updates'), callback_data: 'updates:show' }],
     ],
   };
 }
-export function codexOperationCard(locale: Locale, operation: CodexUpdateOperation): TelegramCard {
+export function runtimeOperationCard(
+  locale: Locale,
+  operation: RuntimeUpdateOperation,
+): TelegramCard {
   const t = translator(locale),
     complete = operation.phase === 'complete',
     failed = operation.phase === 'failed';
@@ -238,10 +266,11 @@ export function codexOperationCard(locale: Locale, operation: CodexUpdateOperati
       (complete ? '✅ ' : failed ? '⚠️ ' : '⏳ ') +
         t(
           complete
-            ? 'Codex version selected'
+            ? '{name} version selected'
             : failed
-              ? 'Codex update failed'
-              : 'Codex update started',
+              ? '{name} update failed'
+              : '{name} update started',
+          { name: operation.name },
         ),
       'bold',
     )

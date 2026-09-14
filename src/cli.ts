@@ -10,7 +10,9 @@ import { buildApp } from './server/app.js';
 import { credential, redact, rememberSecret } from './core/security.js';
 import { resources } from './core/resources.js';
 import { ProviderHttp } from './providers/http.js';
-import { CodexConnection } from './runtime/protocol.js';
+import { createAgents } from './modules/agents/index.js';
+import { Store } from './core/store.js';
+import { moduleExecutable } from './runtime/executable.js';
 import { git } from './runtime/workspaces.js';
 import { loadConfig, defaultDataDir, configSchema } from './ops/config.js';
 import { api as callApi } from './ops/client.js';
@@ -169,13 +171,13 @@ program
   });
 program
   .command('doctor')
-  .description(
-    'Check resources, credentials and the installed Codex protocol without running a model',
-  )
+  .description('Check resources, credentials and enabled agent adapters without running a model')
   .action(async () => {
     mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
     print({ resources: resources(dataDir()) });
-    for (const provider of ['github', 'gitlab'] as const) {
+    for (const provider of (['github', 'gitlab'] as const).filter((id) =>
+      loadConfig().modules.includes(id),
+    )) {
       const host = process.env[`DADDYLOOP_${provider.toUpperCase()}_HOST`] ?? `${provider}.com`;
       try {
         const token = credential(provider, host);
@@ -203,22 +205,26 @@ program
         });
       }
     }
-    const rpc = new CodexConnection(process.env.DADDYLOOP_CODEX_BIN);
+    const config = loadConfig(),
+      temporary = new Store(':memory:');
     try {
-      await rpc.start(process.cwd());
-      const result = await rpc.request<{
-        account: { type: string } | null;
-        requiresOpenaiAuth: boolean;
-      }>('account/read', { refreshToken: false });
-      print({
-        codex: 'connected',
-        authType: result.account?.type ?? null,
-        requiresOpenaiAuth: result.requiresOpenaiAuth,
+      const agents = createAgents(config.modules, {
+        store: temporary,
+        executable: (id) => () => moduleExecutable(id, config),
       });
-    } catch (error) {
-      print({ codex: 'unavailable', error: redact(String(error)) });
+      for (const module of agents.all()) {
+        try {
+          if (!module.cli?.diagnose) {
+            print({ engine: module.id, diagnostic: 'not supported by this adapter' });
+            continue;
+          }
+          print({ engine: module.id, ...(await module.cli.diagnose(AbortSignal.timeout(30000))) });
+        } catch (error) {
+          print({ engine: module.id, connected: false, error: redact(String(error)) });
+        }
+      }
     } finally {
-      rpc.close();
+      temporary.close();
     }
   });
 program

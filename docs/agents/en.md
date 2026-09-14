@@ -13,7 +13,7 @@ daddy agents defaults \
   --daddy-engine codex --daddy-model gpt-6-astra --daddy-effort max
 ```
 
-Use model IDs that your `daddy models` response actually offers. The names above are examples, not a product-maintained list. The Codex module reads `model/list` from the selected CLI, follows pagination and caches successful results for five minutes. Refresh requests it again. Unsupported delegation mode is excluded.
+Use model IDs that your `daddy models` response actually offers. The names above are examples, not a product-maintained list. The Codex module reads `model/list` from the selected CLI, follows pagination and caches successful results for five minutes. Refresh requests it again. Effort values are taken from that response; new values are not filtered by a local list.
 
 On the website open **Session settings**. Choose the module, model and effort for daddy and future workers. In the CLI or bot use `/models`; each choice carries its engine. Changing worker defaults affects future tasks. Changing daddy requires an idle session. Switching engines records previous context handles and starts a new native context; a Codex session is never passed into a different runtime.
 
@@ -21,15 +21,26 @@ On the website open **Session settings**. Choose the module, model and effort fo
 
 ```bash
 daddy updates --check
-daddy runtime update --yes
-daddy runtime rollback --yes
+daddy runtime update --engine claude --yes
+daddy runtime update --engine codex --yes
+daddy runtime rollback --engine claude --yes
+daddy runtime update-status
 ```
 
-In Telegram use `/updates`. A confirmed update pins a version and verifies its artifact, CLI protocol and saved Codex profiles. Existing agent processes keep their captured executable; the next turn uses the new selection. One completion notice is sent. A lost response is reconciled before another operation is allowed.
+Open **Updates** on the website or `/updates` in Telegram. Each installed adapter has its own version, update and rollback controls. The CLI requires `--engine` when more than one CLI is installed. A module without a managed installer can report new releases, but the interface links to installation instructions instead of promising an update button.
 
-To select a host-installed Codex CLI use `daddy runtime use /absolute/path/to/codex`; this validates the CLI and restarts an idle service. `daddy runtime use bundled` selects the installed Codex module. These management commands are Codex-specific capabilities, separate from generic agent dispatch.
+Confirm the displayed old and new versions. The server downloads an official, checksum-verified artifact into a private immutable directory, validates the CLI and its model catalogue, then checks saved profiles for that engine. A failed validation preserves the selected version. Existing agent processes finish on their captured executable; subsequent turns use the new selection. Each completed operation produces one result message, without a duplicate version-change notice.
 
-See [appearance and usage](../appearance/en.md) for account quotas and confirmed resets.
+Codex and Claude Code support managed updates on Linux x64/ARM64 (Claude requires glibc). A service environment override makes its updater unavailable and explains which setting must change. Updating a CLI does not update daddyloop's adapter or SDK; an incompatible CLI is rejected during validation.
+
+To select another executable on the service host:
+
+```bash
+daddy runtime use /absolute/path/to/claude --engine claude
+daddy runtime use bundled --engine codex
+```
+
+`use` validates through the selected adapter, verifies ownership of the connected service, and restarts only when no jobs or updates are pending. `daddy doctor` diagnoses enabled agent adapters without a model turn. See [module development](../module-development/en.md) for the common lifecycle contract and [appearance and usage](../appearance/en.md) for quotas.
 
 ## Actual account quotas
 

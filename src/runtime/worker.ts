@@ -258,7 +258,11 @@ export class Worker {
           throw new Error('The shared reviewer configuration changed before this job started');
         task.reviewerThreadId = group.reviewerThreadId;
       }
-      job.profile ??= this.engine.effectiveAgents(task)[job.role === 'author' ? 'worker' : 'daddy'];
+      if (!job.profile)
+        throw new AppError(
+          'agent_profile_missing',
+          'The queued job has no frozen agent profile; queue a new turn',
+        );
       store.saveJob(job);
       const startingPR = isTicket(task)
         ? undefined

@@ -1,50 +1,51 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
-import { CodexCatalogue } from '../modules/agents/codex/models.js';
 import type { ModelOption } from './agents.js';
 import { AppError, now } from './types.js';
 import { redact } from './security.js';
 import type { Store } from './store.js';
-import { executablePath, isNewerVersion, versionNumber } from '../runtime/executable.js';
-import { command } from '../ops/process.js';
-import {
-  installCodexPackage,
-  latestCodexPackage,
-  type CodexPackage,
-} from '../ops/codex-package.js';
+import { executablePath, isNewerVersion } from '../runtime/executable.js';
+import type {
+  AgentInstallation as Installation,
+  AgentPackage,
+  AgentCli,
+} from '../modules/contracts.js';
 
-interface Installation {
-  executable: string;
-  version: string;
-}
 const sameInstallation = (a: Installation, b: Installation) =>
   a.executable === b.executable && a.version === b.version;
-export interface CodexUpdatePlan {
+export interface RuntimeUpdatePlan {
   id: string;
+  engine: string;
+  name: string;
   action: 'install' | 'rollback';
   from: Installation;
   target: { version: string; executable?: string };
-  artifact?: CodexPackage;
+  artifact?: AgentPackage;
   expiresAt: string;
 }
-export interface CodexUpdateOperation {
+export interface RuntimeUpdateOperation {
   id: string;
-  action: CodexUpdatePlan['action'];
+  engine: string;
+  name: string;
+  action: RuntimeUpdatePlan['action'];
   phase: 'installing' | 'validating' | 'activating' | 'complete' | 'failed';
   from: Installation;
-  target: CodexUpdatePlan['target'];
+  target: RuntimeUpdatePlan['target'];
   startedAt: string;
   finishedAt?: string;
   error?: string;
 }
-export interface CodexUpdaterStatus {
+export interface RuntimeUpdaterStatus {
+  engine: string;
+  name: string;
+  reason?: string;
   enabled: boolean;
   busy: boolean;
   rollback?: string;
-  operation?: CodexUpdateOperation;
+  operation?: RuntimeUpdateOperation;
 }
-export class CodexUpdater {
+export class RuntimeUpdater {
   private pending?: Promise<void>;
   private preparing = false;
   private stopped = false;
@@ -58,76 +59,84 @@ export class CodexUpdater {
       resourceCheck: () => void;
       enabled?: boolean;
       validateModels?: (models: ModelOption[]) => void;
-      latest?: typeof latestCodexPackage;
-      install?: typeof installCodexPackage;
-      probe?: (executable: string, signal: AbortSignal) => Promise<Installation>;
-      validate?: (
-        executable: string,
-        signal: AbortSignal,
-      ) => Promise<{ version?: string; models: ModelOption[] }>;
+      engine: string;
+      cli: AgentCli;
+      disabledReason?: string;
     },
-  ) {}
-  status(): CodexUpdaterStatus {
+  ) {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(options.engine)) throw new Error('Invalid agent module ID');
+  }
+  private key(suffix: string) {
+    return `runtime.${this.options.engine}.${suffix}`;
+  }
+  status(): RuntimeUpdaterStatus {
     const rollback = this.store.setting<{ from: Installation; current: Installation }>(
-      'codex.rollback',
+      this.key('rollback'),
     );
     return {
-      enabled: this.options.enabled !== false,
+      engine: this.options.engine,
+      name: this.options.cli.name,
+      enabled:
+        this.options.enabled !== false &&
+        !!this.options.cli.updates &&
+        !this.options.cli.updates.unavailableReason,
+      reason:
+        this.options.disabledReason ??
+        this.options.cli.updates?.unavailableReason ??
+        (!this.options.cli.updates
+          ? 'Managed updates are not provided by this adapter'
+          : undefined),
       busy: !!this.pending || this.preparing,
       rollback:
         rollback?.current.executable === this.options.executable()
           ? rollback.from.version
           : undefined,
-      operation: this.store.setting<CodexUpdateOperation>('codex.update.operation'),
+      operation: this.store.setting<RuntimeUpdateOperation>(this.key('update.operation')),
     };
   }
   private available() {
-    if (this.stopped || this.options.enabled === false)
+    if (this.stopped || !this.status().enabled)
       throw new AppError(
         'updater_disabled',
-        'Codex updates are disabled by the service environment',
+        this.status().reason ?? 'Agent CLI updates are disabled',
         422,
       );
     if (this.pending || this.preparing)
-      throw new AppError('updater_busy', 'A Codex update is already in progress', 409);
+      throw new AppError(
+        'updater_busy',
+        `A ${this.options.cli.name} update is already in progress`,
+        409,
+      );
   }
   private async probe(executable: string) {
-    if (this.options.probe) return this.options.probe(executable, this.controller.signal);
-    if (!executablePath(executable))
-      throw new Error('The selected Codex executable is unavailable');
-    const result = await command(executable, ['--version'], {
-      timeoutMs: 10000,
-      maxBytes: 8000,
-      signal: this.controller.signal,
-    });
-    const version = versionNumber(result.stdout);
-    if (!version) throw new Error('Codex did not report a recognizable version');
-    return { executable, version };
+    return this.options.cli.probe(executable, this.controller.signal);
   }
-  async prepare(action: CodexUpdatePlan['action'], audience: string): Promise<CodexUpdatePlan> {
+  async prepare(action: RuntimeUpdatePlan['action'], audience: string): Promise<RuntimeUpdatePlan> {
     this.available();
     this.preparing = true;
     try {
       const from = await this.probe(this.options.executable());
-      let artifact: CodexPackage | undefined, target: CodexUpdatePlan['target'];
+      let artifact: AgentPackage | undefined, target: RuntimeUpdatePlan['target'];
       if (action === 'install') {
-        artifact = await (this.options.latest ?? latestCodexPackage)(this.controller.signal);
+        artifact = await this.options.cli.updates!.latest(this.controller.signal);
         if (!isNewerVersion(artifact.version, from.version))
-          throw new AppError('codex_current', 'Codex is already up to date', 422);
+          throw new AppError('runtime_current', 'agent CLI is already up to date', 422);
         target = { version: artifact.version };
       } else {
         const rollback = this.store.setting<{ from: Installation; current: Installation }>(
-          'codex.rollback',
+          this.key('rollback'),
         );
         if (!rollback || !sameInstallation(rollback.current, from))
           throw new AppError(
             'rollback_unavailable',
-            'No matching previous Codex version is available',
+            'No matching previous agent CLI version is available',
             422,
           );
         target = rollback.from;
       }
-      const plan: CodexUpdatePlan = {
+      const plan: RuntimeUpdatePlan = {
+        engine: this.options.engine,
+        name: this.options.cli.name,
         id: randomBytes(18).toString('base64url'),
         action,
         from,
@@ -136,15 +145,17 @@ export class CodexUpdater {
         expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
       };
       this.controller.signal.throwIfAborted();
-      this.store.setSetting('codex.update.plan', { ...plan, audience });
+      this.store.setSetting(this.key('update.plan'), { ...plan, audience });
       return plan;
     } finally {
       this.preparing = false;
     }
   }
-  confirm(id: string, audience: string): CodexUpdateOperation {
+  confirm(id: string, audience: string): RuntimeUpdateOperation {
     this.available();
-    const plan = this.store.setting<CodexUpdatePlan & { audience: string }>('codex.update.plan');
+    const plan = this.store.setting<RuntimeUpdatePlan & { audience: string }>(
+      this.key('update.plan'),
+    );
     if (
       !plan ||
       plan.id !== id ||
@@ -154,10 +165,12 @@ export class CodexUpdater {
     )
       throw new AppError(
         'update_confirmation_expired',
-        'This Codex confirmation expired or was already used. Open Updates again.',
+        'This agent CLI confirmation expired or was already used. Open Updates again.',
         409,
       );
-    const operation: CodexUpdateOperation = {
+    const operation: RuntimeUpdateOperation = {
+      engine: this.options.engine,
+      name: this.options.cli.name,
       id: randomUUID(),
       action: plan.action,
       from: plan.from,
@@ -166,8 +179,8 @@ export class CodexUpdater {
       startedAt: now(),
     };
     this.store.transaction(() => {
-      this.store.setSetting('codex.update.plan', null);
-      this.store.setSetting('codex.update.operation', operation);
+      this.store.setSetting(this.key('update.plan'), null);
+      this.store.setSetting(this.key('update.operation'), operation);
     });
     this.pending = this.apply(plan, operation).finally(() => {
       this.pending = undefined;
@@ -175,44 +188,45 @@ export class CodexUpdater {
     return operation;
   }
   private directory(id: string) {
-    return join(this.options.dataDir, 'runtimes', 'codex', id);
+    return join(this.options.dataDir, 'runtimes', this.options.engine, id);
   }
-  private save(operation: CodexUpdateOperation) {
-    this.store.setSetting('codex.update.operation', operation);
+  private save(operation: RuntimeUpdateOperation) {
+    this.store.setSetting(this.key('update.operation'), operation);
   }
-  private complete(operation: CodexUpdateOperation) {
+  private complete(operation: RuntimeUpdateOperation) {
     this.store.transaction(() => {
-      this.store.setSetting('codex.rollback', { from: operation.from, current: operation.target });
+      this.store.setSetting(this.key('rollback'), {
+        from: operation.from,
+        current: operation.target,
+      });
       this.save({ ...operation, phase: 'complete', finishedAt: now() });
     });
   }
-  private async apply(plan: CodexUpdatePlan, operation: CodexUpdateOperation) {
+  private async apply(plan: RuntimeUpdatePlan, operation: RuntimeUpdateOperation) {
     let activated = false;
     try {
       this.options.resourceCheck();
       let executable = plan.target.executable;
       if (plan.action === 'install')
-        executable = await (this.options.install ?? installCodexPackage)(
+        executable = await this.options.cli.updates!.install(
           plan.artifact!,
           this.directory(operation.id),
           this.controller.signal,
           this.options.resourceCheck,
         );
-      if (!executable) throw new Error('The target Codex executable is unavailable');
+      if (!executable) throw new Error('The target agent CLI executable is unavailable');
       operation.target = { executable, version: plan.target.version };
       operation.phase = 'validating';
       this.save(operation);
       const probe = await this.probe(executable);
       if (probe.version !== plan.target.version)
-        throw new Error('The downloaded Codex version does not match the confirmation');
-      const validation = this.options.validate
-        ? await this.options.validate(executable, this.controller.signal)
-        : await this.validate(executable);
+        throw new Error('The downloaded agent CLI version does not match the confirmation');
+      const validation = await this.options.cli.validate(executable, this.controller.signal);
       if (validation.version !== plan.target.version || !validation.models.length)
-        throw new Error('Codex app-server validation failed');
+        throw new Error('Agent CLI catalogue validation failed');
       const current = await this.probe(this.options.executable());
       if (!sameInstallation(current, plan.from))
-        throw new Error('The selected Codex changed during the update; open Updates again');
+        throw new Error('The selected agent CLI changed during the update; open Updates again');
       this.options.resourceCheck();
       this.controller.signal.throwIfAborted();
       this.options.validateModels?.(validation.models);
@@ -238,12 +252,7 @@ export class CodexUpdater {
       this.store.event('_system', 'runtime.update_finished', this.status().operation);
     }
   }
-  private async validate(executable: string) {
-    const catalogue = new CodexCatalogue(executable);
-    const models = await catalogue.list(true, this.controller.signal);
-    return { models, version: catalogue.metadata().cliVersion };
-  }
-  private async cleanup(operation: CodexUpdateOperation) {
+  private async cleanup(operation: RuntimeUpdateOperation) {
     if (operation.action !== 'install') return;
     const directory = this.directory(operation.id),
       selected = this.options.executable();
@@ -268,7 +277,8 @@ export class CodexUpdater {
         ...operation,
         phase: 'failed',
         finishedAt: now(),
-        error: 'Codex update interrupted. The selected CLI was preserved; open Updates to retry.',
+        error:
+          'agent CLI update interrupted. The selected CLI was preserved; open Updates to retry.',
       });
       await this.cleanup(operation);
     }
@@ -277,5 +287,29 @@ export class CodexUpdater {
     this.stopped = true;
     this.controller.abort();
     await this.pending;
+  }
+}
+
+/** One isolated operation ledger per registered engine. */
+export class RuntimeUpdaters {
+  private items: Map<string, RuntimeUpdater>;
+  constructor(items: RuntimeUpdater[]) {
+    this.items = new Map(items.map((item) => [item.status().engine, item]));
+    if (this.items.size !== items.length) throw new Error('Duplicate runtime updater');
+  }
+  get(engine: string) {
+    const updater = this.items.get(engine);
+    if (!updater)
+      throw new AppError('updater_unavailable', `No CLI updater for agent ${engine}`, 422);
+    return updater;
+  }
+  status() {
+    return [...this.items.values()].map((item) => item.status());
+  }
+  async recover() {
+    for (const item of this.items.values()) await item.recover();
+  }
+  async stop() {
+    await Promise.all([...this.items.values()].map((item) => item.stop()));
   }
 }

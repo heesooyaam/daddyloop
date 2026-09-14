@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { claudeCli } from './cli.js';
 import type { AgentModule } from '../../contracts.js';
 import type { AgentModuleContext } from '../index.js';
 import { ClaudeRuntime } from './runtime.js';
@@ -8,6 +11,7 @@ export function claudeModule(context: AgentModuleContext): AgentModule {
     usage = new ClaudeUsage(context.store, executable);
   return {
     id: 'claude',
+    cli: claudeCli(executable),
     name: 'Claude',
     catalogue: new ClaudeCatalogue(executable),
     usage,
@@ -18,3 +22,8 @@ export function claudeModule(context: AgentModuleContext): AgentModule {
     }),
   };
 }
+
+export const claudePrivatePaths = () =>
+  [join(homedir(), '.claude/.credentials.json'), process.env.DADDYLOOP_CLAUDE_API_KEY_FILE].filter(
+    (path): path is string => !!path,
+  );

@@ -27,3 +27,5 @@
 - [Настройка Claude](../claude/ru.md)
 - [Бэкапы и восстановление](../backups/ru.md)
 - [Написать свой модуль](../module-development/ru.md)
+
+- [Ревью адаптеров агентов (0.17)](../agent-adapter-review/ru.md)

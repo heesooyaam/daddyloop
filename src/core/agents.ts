@@ -1,10 +1,8 @@
 import { z } from 'zod';
+import { defaultAgentId } from '../modules/catalogue.js';
 export const profileSchema = z
   .object({
-    engine: z
-      .string()
-      .regex(/^[a-z][a-z0-9-]{0,31}$/)
-      .default('codex'),
+    engine: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
     model: z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,119}$/)
@@ -21,8 +19,8 @@ export const profileSchema = z
   );
 export const profilesSchema = z.object({ worker: profileSchema, daddy: profileSchema }).strict();
 export const inheritedProfiles = () => ({
-  worker: { engine: 'codex' as const },
-  daddy: { engine: 'codex' as const },
+  worker: { engine: defaultAgentId() },
+  daddy: { engine: defaultAgentId() },
 });
 export interface ModelOption {
   id: string;

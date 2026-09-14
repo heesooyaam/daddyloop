@@ -1,29 +1,50 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Open Updates to install {name} directly on this server.':
+    'Открой «Обновления», чтобы установить {name} прямо на этом сервере.',
+  'Open the release notes for installation instructions.':
+    'Инструкции по установке — в описании релиза.',
+  'Update {name}': 'Обновить {name}',
+  'Roll back {name}': 'Откатить {name}',
+  'Roll back {name} to {version}': 'Откатить {name} до {version}',
+  '{name} update in progress': '{name} обновляется',
+  '{name} update failed': 'Не удалось обновить {name}',
+  '{name} update started': 'Обновление {name} началось',
+  '{name} version selected': 'Версия {name} переключена',
+  'Choose the CLI to update. daddy checks it before switching; running agents finish on their current version.':
+    'Выбирай, кого обновить. daddy проверит новую версию, а запущенные агенты спокойно закончат на своей.',
+  'Check for CLI updates': 'Проверить новые версии CLI',
+  'CLI installation details': 'Где установлен CLI',
+  'Confirm CLI change': 'Подтвердить смену версии CLI',
+  'Install or roll back an agent CLI in Updates on the website or Telegram, or use daddy runtime update --engine <id> --yes.':
+    'Обновить или откатить CLI можно в «Обновлениях» на сайте и в Telegram. В терминале: daddy runtime update --engine <id> --yes.',
+  'Add presets': 'Добавить пресеты',
+  'Hide available presets': 'Скрыть доступные пресеты',
+  'Saved instructions you can reuse. Select a preset, then choose which parts daddy and workers should use.':
+    'Пресет — это сохранённый набор инструкций. Подключай нужные и выбирай, какие части достанутся daddy и воркерам.',
+  'No presets yet. Create a set of instructions you want to reuse, or just write your instructions below.':
+    'Пресетов пока нет. Создай набор на будущее или просто напиши свои пожелания ниже.',
+  'Back to session instructions': 'К инструкциям сессии',
+  'Save and use in this session': 'Сохранить и подключить к сессии',
+  'Who are these instructions for?': 'Кому даём инструкции?',
+  'Tell daddy how to work: tone, rules and skills. Everything here applies only to this session.':
+    'Объясни папочке, как тебе удобно: стиль общения, правила, навыки. Это настройки только для этой сессии.',
+  'Import or export instructions': 'Перенести инструкции',
+  'Loading presets…': 'Загружаю пресеты…',
+  'Check presets again': 'Повторить загрузку пресетов',
+
   Confirm: 'Подтвердить',
-  'Install the latest stable Codex on the service host':
-    'Установить актуальную стабильную версию Codex на сервере',
-  'Restore the previous Codex version': 'Вернуть предыдущую версию Codex',
-  'Inspect a server-side Codex update': 'Показать состояние обновления Codex на сервере',
   'confirm the displayed version and start the operation':
     'подтвердить указанную версию и начать операцию',
   'Managed by daddyloop': 'Установлен через daddyloop',
-  'Open Updates to install Codex directly on this server.':
-    'Открой «Обновления», чтобы установить Codex прямо на этом сервере.',
-  'Update Codex': 'Обновить Codex',
-  'Roll back Codex': 'Откатить Codex',
   'Roll back to {version}': 'Откатить до {version}',
   'Back to updates': 'К обновлениям',
-  'Codex update in progress': 'Codex обновляется',
   'Last update failed': 'Последнее обновление не удалось',
   'The server will validate this version before switching. Running agents finish on their current version; subsequent turns use the selected version.':
     'Сервер проверит эту версию перед переключением. Запущенные агенты закончат текущую работу на старой версии; следующие запуски будут на выбранной.',
   'Your models, chats and login stay in place. The previous CLI remains available for rollback.':
     'Модели, переписка и авторизация сохранятся. Предыдущая версия CLI останется доступна для отката.',
   'This confirmation is valid for 10 minutes.': 'Подтверждение действует 10 минут.',
-  'Codex version selected': 'Версия Codex переключена',
-  'Codex update failed': 'Не удалось обновить Codex',
-  'Codex update started': 'Обновление Codex началось',
   'New agent turns will use this version. Running agents were not interrupted.':
     'Следующие запуски агентов будут использовать эту версию. Работающие агенты не прерывались.',
   'The selected CLI was preserved. Open Updates to try again.':
@@ -32,17 +53,6 @@ export const ru: Record<string, string> = {
     'Скачивание и проверка идут на сервере. Можно закрыть Telegram — бот сообщит результат.',
   'Run again with --yes to confirm, or use Updates in Telegram.':
     'Повтори команду с --yes для подтверждения или открой «Обновления» в Telegram.',
-  'Codex is already up to date': 'Уже установлена актуальная версия Codex',
-  'A Codex update is already in progress': 'Обновление Codex уже выполняется',
-  'No matching previous Codex version is available':
-    'Подходящая предыдущая версия Codex недоступна',
-  'This Codex confirmation expired or was already used. Open Updates again.':
-    'Это подтверждение истекло или уже использовано. Открой «Обновления» ещё раз.',
-  'Codex updates are disabled by the service environment':
-    'Обновления Codex отключены настройкой окружения сервиса',
-  'Codex update interrupted. The selected CLI was preserved; open Updates to retry.':
-    'Обновление Codex прервано. Текущая версия сохранена; открой «Обновления», чтобы повторить попытку.',
-  'Codex package checksum mismatch': 'Контрольная сумма пакета Codex не совпала',
   Language: 'Язык',
   'Interface language': 'Язык интерфейса',
   Save: 'Сохранить',
@@ -86,7 +96,6 @@ export const ru: Record<string, string> = {
   'Integration not available': 'Интеграция пока недоступна',
   'Refresh model list': 'Обновить список моделей',
   'Refreshing…': 'Обновление…',
-  'Source: Codex app-server model/list': 'Источник: Codex app-server model/list',
   'Cached for up to 5 minutes. Refresh queries the CLI again.':
     'Кеш до 5 минут. Кнопка обновления повторно запрашивает CLI.',
   'Retrieved: {time}': 'Получено: {time}',
@@ -111,9 +120,6 @@ export const ru: Record<string, string> = {
   'Author for this ticket': 'Автор этого тикета',
   'Reviewer for this group': 'Ревьюер группы',
   'Shared reviewer (inherited from parent)': 'Общий ревьюер (из родительской задачи)',
-  'Use Codex configuration': 'Использовать настройки Codex',
-  'Codex default': 'Настройки Codex',
-  'Codex configuration': 'Настройки Codex',
   'Publish finished reviews automatically': 'Публиковать готовые ревью автоматически',
   'The reviewer sends comments to the author without waiting for you.':
     'Ревьюер передаёт замечания автору, не дожидаясь тебя.',
@@ -242,7 +248,6 @@ Object.assign(ru, {
   'Choose which updates reach your private Telegram chat.':
     'Выбери, какие обновления получать в личном чате Telegram.',
   'Code implementation': 'Реализация кода',
-  'Codex thread ID': 'ID сессии Codex',
   Comment: 'Комментарий',
   Completed: 'Завершённые',
   'Completed reviews publish automatically when the session is idle.':
@@ -308,8 +313,6 @@ Object.assign(ru, {
   'Automatic publication by default': 'Автоматическая публикация по умолчанию',
   'Markdown plan': 'План в Markdown',
   'Maximum review rounds': 'Максимум раундов ревью',
-  'Model list unavailable. Connect Codex with':
-    'Список моделей недоступен. Подключи Codex командой',
   'Moving through the loop': 'Идут по рабочему циклу',
   'Need your attention': 'Нужен твой ответ',
   'Needs attention': 'Требуют внимания',
@@ -640,8 +643,6 @@ Object.assign(ru, {
     'Сервер и агенты продолжат работу после закрытия консоли.',
   'Only completion and situations needing my input':
     'Только завершение и случаи, где нужен мой ответ',
-  'Model catalogue unavailable. Use Codex defaults or connect the account first.':
-    'Каталог моделей недоступен. Используй настройки Codex или подключи аккаунт.',
   'Ticket imported. Discuss it, then /implement starts implementation and automatic review.':
     'Тикет импортирован. Обсуди его, затем /implement запустит реализацию и ревью.',
   'Telegram notification preferences saved.': 'Настройки уведомлений Telegram сохранены.',
@@ -734,12 +735,6 @@ Object.assign(ru, {
   'output the version number': 'показать версию',
   'display help for command': 'показать справку',
   'check the version registries now': 'проверить доступные версии сейчас',
-  'Inspect or choose the Codex CLI used by this service':
-    'Посмотреть или выбрать CLI Codex для этого сервиса',
-  'Choose a Codex executable on the service host; restart when idle':
-    'Выбрать CLI Codex на сервере и перезапустить свободный сервис',
-  'query the Codex model catalogue again': 'повторно запросить каталог моделей Codex',
-  'List available Codex models and reasoning efforts': 'Показать модели Codex и уровни рассуждений',
   'Choose independent author and reviewer profiles':
     'Выбрать независимые профили автора и ревьюера',
   'Start a conversation from a GitHub issue or Tracker ticket':
@@ -751,8 +746,6 @@ Object.assign(ru, {
   'Open the interactive terminal workspace': 'Открыть интерактивный терминал',
   'Run the local backend, worker and web panel': 'Запустить сервис, агентов и сайт',
   'Print the local web-panel access token': 'Показать локальный токен доступа к сайту',
-  'Check resources, credentials and the installed Codex protocol without running a model':
-    'Проверить ресурсы, аккаунты и протокол Codex без запуска модели',
   'Set up this host and its background service': 'Настроить хост и фоновый сервис',
   'Install/start the persistent background service': 'Установить и запустить фоновый сервис',
   'Stop the service, preserving state and unfinished work':

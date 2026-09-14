@@ -1,3 +1,4 @@
+import type { AgentPackage } from '../src/modules/contracts.js';
 import { it, expect, vi } from 'vitest';
 import {
   mkdtempSync,
@@ -12,11 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  installCodexPackage,
-  latestCodexPackage,
-  type CodexPackage,
-} from '../src/ops/codex-package.js';
+import { installCodexPackage, latestCodexPackage } from '../src/modules/agents/codex/package.js';
 function archive(unsafe = false) {
   const dir = mkdtempSync(join(tmpdir(), 'daddyloop-codex-package-test-'));
   const triple =
@@ -37,7 +34,7 @@ function archive(unsafe = false) {
     'package',
   ]);
   const bytes = readFileSync(join(dir, 'package.tgz'));
-  const pkg: CodexPackage = {
+  const pkg: AgentPackage = {
     version: '2.0.0',
     platform: `linux-${process.arch}`,
     url: `https://registry.npmjs.org/@openai/codex/-/codex-2.0.0-linux-${process.arch}.tgz`,

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { CodexRuntime } from '../src/runtime/codex.js';
+import { CodexRuntime } from '../src/modules/agents/codex/runtime.js';
 import { defaultPolicy, type Task, type Job } from '../src/core/types.js';
 const dataDir = resolve('.daddyloop');
 mkdirSync(dataDir, { recursive: true, mode: 0o700 });

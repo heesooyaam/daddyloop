@@ -41,6 +41,7 @@ test('saves different daddy and worker instructions with multiple import methods
     buffer: Buffer.from('---\nname: worker-style\n---\nKeep reports precise.'),
   });
   await expect(page.getByText('worker-style', { exact: true })).toBeVisible();
+  await page.getByText('Import or export instructions', { exact: true }).click();
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download this instruction set' }).click();
   const download = await downloadPromise;
@@ -59,6 +60,7 @@ test('saves different daddy and worker instructions with multiple import methods
   expect((await board(page)).group.instructions).toBeUndefined();
   await page.getByRole('button', { name: 'Session settings' }).click();
   await page.getByText('Style and skills for this session', { exact: true }).click();
+  await page.getByText('Import or export instructions', { exact: true }).click();
   await page.getByLabel('Load an instruction set (.json)').setInputFiles({
     name: 'instructions.json',
     mimeType: 'application/json',

@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
-import { AppError } from '../core/types.js';
-import { redact } from '../core/security.js';
-import { VERSION } from '../version.js';
+import { AppError } from '../../../core/types.js';
+import { redact } from '../../../core/security.js';
+import { VERSION } from '../../../version.js';
 
 export interface RpcMessage {
   id?: string | number;

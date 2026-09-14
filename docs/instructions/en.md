@@ -8,11 +8,11 @@ In **New session**, open **Style and skills for this session** before starting. 
 
 ## Reusable presets
 
-Open **Presets** in the sidebar and click **Create preset**. Give the set a name, optionally describe it, and fill its daddy and worker sections. Each role can have a prompt and several skills. **Save preset** makes it available to this installation’s sessions. To reuse a set already configured in the website, download its JSON, create a preset and load that file into the preset contents.
+Open **Presets** in the sidebar and click **Create preset**. Give the set a name, optionally describe it, and fill its daddy and worker sections. Each role can have a prompt and several skills. **Save preset** makes it available to this installation’s sessions. To reuse a set already configured in the website, open **Import or export instructions**, download its JSON, create a preset and load that file into the preset contents.
 
 ![Preset library](../media/en/daddy-preset-library.png)
 
-When creating a session or editing its settings, open **Style and skills for this session**. Enable the presets you need. Expand **Choose components** to include or exclude each role’s prompt and each skill separately. Presets are applied in the displayed selection order; your own prompt follows them. Identical skills are included once per role.
+When creating a session or editing its settings, open **Style and skills for this session**. Click **Add presets** and enable the sets you need. The list is fetched automatically when you open it. **Create preset** opens an editor here; **Save and use in this session** saves the reusable set and attaches its copy without losing your task draft. During preset editing, session creation is disabled. **Back to session instructions** returns without attaching a set. When there are no presets, you can create one or write instructions directly below. Expand **Choose components** to include or exclude each role’s prompt and each skill separately. Presets are applied in the displayed selection order; your own prompt follows them. Identical skills are included once per role.
 
 ![Several presets and selected components](../media/en/daddy-preset-selection.png)
 

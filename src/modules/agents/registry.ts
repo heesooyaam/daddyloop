@@ -41,6 +41,7 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
       );
     return module;
   }
+  all = () => [...this.modules.values()];
   engines = () => [...this.modules.values()].map(({ id, name }) => ({ id, name }));
   async list(refresh = false, signal?: AbortSignal) {
     const modules = [...this.modules.values()];

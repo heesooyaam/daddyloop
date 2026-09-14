@@ -82,7 +82,7 @@ export class Engine {
             t.reviewerThreadId === input.authorThreadId,
         )
     )
-      throw new AppError('thread_in_use', 'This Codex thread is already assigned to another task');
+      throw new AppError('thread_in_use', 'This agent context is already assigned to another task');
     const group = input.groupId ? this.store.getGroup(input.groupId) : undefined;
     if (group && input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
       throw new AppError(

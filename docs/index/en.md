@@ -27,3 +27,5 @@ Start with installation, then open the site or the CLI. Every topic has the same
 - [Claude setup](../claude/en.md)
 - [Back up and restore](../backups/en.md)
 - [Write your own module](../module-development/en.md)
+
+- [Agent adapter review (0.17)](../agent-adapter-review/en.md)

@@ -329,6 +329,7 @@ try {
   await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
   await page.screenshot({ path: join(output, 'daddy-new-session.png'), animations: 'disabled' });
   await page.getByText(t('Style and skills for this session'), { exact: true }).click();
+  await page.getByRole('button', { name: t('Add presets'), exact: true }).click();
   for (const preset of [shortPreset, checkPreset]) {
     await page
       .getByRole('checkbox', { name: t('Use preset {name}', { name: preset.name }), exact: true })
@@ -358,7 +359,7 @@ try {
     })
     .uncheck();
   await page.locator('.daddy-preset-picker').scrollIntoViewIfNeeded();
-  await page.screenshot({
+  await page.locator('.daddy-preset-picker').screenshot({
     path: join(output, 'daddy-preset-selection.png'),
     animations: 'disabled',
   });
@@ -383,8 +384,12 @@ try {
     );
   await page.getByRole('button', { name: t('Attach skill'), exact: true }).click();
   await expect(page.getByRole('button', { name: t('Attach a skill'), exact: true })).toBeVisible();
+  for (const summary of await page.locator('.daddy-preset-components[open] > summary').all())
+    await summary.click();
   await page.locator('.daddy-instructions').scrollIntoViewIfNeeded();
-  await page.screenshot({ path: join(output, 'daddy-instructions.png'), animations: 'disabled' });
+  await page
+    .locator('.daddy-instructions')
+    .screenshot({ path: join(output, 'daddy-instructions.png'), animations: 'disabled' });
   await page.getByRole('button', { name: t('Attach a skill'), exact: true }).click();
   await page.getByLabel(t('Skill source')).selectOption('folder');
   await page.getByLabel(t('Skill folder on this device')).setInputFiles(skillFolder);

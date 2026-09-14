@@ -21,8 +21,8 @@ export function registerPlanningCommands(program: Command) {
   });
   program
     .command('models')
-    .option('--refresh', 'query the Codex model catalogue again')
-    .description('List available Codex models and reasoning efforts')
+    .option('--refresh', 'query enabled agent model catalogues again')
+    .description('List available agent models and reasoning efforts')
     .action(async (options) => print(await api(options.refresh ? '/agents?refresh=1' : '/agents')));
   const agents = program
     .command('agents')
