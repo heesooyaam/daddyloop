@@ -308,7 +308,7 @@ Group states are `active`, `needs_input`, `paused` and `archived`; coordination 
 
 Default [Policy](../../src/core/types.ts#L17) is automatic publication and push, required CI, human approval for plan tasks, at most **3 review rounds**, and `maxNoProgress=2`. Repeated published comment bodies/locations, excluding service markers, increment `noProgress`; a different set resets it. These are stop limits, not a guarantee the model will fix every issue within that budget. Engine checks workflow evidence; it cannot prove that a model found every defect.
 
-Coordination has separate bounds: at most **24 tool calls per turn**, and it moves to `needs_input` after **8 automatic turns without a change in the task ID/state/head fingerprint**. User input or observed task progress resets that counter. Workspace-capacity waits are requeued with about a **30-second** delay.
+Coordination has separate bounds: at most **24 coordination-tool calls per turn**, and it moves to `needs_input` after **8 automatic turns without a change in the task ID/state/head fingerprint**. User input or observed task progress resets that counter. Workspace-capacity waits are requeued with about a **30-second** delay.
 
 Failing CI keeps a task in `awaiting_checks`; the polling loop does not itself synthesize a CI-repair job. Further work needs a permitted coordination/user action. A check waiver requires an explicit reason and matching revision. There is no merge tool: **completion of this loop is not a GitHub/GitLab/Arcadia merge**.
 
