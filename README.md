@@ -61,7 +61,7 @@ Sessions started in the CLI or website get topics too. Questions, progress and a
 | Choose daddy and worker models             | `/models`                                |
 | Grow the crew to three                     | `/pool 3`                                |
 | Check remaining usage and available resets | `/limits`                                |
-| Receive only results and questions         | `/notifications` → quiet mode            |
+| Private alerts for results and questions   | `/notifications` → quiet mode            |
 | Open the website on your phone             | `/web` in private chat after HTTPS setup |
 
 The bot runs on the server. Your laptop, SSH tunnel and browser tab can all be closed. Voice recognition runs locally, in English and Russian.

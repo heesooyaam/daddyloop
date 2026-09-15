@@ -3,7 +3,7 @@ import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
-import { TelegramText, type TelegramCard } from './telegram-text.js';
+import { TelegramText } from './telegram-text.js';
 import { daddyHome, workspacePicker, daddyBoard, poolCard } from './daddy-cards.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
