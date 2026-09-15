@@ -94,7 +94,12 @@ export function FolderBrowser({
           aria-label={t('Server directory')}
           value={path}
           placeholder={t('Absolute path on the server')}
-          onChange={(event) => setPath(event.target.value)}
+          onChange={(event) => {
+            request.current?.abort();
+            setBusy(false);
+            setError('');
+            setPath(event.target.value);
+          }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();

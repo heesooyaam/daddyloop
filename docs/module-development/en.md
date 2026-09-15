@@ -102,3 +102,5 @@ Ordinary tests must stay offline and use isolated state. Put paid model calls in
 `workspaceRoot` and `readPaths` grant read access to the managed repository and shared VCS metadata. Writes remain limited to `cwd`; adapters must not turn a metadata read grant into a write grant.
 
 Task instructions are part of the common runtime contract: use `taskSession(input)` for task jobs and pass `SessionInput.instructions` intact to the engine. The helper includes the frozen job instructions and workflow policy. The coordinator has already composed its session instructions. Do not reread local/global skills or replace these instructions based on the engine.
+
+A repository module can provide `sessionWorkspace(context): SessionWorkspaceBackend`. `prepare(group, signal)` allocates a session copy without invoking a model; `remove(group)` exports results and removes only verified owned copies. The host cancels and waits for the session runs before removal. Use [the Arcadia implementation](../../src/modules/repositories/arcadia-sessions.ts) as an example. Backup sinks receive the source `dataDir` so adapters can resolve their own journals.

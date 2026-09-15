@@ -23,6 +23,7 @@ import {
   type Policy,
   type Job,
   type AgentResult,
+  type Workspace,
 } from './types.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
@@ -64,6 +65,7 @@ export class Engine {
     groupId?: string;
     workspaceId?: string;
     scope?: string;
+    workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
     groupGeneration?: number;
   }) {
@@ -84,6 +86,8 @@ export class Engine {
     )
       throw new AppError('thread_in_use', 'This agent context is already assigned to another task');
     const group = input.groupId ? this.store.getGroup(input.groupId) : undefined;
+    if (group?.deletedAt || group?.deletion)
+      throw new AppError('session_deleting', 'This session is being deleted');
     if (group && input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
       throw new AppError(
         'stale_daddy',
@@ -113,6 +117,7 @@ export class Engine {
       groupId: group?.id,
       workspaceId: input.workspaceId ?? group?.workspaceId,
       scope: input.scope,
+      workspaceIsolation: input.workspaceIsolation ?? group?.workspace?.copyMode,
       createdByAction: input.createdByAction,
       agents: {
         ...this.defaultAgents(),
@@ -579,6 +584,11 @@ export class Engine {
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (group.deletedAt || group.deletion)
+          throw new AppError('session_deleting', 'This session is being deleted');
+      }
       assertTaskVersion(task, expected);
       if (action === 'pause') {
         task.resumeState = task.state;
@@ -822,6 +832,7 @@ export class Engine {
     groupGeneration?: number;
     workspaceId?: string;
     scope?: string;
+    workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
     dependsOn?: string[];
     id?: string;
@@ -844,6 +855,8 @@ export class Engine {
       let group: ReviewGroup;
       if (input.groupId) {
         group = this.store.getGroup(input.groupId);
+        if (group.deletedAt || group.deletion)
+          throw new AppError('session_deleting', 'This session is being deleted');
         if (input.groupGeneration !== undefined && group.generation !== input.groupGeneration)
           throw new AppError(
             'stale_daddy',
@@ -883,6 +896,8 @@ export class Engine {
           createdAt: now(),
           updatedAt: now(),
         };
+      if (group.deletedAt || group.deletion)
+        throw new AppError('session_deleting', 'This session is being deleted');
       if (
         (parent || input.groupId) &&
         input.agents?.daddy &&
@@ -907,6 +922,7 @@ export class Engine {
         groupId: group.id,
         workspaceId: input.workspaceId ?? group.workspaceId,
         scope: input.scope,
+        workspaceIsolation: input.workspaceIsolation ?? group.workspace?.copyMode,
         createdByAction: input.createdByAction,
         dependsOn: input.dependsOn,
         agents: {

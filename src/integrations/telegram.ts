@@ -1,4 +1,5 @@
 import { randomBytes, createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Engine } from '../core/engine.js';
@@ -101,6 +102,14 @@ export async function connectTelegram(
 }
 export class TelegramApi {
   private token: string;
+  private navigation = new AsyncLocalStorage<{
+    chatId: number;
+    threadId?: number;
+    messageId: number;
+    replied: boolean;
+    active: boolean;
+  }>();
+  onCleanupError?: (error: unknown) => void;
   constructor(
     token: string,
     private fetcher: typeof fetch = fetch,
@@ -170,6 +179,15 @@ export class TelegramApi {
             redact(value.description ?? `Telegram HTTP ${response.status}`),
             502,
           );
+        const navigation = this.navigation.getStore();
+        const outgoing = body as { chat_id?: number; message_thread_id?: number };
+        if (
+          method === 'sendMessage' &&
+          navigation?.active &&
+          outgoing?.chat_id === navigation.chatId &&
+          outgoing.message_thread_id === navigation.threadId
+        )
+          navigation.replied = true;
         return value.result as T;
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
@@ -191,6 +209,42 @@ export class TelegramApi {
         }
       }
     }
+  }
+  async replaceCard<T>(
+    callback: NonNullable<Update['callback_query']>,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const message = callback.message;
+    if (!message?.message_id || !Number.isSafeInteger(message.message_id)) return action();
+    const navigation = {
+      chatId: message.chat.id,
+      threadId: message.message_thread_id,
+      messageId: message.message_id,
+      replied: false,
+      active: true,
+    };
+    let result: T;
+    try {
+      result = await this.navigation.run(navigation, action);
+    } finally {
+      navigation.active = false;
+    }
+    if (navigation.replied) {
+      try {
+        await this.call('deleteMessage', {
+          chat_id: navigation.chatId,
+          message_id: navigation.messageId,
+        });
+      } catch (error) {
+        // The action already succeeded. A failed cleanup must not repeat it or replace its result with an error.
+        try {
+          this.onCleanupError?.(error);
+        } catch {
+          /* Notification cleanup cannot fail the completed action. */
+        }
+      }
+    }
+    return result;
   }
   async downloadVoice(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
     const limit = 10 * 1024 * 1024;
@@ -313,7 +367,12 @@ export class Telegram {
     private api: TelegramApi,
     readonly username: string,
     private publicOrigin?: string,
-  ) {}
+  ) {
+    this.api.onCleanupError = (error) =>
+      this.engine.store.event('_system', 'telegram.card_cleanup_failed', {
+        error: redact(error instanceof Error ? error.message : String(error)),
+      });
+  }
   pair() {
     const code = randomBytes(24).toString('base64url');
     this.engine.store.setSetting('telegram.pairCode', {
@@ -411,9 +470,12 @@ export class Telegram {
     if (await this.workspace?.handle(update)) return;
     try {
       if (callback) {
-        await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
-        if (await this.navigate(callback.data ?? '', chat.id)) return;
-        throw new Error('Unknown action. Open the current menu with /start.');
+        await this.api.replaceCard(callback, async () => {
+          await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          if (!(await this.navigate(callback.data ?? '', chat.id)))
+            throw new Error('Unknown action. Open the current menu with /start.');
+        });
+        return;
       }
       const text = message?.text?.trim();
       if (!text) return;

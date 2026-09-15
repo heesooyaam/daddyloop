@@ -2,24 +2,63 @@
 
 # Arcadia and Tracker
 
-Select the `arcadia` module during installation. It uses existing corporate tools; the public installer does not install or authenticate Arc/Arcanum for you.
+Choose `arcadia` during installation. Arc, Arcanum and the corporate lease helper must already be available and authenticated on the server.
 
 ```bash
-daddy arcadia setup --help
 daddy arcadia setup
-daddy arcadia mounts
-daddy workspaces add ~/arcadia2 --name Work --base trunk
+daddy workspaces add ~/arcadia --name Work --base trunk --copies session
+daddy new --workspace Work "TEAM-123"
 ```
 
-Configure an `arcadia-mount-lease` helper appropriate to this host. Its config defines the shared object store, mount range, reservations and lease root. A mount must use the expected shared store. The registered source, session snapshots and task sources are protected from worker allocation.
+Already have Work? Update its defaults with `daddy workspaces set Work ~/arcadia --copies session`. Existing sessions keep their settings.
 
-Workers claim separate eligible mounts. One control/review slot is kept available; allocation waits when no suitable slot is free. Dirty or unpushed work is preserved. Lease identity, branch and exact revision are checked before submission. The source mount is not switched to a task branch.
+## Automatic copies
 
-Tracker credentials are read from `TRACKER_OAUTH_TOKEN`, `TRACKER_TOKEN` or `~/.tokens/tracker`. A ticket such as `TEAM-123` is imported read-only; the tool does not write comments to Tracker. Native review uses Arcanum and Arc tools. Imported descriptions and published comment Markdown stay intact.
+**Choose the source once. The service creates the working copies.** An Arcadia source must be mounted; it can use an older, separate object store. New copies always use the shared object store from `arcadia-mount-lease` configuration.
+
+```mermaid
+flowchart TB
+    S["Source Arcadia<br/>Kept in place"] --> C["New session<br/>Private coordinator copy"]
+    C --> W["Tasks<br/>Isolated worker copies"]
+    W --> D["Delete session<br/>Stop its agents"]
+    D --> A["Save and verify<br/>the results archive"]
+    A --> R["Remove this session's copies<br/>Keep the shared object store"]
+```
+
+The session copy is prepared even before its first message. Independent workers have separate copies. The service owns the leases and switches branches; the agents use their supplied folders. You do not need to find a free `arcadia2`, `arcadia3`, etc.
+
+On the website, **Create copies for this session automatically** is enabled by default. Telegram shows the mode before **Start session**. `--copies pool` selects the existing numbered mount pool instead; those copies are retained, and borrowed leases must be released separately.
+
+Owned copies live under `<data-dir>/arcadia-sessions/<session-id>/`. Finished tasks can have their FUSE processes stopped to save memory; their stores and changes remain and are mounted again when needed. Source folders and copies owned by other sessions are not changed.
+
+![Automatic copies in the new-session form](../media/en/daddy-arc-session.png)
+
+## Delete a session
+
+Use **Delete session** on the website or session card in Telegram. The terminal has `/delete`; the plain CLI shows a confirmation before the destructive step:
 
 ```bash
-daddy new --workspace Work "TEAM-123"
-daddy talk SESSION_ID "Also take TEAM-124"
+daddy delete SESSION_ID
+daddy delete SESSION_ID --yes
 ```
 
-Review and implementation still follow [the common task cycle](../tasks/en.md). A clean, confirmed author lease may be released after its exact head is visible in the native PR. Unpublished or dirty work stays protected. Cleanup is described in [operations](../operations/en.md).
+Deletion runs in the background:
+
+1. Cancel and wait for this session's agent runs.
+2. Save conversation, task data, patches and changed files in `<data-dir>/session-archives/<session-id>/g<generation>/`.
+3. Verify the archive and ownership, then unmount and forget only the session's copies.
+
+If export or ownership verification fails, deletion stops with the remaining copies preserved. Retry from the session card after addressing the reported problem. The source repository and shared object store remain. Telegram closes the session topic while keeping its messages.
+
+The readable archive contains `session.json` and `arcadia/<task>/<role>/` with patches, file contents and `state.json`. It is also included in a full [backup](../backups/en.md). The service never force-unmounts or truncates the shared store.
+
+## Tickets and reviews
+
+Tracker credentials come from `TRACKER_OAUTH_TOKEN`, `TRACKER_TOKEN` or `~/.tokens/tracker`. Import reads the ticket; it does not post comments to Tracker. Native reviews use Arcanum and Arc tools.
+
+```bash
+daddy talk SESSION_ID "Also take TEAM-124"
+daddy arcadia mounts
+```
+
+Tasks follow [the same review cycle](../tasks/en.md). Submission checks the lease owner, branch and exact revision. Use [operations](../operations/en.md) for cache management.

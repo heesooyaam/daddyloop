@@ -15,6 +15,7 @@ export class Worker {
   private active = new Map<string, AbortController>();
   private runningJobs = new Map<string, Job>();
   private pendingRuns = new Set<Promise<void>>();
+  private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
   private ticking = false;
   private stopped = false;
@@ -34,6 +35,21 @@ export class Worker {
   }
   releaseGroup(id: string) {
     this.reservedGroups.delete(id);
+  }
+  private track(taskId: string, run: Promise<void>) {
+    this.taskRuns.set(run, taskId);
+    void run.then(
+      () => this.taskRuns.delete(run),
+      () => this.taskRuns.delete(run),
+    );
+  }
+  async waitForGroup(groupId: string) {
+    await this.tickDone;
+    await Promise.allSettled(
+      [...this.taskRuns.entries()]
+        .filter(([, taskId]) => this.engine.store.getTask(taskId).groupId === groupId)
+        .map(([run]) => run),
+    );
   }
   autoCleanup?: () => Promise<unknown>;
   autoSubmit?: (id: string) => Promise<unknown>;
@@ -71,9 +87,27 @@ export class Worker {
       const resources = this.resourceCheck();
       if (Date.now() - this.lastArcRelease > 15000) {
         this.lastArcRelease = Date.now();
+        for (const task of store
+          .tasks()
+          .filter(
+            (task) =>
+              task.state === 'complete' &&
+              !store.busy(task.id) &&
+              (!task.groupId || !store.getGroup(task.groupId).deletion),
+          )) {
+          for (const role of ['author', 'reviewer'] as const) {
+            if (!task.arcWorkspaces?.[role]?.managed) continue;
+            try {
+              await this.workspaces.parkArc(task, role);
+            } catch (error) {
+              store.event(task.id, 'arc.copy_preserved', { error: redact(String(error)) });
+            }
+          }
+        }
         for (const task of store.tasks())
           if (
             task.ref.provider === 'arcadia' &&
+            (!task.groupId || !store.getGroup(task.groupId).deletion) &&
             task.ref.kind !== 'ticket' &&
             task.arcWorkspaces?.author &&
             !store.busy(task.id) &&
@@ -157,6 +191,7 @@ export class Worker {
               },
             );
             this.pendingRuns.add(submission);
+            this.track(task.id, submission);
             void submission.finally(() => this.pendingRuns.delete(submission));
           }
         }
@@ -210,7 +245,12 @@ export class Worker {
             (!candidate.groupId ||
               (() => {
                 const group = store.getGroup(candidate.groupId!);
-                if (group.daddyState === 'paused' || group.daddyState === 'archived') return false;
+                if (
+                  group.daddyState === 'paused' ||
+                  group.daddyState === 'archived' ||
+                  group.deletion
+                )
+                  return false;
                 if (candidate.role === 'reviewer') return !this.reservedGroups.has(group.id);
                 if (group.orchestrated && !canAssignWorker(store, group, candidate.taskId))
                   return false;
@@ -237,6 +277,7 @@ export class Worker {
         if (job) {
           const running = this.run(job);
           this.pendingRuns.add(running);
+          this.track(job.taskId, running);
           void running.finally(() => this.pendingRuns.delete(running));
         } else break;
       }

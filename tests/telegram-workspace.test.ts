@@ -11,6 +11,7 @@ it('changes only the selected session role from a private chat or topic and igno
   const f = daddyFixture();
   let topic = 30;
   const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send: vi.fn(async () => ({ message_id: 1 })),
     call: vi.fn(async () => ({ message_thread_id: ++topic })),
   } as unknown as TelegramApi;
@@ -246,6 +247,7 @@ it('scopes a one-message repository selection to its owner and conversation, the
   const f = daddyFixture();
   const sent: any[] = [];
   const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send: vi.fn(async (_destination, card) => {
       sent.push(card);
       return { message_id: sent.length };
@@ -299,6 +301,7 @@ it('shows shared limits and only the paired owner can confirm consuming a reset'
   const f = daddyFixture(),
     sent: any[] = [];
   const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send: vi.fn(async (_destination, card) => {
       sent.push(card);
       return { message_id: sent.length };
@@ -372,6 +375,7 @@ it('creates a session from a group topic and isolates its wizard from another to
     sent: { destination: any; card: any }[] = [];
   let thread = 20;
   const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send: vi.fn(async (destination, card) => {
       sent.push({ destination, card });
       return { message_id: sent.length };

@@ -623,4 +623,62 @@ export const daddyRu: Record<string, string> = {
   'Refresh queries the enabled agent modules.': 'Обновление запрашивает включённые модули агентов.',
   'A task, a ticket, a voice note. daddy’s listening.':
     'Задача, тикет, голосовое. Папочка слушает.',
+
+  'Create copies for this session automatically': 'Свои копии для этой сессии',
+  'The service prepares the copies and removes them when the session is deleted.':
+    'Сервис подготовит копии и удалит их вместе с сессией.',
+  'Session copy ready': 'Копия для сессии готова',
+  'Preparing the session copy': 'Готовлю копию для сессии',
+  'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
+  'Session deletion stopped; working copies were preserved':
+    'Удаление остановлено. Рабочие копии сохранены.',
+  'Saving results and removing session copies': 'Сохраняю результаты и убираю копии сессии',
+  'Retry deletion': 'Повторить удаление',
+  'Delete session': 'Удалить сессию',
+  'I will stop its agents, save the results in a local archive and remove the session copies. Your source repository stays in place.':
+    'Остановлю агентов, сохраню результаты в архив на сервере и удалю копии сессии. Исходная папка сохранится.',
+  'Session deleted': 'Сессия удалена',
+  'Results saved in the archive': 'Результаты сохранены в архиве',
+  'The service will create copies for this session and remove them when it is deleted.':
+    'Для этой сессии сервис создаст свои копии и уберёт их при удалении.',
+  'This session will use the existing Arc pool. Pool copies are kept.':
+    'Будут использованы свободные копии Arcadia из общего пула. Они останутся после сессии.',
+  'Use the existing Arc pool': 'Использовать общий пул Arcadia',
+  'Create copies automatically': 'Создавать копии автоматически',
+  'Choose an existing mounted Arcadia source. The service creates its own working copies.':
+    'Выбери подключённую исходную Arcadia. Рабочие копии сервис создаст сам.',
+  'The selected Arcadia source is not mounted': 'Выбранная Arcadia не подключена.',
+  'Choose the original source folder, not a session-owned copy':
+    'Выбери исходную папку репозитория. Копия другой сессии для этого не подходит.',
+  'This session is being deleted': 'Эта сессия удаляется.',
+  'This session was deleted': 'Эта сессия удалена.',
+  'Retry deletion before changing this session': 'Сначала заверши удаление этой сессии.',
+  'The session changed. Open its current deletion confirmation.':
+    'Сессия изменилась. Открой подтверждение удаления заново.',
+  'Open the current deletion confirmation': 'Открой подтверждение удаления заново.',
+  'This repository module does not support managed session deletion':
+    'Удаление доступно для сессии с собственными рабочими копиями.',
+  'Release the borrowed Arc pool copies before deleting this session. They were preserved.':
+    'Сначала освободи копии из общего пула Arcadia. Они сохранены.',
+  'Automatic Arc copies require a data directory without whitespace':
+    'Для автоматических копий Arcadia нужен путь к данным daddyloop без пробелов.',
+  'The Arc shared store or lease root changed; existing session copies were preserved':
+    'Изменились настройки общего хранилища или блокировок Arcadia. Копии сессий сохранены.',
+  'The session copy is leased by another owner; it was preserved':
+    'Эта копия занята другим владельцем. Она сохранена.',
+  'Session changes exceed the 2 GiB automatic archive limit; working copies were preserved':
+    'Изменения превышают лимит автоматического архива в 2 ГиБ. Рабочие копии сохранены.',
+  'The saved session archive is missing; working copies were preserved':
+    'Архив сессии не найден. Рабочие копии сохранены.',
+  'A session archive file changed; copies were preserved':
+    'Файл в архиве изменился. Рабочие копии сохранены.',
+  'A session file changed during export; deletion was stopped':
+    'Файл изменился во время сохранения. Удаление остановлено.',
+  'The session changed after export; its copy was preserved':
+    'Код изменился после сохранения архива. Рабочая копия сохранена.',
+  'The service has already prepared and leased this working copy. Do not create or claim other checkouts.':
+    'Сервис уже подготовил и занял эту копию. Не создавай и не занимай другие рабочие копии.',
+  'Use automatic copies for new sessions': 'Свои копии для новых сессий',
+  'A repository module cannot remove its session copies; all working copies were preserved':
+    'Один из модулей пока не умеет удалять копии сессии. Все рабочие копии сохранены.',
 };

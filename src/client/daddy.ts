@@ -140,8 +140,17 @@ export class DaddyClient {
             sessions.filter((group) => group.id.startsWith(selected)).length === 1
               ? sessions.find((group) => group.id.startsWith(selected))!.id
               : '';
+        if (selected && !sessions.some((session) => session.id === selected)) selected = '';
         selected ||= sessions[0]?.id ?? '';
-        this.update({ sessions, workspaces, status, selected, connected: true });
+        if (selected !== this.value.selected) this.sequence++;
+        this.update({
+          sessions,
+          workspaces,
+          status,
+          selected,
+          connected: true,
+          ...(selected !== this.value.selected ? { board: undefined } : {}),
+        });
         await this.detail();
       } catch (error) {
         if (!this.stopped && epoch === this.epoch)
@@ -234,7 +243,7 @@ export class DaddyClient {
       this.update({ busy: false });
     }
   }
-  async action(action: 'pause' | 'resume' | 'settings', body: unknown = {}) {
+  async action(action: 'pause' | 'resume' | 'settings' | 'delete', body: unknown = {}) {
     const id = this.value.selected;
     if (!id || this.value.busy) return;
     this.update({ busy: true, error: undefined });

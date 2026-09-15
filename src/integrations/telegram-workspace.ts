@@ -478,7 +478,7 @@ export class TelegramWorkspace {
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
       )
       .run(now());
-    const button = (text: string, next: RepoChoice, action: 'use' | 'browse') => {
+    const button = (text: string, next: RepoChoice, action: 'use' | 'browse' | 'mode') => {
       const id = randomBytes(12).toString('base64url');
       this.store.setSetting(`telegram.repo:${id}`, next);
       return { text, callback_data: `dad:repo:${id}:${action}` };
@@ -517,6 +517,27 @@ export class TelegramWorkspace {
         ? [[button(this.t('Use workspace defaults'), { ...choice, input: undefined }, 'use')]]
         : []),
     ];
+    if (!choice.groupId && choice.workspace.copyMode) {
+      const mode = choice.input?.copyMode ?? choice.workspace.copyMode;
+      title.add(
+        '\n\n' +
+          this.t(
+            mode === 'session'
+              ? 'The service will create copies for this session and remove them when it is deleted.'
+              : 'This session will use the existing Arc pool. Pool copies are kept.',
+          ),
+      );
+      buttons.push([
+        button(
+          this.t(mode === 'session' ? 'Use the existing Arc pool' : 'Create copies automatically'),
+          {
+            ...choice,
+            input: { ...choice.input, copyMode: mode === 'session' ? 'pool' : 'session' },
+          },
+          'mode',
+        ),
+      ]);
+    }
     if (browse) {
       const listing = await this.daddy.workspaces.browse(
         choice.input?.path ?? choice.workspace.repoPath,
@@ -538,7 +559,7 @@ export class TelegramWorkspace {
     await this.api.send(choice.destination, { ...title, buttons });
   }
   private async repositoryCallback(data: string, destination: Destination) {
-    const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse)$/);
+    const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse|mode)$/);
     if (!match) return false;
     const key = `telegram.repo:${match[1]}`,
       choice = this.store.setting<RepoChoice>(key);
@@ -557,7 +578,8 @@ export class TelegramWorkspace {
         choice.creationExpiresAt
     )
       throw new Error(this.t('This selection expired. Start a new session again.'));
-    if (match[2] === 'browse') await this.repository(choice, true);
+    if (match[2] === 'browse' || match[2] === 'mode')
+      await this.repository(choice, match[2] === 'browse');
     else {
       const selected = await this.daddy.workspaces.selection(choice.workspace, choice.input);
       if (choice.groupId) {
@@ -819,6 +841,38 @@ export class TelegramWorkspace {
       );
       return true;
     }
+    const deleting = data.match(/^dad:(delete|del):([a-f0-9-]{36})(?::([0-9]+))?$/);
+    if (deleting) {
+      const group = this.authorize(destination, deleting[2]);
+      if (!this.daddy.board(group.id).canDelete)
+        throw new Error(this.t('This repository module does not support managed session deletion'));
+      if (deleting[1] === 'delete') {
+        await this.api.send(destination, {
+          ...new TelegramText()
+            .add(this.t('Delete session') + ': ' + group.title, 'bold')
+            .add(
+              '\n\n' +
+                this.t(
+                  'I will stop its agents, save the results in a local archive and remove the session copies. Your source repository stays in place.',
+                ),
+            ),
+          buttons: [
+            [
+              {
+                text: this.t('Delete session'),
+                callback_data: `dad:del:${group.id}:${group.generation}`,
+              },
+            ],
+            [{ text: this.t('Cancel'), callback_data: `dad:open:${group.id}` }],
+          ],
+        });
+      } else {
+        if (!deleting[3]) throw new Error(this.t('Open the current deletion confirmation'));
+        const result = await this.daddy.remove(group.id, Number(deleting[3]));
+        if ('group' in result) await this.api.send(destination, daddyBoard(this.locale(), result));
+      }
+      return true;
+    }
     const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(worker|daddy))?$/);
     if (models) {
       await this.models(models[1], destination, models[2] as 'worker' | 'daddy' | undefined);
@@ -915,8 +969,10 @@ export class TelegramWorkspace {
           !callback.data?.startsWith('language:')
         )
           return false;
-        await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
-        await this.callback(callback.data, destination);
+        await this.api.replaceCard(callback, async () => {
+          await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          await this.callback(callback.data!, destination);
+        });
         return true;
       }
       if (privateChat && message?.chat_shared) {
@@ -1224,11 +1280,58 @@ export class TelegramWorkspace {
   }
   onEvent(event: Event): boolean {
     if (!event.type.startsWith('daddy.')) return false;
+    if (
+      [
+        'daddy.workspace_ready',
+        'daddy.prepare_failed',
+        'daddy.deleted',
+        'daddy.delete_failed',
+      ].includes(event.type)
+    ) {
+      this.pending = this.pending
+        .then(async () => {
+          const pair = this.pair();
+          if (this.stopped || !pair) return;
+          const group = this.store.getGroup(event.taskId);
+          const room = this.room();
+          const topic = room ? this.topic(room, group.id) : undefined;
+          const destination = topic
+            ? { chatId: topic.chatId, threadId: topic.threadId }
+            : pair.chatId;
+          if (group.deletedAt) {
+            if (event.type !== 'daddy.deleted') return;
+            if (this.store.setting('telegram.currentDaddy') === group.id)
+              this.store.setSetting('telegram.currentDaddy', null);
+            const text = new TelegramText().add(
+              this.t('Session deleted') + ': ' + group.title,
+              'bold',
+            );
+            if (group.deletion?.archivePath)
+              text
+                .add('\n\n' + this.t('Results saved in the archive') + '\n')
+                .add(group.deletion.archivePath, 'code');
+            await this.api.send(destination, {
+              ...text,
+              buttons: [[{ text: this.t('Sessions'), callback_data: 'dad:home' }]],
+            });
+            if (topic)
+              await this.api.call('closeForumTopic', {
+                chat_id: topic.chatId,
+                message_thread_id: topic.threadId,
+              });
+          } else {
+            await this.api.send(destination, daddyBoard(this.locale(), this.daddy.board(group.id)));
+          }
+        })
+        .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
+      return true;
+    }
     if (event.type === 'daddy.created') {
       this.pending = this.pending
         .then(async () => {
           const room = this.room();
           if (this.stopped) return;
+          if (this.store.getGroup(event.taskId).deletedAt) return;
           const group = this.daddy.group(event.taskId),
             topic = await this.ensureTopic(group);
           await this.announceChild(group, topic);
@@ -1253,6 +1356,7 @@ export class TelegramWorkspace {
       .then(async () => {
         const pair = this.pair();
         if (this.stopped || !pair) return;
+        if (this.store.getGroup(event.taskId).deletedAt) return;
         const group = this.daddy.group(event.taskId),
           message = this.store
             .messages(group.id)

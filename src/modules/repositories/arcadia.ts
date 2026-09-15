@@ -1,4 +1,5 @@
 import { backupArcadia } from './arcadia-backup.js';
+import { ArcadiaSessionWorkspace } from './arcadia-sessions.js';
 import { parseTicket } from './tickets.js';
 import type { RepositoryModule, SubmissionBackend, SubmissionContext } from '../contracts.js';
 import type { PRRef, Task } from '../../core/types.js';
@@ -110,6 +111,7 @@ export const arcadiaModule: RepositoryModule = {
   name: 'Arcadia + Tracker',
   vcs: 'arcadia',
   backupWorkspace: backupArcadia,
+  sessionWorkspace: (context) => new ArcadiaSessionWorkspace(context),
   acceptsTicket(input) {
     try {
       return parseTicket(input).kind === 'tracker';

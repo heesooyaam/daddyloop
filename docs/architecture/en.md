@@ -76,7 +76,7 @@ sequenceDiagram
     E->>Q: Save state<br/>and the required next step
 ```
 
-**Folder.** A named workspace points to the source repository and allowed scope. `Workspaces` prepares separate task copies; `ArcWorkspaces` handles Arcadia. A worker changes its own copy, while the reviewer reads a pinned code version. Coordination has its own `DaddyWorkspace` copy. The user's source checkout is not switched, and uncommitted changes are preserved.
+**Folder.** A named workspace points to the source repository and allowed scope. `Workspaces` prepares separate task copies; `ArcWorkspaces` handles Arcadia. In automatic mode the repository module prepares a session copy before the first model turn, then allocates workers their own copies. A worker changes its own copy, while the reviewer reads a pinned code version. Coordination has its own `DaddyWorkspace` copy. The user's source checkout is not switched, and uncommitted changes are preserved.
 
 **Settings.** The agent profile and instructions are saved with the queued run. Changing the default model later leaves that waiting run's settings intact. `AgentRegistry` selects the adapter by `profile.engine`; individual model names do not control scheduler behavior.
 
@@ -206,5 +206,7 @@ Failures follow the same rules:
 - **Low memory or disk:** new runs wait; active ones may be interrupted with their work preserved.
 - **A write already reached the repository:** pausing does not remove the comment or undo the push. The service checks the external result before continuing.
 - **Backup moved to another host:** application data and working files move, while unfinished tasks restore paused. Conversations inside the CLIs start afresh; see [backups](../backups/en.md).
+
+Deleting a managed session first cancels and waits for its runs. The repository module archives and verifies its results, then removes its owned copies. A failed export keeps the copies. See [the Arcadia lifecycle](../arcadia/en.md).
 
 Code: [cancellation, revision changes and recovery](../../src/core/engine.ts), [coordinator recovery](../../src/core/daddy.ts), [resource checks](../../src/core/resources.ts). [buildApp()](../../src/server/app.ts) assembles all components.

@@ -17,6 +17,7 @@ export const workspaceSchema = z
     path: z.string().min(1).max(4000),
     scope: z.string().max(1000).optional(),
     base: z.string().max(200).optional(),
+    copyMode: z.enum(['session', 'pool']).optional(),
     provider: z
       .string()
       .regex(/^[a-z][a-z0-9-]{0,31}$/)
@@ -99,34 +100,62 @@ export class WorkspaceRegistry {
     const path = this.path(input.path);
     let root = path,
       vcs: Workspace['vcs'] | undefined;
+    let gitRoot: string | undefined;
     for (let at = path; ; at = dirname(at)) {
       // Never invoke Git inside Arcadia, including a selected subdirectory.
-      if (existsSync(join(at, '.arc')) || existsSync(join(at, '.arcignore'))) {
+      if (
+        at !== homedir() &&
+        (existsSync(join(at, '.arc')) || existsSync(join(at, '.arcignore')))
+      ) {
         root = at;
         vcs = 'arcadia';
         break;
       }
-      if (existsSync(join(at, '.git'))) {
-        vcs = 'git';
-        break;
-      }
+      if (!gitRoot && existsSync(join(at, '.git'))) gitRoot = at;
       if (dirname(at) === at) break;
     }
+    if (!vcs && gitRoot) vcs = 'git';
     let host: string, repo: string, provider: Workspace['provider'];
     if (vcs === 'arcadia') {
       this.repositories.forRepository(
         { vcs: 'arcadia', host: 'a.yandex-team.ru', remotes: [] },
         input.provider,
       );
-      const mount = (await this.arc.mounts()).find(
-        (mount) => mount.path === root && mount.object_store_ok,
-      );
+      const mounts = await this.arc.mounts();
+      const mount = mounts
+        .filter((mount) => path === mount.path || path.startsWith(mount.path + '/'))
+        .sort((a, b) => b.path.length - a.path.length)[0];
+      const native =
+        !mount && typeof this.arc.sourceMounts === 'function'
+          ? (await this.arc.sourceMounts())
+              .filter(
+                (mount) =>
+                  mount.status === 'mounted' &&
+                  (path === mount.mount || path.startsWith(mount.mount + '/')),
+              )
+              .sort((a, b) => b.mount.length - a.mount.length)[0]
+          : undefined;
       if (!mount)
+        if (!native)
+          throw new AppError(
+            'arcadia_project_unavailable',
+            'Choose an existing mounted Arcadia source. The service creates its own working copies.',
+            422,
+          );
+      if (mount?.managed)
         throw new AppError(
-          'arcadia_project_unavailable',
-          'Arcadia must use a mounted checkout and the configured shared object store',
+          'managed_workspace_source',
+          'Choose the original source folder, not a session-owned copy',
           422,
         );
+      if (mount && !(mount.mounted || mount.object_store_ok))
+        throw new AppError(
+          'arcadia_project_unavailable',
+          'The selected Arcadia source is not mounted',
+          422,
+        );
+      root = mount?.path ?? native!.mount;
+      this.path(root);
       host = 'a.yandex-team.ru';
       repo = 'arcadia';
       provider = this.repositories.forRepository(
@@ -191,13 +220,17 @@ export class WorkspaceRegistry {
       host,
       repo,
       base: input.base || (vcs === 'arcadia' ? 'trunk' : undefined),
+      ...(vcs === 'arcadia' ? { copyMode: input.copyMode ?? ('session' as const) } : {}),
       createdAt: now(),
       updatedAt: now(),
     };
   }
   async selection(workspace: Workspace, input?: RepositorySelection): Promise<Workspace> {
     this.repositories.get(workspace.provider);
-    if (!input || !Object.keys(input).length) return { ...workspace };
+    if (!input || !Object.keys(input).length)
+      return workspace.vcs === 'arcadia'
+        ? { ...workspace, copyMode: workspace.copyMode ?? 'session' }
+        : { ...workspace };
     input = repositorySelectionSchema.parse(input);
     const sameSource =
       !input.path ||
@@ -206,6 +239,7 @@ export class WorkspaceRegistry {
     const selected = await this.inspect({
       provider: input.provider ?? (sameSource ? workspace.provider : undefined),
       name: workspace.name,
+      copyMode: input.copyMode ?? workspace.copyMode,
       path: input.path ?? workspace.repoPath,
       scope: input.scope ?? (input.path ? undefined : workspace.scope),
       // A different repository must not inherit a branch name from another VCS.
@@ -218,6 +252,7 @@ export class WorkspaceRegistry {
       value.host,
       value.repo,
       value.provider,
+      ...(value.copyMode ? [value.copyMode] : []),
     ];
     const changed = JSON.stringify(identity(selected)) !== JSON.stringify(identity(workspace));
     const hash = createHash('sha256')
@@ -268,7 +303,7 @@ export class WorkspaceRegistry {
       for (const mount of this.repositories.list().some((module) => module.vcs === 'arcadia')
         ? await this.arc.mounts()
         : [])
-        if (mount.object_store_ok) candidates.add(mount.path);
+        if (!mount.managed && (mount.mounted || mount.object_store_ok)) candidates.add(mount.path);
     } catch {
       /* Git-only installations need no Arc CLI. */
     }
@@ -283,11 +318,15 @@ export class WorkspaceRegistry {
       .map((path) => ({ name: basename(path), path }));
   }
   get(id: string) {
-    return this.store.workspace(id);
+    const workspace = this.store.workspace(id);
+    return workspace.vcs === 'arcadia'
+      ? { ...workspace, copyMode: workspace.copyMode ?? ('session' as const) }
+      : workspace;
   }
   list() {
     return this.store
       .workspaces()
+      .map((workspace) => this.get(workspace.id))
       .filter((workspace) =>
         this.repositories.list().some((module) => module.id === workspace.provider),
       );

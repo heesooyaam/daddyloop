@@ -73,6 +73,41 @@ export function daddyBoard(
             total: board.tasks.length,
           }),
       );
+  const preparation = board.group.workspacePreparation;
+  if (preparation)
+    text
+      .add(
+        '\n\n' +
+          t(
+            preparation.state === 'ready'
+              ? 'Session copy ready'
+              : preparation.state === 'error'
+                ? 'Could not prepare the session copy'
+                : 'Preparing the session copy',
+          ),
+      )
+      .add(preparation.error ? '\n' + t(preparation.error) : '');
+  if (board.group.deletion) {
+    text.add(
+      '\n\n' +
+        t(
+          board.group.deletion.state === 'error'
+            ? 'Session deletion stopped; working copies were preserved'
+            : 'Saving results and removing session copies',
+        ),
+    );
+    if (board.group.deletion.error) text.add('\n' + t(board.group.deletion.error));
+    return {
+      ...text,
+      buttons: [
+        ...(board.group.deletion.state === 'error'
+          ? [[{ text: t('Retry deletion'), callback_data: `dad:delete:${board.group.id}` }]]
+          : []),
+        [{ text: t('Refresh'), callback_data: `dad:open:${board.group.id}` }],
+        [{ text: t('Sessions'), callback_data: 'dad:home' }],
+      ],
+    };
+  }
   for (const task of board.tasks.slice(0, 15))
     text
       .add('\n\n' + (task.state === 'complete' ? '✅ ' : task.running ? '⚙️ ' : '• ') + task.title)
@@ -120,6 +155,9 @@ export function daddyBoard(
         },
         { text: t('Refresh'), callback_data: `dad:open:${board.group.id}` },
       ],
+      ...(board.canDelete
+        ? [[{ text: t('Delete session'), callback_data: `dad:delete:${board.group.id}` }]]
+        : []),
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
   };

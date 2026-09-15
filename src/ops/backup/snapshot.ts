@@ -203,10 +203,12 @@ export async function createBackup(dataDir: string, output: string, config: Conf
       };
       for (const table of ['review_groups', 'messages', 'jobs', 'daddy_jobs'])
         rows(db, table).forEach(collect);
-      for (const row of db
+      const contexts = db
         .prepare("SELECT value FROM settings WHERE key LIKE 'daddy.context:%'")
-        .all())
-        collect(JSON.parse(String(row.value)));
+        .all()
+        .map((row) => JSON.parse(String(row.value)))
+        .filter((value): value is Task => !!value?.id);
+      contexts.forEach(collect);
       scrubIdentity(db);
       for (const [path, info] of sources) {
         const id = idFor(path);
@@ -320,13 +322,16 @@ export async function createBackup(dataDir: string, output: string, config: Conf
         )
           throw new Error(`Source changed during backup: ${path}`);
       }
-      const arcTasks = tasks.filter((task) => Object.values(task.arcWorkspaces ?? {}).length);
+      const arcTasks = [...tasks, ...contexts].filter(
+        (task) => Object.values(task.arcWorkspaces ?? {}).length,
+      );
       const repositories = createRepositories(config.modules);
       for (const task of arcTasks) {
         const capture = repositories.get(task.ref.provider).backupWorkspace;
         if (!capture)
           throw new Error('This repository module cannot export its external task workspace');
         await capture(task, {
+          dataDir,
           file: (path, file) => builder.add(file, 'recovery/' + safePath.parse(path)),
           text: async (path, content) => {
             const file = join(stage, 'recovery-text');
@@ -337,7 +342,7 @@ export async function createBackup(dataDir: string, output: string, config: Conf
         });
       }
       // Managed Git object stores and all their working files are private to daddyloop.
-      for (const name of ['workspaces', 'artifacts', 'voice']) {
+      for (const name of ['workspaces', 'artifacts', 'voice', 'session-archives']) {
         const root = join(dataDir, name);
         if (existsSync(root)) {
           builder.addDirectory(`data/${name}`);
@@ -523,6 +528,10 @@ export async function restoreBackup(
             delete data.reviewerThreadId;
             delete data.daddyToolSignature;
             if (data.daddyState !== 'archived') data.daddyState = 'paused';
+            if (!data.deletedAt) {
+              delete data.deletion;
+              if (data.workspacePreparation) data.workspacePreparation = { state: 'pending' };
+            }
             data.generation = Number(data.generation) + 1;
           }
           if (

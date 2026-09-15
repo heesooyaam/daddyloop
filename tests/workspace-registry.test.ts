@@ -112,7 +112,9 @@ it('detects Arcadia before Git and uses the configured shared-store mounts', asy
   mkdirSync(join(dir, 'alice'));
   writeFileSync(join(dir, '.arcignore'), '');
   const git = vi.spyOn(workspaces, 'git'),
-    mounts = vi.fn(async () => [{ path: dir, object_store_ok: true, claimable: false }]);
+    mounts = vi.fn(async (): Promise<Awaited<ReturnType<ArcBridge['mounts']>>> => [
+      { path: dir, object_store_ok: true, claimable: false },
+    ]);
   try {
     const workspaces = new WorkspaceRegistry(store, [dir], { mounts } as unknown as ArcBridge);
     const workspace = await workspaces.register({ name: 'Work', path: join(dir, 'alice') });
@@ -137,6 +139,20 @@ it('detects Arcadia before Git and uses the configured shared-store mounts', asy
     });
     expect(workspaces.get(workspace.id)).toEqual(workspace);
     expect(git).not.toHaveBeenCalled();
+    mounts.mockResolvedValue([
+      { path: dir, mounted: true, object_store_ok: false, claimable: false },
+    ]);
+    writeFileSync(join(dir, 'alice', '.arcignore'), '');
+    mkdirSync(join(dir, 'alice', '.git'));
+    const privateSource = await workspaces.selection(workspace, { path: join(dir, 'alice') });
+    expect(privateSource).toMatchObject({ repoPath: dir, scope: 'alice', copyMode: 'session' });
+    expect(git).not.toHaveBeenCalled();
+    mounts.mockResolvedValue([
+      { path: dir, mounted: true, object_store_ok: true, claimable: false, managed: true },
+    ]);
+    await expect(workspaces.selection(workspace, { path: dir })).rejects.toMatchObject({
+      code: 'managed_workspace_source',
+    });
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

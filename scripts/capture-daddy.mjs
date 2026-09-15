@@ -338,6 +338,14 @@ try {
     );
   await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
   await page.screenshot({ path: join(output, 'daddy-new-session.png'), animations: 'disabled' });
+  await page
+    .getByLabel(t('Workspace'), { exact: true })
+    .selectOption(store.workspaces().find((item) => item.name === 'Work').id);
+  await expect(
+    page.getByRole('checkbox', { name: t('Create copies for this session automatically') }),
+  ).toBeChecked();
+  await page.screenshot({ path: join(output, 'daddy-arc-session.png'), animations: 'disabled' });
+  await page.getByLabel(t('Workspace'), { exact: true }).selectOption(workspace.id);
   await page.getByText(t('Style and skills for this session'), { exact: true }).click();
   await page.getByRole('button', { name: t('Add presets'), exact: true }).click();
   for (const preset of [shortPreset, checkPreset]) {

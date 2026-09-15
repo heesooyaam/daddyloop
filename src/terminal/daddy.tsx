@@ -26,7 +26,9 @@ type MenuKind =
   | 'notifications'
   | 'model-role'
   | 'model'
-  | 'effort';
+  | 'effort'
+  | 'delete-session';
+type DeletionConfirmation = { id: string; generation: number; title: string };
 type MenuState = {
   kind: MenuKind;
   index: number;
@@ -40,8 +42,10 @@ type MenuState = {
   usage?: UsageView;
   resetPlan?: ResetPlan;
   notice?: string;
+  deletion?: DeletionConfirmation;
 };
 const commands = [
+  '/delete',
   '/presets',
   '/preset',
   '/instructions',
@@ -157,6 +161,11 @@ export function DaddyTerminal({
                 ]
               : []),
           ];
+    if (menu.kind === 'delete-session')
+      return [
+        { id: 'cancel', label: t('Cancel'), detail: '' },
+        { id: 'delete', label: t('Delete session'), detail: menu.deletion?.title ?? '' },
+      ];
     if (menu.kind === 'sessions')
       return state.sessions
         .filter((group) => group.title.toLowerCase().includes(menu.query.toLowerCase()))
@@ -226,6 +235,15 @@ export function DaddyTerminal({
     const item = options[menu.index % Math.max(1, options.length)];
     if (!item) return;
     try {
+      if (menu.kind === 'delete-session') {
+        if (item.id === 'delete') {
+          if (!menu.deletion || state.board?.group.id !== menu.deletion.id)
+            throw new Error(t('The session changed. Open its current deletion confirmation.'));
+          await model.action('delete', { expectedGeneration: menu.deletion.generation });
+        }
+        setMenu(undefined);
+        return;
+      }
       if (menu.kind === 'limits') {
         if (item.id === 'prepare')
           setMenu({
@@ -435,6 +453,21 @@ export function DaddyTerminal({
       open('model-role');
       return;
     }
+    if (name === '/delete') {
+      if (!state.board?.canDelete)
+        throw new Error(t('This repository module does not support managed session deletion'));
+      setMenu({
+        kind: 'delete-session',
+        index: 0,
+        query: '',
+        deletion: {
+          id: state.board.group.id,
+          generation: state.board.group.generation,
+          title: state.board.group.title,
+        },
+      });
+      return;
+    }
     if (name === '/pause' || name === '/resume') {
       await model.action(name === '/pause' ? 'pause' : 'resume');
       return;
@@ -456,8 +489,18 @@ export function DaddyTerminal({
       'model-role': 'Choose a role',
       model: 'Choose a model',
       effort: 'Reasoning effort',
+      'delete-session': 'Delete session',
     };
     content.push({ text: t(headings[menu.kind]), kind: 'heading' }, { text: '' });
+    if (menu.kind === 'delete-session')
+      content.push(
+        ...markdown(
+          t(
+            'I will stop its agents, save the results in a local archive and remove the session copies. Your source repository stays in place.',
+          ),
+          width,
+        ),
+      );
     if (menu.kind === 'limits') {
       if (menu.notice) content.push({ text: menu.notice, kind: 'accent' });
       if (menu.resetPlan)

@@ -36,3 +36,7 @@ Send `/notifications` to choose quiet completion/decision notices, all updates, 
 The session card opens **Instructions for this session**. `/instructions daddy <text>` and `/instructions worker <text>` set separate prompts; `/skill <role> <GitHub URL>` adds a skill. These commands work in private conversations and their group topics. See [task instructions](../instructions/en.md).
 
 `/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected in the website’s session settings.
+
+After a successful callback-button action sends a replacement message, the bot deletes the clicked card. Failed actions keep the old card for retry; messages in another topic do not remove it. Link buttons open their URL directly and do not notify the bot of a click.
+
+For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session card offers **Delete session** with confirmation; the service archives its results and removes its copies. See [Arcadia](../arcadia/en.md).

@@ -127,6 +127,14 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/resume', async (request) =>
     daddy.resume(id.parse(request.params.id)),
   );
+  app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/delete', async (request, reply) => {
+    const input = z
+      .object({ expectedGeneration: z.number().int().positive() })
+      .strict()
+      .parse(request.body);
+    const result = await daddy.remove(id.parse(request.params.id), input.expectedGeneration);
+    return reply.code(202).send(result);
+  });
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {
     const input = z
       .object({

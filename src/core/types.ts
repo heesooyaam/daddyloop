@@ -96,6 +96,17 @@ export interface ReviewGroup {
   parentGroupId?: string;
   createdByAction?: string;
   defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
+  workspacePreparation?: {
+    state: 'pending' | 'preparing' | 'ready' | 'error';
+    path?: string;
+    error?: string;
+  };
+  deletion?: {
+    state: 'pending' | 'running' | 'error' | 'complete';
+    archivePath?: string;
+    error?: string;
+  };
+  deletedAt?: string;
 }
 export interface Workspace {
   id: string;
@@ -107,6 +118,7 @@ export interface Workspace {
   host: string;
   repo: string;
   base?: string;
+  copyMode?: 'session' | 'pool';
   createdAt: string;
   updatedAt: string;
 }
@@ -191,6 +203,7 @@ export interface Task {
   ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
   policy: Policy;
+  workspaceIsolation?: 'session' | 'pool';
   state: State;
   reason: string;
   generation: number;
@@ -216,9 +229,12 @@ export interface Task {
         mount: string;
         ownerId: string;
         objectStore: string;
+        managed?: { sessionId: string; taskId: string; role: Role };
         initialHash: string;
         initialBranch: string;
         baseHead: string;
+        prepared?: boolean;
+        targetBranch?: string;
       }
     >
   >;

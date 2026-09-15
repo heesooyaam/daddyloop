@@ -1,17 +1,22 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { command } from '../ops/process.js';
-import { loadConfig } from '../ops/config.js';
+import { defaultDataDir, loadConfig } from '../ops/config.js';
 import { credential } from '../core/security.js';
 import { AppError } from '../core/types.js';
 import { resources } from '../core/resources.js';
+import { leaseHelper } from './arc-lease.js';
+import { ManagedArcMounts, type ArcCheckpoint } from './arc-managed.js';
+import type { Role, Task } from '../core/types.js';
+export { leaseHelper } from './arc-lease.js';
 
 export interface ArcLease {
   mount: string;
   ownerId: string;
   objectStore: string;
+  managed?: { sessionId: string; taskId: string; role: Role };
 }
 export interface ArcNativePR {
   id: number;
@@ -24,27 +29,20 @@ export interface ArcNativePR {
   from_branch: string;
   to_branch: string;
 }
-export function leaseHelper() {
-  const configured = loadConfig().arcadia.leaseHelper ?? process.env.DADDYLOOP_ARCADIA_LEASE_HELPER;
-  if (configured) return configured;
-  const candidates = (process.env.PATH ?? '')
-    .split(':')
-    .map((path) => join(path, 'arcadia-mount-lease'));
-  for (const base of ['.agents', '.codex', '.claude', '.cursor'])
-    candidates.push(join(homedir(), base, 'skills/arcadia-mounts/scripts/arcadia-mount-lease'));
-  const path = candidates.find(existsSync);
-  if (!path)
-    throw new AppError(
-      'arcadia_lease_helper_missing',
-      'Configure the company arcadia-mount-lease helper with daddy arcadia setup --lease-helper <path>',
-      422,
-    );
-  return path;
-}
 export class ArcBridge {
+  constructor(readonly dataDir = defaultDataDir()) {}
   async mounts() {
     const r = await command(leaseHelper(), ['--json', 'status']);
-    return JSON.parse(r.stdout).data.mounts as {
+    const value = JSON.parse(r.stdout);
+    if (value.status !== 'success' || !Array.isArray(value.data?.mounts))
+      throw new Error('The Arc lease helper returned an invalid mount inventory');
+    return [
+      ...new Map(
+        [...value.data.mounts, ...(await new ManagedArcMounts(this.dataDir).status())].map(
+          (mount) => [mount.path, mount],
+        ),
+      ).values(),
+    ] as {
       path: string;
       claimable: boolean;
       object_store_ok: boolean;
@@ -53,7 +51,28 @@ export class ArcBridge {
       number?: number;
       reserved?: boolean;
       claim_blockers?: string[];
+      managed?: boolean;
     }[];
+  }
+  async sourceMounts() {
+    const managed = new ManagedArcMounts(this.dataDir);
+    return (await managed.nativeMounts()).filter(
+      (mount) => !mount.mount.startsWith(managed.root + '/'),
+    );
+  }
+  async sessionMount(task: Pick<Task, 'id' | 'groupId'>, role: Role, signal?: AbortSignal) {
+    return new ManagedArcMounts(this.dataDir).ensure(
+      task.groupId ?? task.id,
+      task.id,
+      role,
+      signal,
+    );
+  }
+  saveSessionCheckpoint(lease: ArcLease, value: ArcCheckpoint) {
+    new ManagedArcMounts(this.dataDir).checkpoint(lease, value);
+  }
+  async parkSessionMount(lease: ArcLease) {
+    return new ManagedArcMounts(this.dataDir).park(lease);
   }
   async provision(exclude?: string): Promise<boolean> {
     const candidate = (await this.mounts()).find(
@@ -90,12 +109,36 @@ export class ArcBridge {
     return { mount: value.data.mount, ownerId, objectStore: value.data.object_store };
   }
   async release(lease: ArcLease) {
+    if (lease.managed) return new ManagedArcMounts(this.dataDir).releaseLease(lease);
     await command(leaseHelper(), ['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
   }
   async native(args: string[], mount: string, signal?: AbortSignal) {
     return (await command('arc', args, { cwd: mount, timeoutMs: 120000, signal })).stdout.trimEnd();
   }
   async withMount<T>(fn: (mount: string) => Promise<T>) {
+    if (
+      !(await this.mounts()).some(
+        (mount) => mount.claimable && mount.object_store_ok && !mount.managed,
+      )
+    ) {
+      const id = randomUUID();
+      const managed = new ManagedArcMounts(this.dataDir);
+      const { lease } = await managed.ensure(id, id, 'reviewer');
+      const initial = await this.native(['info', '--json'], lease.mount);
+      if (await this.native(['status', '--short', '-u', 'all'], lease.mount))
+        throw new Error('The new Arc metadata copy contains changes; it was preserved');
+      try {
+        return await fn(lease.mount);
+      } finally {
+        if (
+          initial !== (await this.native(['info', '--json'], lease.mount)) ||
+          (await this.native(['status', '--short', '-u', 'all'], lease.mount))
+        )
+          throw new Error('The Arc metadata copy changed; it was preserved');
+        const record = managed.records(id)[0];
+        if (record) await managed.remove(record);
+      }
+    }
     const lease = await this.claim(`daddyloop-read-${randomUUID()}`);
     try {
       return await fn(lease.mount);
@@ -169,16 +212,17 @@ export class ArcBridge {
     if (!existsSync(join(homedir(), '.tokens/arcadia')) && !process.env.ARC_TOKEN)
       throw new Error('Configure ~/.tokens/arcadia or ARC_TOKEN');
     if (workspace) {
-      const lease = await this.claim(`daddyloop-doctor-${randomUUID()}`, workspace);
-      try {
-        return JSON.parse(await this.native(['info', '--json'], lease.mount)) as {
-          user_login: string;
-          hash: string;
-          branch: string;
-        };
-      } finally {
-        await this.release(lease);
-      }
+      const selected = realpathSync(workspace);
+      const source = (await this.sourceMounts()).find(
+        (mount) =>
+          mount.status === 'mounted' &&
+          (selected === mount.mount || selected.startsWith(mount.mount + '/')),
+      );
+      if (!source) throw new Error('The selected Arcadia source is not mounted');
+      return this.withMount(async (mount) => ({
+        ...JSON.parse(await this.native(['info', '--json'], mount)),
+        source: source.mount,
+      }));
     }
     return this.withMount(
       async (mount) =>

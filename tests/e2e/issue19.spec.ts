@@ -153,6 +153,19 @@ test('folder navigation never submits a form and adding a workspace keeps the ne
   await page.getByRole('button', { name: 'Add another workspace' }).click();
   await page.getByRole('button', { name: 'Add workspace', exact: true }).click();
   await page.getByLabel('Workspace name').fill('Another workspace');
+  let releaseInitial!: () => void, finishInitial!: () => void;
+  const initialGate = new Promise<void>((resolve) => {
+    releaseInitial = resolve;
+  });
+  const initialFinished = new Promise<void>((resolve) => {
+    finishInitial = resolve;
+  });
+  await page.route('**/api/workspaces/directories', async (route) => {
+    const response = await route.fetch();
+    await initialGate;
+    await route.fulfill({ response }).catch(() => {});
+    finishInitial();
+  });
   await page.getByRole('button', { name: 'Browse server folders' }).click();
   const browser = page.getByRole('region', { name: 'Choose a folder on this server' });
   const writes: string[] = [];
@@ -160,6 +173,15 @@ test('folder navigation never submits a form and adding a workspace keeps the ne
     if (request.method() === 'POST') writes.push(request.url());
   });
   await browser.getByLabel('Server directory').fill(alternate);
+  releaseInitial();
+  await initialFinished;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(browser.getByLabel('Server directory')).toHaveValue(alternate);
   await browser.getByLabel('Server directory').press('Enter');
   await expect(browser.getByRole('button', { name: 'Select this folder' })).toBeEnabled();
   await expect(page.getByLabel('Repository on this server')).toHaveValue('');

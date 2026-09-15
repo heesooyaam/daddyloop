@@ -14,7 +14,12 @@ export class DaddyWorkspace {
     const workspace = override ?? group.workspace!;
     const original = group.workspace!;
     const signature = (value: Workspace) =>
-      JSON.stringify([value.repoPath, value.scope, value.base]);
+      JSON.stringify([
+        value.repoPath,
+        value.scope,
+        value.base,
+        ...(value.copyMode ? [value.copyMode] : []),
+      ]);
     const key =
       signature(workspace) === signature(original)
         ? group.id
@@ -45,12 +50,15 @@ export class DaddyWorkspace {
         workspace.repoPath,
         ref,
         workspace.base,
+        { groupId: group.id, taskId: key, copyMode: workspace.copyMode, signal },
       );
       context = {
         id: key,
+        groupId: group.id,
         ref,
         repoPath: workspace.repoPath,
         scope: workspace.scope,
+        workspaceIsolation: workspace.copyMode,
         ticketRepository: { ...description.repository, branch: `daddyloop/context-${group.id}` },
         title: group.title,
         requirements: group.requirements,
