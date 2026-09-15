@@ -58,6 +58,10 @@ In **Workspaces**, names, repository types and paths are separate. A card opens 
 
 In Telegram and the interactive CLI, use `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.
 
+## Automatic Arcadia copies
+
+Arc workspaces use automatic session copies by default. The source can stay at `~/arcadia`: the service prepares its own copies and removes them after you delete the session. The new-session form and Telegram offer the mode; `daddy workspaces set Work ~/arcadia --copies session` changes the default. [Allocation, deletion and archives](../arcadia/en.md).
+
 ## What happens to the source repository?
 
 Git workers get managed working copies; Arcadia workers get leased mounts. The source branch and local changes remain in place. Uncommitted source edits are not copied into the worker's new checkout. A relative scope selects the starting directory inside the managed copy, not a second repository.

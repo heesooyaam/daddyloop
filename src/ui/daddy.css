@@ -2326,3 +2326,39 @@ body {
   display: block;
   margin-top: 10px;
 }
+.daddy-session-progress {
+  margin: 10px 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 13px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.daddy-session-progress code {
+  overflow-wrap: anywhere;
+}
+.daddy-toggle {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  font-size: 13px;
+}
+.daddy-toggle small {
+  display: block;
+  margin-top: 4px;
+}
+.daddy-form label.daddy-toggle {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.daddy-form .daddy-toggle input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}

@@ -5,7 +5,13 @@ import { randomUUID } from 'node:crypto';
 import type { Task, Role } from '../core/types.js';
 import { AppError } from '../core/types.js';
 import { ArcBridge, type ArcLease } from '../integrations/arcadia.js';
-type Saved = ArcLease & { initialHash: string; initialBranch: string; baseHead: string };
+type Saved = ArcLease & {
+  initialHash: string;
+  initialBranch: string;
+  baseHead: string;
+  prepared?: boolean;
+  targetBranch?: string;
+};
 export class ArcWorkspaces {
   protectedSources: () => string[] = () => [];
   private allocation = Promise.resolve();
@@ -19,11 +25,20 @@ export class ArcWorkspaces {
     const match = mounts
       .filter((m) => source === m.path || source.startsWith(m.path + '/'))
       .sort((a, b) => b.path.length - a.path.length)[0];
-    if (!match || !match.object_store_ok)
-      throw new Error(
-        'The source must be an existing Arc mount using the configured shared object store',
-      );
-    return match.path;
+    if (match && !match.managed && (match.mounted || match.object_store_ok)) return match.path;
+    if (!match && typeof this.bridge.sourceMounts === 'function') {
+      const native = (await this.bridge.sourceMounts())
+        .filter(
+          (mount) =>
+            mount.status === 'mounted' &&
+            (source === mount.mount || source.startsWith(mount.mount + '/')),
+        )
+        .sort((a, b) => b.mount.length - a.mount.length)[0];
+      if (native) return native.mount;
+    }
+    throw new Error(
+      'Choose an existing mounted Arcadia source. The service creates its own working copies.',
+    );
   }
   async prepare(task: Task, role: Role, signal?: AbortSignal): Promise<string> {
     const previous = this.allocation;
@@ -45,6 +60,21 @@ export class ArcWorkspaces {
     let saved = task.arcWorkspaces[role] as Saved | undefined;
     const journal = join(this.dataDir, 'arc-leases', `${task.id}-${role}.json`);
     if (!saved && existsSync(journal)) saved = JSON.parse(readFileSync(journal, 'utf8')) as Saved;
+    let managed: ArcLease | undefined;
+    if (
+      saved?.managed &&
+      (saved.managed.sessionId !== (task.groupId ?? task.id) ||
+        saved.managed.taskId !== task.id ||
+        saved.managed.role !== role)
+    )
+      throw new Error('The Arc copy belongs to a different session or task');
+    if (saved?.managed || (!saved && task.workspaceIsolation === 'session')) {
+      const allocation = await this.bridge.sessionMount(task, role, signal);
+      managed = allocation.lease;
+      if (saved && saved.ownerId !== managed.ownerId)
+        throw new Error('The saved Arc session copy belongs to a different owner');
+      if (!saved && allocation.checkpoint) saved = { ...managed, ...allocation.checkpoint };
+    }
     if (saved && !saved.ownerId.startsWith(`daddyloop-${task.id}-${role}-`))
       throw new Error('Arc lease journal does not belong to this task');
     if (saved) {
@@ -56,15 +86,18 @@ export class ArcWorkspaces {
           'The previous Arc workspace lease is unavailable. Its work was preserved; inspect it before continuing.',
         );
     } else {
-      const candidates = (await this.bridge.mounts()).filter(
-        (m) =>
-          m.claimable &&
-          m.object_store_ok &&
-          m.path !== task.repoPath &&
-          !this.protectedSources().includes(m.path),
-      );
+      const candidates = managed
+        ? [{ path: managed.mount }]
+        : (await this.bridge.mounts()).filter(
+            (m) =>
+              m.claimable &&
+              m.object_store_ok &&
+              !m.managed &&
+              m.path !== task.repoPath &&
+              !this.protectedSources().includes(m.path),
+          );
       // Leave one mount available for Daddy/review so a full worker pool cannot deadlock.
-      if (role === 'author' && candidates.length <= 1) {
+      if (!managed && role === 'author' && candidates.length <= 1) {
         if (
           typeof this.bridge.provision === 'function' &&
           (await this.bridge.provision(task.repoPath))
@@ -79,15 +112,19 @@ export class ArcWorkspaces {
       for (const candidate of candidates) {
         let lease: ArcLease;
         try {
-          lease = await this.bridge.claim(
-            `daddyloop-${task.id}-${role}-${randomUUID()}`,
-            candidate.path,
-          );
+          lease =
+            managed ??
+            (await this.bridge.claim(
+              `daddyloop-${task.id}-${role}-${randomUUID()}`,
+              candidate.path,
+            ));
         } catch {
           continue;
         }
         try {
           if (await this.bridge.native(['status', '--short'], lease.mount, signal)) {
+            if (lease.managed)
+              throw new Error('The new session copy already contains changes; they were preserved');
             await this.bridge.release(lease);
             continue;
           }
@@ -99,26 +136,27 @@ export class ArcWorkspaces {
             initialHash: info.hash,
             initialBranch: info.branch,
             baseHead: task.revision.head,
+            ...(lease.managed ? { prepared: false } : {}),
+            targetBranch:
+              role === 'author'
+                ? task.ref.kind === 'ticket'
+                  ? `daddyloop/${task.id}`
+                  : `daddyloop/${task.id}-g${task.generation}-${randomUUID().slice(0, 8)}`
+                : undefined,
           };
           task.arcWorkspaces[role] = saved;
           privateWrite(journal, JSON.stringify(saved));
+          if (saved.managed) this.bridge.saveSessionCheckpoint(saved, saved);
           if (role === 'author')
             await this.bridge.native(
-              [
-                'checkout',
-                '-b',
-                task.ref.kind === 'ticket'
-                  ? `daddyloop/${task.id}`
-                  : `daddyloop/${task.id}-g${task.generation}-${randomUUID().slice(0, 8)}`,
-                task.revision.head,
-              ],
+              ['checkout', '-b', saved.targetBranch!, task.revision.head],
               saved.mount,
               signal,
             );
           else await this.bridge.native(['checkout', task.revision.head], saved.mount, signal);
           break;
         } catch (error) {
-          if (!existsSync(journal)) await this.bridge.release(lease);
+          if (!existsSync(journal) && !lease.managed) await this.bridge.release(lease);
           throw error;
         }
       }
@@ -135,9 +173,42 @@ export class ArcWorkspaces {
         );
       }
     }
-    const info = JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal)) as {
+    let info = JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal)) as {
       hash: string;
+      branch: string;
     };
+    if (
+      saved.managed &&
+      saved.prepared === false &&
+      info.hash === saved.initialHash &&
+      info.branch === saved.initialBranch
+    ) {
+      if (await this.bridge.native(['status', '--short'], saved.mount, signal))
+        throw new Error('The interrupted Arc preparation contains changes; they were preserved');
+      if (role === 'reviewer')
+        await this.bridge.native(['checkout', task.revision.head], saved.mount, signal);
+      else {
+        const target = saved.targetBranch!;
+        let existing: string | undefined;
+        try {
+          existing = await this.bridge.native(
+            ['merge-base', '--leftmost', target, target],
+            saved.mount,
+            signal,
+          );
+        } catch {
+          signal?.throwIfAborted();
+        }
+        if (existing && existing !== task.revision.head)
+          throw new Error('The interrupted Arc branch changed; it was preserved');
+        await this.bridge.native(
+          existing ? ['checkout', target] : ['checkout', '-b', target, task.revision.head],
+          saved.mount,
+          signal,
+        );
+      }
+      info = JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal));
+    }
     if (saved.baseHead !== task.revision.head) {
       if (await this.bridge.native(['status', '--short'], saved.mount, signal))
         throw new Error('Arc workspace has uncommitted changes; it was not switched');
@@ -190,7 +261,9 @@ export class ArcWorkspaces {
       }
     }
     task.arcWorkspaces[role] = saved;
+    if (saved.managed) saved.prepared = true;
     privateWrite(journal, JSON.stringify(saved));
+    if (saved.managed) this.bridge.saveSessionCheckpoint(saved, saved);
     if (role === 'author') {
       task.authorWorktree = saved.mount;
       task.authorBaseHead = task.revision.head;
@@ -272,9 +345,19 @@ export class ArcWorkspaces {
     }
     return documents;
   }
+  async park(task: Task, role: Role) {
+    const lease = task.arcWorkspaces?.[role];
+    if (lease?.managed) await this.bridge.parkSessionMount(lease);
+  }
   async release(task: Task, role: Role) {
     const saved = task.arcWorkspaces?.[role] as Saved | undefined;
     if (!saved) return { released: false };
+    if (saved.managed)
+      return {
+        released: false,
+        retained: true,
+        reason: 'The session owns this copy until it is deleted',
+      };
     const owned = (await this.bridge.mounts()).some(
       (m) => m.path === saved.mount && m.lease_owner_id === saved.ownerId && m.object_store_ok,
     );

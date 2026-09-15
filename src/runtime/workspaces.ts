@@ -48,7 +48,7 @@ export async function git(
 export class Workspaces {
   private arc: ArcWorkspaces;
   constructor(readonly dataDir: string) {
-    this.arc = new ArcWorkspaces(dataDir);
+    this.arc = new ArcWorkspaces(dataDir, new ArcBridge(dataDir));
   }
   protectSources(paths: () => string[]) {
     this.arc.protectedSources = paths;
@@ -226,7 +226,20 @@ export class Workspaces {
   async releaseArc(task: Task, role: Role) {
     return this.arc.release(task, role);
   }
-  async describeTicket(path: string, input: TicketRef, base?: string) {
+  async parkArc(task: Task, role: Role) {
+    return this.arc.park(task, role);
+  }
+  async describeTicket(
+    path: string,
+    input: TicketRef,
+    base?: string,
+    session?: {
+      groupId: string;
+      taskId?: string;
+      copyMode?: 'session' | 'pool';
+      signal?: AbortSignal;
+    },
+  ) {
     if (
       input.provider !== 'arcadia' &&
       ['.arc', '.arcignore'].some((marker) => existsSync(join(path, marker)))
@@ -237,10 +250,27 @@ export class Workspaces {
       const name = base ?? 'trunk';
       if (!/^[A-Za-z0-9_./-]+$/.test(name) || name.startsWith('-'))
         throw new Error('Invalid Arc base revision');
-      const bridge = new ArcBridge(),
-        baseHead = await bridge.withMount((mount) =>
-          bridge.native(['merge-base', '--leftmost', name, name], mount),
-        );
+      const bridge = new ArcBridge(this.dataDir);
+      const owned =
+        session?.copyMode === 'session'
+          ? await bridge.sessionMount(
+              {
+                groupId: session.groupId,
+                id: session.taskId ?? session.groupId,
+              },
+              'reviewer',
+              session.signal,
+            )
+          : undefined;
+      const baseHead = owned
+        ? await bridge.native(
+            ['merge-base', '--leftmost', name, name],
+            owned.lease.mount,
+            session?.signal,
+          )
+        : await bridge.withMount((mount) =>
+            bridge.native(['merge-base', '--leftmost', name, name], mount),
+          );
       if (!/^[a-f0-9]{40}$/.test(baseHead))
         throw new Error('Arc returned an invalid base revision');
       return {

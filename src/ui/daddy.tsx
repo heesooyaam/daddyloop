@@ -21,6 +21,7 @@ import {
   Bell,
   BookOpen,
   RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
 import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
@@ -81,7 +82,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, setModal] = useState<
-      'new' | 'workspaces' | 'settings' | 'updates' | 'notifications' | 'limits' | 'presets' | null
+      | 'new'
+      | 'workspaces'
+      | 'settings'
+      | 'updates'
+      | 'notifications'
+      | 'limits'
+      | 'presets'
+      | 'delete'
+      | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
@@ -96,7 +105,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     if (state.status?.preferences) adopt(state.status.preferences);
   }, [state.status?.preferences?.version]);
   useEffect(() => {
-    if (state.selected) history.replaceState(null, '', `#session/${state.selected}`);
+    history.replaceState(
+      null,
+      '',
+      state.selected ? `#session/${state.selected}` : location.pathname + location.search,
+    );
   }, [state.selected]);
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -240,7 +253,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               <button
                 className="daddy-button quiet"
                 onClick={() => void model.action(paused ? 'resume' : 'pause')}
-                disabled={state.busy}
+                disabled={state.busy || !!board.group.deletion}
               >
                 {paused ? <Play size={15} /> : <Pause size={15} />}
                 <span>{t(paused ? 'Resume' : 'Pause')}</span>
@@ -249,9 +262,22 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className="daddy-icon"
                 aria-label={t('Session settings')}
                 onClick={() => setModal('settings')}
+                disabled={!!board.group.deletion}
               >
                 <Settings2 size={19} />
               </button>
+              {board.canDelete && (
+                <button
+                  className="daddy-icon"
+                  aria-label={t('Delete session')}
+                  disabled={
+                    state.busy || (!!board.group.deletion && board.group.deletion.state !== 'error')
+                  }
+                  onClick={() => setModal('delete')}
+                >
+                  <Trash2 size={18} />
+                </button>
+              )}
             </div>
           )}
         </header>
@@ -267,6 +293,51 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <div className="daddy-error" role="alert">
             {t(state.error)}
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
+          </div>
+        )}
+        {board?.group.workspacePreparation && !board.group.deletion && (
+          <div
+            className={
+              board.group.workspacePreparation.state === 'error'
+                ? 'daddy-error'
+                : 'daddy-session-progress'
+            }
+            role="status"
+          >
+            {t(
+              board.group.workspacePreparation.state === 'ready'
+                ? 'Session copy ready'
+                : board.group.workspacePreparation.state === 'error'
+                  ? 'Could not prepare the session copy'
+                  : 'Preparing the session copy',
+            )}
+            {board.group.workspacePreparation.path && (
+              <code>{board.group.workspacePreparation.path}</code>
+            )}
+            {board.group.workspacePreparation.error && (
+              <span>{t(board.group.workspacePreparation.error)}</span>
+            )}
+            {board.group.workspacePreparation.state === 'error' && (
+              <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
+            )}
+          </div>
+        )}
+        {board?.group.deletion && (
+          <div
+            className={
+              board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
+            }
+            role="status"
+          >
+            {t(
+              board.group.deletion.state === 'error'
+                ? 'Session deletion stopped; working copies were preserved'
+                : 'Saving results and removing session copies',
+            )}
+            {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
+            {board.group.deletion.state === 'error' && (
+              <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
+            )}
           </div>
         )}
         {board ? (
@@ -617,6 +688,32 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <PresetLibrary api={api} />
         </Dialog>
       )}
+      {modal === 'delete' && board && (
+        <Dialog title={t('Delete session')} onClose={() => setModal(null)}>
+          <p>
+            <strong>{board.group.title}</strong>
+          </p>
+          <p>
+            {t(
+              'I will stop its agents, save the results in a local archive and remove the session copies. Your source repository stays in place.',
+            )}
+          </p>
+          <div className="daddy-actions">
+            <button className="daddy-button quiet" onClick={() => setModal(null)}>
+              {t('Cancel')}
+            </button>
+            <button
+              className="daddy-button danger"
+              onClick={() => {
+                void model.action('delete', { expectedGeneration: board.group.generation });
+                setModal(null);
+              }}
+            >
+              {t('Delete session')}
+            </button>
+          </div>
+        </Dialog>
+      )}
       {modal === 'updates' && (
         <Dialog title={t('CLI updates')} onClose={() => setModal(null)}>
           <UpdatesPanel api={api} />
@@ -818,6 +915,7 @@ function WorkspaceManager({
   const [path, setPath] = useState(''),
     [name, setName] = useState(''),
     [base, setBase] = useState('');
+  const [copyMode, setCopyMode] = useState<Workspace['copyMode']>();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const create = (path = '') => {
@@ -825,6 +923,7 @@ function WorkspaceManager({
     setName(path.split('/').at(-1) ?? '');
     setPath(path);
     setBase('');
+    setCopyMode(undefined);
     setError('');
     setPicking(false);
     setShowForm(true);
@@ -847,7 +946,7 @@ function WorkspaceManager({
     try {
       const saved = await api<Workspace>(
         editing ? `/workspaces/${editing}/defaults` : '/workspaces',
-        { name: name.trim(), path: path.trim(), ...(base ? { base } : {}) },
+        { name: name.trim(), path: path.trim(), copyMode, ...(base ? { base } : {}) },
       );
       await onSaved(saved);
       setShowForm(false);
@@ -878,6 +977,7 @@ function WorkspaceManager({
                 setName(workspace.name);
                 setPath(workspace.repoPath + (workspace.scope ? '/' + workspace.scope : ''));
                 setBase(workspace.base ?? '');
+                setCopyMode(workspace.copyMode);
                 setError('');
                 setPicking(false);
                 setShowForm(true);
@@ -1015,6 +1115,16 @@ function WorkspaceManager({
               </small>
             </label>
           </details>
+          {copyMode && (
+            <label className="daddy-toggle">
+              <input
+                type="checkbox"
+                checked={copyMode === 'session'}
+                onChange={(event) => setCopyMode(event.target.checked ? 'session' : 'pool')}
+              />
+              <span>{t('Use automatic copies for new sessions')}</span>
+            </label>
+          )}
           {error && (
             <p className="daddy-field-error" role="alert">
               {t(error)}

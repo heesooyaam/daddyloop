@@ -43,6 +43,7 @@ export class TicketWorkflow {
     groupGeneration?: number;
     workspaceId?: string;
     scope?: string;
+    workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
   }) {
     const parent = input.parentTaskId ? this.engine.store.getTask(input.parentTaskId) : undefined;
@@ -52,7 +53,19 @@ export class TicketWorkflow {
     this.repositories.forTicket(input.source);
     const imported = await this.reader.read(input.source);
     this.repositories.get(imported.ref.provider);
-    const repository = await this.workspaces.describeTicket(path, imported.ref, input.base);
+    const repository = await this.workspaces.describeTicket(
+      path,
+      imported.ref,
+      input.base,
+      input.groupId
+        ? {
+            groupId: input.groupId,
+            copyMode:
+              input.workspaceIsolation ??
+              this.engine.store.getGroup(input.groupId).workspace?.copyMode,
+          }
+        : undefined,
+    );
     const task = await this.engine.createTicket({
       ...repository,
       source: imported.source,
@@ -65,6 +78,7 @@ export class TicketWorkflow {
       groupGeneration: input.groupGeneration,
       workspaceId: input.workspaceId,
       scope: input.scope,
+      workspaceIsolation: input.workspaceIsolation,
       createdByAction: input.createdByAction,
     });
     return task;
@@ -95,6 +109,7 @@ export class TicketWorkflow {
       workspace.repoPath,
       ref,
       workspace.base,
+      { groupId: input.groupId, copyMode: workspace.copyMode },
     );
     return this.engine.createTicket({
       ...repository,
@@ -103,6 +118,7 @@ export class TicketWorkflow {
       groupGeneration: input.groupGeneration,
       workspaceId: workspace.id,
       scope: workspace.scope,
+      workspaceIsolation: workspace.copyMode,
       createdByAction: input.createdByAction,
       dependsOn: input.dependsOn,
       requirements: input.requirements,

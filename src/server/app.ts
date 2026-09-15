@@ -15,6 +15,7 @@ import { providers } from '../providers/index.js';
 import { type ReviewProvider } from '../providers/provider.js';
 import { Workspaces } from '../runtime/workspaces.js';
 import { Worker } from '../runtime/worker.js';
+import { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import { AgentRegistry } from '../modules/agents/registry.js';
 import { createAgents } from '../modules/agents/index.js';
 import { RepositoryRegistry } from '../modules/repositories/registry.js';
@@ -165,14 +166,18 @@ export async function buildApp(options: ServerOptions) {
               engine.defaultAgents(),
               ...store
                 .groups()
-                .filter((group) => group.orchestrated)
+                .filter((group) => group.orchestrated && !group.deletedAt)
                 .map((group) => ({
                   daddy: group.daddy,
                   worker: group.worker ?? engine.defaultAgents().worker,
                 })),
               ...store
                 .tasks()
-                .filter((task) => task.state !== 'complete')
+                .filter(
+                  (task) =>
+                    task.state !== 'complete' &&
+                    (!task.groupId || !store.getGroup(task.groupId).deletedAt),
+                )
                 .map((task) => engine.effectiveAgents(task)),
             ];
             const queuedProfiles = [
@@ -260,6 +265,7 @@ export async function buildApp(options: ServerOptions) {
     getResources,
     catalogue,
     options.daddyWorkspace,
+    new SessionWorkspaces(repositories, { store, dataDir, registry: workspaces, checkouts }),
   );
   if (config.cache.auto) worker.autoCleanup = () => cache.prune(true);
   const token = options.token ?? accessToken(dataDir);

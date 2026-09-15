@@ -48,8 +48,11 @@ export function WorkspaceFields({
   const path = value?.path ?? workspace.repoPath;
   const scope = value?.scope ?? (value?.path ? '' : workspace.scope);
   const base = value?.base ?? (value?.path ? '' : (workspace.base ?? ''));
+  const copyMode =
+    value?.copyMode ??
+    (!value?.provider || value.provider === workspace.provider ? workspace.copyMode : undefined);
   const begin = () => {
-    setDraft({ path, scope, base, provider: value?.provider ?? workspace.provider });
+    setDraft({ path, scope, base, provider: value?.provider ?? workspace.provider, copyMode });
     setError('');
     setEditing(true);
   };
@@ -78,7 +81,8 @@ export function WorkspaceFields({
         selected.repoPath === workspace.repoPath &&
         selected.scope === workspace.scope &&
         (selected.base ?? '') === (workspace.base ?? '') &&
-        selected.provider === workspace.provider;
+        selected.provider === workspace.provider &&
+        selected.copyMode === workspace.copyMode;
       onChange(
         same
           ? undefined
@@ -87,6 +91,7 @@ export function WorkspaceFields({
               scope: selected.scope,
               base: selected.base,
               provider: selected.provider,
+              copyMode: selected.copyMode,
             },
       );
       setEditing(false);
@@ -147,6 +152,23 @@ export function WorkspaceFields({
             {t('Use workspace defaults')}
           </button>
         </div>
+      )}
+      {!editing && !compact && copyMode && (
+        <label className="daddy-toggle">
+          <input
+            type="checkbox"
+            checked={copyMode === 'session'}
+            onChange={(event) =>
+              onChange({ ...value, copyMode: event.target.checked ? 'session' : 'pool' })
+            }
+          />
+          <span>
+            {t('Create copies for this session automatically')}
+            <small className="daddy-muted">
+              {t('The service prepares the copies and removes them when the session is deleted.')}
+            </small>
+          </span>
+        </label>
       )}
       {editing && (
         <>

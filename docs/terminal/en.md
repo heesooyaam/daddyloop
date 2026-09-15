@@ -35,3 +35,5 @@ The plain console is a basic client for the same daddy workflow. Closing either 
 For a CLI on another machine, build the source client with a supported Node version, then run `daddy connect https://your-host` and enter its token. The website needs no local Node installation: [open it from your computer](../web/en.md).
 
 Use `/presets` to list shared instruction presets and `/preset <name>` to attach one to this session. The full CLI provides `daddy presets save/show/delete` and repeatable `--preset` flags. [Preset guide](../instructions/en.md).
+
+`/delete` opens confirmation for removing a managed session. The CLI equivalent is `daddy delete SESSION_ID --yes`. Arc sources can use `--copies session` or `--copies pool` when registering a workspace or starting a new session; see [Arcadia](../arcadia/en.md).

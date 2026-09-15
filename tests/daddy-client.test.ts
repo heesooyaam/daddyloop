@@ -139,7 +139,7 @@ it('keeps a changed repository draft during an uncertain send and binds retry id
       return {} as T;
     }
     if (path === '/workspaces') return [f.workspace] as T;
-    if (path === '/daddy/sessions') return [] as T;
+    if (path === '/daddy/sessions') return [group] as T;
     if (path === '/status') return {} as T;
     return f.daddy.board(group.id) as T;
   };

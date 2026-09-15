@@ -82,11 +82,18 @@ export function registerDaddyCommands(program: Command) {
     .argument('<path>')
     .option('--scope <directory>')
     .option('--base <branch>')
+    .option('--copies <mode>', 'session for automatic copies, pool for existing Arc mounts')
     .description('Change defaults on this server for future sessions')
     .action(async (name, path, options) => {
       const selected = await workspace(name);
       print(
-        await api(`/workspaces/${selected.id}/defaults`, { name: selected.name, path, ...options }),
+        await api(`/workspaces/${selected.id}/defaults`, {
+          name: selected.name,
+          path,
+          scope: options.scope,
+          base: options.base,
+          copyMode: options.copies ?? selected.copyMode,
+        }),
       );
     });
   workspaces
@@ -109,6 +116,7 @@ export function registerDaddyCommands(program: Command) {
     .option('--provider <module>', 'repository module for this remote')
     .option('--scope <directory>')
     .option('--base <branch>')
+    .option('--copies <mode>', 'session for automatic copies, pool for existing Arc mounts')
     .description('Register a workspace once for phone, web and CLI')
     .action(async (path, options) =>
       print(
@@ -116,6 +124,7 @@ export function registerDaddyCommands(program: Command) {
           path,
           name: options.name,
           provider: options.provider,
+          copyMode: options.copies,
           ...(options.scope !== undefined ? { scope: options.scope } : {}),
           ...(options.base ? { base: options.base } : {}),
         }),
@@ -133,6 +142,7 @@ export function registerDaddyCommands(program: Command) {
     .option('--repo <path>', 'repository for this session only')
     .option('--scope <directory>', 'relative starting directory for this session')
     .option('--base <branch>', 'base branch for this session')
+    .option('--copies <mode>', 'session for automatic copies, pool for existing Arc mounts')
     .description('Give daddy a goal in a registered workspace')
     .action(async (message, options) => {
       if (!options.workspace) throw new Error('Choose a workspace with --workspace');
@@ -182,9 +192,44 @@ export function registerDaddyCommands(program: Command) {
         ),
       );
     });
+  program
+    .command('delete')
+    .argument('<session>')
+    .option('--yes', 'confirm stopping agents and removing the session copies after export')
+    .description('Delete a managed session and archive its results')
+    .action(async (name, options) => {
+      const selected = await session(name);
+      const board = await api<DaddyBoard>(`/daddy/sessions/${selected.id}`);
+      if (!board.canDelete)
+        throw new Error('This repository module does not support managed session deletion');
+      if (!options.yes) {
+        print({
+          session: selected.title,
+          source: board.workspace.repoPath,
+          action: 'Stop agents, archive results, remove managed copies',
+        });
+        process.stdout.write(`\ndaddy delete ${selected.id} --yes\n`);
+        return;
+      }
+      print(
+        await api(`/daddy/sessions/${selected.id}/delete`, {
+          expectedGeneration: board.group.generation,
+        }),
+      );
+    });
 }
-function workspaceOptions(options: { repo?: string; scope?: string; base?: string }) {
-  if (options.repo === undefined && options.scope === undefined && options.base === undefined)
+function workspaceOptions(options: {
+  repo?: string;
+  scope?: string;
+  base?: string;
+  copies?: string;
+}) {
+  if (
+    options.repo === undefined &&
+    options.scope === undefined &&
+    options.base === undefined &&
+    options.copies === undefined
+  )
     return undefined;
-  return { path: options.repo, scope: options.scope, base: options.base };
+  return { path: options.repo, scope: options.scope, base: options.base, copyMode: options.copies };
 }

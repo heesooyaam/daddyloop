@@ -75,3 +75,5 @@ The first format has no built-in remote storage scheduler or encryption. Use you
 Session instruction sets and queued-turn snapshots include the actual skill text and checksums. Restored work needs no old skill folder or GitHub download; source locations remain attribution. See [instructions](../instructions/en.md).
 
 The preset library is included in full, along with each session’s frozen preset copies and individual component choices. A library revision can differ from a session’s selected revision; restoring preserves both.
+
+Automatic Arc session copies are exported as patches and changed files; live FUSE trees are never copied recursively. The export can temporarily mount a parked owned copy and stop it again afterward. Completed deletion archives in `session-archives/` are included. Restore pauses unfinished sessions, clears pending deletion and native lease state, and lets the service prepare fresh copies when resumed.
