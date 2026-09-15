@@ -2,89 +2,118 @@
 
 # How daddyloop works
 
-Read in order, or jump to [connections and components](#connections-and-components), [data and interfaces](#data-and-interfaces), [the loop](#how-the-loop-runs), [invariants](#invariants) or [concurrency and recovery](#concurrency-and-recovery).
+Start with the overview, then follow [task creation](#1-how-a-message-becomes-a-task), [agent execution](#2-how-an-agent-starts), [tools and adapters](#3-how-an-agent-calls-tools), [the review loop](#4-how-the-review-loop-closes), [parallel work](#5-which-runs-can-work-in-parallel) and [cancellation and recovery](#6-how-cancellation-blocks-old-results).
 
 ## The big picture
 
-daddyloop is one background Node.js service on your server. **daddy decides what to do and reviews the result; workers carry out tasks.** The service starts agent processes, keeps the queue in SQLite and sends changes to repositories. Closing a browser or laptop does not stop it.
+You set the goal. daddy assigns work to workers and reviews the result. The application starts agents, saves history and sends findings back for correction.
 
-For “Fix search,” daddy creates a task, a worker changes the code, and daddy reviews the PR. Published findings return to the worker. New code goes through review again; the task finishes only when its completion rules pass.
+For example, “Fix search” goes through implementation → review → fixes → another check. Below, we follow that task from the first message to the result.
 
 ```mermaid
 flowchart TB
-    U["Browser / CLI"] <-->|"HTTP · JSON"| S
-    T["Telegram"] <-->|"HTTPS · Bot API"| S
-    subgraph H["Server host"]
-        S["daddyloop · Node.js"] <-->|"stdio / SDK"| A["Codex / Claude CLI<br/>Agent processes"]
-        S <-->|"SQL"| DB[("SQLite")]
-        S <-->|"Files<br/>git / arc"| W["Task working copies"]
+    U["Web / CLI"] <-->|"Messages and state"| S
+    T["Telegram"] <-->|"Messages and buttons"| S
+    subgraph H["Your server host"]
+        S["daddyloop<br/>Background Node.js service"] <-->|"Runs and results"| A["Agent processes<br/>Codex / Claude"]
+        S <-->|"Saved data"| DB[("SQLite")]
+        S <-->|"Files<br/>and commits"| W["Task working copies"]
     end
-    S <-->|"API / CLI"| R["GitHub / GitLab / Arcadia"]
+    S <-->|"PRs<br/>and comments"| R["GitHub / GitLab / Arcadia"]
 ```
 
-The model chooses actions through tools. **Application code checks those actions and decides whether the next step is allowed.** A model's “done” message cannot itself publish an unfinished review or mark the whole task complete.
+**The website, CLI and Telegram control one service on the server.** Closing your laptop leaves the service and agents running. Connection options are covered in [web access](../web/en.md).
 
-## Connections and components
+Inside the service, `Daddy`, `Worker`, `Engine` and the other components are objects in one Node.js process. They call each other's methods. Codex and Claude run as separate processes; adapters handle their protocols.
 
-### What crosses a process boundary
+## 1. How a message becomes a task
 
-| Connection                        | What goes through it                                                                                                                                      |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Browser or terminal → HTTP server | JSON commands such as `POST /api/daddy/sessions/:id/chat`, plus requests for saved state. The shared client polls about every two seconds.                |
-| Telegram ↔ Telegram integration   | HTTPS requests to the Bot API. The integration maps a private chat or group topic to a session and calls `Daddy` methods inside the service.              |
-| Service ↔ Codex                   | The Codex adapter uses app-server JSON-RPC over stdin/stdout: start or resume a thread, start a turn, handle tool calls and events.                       |
-| Service ↔ Claude                  | The Claude adapter calls the Agent SDK's `query()`; application tools are exposed through an in-process MCP server. The SDK manages Claude CLI execution. |
-| Service ↔ repositories            | `ReviewProvider` handles reviews; `SubmissionBackend` handles PR creation. GitHub/GitLab adapters use their APIs; Arcadia uses the configured CLI bridge. |
-| Service ↔ disk                    | `Store` reads and writes SQLite. Workspace helpers run `git` or `arc` and manage task files. Agent conversation files remain with the selected CLI.       |
+The service saves the message first. It then starts one coordinator turn: a model run that handles the request. The model can answer you or assign work.
 
-Inside the Node.js service, components call ordinary TypeScript methods. The queues are SQLite tables. Saved events also notify local listeners; there is no separate message broker between these components.
+```mermaid
+sequenceDiagram
+    participant U as Web / CLI / Telegram
+    participant S as Service<br/>Daddy
+    participant Q as SQLite
+    participant A as Coordinator<br/>model
+    U->>S: “Fix search”<br/>and session ID
+    S->>Q: Save message<br/>and queue a turn
+    S-->>U: Message accepted
+    S->>Q: Take the next turn
+    Q-->>S: Message and settings
+    S->>A: Goal, tasks,<br/>recent conversation
+    A->>S: create_task + dispatch<br/>create and assign work
+    S->>Q: Save task<br/>and worker run
+    S-->>A: Task and run IDs
+```
 
-Browser access uses device pairing, a session cookie and request-origin/CSRF checks. A remote browser reaches this same service through a tunnel or configured network access; see [web access](../web/en.md).
+The website and CLI send text over HTTP. For Telegram, the service receives a message through the Bot API and calls the same `Daddy.chat()`. “Accepted” means the request is saved. The model's answer arrives later; the web client fetches updates about every two seconds.
 
-### What each server component owns
+The coordinator receives the goal, task board and recent messages. It uses tools to read older conversation or task details. For example, `create_task` creates “Fix search” and `dispatch` assigns implementation. The service first checks the selected workspace, the task's session and its dependencies.
 
-Read this table from the incoming request down to execution and storage. Names link to the implementation.
+When a worker finishes, an event queues another coordinator turn. That is how it learns about the result and can assign more work or ask you a question.
 
-| Component                                                                                                      | Responsibility and main connections                                                                                                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [HTTP handlers](../../src/server/daddy.ts) / [Telegram handlers](../../src/integrations/telegram-workspace.ts) | Validate a request, find its session and call `Daddy.chat()`, settings or task actions. They do not run models themselves.                                                                                                   |
-| [Daddy](../../src/core/daddy.ts)                                                                               | Saves a message and queues a `DaddyJob`. Its scheduler calls `AgentRegistry.runSession()`. Tool callbacks such as `create_task` and `dispatch` go through checked methods in `Daddy`, then `TicketWorkflow` or `Engine`.     |
-| [Engine](../../src/core/engine.ts)                                                                             | Owns task transitions. `review()` queues a review, `completeJob()` checks an agent result, and `reconcile()` compares saved state with the current PR. It writes through `Store` and uses `Broker` for native reviews.       |
-| [Worker](../../src/runtime/worker.ts)                                                                          | The scheduler for **both worker and reviewer runs**. `tick()` calls `Store.claim()`, prepares a working copy, invokes `AgentRegistry.run()`, then passes the result to `Engine.completeJob()`.                               |
-| [AgentRegistry](../../src/modules/agents/registry.ts)                                                          | Selects an enabled adapter by `profile.engine`. The adapter translates the shared runtime interface into Codex or Claude calls and returns tool calls, events and a structured result.                                       |
-| [TicketWorkflow](../../src/core/ticket-workflow.ts)                                                            | Imports a ticket or local task description. After implementation, prepares submission through a repository module, creates or recovers the PR, then calls `Engine.linkPR()`.                                                 |
-| [Broker](../../src/core/broker.ts) + [Outbox](../../src/core/outbox.ts)                                        | `Broker.call()` checks review-tool arguments, role and revision before a native operation. `Outbox.perform()` records write intent and its confirmed result. PR submission and daddy's mutating tools also use this journal. |
-| [RepositoryRegistry](../../src/modules/repositories/registry.ts)                                               | Selects the repository module. Its `ReviewProvider` reads and edits native reviews; its `SubmissionBackend` prepares, creates and finds PRs.                                                                                 |
-| [Workspaces](../../src/runtime/workspaces.ts) / [ArcWorkspaces](../../src/runtime/arc-workspaces.ts)           | Prepare isolated copies, preserve local changes, commit and submit worker changes. They own the VCS commands, rather than delegating publication to the model.                                                               |
-| [Store](../../src/core/store.ts)                                                                               | Saves sessions, tasks, both queues, messages, decisions, events and operation receipts. A transaction claims a job and assigns its worker slot together; events notify listeners after commit.                               |
+Code: [HTTP request handling](../../src/server/daddy.ts), [Daddy.chat(), tick(), onEvent() and tool checks](../../src/core/daddy.ts), [tasks from text and tickets](../../src/core/ticket-workflow.ts).
 
-[buildApp()](../../src/server/app.ts) constructs these objects and connects their callbacks. This is the starting point for reading how the application is assembled.
+## 2. How an agent starts
 
-A named workspace describes the source repository and allowed scope. The session keeps a copy of those settings. Workers and reviewers get managed copies; [DaddyWorkspace](../../src/runtime/daddy-workspace.ts) prepares a separate read-only copy for coordination.
+A **session** is a conversation with daddy and all its tasks. A **task** is one result, such as working search. A **run** is one step: implement it, review it or address findings. One task can have many runs.
 
-## Data and interfaces
+The scheduler finds a ready run in the queue, checks capacity and resources, then prepares a folder and calls the agent. This scheduler is named `Worker` in code; it starts models for both roles.
 
-### Session, task and run are different objects
+```mermaid
+sequenceDiagram
+    participant Q as SQLite<br/>tasks and queue
+    participant W as Scheduler<br/>Worker
+    participant A as Agent<br/>adapter
+    participant E as Task rules<br/>Engine
+    W->>Q: Take a ready run<br/>Store.claim()
+    Q-->>W: Task and run settings
+    W->>W: Prepare a folder<br/>through Workspaces
+    W->>A: Run with folder,<br/>goal and settings
+    A-->>W: Result, report,<br/>checked commit
+    W->>E: Validate the result<br/>completeJob()
+    E->>Q: Save state<br/>and the required next step
+```
 
-| Object                            | What it keeps                                                                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `ReviewGroup` — a session         | Your conversation with daddy, workspace settings, daddy/worker profiles, task list and pool size.                               |
-| `Task` — one unit of work         | Its ticket or PR, working copies, current revision, review, policy, dependencies and state.                                     |
-| `Job` — one task run              | Task ID, kind (`implement`, `review`, `fix`, `chat`), role, a copy of model settings and instructions, and a generation number. |
-| `DaddyJob` — one coordinator turn | Session ID, triggering message or event, copied settings and its own queue status. It is separate from the task-run queue.      |
+**Folder.** A named workspace points to the source repository and allowed scope. `Workspaces` prepares separate task copies; `ArcWorkspaces` handles Arcadia. A worker changes its own copy, while the reviewer reads a pinned code version. Coordination has its own `DaddyWorkspace` copy. The user's source checkout is not switched, and uncommitted changes are preserved.
 
-In code, the `author` role means a worker; `reviewer` means daddy doing a native PR review. A task can have many runs. `Job.status = completed` ends one run; `Task.state = complete` means the workflow's completion rules passed.
+**Settings.** The agent profile and instructions are saved with the queued run. Changing the default model later leaves that waiting run's settings intact. `AgentRegistry` selects the adapter by `profile.engine`; individual model names do not control scheduler behavior.
 
-Two fields prevent old work from becoming current:
+**Result.** The agent returns a status, report and the commit it worked against. `Engine` checks these against the task and repository. A “done” message is insufficient: an unfinished review, for example, leaves the task open.
 
-- **Revision** identifies the exact code and diff: `head`, `base`, `start` and optional provider `revisionId`. Comparing only the latest commit would miss changes to the comparison base.
-- **Generation** is a cancellation counter. Pausing or invalidating work increases it. A job with an older counter cannot advance the current task. Sessions have a separate counter for daddy's turns.
+The saved objects are `ReviewGroup` (session), `Task` (task), `Job` (task run) and `DaddyJob` (coordinator turn).
 
-SQLite stores the current state; the event log records what happened and wakes listeners. Recovery reads saved objects and checks the repository again. It does not rebuild the application by replaying every event. See [types](../../src/core/types.ts) and [Store](../../src/core/store.ts).
+Code: [Worker](../../src/runtime/worker.ts), [Store](../../src/core/store.ts), [data types](../../src/core/types.ts), [Git copies](../../src/runtime/workspaces.ts), [Arc copies](../../src/runtime/arc-workspaces.ts), [coordinator copy](../../src/runtime/daddy-workspace.ts).
 
-### The common agent interface
+## 3. How an agent calls tools
 
-The scheduler and daddy use these two interfaces from [runtime/agent.ts](../../src/runtime/agent.ts):
+Suppose the reviewer finds a bug and wants to leave a comment. It sends the application a command with the text and code location. This is the command's path:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant T as Adapter
+    participant B as Broker<br/>and Outbox
+    participant R as Repository<br/>module
+    A->>T: add_comment:<br/>text, file, line
+    T->>B: onTool:<br/>name and arguments
+    B->>B: Check role and revision<br/>Save write intent
+    B->>R: createComment
+    R->>R: Create a draft comment<br/>through API / CLI
+    R-->>B: Comment ID
+    B->>B: Save confirmation
+    B-->>T: Tool result
+    T-->>A: Comment ID
+```
+
+`Broker` checks that the run is still valid, the code is unchanged and the role may call this command. A worker cannot create review comments or verify its own fix. The response — a comment ID or an error — returns to the agent through the same path. Comment Markdown is preserved.
+
+`Outbox` handles lost responses. **If the provider creates a comment and the connection breaks, creating another comment immediately would be wrong.** The service records the operation ID and arguments before writing, then looks for an existing result. If it cannot establish the outcome, it stops the retry for inspection.
+
+The adapter translates this shared exchange into the selected CLI's protocol. For Codex, JSON requests and responses travel through the process's standard input and output: app-server JSON-RPC. Claude uses Agent SDK `query()` and MCP tools. The rest of the application receives the same calls and results.
+
+The common runtime interface from [runtime/agent.ts](../../src/runtime/agent.ts):
 
 ```ts
 export interface AgentRuntime {
@@ -95,80 +124,87 @@ export interface SessionRuntime {
 }
 ```
 
-`run()` receives a task and its queued job. `runSession()` receives a conversation request directly. Both provide a folder, prompt, cancellation signal and callbacks:
+`run()` performs a task step; `runSession()` performs a coordinator turn. Inputs include a folder, goal, profile, instructions, tools and cancellation signal. The output is a result; `onTool`, `onEvent` and `onSession` callbacks carry commands, progress and the conversation ID for resuming later.
 
-- `onSession` saves the native conversation ID so a later turn can resume it.
-- `onEvent` records progress; progress messages do not change task state on their own.
-- `onTool` returns an application tool call to `Daddy` or `Broker` for validation and execution.
+`RepositoryRegistry` selects the repository module: `ReviewProvider` handles comments and `SubmissionBackend` creates PRs. The model catalogue, usage and CLI updates also belong to the agent module. Full contracts and a registration example are in [Write a module](../module-development/en.md).
 
-The adapter returns `AgentResult`: a status (`completed`, `needs_input`, `incomplete`), summary, `checkedHead`, and IDs of verified or disputed findings. For task runs, `Engine` checks it against the task and live repository. For coordination, `Daddy` checks that the session and turn are still active.
+Code: [AgentRegistry](../../src/modules/agents/registry.ts), [Broker](../../src/core/broker.ts), [Outbox](../../src/core/outbox.ts), [RepositoryRegistry](../../src/modules/repositories/registry.ts).
 
-An [AgentModule](../../src/modules/contracts.ts) supplies the runtime and model catalogue, with optional usage and CLI-update interfaces. A repository module supplies ticket reading, review and submission interfaces. The main loop selects a module by its ID; model names and native API details belong in the adapters. See [Write a module](../module-development/en.md) for the complete contracts and registration steps.
+## 4. How the review loop closes
 
-## How the loop runs
+After implementation, the service saves a commit and creates a PR through `TicketWorkflow`. You can also attach an existing PR directly. Both follow the same loop:
 
-There are two connected loops: daddy decides which tasks to start; the task loop executes and reviews them.
+```mermaid
+flowchart TB
+    R["Review code<br/>Draft findings"] -->|"Review completed"| P["Publish<br/>the review"]
+    P --> Q{"Any findings?"}
+    Q -->|"Yes"| F["Worker<br/>fixes findings"]
+    F --> H["Push<br/>a new commit"]
+    H -->|"Review again"| R
+    Q -->|"No"| C["CI and plan<br/>Engine checks"]
+    C -->|"Passed"| E["Task complete"]
+```
 
-### 1. From a message to assigned work
+**From review to fixes.** `Engine.review()` queues a review. The reviewer reads the code and leaves draft comments. The service publishes only after the review finishes successfully. If it contains findings, `Engine.reconcile()` creates a fix run. The worker receives the published snapshot; the private draft is unavailable to it.
 
-`HTTP / Telegram → Daddy.chat() → saved message + DaddyJob → Daddy.tick() → AgentRegistry.runSession()`
+**From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
 
-daddy receives the goal, task board and recent conversation. It can read older messages or task details through tools. A `create_task` or `import_ticket` call creates a task; `dispatch` queues implementation once dependencies allow it.
+**Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. Merging the PR remains a separate user action.
 
-The worker scheduler claims that job and runs the selected agent in the task's copy. After successful implementation, it commits the files. `TicketWorkflow.submit()` submits the saved work and links the resulting PR to the task. The task enters `queued`, ready for review. An attached existing PR starts here directly.
+Publication and submission are automatic by default; manual mode adds a wait. Incomplete checks, disputes or exhausted attempts leave the task open. The default allows three review rounds. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
 
-### 2. From a PR through review and fixes
+Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
-Suppose revision **H1** still has a search bug. The table shows the automatic path; manual publication or push settings introduce waits at the corresponding step.
+## 5. Which runs can work in parallel
 
-| Step                     | Calls and checks                                                                                                                                                                                                   | Saved outcome                                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Start review             | `Worker.tick()` sees `queued` and calls `Engine.review()`. The engine reads the live PR and creates or finds its native draft through `Broker.ensureReview()`.                                                     | Task → `reviewing`; queue a `reviewer/review` job for H1.                                                                                |
-| Run review               | `Store.claim()` selects the job. The adapter runs in a read-only code copy. Review-tool callbacks reach `Broker.call()` and the selected `ReviewProvider`.                                                         | Findings are native draft comments. The worker cannot read them yet.                                                                     |
-| Accept the review result | `Worker` calls `Engine.completeJob()`. The engine checks the generation, revision, result and native draft. An empty review must also account for earlier findings.                                                | `reviewFinished = true`; task → `awaiting_publication`.                                                                                  |
-| Publish and assign fixes | `Worker.tick()` calls `Engine.publish()`. `Broker` publishes through the outbox; `Engine.reconcile()` reads the published snapshot.                                                                                | Findings present, within retry limits → `fixing` and an `author/fix` job containing published feedback. No findings → completion checks. |
-| Apply fixes              | The worker receives H1 and its published findings. After a successful result, `Workspaces.submit()` saves changes and pushes H2 when policy allows. `Engine.completeJob()` accepts the result for the starting H1. | The old review is invalidated; task → `queued` for H2. With a pending manual push: `awaiting_push`.                                      |
-| Review H2                | The next scheduler pass starts another review. daddy verifies earlier findings against the new code.                                                                                                               | Repeat if findings remain. An empty, completed, published review proceeds to CI and any required plan approval; then `complete`.         |
+**One task has at most one active agent run.** While a worker implements “Fix search,” a second run for that task waits. Another task — such as updating documentation — can run alongside it.
 
-**The return path is in `Engine` and `Worker`:** published findings queue a fix; a submitted fix makes the task eligible for a new review. The model does not need to remember to restart the loop. The [worker tests](../../tests/worker.test.ts) exercise this path with automatic and manual publication.
+```mermaid
+flowchart TB
+    S["Scheduler"] --> A
+    S --> B
+    subgraph T["Search: steps in order"]
+        A["Implementation"] --> R["Review"] --> F["Fixes"]
+    end
+    B["Documentation:<br/>runs alongside search"]
+```
 
-Earlier findings cannot simply disappear from a clean review. For each old comment ID, `Engine.completeJob()` requires verification on the current revision or a recorded decision to withdraw, defer or reject it. Without that, an empty review leaves the task in `needs_input`.
+This prevents two runs from editing one working copy at once and starts review after the previous step finishes. **A task and a run are different:** a task might go through five runs over its lifetime, with only one active at a time.
 
-Task events also call `Daddy.onEvent()`, which can queue a coordinator turn to inspect results, ask you a question or dispatch more work. Coordination and native review use the same daddy profile but separate conversation histories. Within one session they do not run at the same time.
+`Store.claim()` enforces this by skipping tasks that already have a running job. Selecting a queued job and marking it as running are saved together. The database also rejects a second running job for the same task ID; that is what the `one_running_per_task` index does.
 
-## Invariants
+Two other limits apply. Reviews within one session run in order; its coordinator and reviewer cannot overlap either. They share a model profile but have separate conversation histories. A host-wide setting limits simultaneous task runs (`worker.maxAgents`, including reviews); separately, one coordinator turn may run at a time.
 
-These are rules enforced by the application. Each row points to the check, not just an instruction in a prompt.
+**Shrinking the pool waits for tasks to finish.** Changing its size from three to one preserves slots for assigned tasks. Those slots stay occupied through review, fixes and checks, even while paused. New tasks wait for room in the smaller pool. A dependency “A before B” also holds B, but does not transfer changes from A's branch into it.
 
-| Rule                                                                         | Where it is enforced / what happens otherwise                                                                                                                                                                                                                                                                 |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **At most one running task job per task.**                                   | [Store.claim()](../../src/core/store.ts) uses a transaction and the `one_running_per_task` unique index. Per-task locks in `Engine` serialize transitions.                                                                                                                                                    |
-| **Results and actions belong to the current generation and exact revision.** | [Engine](../../src/core/engine.ts) rejects old results; [Broker](../../src/core/broker.ts) checks the live revision before review writes. Changed code invalidates the review and approvals. A stale draft requires inspection. A fix reports its starting head; the submitted new head needs its own review. |
-| **An unfinished review cannot feed the worker.**                             | `Engine.publish()` requires `reviewFinished` and an idle task. `reconcile()` holds missing, partial, stale or prematurely published reviews.                                                                                                                                                                  |
-| **Workers see published feedback and cannot approve their own fixes.**       | [Broker](../../src/core/broker.ts) checks roles: workers can read published findings and accept or dispute them, but cannot edit review comments or mark fixes verified. [Daddy's task view](../../src/core/daddy.ts) also hides private review discussion. Native comment Markdown is preserved.             |
-| **A successful run is not a completed task.**                                | `Engine.completeJob()` checks the result and earlier findings; `finish()` requires applicable CI and plan-approval rules. A human CI waiver is recorded for that revision. There is no merge tool in daddy's tool set.                                                                                        |
-| **Queued work keeps its settings.**                                          | [Store.enqueue()](../../src/core/store.ts) and [Daddy.enqueue()](../../src/core/daddy.ts) copy the profile and role instructions into the job. Changing defaults does not silently change a waiting run.                                                                                                      |
-| **A lost write response is not permission to repeat the write.**             | [Outbox.perform()](../../src/core/outbox.ts) records `pending` before a write and `done` after confirmation. The same operation ID must have the same arguments. A retry looks for the native result; an uncertain result raises `ambiguous_write`.                                                           |
-| **Managed copies preserve existing work.**                                   | [Workspaces](../../src/runtime/workspaces.ts) refuses destructive replacement of dirty or diverged work and uses ordinary pushes. [ArcWorkspaces](../../src/runtime/arc-workspaces.ts) checks copy ownership and protected source mounts. The user's source checkout is not switched for an agent.            |
-| **Reducing the pool does not interrupt an assigned task.**                   | [worker-pool.ts](../../src/core/worker-pool.ts) keeps its slot through review, fixes, checks and pauses. The scheduler releases it only after the task is complete and has no queued or running jobs.                                                                                                         |
+Code: [job selection and duplicate prevention](../../src/core/store.ts), [worker pool](../../src/core/worker-pool.ts), [shared reviewer](../../src/runtime/worker.ts).
 
-The outbox cannot make a remote API write and SQLite update one atomic transaction. Its guarantee is to preserve uncertainty and stop blind retries, not to promise that every external effect happens exactly once. Installed modules are trusted application code; these interfaces are not a sandbox for arbitrary plugins.
+## 6. How cancellation blocks old results
 
-## Concurrency and recovery
+Cancellation can arrive while an agent is already sending its answer. Sending “stop” is therefore insufficient: the service must also check whether that old run may still change the task.
 
-**Three limits control scheduling.** A session's worker pool limits assigned tasks, normally one. `worker.maxAgents` limits simultaneous task runs across the host, including reviews. The current daddy scheduler separately allows one coordinator turn at a time across the host. Runs also need enough memory and disk space.
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant S as Service
+    participant A as Agent
+    Note over S: Current generation: 7
+    S->>A: Start work
+    U->>S: Pause
+    S->>S: Cancel the run<br/>Change generation to 8
+    A-->>S: Late “done” response
+    S->>S: Run saved 7,<br/>current value is 8: stale result
+```
 
-Reviews in one session are serialized, and `Worker.reserveGroup()` prevents its coordinator and reviewer from overlapping. Independent workers can run in parallel. A dependency “A before B” controls when B starts; it does not merge A's branch into B.
+**An old result cannot advance the task.** The generation is a cancellation counter saved with each run. After a pause, the numbers differ. `Engine.completeJob()` ignores that result, and `Broker.call()` prevents that run from changing comments. Files and history are preserved.
 
-When the pool changes from three to one, the requested size becomes one immediately. Existing tasks keep their slots. The scheduler reduces the applied size as those tasks finish and holds new tasks until there is room. Even a paused task keeps its slot.
+Code-version checks solve a related problem: reviewing H1 does not verify a fix in H2. The service compares the full code and comparison-base identity (`head`, `base`, `start`, `revisionId`). Changed code invalidates the old review, plan approval and human CI waiver. A leftover stale draft requires inspection.
 
-| Situation                                           | What the service does                                                                                                                                                                                                                                   |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Browser, CLI or SSH connection closes               | Work continues in the background service. Client lifetime does not own agent lifetime.                                                                                                                                                                  |
-| Task or session is paused                           | Cancels affected work and invalidates old results. Files and history remain. A remote write already sent may still finish; pause does not undo it.                                                                                                      |
-| Service restarts during a run                       | [Engine recovery](../../src/core/engine.ts) records interruption and preserves work. [Daddy recovery](../../src/core/daddy.ts) can queue a turn to inspect it and continue allowed steps. An interrupted run is never silently marked successful.       |
-| Memory, disk or working-copy capacity runs low      | [Resource checks](../../src/core/resources.ts) hold new work; memory/disk pressure can interrupt active runs. A temporary workspace-capacity error requeues the job with a delay.                                                                       |
-| Reviews repeat, CI fails or clarification is needed | The task stays open. Defaults allow three review rounds and a repeated-feedback threshold of two. Failing CI waits in `awaiting_checks`; it does not itself queue a CI-fix run. Daddy also stops automatic turns when the task board makes no progress. |
-| A backup moves to another host                      | Saved application data and managed files move. Restore pauses unfinished work and clears native agent conversation IDs; it does not promise to transfer a live CLI process. See [backups](../backups/en.md).                                            |
+Failures follow the same rules:
 
-Other features feed these same paths: [workspace settings](../workspaces/en.md) choose the source and scope; [instructions and presets](../instructions/en.md) supply each role's saved instructions; [voice messages](../voice/en.md) become text before `Daddy.chat()`; [usage and updates](../agents/en.md) call the selected agent module.
+- **Service restart:** the database keeps tasks, queues and history. Interrupted work is recorded as interrupted; the coordinator can inspect it and continue allowed steps.
+- **Low memory or disk:** new runs wait; active ones may be interrupted with their work preserved.
+- **A write already reached the repository:** pausing does not remove the comment or undo the push. The service checks the external result before continuing.
+- **Backup moved to another host:** application data and working files move, while unfinished tasks restore paused. Conversations inside the CLIs start afresh; see [backups](../backups/en.md).
+
+Code: [cancellation, revision changes and recovery](../../src/core/engine.ts), [coordinator recovery](../../src/core/daddy.ts), [resource checks](../../src/core/resources.ts). [buildApp()](../../src/server/app.ts) assembles all components.
