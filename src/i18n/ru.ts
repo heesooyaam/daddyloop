@@ -1,5 +1,48 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Repository URL or server folder': 'URL репозитория или папка на сервере',
+  'Repository service': 'Сервис репозитория',
+  'Detect from address': 'Определить по адресу',
+  'Choose the service explicitly for a company Git server.':
+    'Для корпоративного Git-сервера выбери модуль явно.',
+  'Repository for the next message': 'Репозиторий для следующего сообщения',
+  'Repository for this session': 'Репозиторий для этой сессии',
+  'Workspace source': 'Источник воркспейса',
+  'Repository settings (advanced)': 'Настройки репозитория',
+  'A workspace is a repository URL or a source folder. daddy gives every worker a separate copy.':
+    'Воркспейс — это URL репозитория или исходная папка. daddy выдаст каждому воркеру отдельную копию.',
+  'Save a repository under a familiar name. daddy will prepare a copy for every worker.':
+    'Дай репозиторию понятное имя. Копии для воркеров daddy подготовит сам.',
+  'Paste a GitHub or GitLab repository URL, or choose an existing Git folder or Arcadia mount.':
+    'Вставь URL репозитория GitHub или GitLab, либо выбери папку Git или маунт Arcadia.',
+  'Choose the repository service.': 'Выбери сервис репозитория.',
+  'Choose an enabled repository service.': 'Выбери включённый модуль репозитория.',
+  'Send the path of an existing Arcadia mount, for example ~/arcadia.':
+    'Пришли путь к подключённой Arcadia, например ~/arcadia.',
+  'Send an HTTPS or SSH repository URL, or an existing server folder.':
+    'Пришли HTTPS- или SSH-адрес репозитория, либо путь к папке на сервере.',
+  'Send a repository URL or an absolute server path.':
+    'Пришли URL репозитория или полный путь на сервере.',
+  'Send a short name, for example Work or My app.':
+    'Пришли короткое имя, например Work или Моё приложение.',
+  'You can also send /repo followed by a repository URL or server path.':
+    'Можно прислать /repo и URL репозитория или путь на сервере.',
+  'Use an HTTPS or SSH repository URL without passwords, query parameters or fragments':
+    'Нужен HTTPS- или SSH-адрес репозитория без пароля, параметров запроса и фрагмента.',
+  'The mount pool is available only for Arcadia': 'Пул маунтов доступен только для Arcadia.',
+  'The remote has no default branch; choose a base branch':
+    'В репозитории не задана основная ветка. Укажи начальную ветку.',
+  'The selected branch does not exist in the remote repository':
+    'В удалённом репозитории нет выбранной ветки.',
+  'Register repository URLs or server folders as workspaces':
+    'Добавить URL репозитория или папку сервера как воркспейс',
+  'HTTPS/SSH repository URL or absolute server folder':
+    'HTTPS/SSH-адрес репозитория или полный путь на сервере',
+  'repository module for this source': 'модуль репозитория для этого источника',
+  'repository URL or folder for this session only':
+    'URL репозитория или папка только для этой сессии',
+  'repository URL or folder for this message only':
+    'URL репозитория или папка только для этого сообщения',
   'Inspect or choose an agent CLI used by this service':
     'Посмотреть или выбрать CLI агента для этого сервиса',
   'Install the latest stable agent CLI on the service host':

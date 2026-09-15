@@ -7,7 +7,7 @@
 ## 1. Install
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
 ```
 
 Choose modules with **↑/↓**, toggle with **Space**, confirm with **Enter**. Codex and GitHub are selected initially. GitLab uses its REST API; Arcadia uses your existing corporate tools. The installer downloads the CLI packages selected by your choices, installs Node and the local speech model, then starts a systemd service. No tmux setup is needed.
@@ -15,7 +15,7 @@ Choose modules with **↑/↓**, toggle with **Space**, confirm with **Enter**. 
 For an unattended installation:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
 ```
 
 Linux x64 and ARM64 are supported. The script needs curl and tar; it can install Git through apt. One-time sudo access may be needed for Git and the persistent service. macOS and Windows can use the website. See [operations](../operations/en.md) for service management.
@@ -44,10 +44,10 @@ Codex opens a device login flow. GitHub uses browser login and SSH for Git. For 
 ## 3. Register a workspace
 
 ```bash
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/your-team/app --name App
 ```
 
-This records a repository on the server, not a task. The web workspace chooser can browse server directories too. See [workspaces](../workspaces/en.md).
+This saves the source address. daddy prepares a copy for each worker when work starts. You can also register an existing Git folder or Arcadia mount. See [workspaces](../workspaces/en.md).
 
 ## 4. Give daddy a job
 

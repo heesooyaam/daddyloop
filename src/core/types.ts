@@ -111,6 +111,7 @@ export interface ReviewGroup {
 export interface Workspace {
   id: string;
   name: string;
+  /** Canonical Git URL or absolute path to a local Git/Arcadia source. */
   repoPath: string;
   scope: string;
   vcs: 'git' | 'arcadia';
@@ -264,6 +265,8 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
+  origin?: { channel: 'telegram'; chatId: number; threadId?: number };
   workspace?: Workspace;
   id: string;
   taskId: string;

@@ -1,3 +1,4 @@
+import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -840,7 +841,7 @@ function NewSession({
         </label>
         <p className="daddy-muted">
           {t(
-            'A workspace is a saved source folder. daddy prepares separate working copies for the task.',
+            'A workspace is a repository URL or a source folder. daddy gives every worker a separate copy.',
           )}
         </p>
         {workspace && (
@@ -914,7 +915,9 @@ function WorkspaceManager({
     [picking, setPicking] = useState(false);
   const [path, setPath] = useState(''),
     [name, setName] = useState(''),
-    [base, setBase] = useState('');
+    [base, setBase] = useState(''),
+    [scope, setScope] = useState(''),
+    [provider, setProvider] = useState<string>();
   const [copyMode, setCopyMode] = useState<Workspace['copyMode']>();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
@@ -924,6 +927,8 @@ function WorkspaceManager({
     setPath(path);
     setBase('');
     setCopyMode(undefined);
+    setProvider(undefined);
+    setScope('');
     setError('');
     setPicking(false);
     setShowForm(true);
@@ -946,7 +951,14 @@ function WorkspaceManager({
     try {
       const saved = await api<Workspace>(
         editing ? `/workspaces/${editing}/defaults` : '/workspaces',
-        { name: name.trim(), path: path.trim(), copyMode, ...(base ? { base } : {}) },
+        {
+          name: name.trim(),
+          path: path.trim(),
+          scope,
+          provider,
+          copyMode: provider === 'arcadia' ? copyMode : undefined,
+          ...(base ? { base } : {}),
+        },
       );
       await onSaved(saved);
       setShowForm(false);
@@ -960,7 +972,7 @@ function WorkspaceManager({
   return (
     <div className="daddy-workspace-manager">
       <p className="daddy-muted">
-        {t('Save a folder under a familiar name, then choose it when giving daddy a task.')}
+        {t('Save a repository under a familiar name. daddy will prepare a copy for every worker.')}
       </p>
       {!!workspaces.length && (
         <div className="daddy-workspace-chips">
@@ -975,7 +987,9 @@ function WorkspaceManager({
               onClick={() => {
                 setEditing(workspace.id);
                 setName(workspace.name);
-                setPath(workspace.repoPath + (workspace.scope ? '/' + workspace.scope : ''));
+                setPath(workspace.repoPath);
+                setScope(workspace.scope);
+                setProvider(workspace.provider);
                 setBase(workspace.base ?? '');
                 setCopyMode(workspace.copyMode);
                 setError('');
@@ -1036,7 +1050,7 @@ function WorkspaceManager({
             {t(
               editing
                 ? 'These defaults apply to new sessions. Existing sessions keep their folders.'
-                : 'Choose a source repository or a subfolder. daddy will leave your original checkout in place.',
+                : 'Paste a GitHub or GitLab repository URL, or choose an existing Git folder or Arcadia mount.',
             )}
           </p>
           {!editing &&
@@ -1074,12 +1088,16 @@ function WorkspaceManager({
             />
           </label>
           <label style={picking ? { display: 'none' } : undefined}>
-            {t('Source folder')}
+            {t('Repository URL or server folder')}
             <input
-              aria-label={t('Repository on this server')}
+              aria-label={t('Repository URL or server folder')}
               value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder={t('Absolute path on the server')}
+              onChange={(event) => {
+                setPath(event.target.value);
+                setProvider(undefined);
+                setCopyMode(undefined);
+              }}
+              placeholder="https://github.com/team/app or ~/arcadia"
               required
             />
           </label>
@@ -1092,9 +1110,11 @@ function WorkspaceManager({
           {picking && (
             <FolderBrowser
               api={api}
-              initialPath={path}
+              initialPath={/^(\/|~)/.test(path) ? path : ''}
               onSelect={(path) => {
                 setPath(path);
+                setProvider(undefined);
+                setCopyMode(undefined);
                 if (!name.trim()) setName(path.split('/').at(-1) ?? '');
                 setPicking(false);
               }}
@@ -1102,7 +1122,16 @@ function WorkspaceManager({
             />
           )}
           <details className="daddy-advanced-settings">
-            <summary>{t('Starting branch (advanced)')}</summary>
+            <summary>{t('Repository settings (advanced)')}</summary>
+            <RepositoryModuleField api={api} value={provider} onChange={setProvider} />
+            <label>
+              {t('Subfolder (optional)')}
+              <input
+                value={scope}
+                onChange={(event) => setScope(event.target.value)}
+                placeholder="services/api"
+              />
+            </label>
             <label>
               {t('Base branch (optional)')}
               <input
@@ -1115,7 +1144,7 @@ function WorkspaceManager({
               </small>
             </label>
           </details>
-          {copyMode && (
+          {copyMode && provider === 'arcadia' && (
             <label className="daddy-toggle">
               <input
                 type="checkbox"

@@ -437,3 +437,158 @@ it('creates a session from a group topic and isolates its wizard from another to
     await f.close();
   }
 });
+
+it('registers a named remote workspace from Telegram with owner, topic and cancellation checks', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  let id = 900;
+  const message = (text: string, user = 7, thread?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: user },
+      chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+      message_thread_id: thread,
+    },
+  });
+  const click = (data: string, user = 7, thread?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: user },
+      message: {
+        chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+        message_thread_id: thread,
+      },
+    },
+  });
+  try {
+    await bot.handle(click('dad:add-workspace'));
+    expect(
+      sent
+        .at(-1)
+        .buttons.flat()
+        .some((button: any) => button.callback_data === 'dad:add:gitlab'),
+    ).toBe(true);
+    await bot.handle(click('dad:add:gitlab', 7, 12));
+    await bot.handle(message('https://code.example.test/team/sub/app', 99, 12));
+    await bot.handle(message('https://code.example.test/team/sub/app', 7, 12));
+    expect(sent.at(-1).text).toContain('Workspace name');
+    await bot.handle(message('Company', 7, 13));
+    expect(f.workspaces.list().some((workspace) => workspace.name === 'Company')).toBe(false);
+    await bot.handle(message('Company', 7, 12));
+    expect(f.workspaces.list().find((workspace) => workspace.name === 'Company')).toMatchObject({
+      provider: 'gitlab',
+      repoPath: 'https://code.example.test/team/sub/app.git',
+      copyMode: 'session',
+    });
+    await bot.handle(click('dad:add:github'));
+    await bot.handle(message('/cancel'));
+    expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('mirrors a CLI-created session and live assistant messages to one topic without tool logs or Telegram echoes', async () => {
+  const f = daddyFixture();
+  const sent: { destination: any; card: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({ message_thread_id: 31 })),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  f.store.setSetting('notifications.telegram', { enabled: false, mode: 'attention' });
+  const listener = (event: any) => bot.onEvent(event);
+  f.store.changes.on('event', listener);
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  f.runtime.runSession.mockImplementation(async (input) => {
+    input.onEvent('runtime.item', {
+      type: 'commandExecution',
+      aggregatedOutput: 'PRIVATE SHELL OUTPUT',
+    });
+    input.onEvent('runtime.text', { delta: 'RAW PROTOCOL' });
+    input.onEvent('tool.completed', { result: 'PRIVATE TOOL RESULT' });
+    input.onAssistantMessage?.({ id: 'progress-1', text: 'Checking the code now.' });
+    input.onAssistantMessage?.({ id: 'progress-1', text: 'Checking the code now.' });
+    await gate;
+    return { status: 'completed', summary: 'The fix is ready.', checkedHead: '' };
+  });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Started from CLI' });
+    f.daddy.chat(group.id, 'Question from CLI');
+    f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(sent.some((item) => item.card.text?.includes('Checking the code now.'))).toBe(true),
+    );
+    expect(sent.filter((item) => item.card.text?.includes('Question from CLI'))).toHaveLength(1);
+    expect(sent.find((item) => item.card.text?.includes('Question from CLI'))).toMatchObject({
+      destination: { chatId: -10042, threadId: 31 },
+      card: { text: expect.stringContaining('[user]') },
+    });
+    expect(f.store.daddyJobs(group.id).some((job) => job.status === 'running')).toBe(true);
+    expect(sent.filter((item) => item.card.text?.includes('Checking the code now.'))).toHaveLength(
+      1,
+    );
+    await bot.handle({
+      update_id: 1000,
+      message: {
+        message_id: 1001,
+        from: { id: 7 },
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: 31,
+        text: 'Question from the phone',
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        f.store.messages(group.id).some((message) => message.text === 'Question from the phone'),
+      ).toBe(true),
+    );
+    finish();
+    await vi.waitFor(() =>
+      expect(sent.some((item) => item.card.text?.includes('The fix is ready.'))).toBe(true),
+    );
+    expect(sent.filter((item) => item.card.text?.includes('Question from the phone'))).toHaveLength(
+      0,
+    );
+    expect(sent.some((item) => /PRIVATE|RAW PROTOCOL/.test(item.card.text ?? ''))).toBe(false);
+    f.store.daddyMessage(group.id, 'system', 'PRIVATE ERROR STACK');
+    const count = sent.length;
+    bot.replay();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sent).toHaveLength(count);
+    expect(api.call).toHaveBeenCalledTimes(1);
+    expect(f.daddy.board(group.id).messages.map((message) => message.text)).toContain(
+      'Question from the phone',
+    );
+  } finally {
+    finish();
+    f.store.changes.off('event', listener);
+    await bot.stop();
+    await f.close();
+  }
+});

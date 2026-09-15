@@ -3,7 +3,7 @@ import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
-import { TelegramText, type TelegramCard } from './telegram-text.js';
+import { TelegramText } from './telegram-text.js';
 import { daddyHome, workspacePicker, daddyBoard, poolCard } from './daddy-cards.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
@@ -21,6 +21,7 @@ import { instructionCommand, instructionLines } from '../client/instructions.js'
 import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
 import { findPreset, selectPreset, presetLines } from '../client/presets.js';
+import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
@@ -115,7 +116,11 @@ export class TelegramWorkspace {
         'The session changed while recognizing the voice. Send it again to continue.',
       );
     const text = job.fileId ? '🎙️ ' + job.text : job.text!;
-    this.daddy.chat(group.id, text, receipt, job.route.workspace);
+    this.daddy.chat(group.id, text, receipt, job.route.workspace, {
+      channel: 'telegram',
+      chatId: job.route.chatId,
+      threadId: job.route.threadId,
+    });
     if (job.fileId)
       await this.api
         .send(
@@ -451,7 +456,11 @@ export class TelegramWorkspace {
     this.store.setSetting(this.creationKey(destination), null);
     if (destination.chatId === this.pair()?.chatId)
       this.store.setSetting('telegram.currentDaddy', group.id);
-    if (text) this.daddy.chat(group.id, text);
+    if (text)
+      this.daddy.chat(group.id, text, undefined, undefined, {
+        channel: 'telegram',
+        ...destination,
+      });
     const topic = await this.ensureTopic(group);
     if (topic && destination.chatId === topic.chatId && destination.threadId !== topic.threadId) {
       await this.api.send(destination, {
@@ -470,6 +479,9 @@ export class TelegramWorkspace {
   }
   private repoKey(destination: Destination, groupId: string) {
     return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
+  }
+  private registrationKey(destination: Destination) {
+    return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
   }
   private async repository(choice: RepoChoice, browse = false) {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
@@ -517,7 +529,7 @@ export class TelegramWorkspace {
         ? [[button(this.t('Use workspace defaults'), { ...choice, input: undefined }, 'use')]]
         : []),
     ];
-    if (!choice.groupId && choice.workspace.copyMode) {
+    if (!choice.groupId && choice.workspace.vcs === 'arcadia' && choice.workspace.copyMode) {
       const mode = choice.input?.copyMode ?? choice.workspace.copyMode;
       title.add(
         '\n\n' +
@@ -539,9 +551,8 @@ export class TelegramWorkspace {
       ]);
     }
     if (browse) {
-      const listing = await this.daddy.workspaces.browse(
-        choice.input?.path ?? choice.workspace.repoPath,
-      );
+      const source = choice.input?.path ?? choice.workspace.repoPath;
+      const listing = await this.daddy.workspaces.browse(isGitAddress(source) ? undefined : source);
       if (listing.parent)
         buttons.push([
           button(
@@ -554,7 +565,9 @@ export class TelegramWorkspace {
         buttons.push([
           button(entry.name + ' →', { ...choice, input: { path: entry.path } }, 'browse'),
         ]);
-      title.add('\n\n' + this.t('You can also send /repo followed by an absolute server path.'));
+      title.add(
+        '\n\n' + this.t('You can also send /repo followed by a repository URL or server path.'),
+      );
     } else buttons.push([button(this.t('Browse server folders'), choice, 'browse')]);
     await this.api.send(choice.destination, { ...title, buttons });
   }
@@ -817,6 +830,44 @@ export class TelegramWorkspace {
       return true;
     }
     if (!data.startsWith('dad:')) return false;
+    if (data === 'dad:add-workspace') {
+      this.store.setSetting(this.registrationKey(destination), null);
+      await this.api.send(destination, {
+        ...new TelegramText()
+          .add('📦 ' + this.t('Add workspace'), 'bold')
+          .add('\n\n' + this.t('Choose the repository service.')),
+        buttons: [
+          ...this.daddy.workspaces
+            .modules()
+            .map((module) => [{ text: module.name, callback_data: `dad:add:${module.id}` }]),
+          [{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }],
+        ],
+      });
+      return true;
+    }
+    if (data.startsWith('dad:add:')) {
+      const module = this.daddy.workspaces.modules().find((module) => module.id === data.slice(8));
+      if (!module) throw new Error(this.t('Choose an enabled repository service.'));
+      this.store.setSetting(this.registrationKey(destination), {
+        provider: module.id,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      });
+      await this.api.send(destination, {
+        ...new TelegramText()
+          .add('📦 ' + module.name, 'bold')
+          .add(
+            '\n\n' +
+              this.t(
+                module.vcs === 'arcadia'
+                  ? 'Send the path of an existing Arcadia mount, for example ~/arcadia.'
+                  : 'Send an HTTPS or SSH repository URL, or an existing server folder.',
+              ),
+          ),
+        buttons: [[{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }]],
+      });
+      return true;
+    }
+    this.store.setSetting(this.registrationKey(destination), null);
     if (data === 'dad:group') {
       if (destination.chatId !== this.pair()?.chatId) throw new Error('Use the private bot chat');
       await this.setup();
@@ -1014,6 +1065,46 @@ export class TelegramWorkspace {
       }
       const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
       if (!text) return false;
+      const registrationKey = this.registrationKey(destination);
+      const registration = this.store.setting<{
+        provider: string;
+        path?: string;
+        expiresAt: string;
+      }>(registrationKey);
+      if (registration) {
+        if (registration.expiresAt <= now() || /^\/[a-z]+(?:\s|$)/i.test(text)) {
+          this.store.setSetting(registrationKey, null);
+          if (text === '/cancel') {
+            await this.api.send(
+              destination,
+              workspacePicker(this.locale(), this.daddy.workspaces.list()),
+            );
+            return true;
+          }
+        } else if (!registration.path) {
+          const path = isGitAddress(text) ? parseGitSource(text).url : text;
+          if (path.length > 4000 || (!isGitAddress(path) && !/^(\/|~\/)/.test(path)))
+            throw new Error(this.t('Send a repository URL or an absolute server path.'));
+          this.store.setSetting(registrationKey, { ...registration, path });
+          await this.api.send(destination, {
+            ...new TelegramText()
+              .add('📦 ' + this.t('Workspace name'), 'bold')
+              .add('\n\n' + this.t('Send a short name, for example Work or My app.')),
+            buttons: [[{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }]],
+          });
+          return true;
+        } else {
+          const workspace = await this.daddy.workspaces.register({
+            name: text,
+            path: registration.path,
+            provider: registration.provider,
+          });
+          this.store.setSetting(registrationKey, null);
+          await this.api.send(destination, workspacePicker(this.locale(), [workspace]));
+          return true;
+        }
+      }
+
       if (text === '/language') return await this.callback('language:show', destination);
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
@@ -1232,7 +1323,10 @@ export class TelegramWorkspace {
         this.store.setSetting(nextKey, null);
         throw new Error(this.t('This selection expired. Choose the repository again.'));
       }
-      this.daddy.chat(groupId, text, receipt, next?.workspace);
+      this.daddy.chat(groupId, text, receipt, next?.workspace, {
+        channel: 'telegram',
+        ...destination,
+      });
       if (next) this.store.setSetting(nextKey, null);
       return true;
     } catch (error) {
@@ -1358,40 +1452,45 @@ export class TelegramWorkspace {
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
         const group = this.daddy.group(event.taskId),
-          message = this.store
-            .messages(group.id)
-            .find((message) => message.id === (event.data as { messageId: string }).messageId);
-        if (!message || message.sender === 'user') return;
-        const job = message.runId
-          ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
-          : undefined;
-        const board = this.daddy.board(group.id),
-          prefs = notificationPreferences(this.store);
-        const attention =
-          group.daddyState === 'needs_input' ||
-          (board.tasks.length > 0 && board.tasks.every((task) => task.state === 'complete'));
-        if (
-          job?.trigger !== 'user' &&
-          (!prefs.enabled || (prefs.mode === 'attention' && !attention))
-        )
-          return;
-        const id = `telegram:daddy:${message.id}`;
-        if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+          message = this.store.messageById(
+            group.id,
+            (event.data as { messageId: string }).messageId,
+          );
+        if (!message || !['user', 'agent'].includes(message.sender)) return;
         const topic = await this.ensureTopic(group);
         if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
           return;
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
-          : pair.chatId;
+          : { chatId: pair.chatId };
+        if (
+          message.origin?.channel === 'telegram' &&
+          message.origin.chatId === destination.chatId &&
+          message.origin.threadId === destination.threadId
+        )
+          return;
+        if (!topic && message.sender === 'agent') {
+          const job = message.runId
+            ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
+            : undefined;
+          const prefs = notificationPreferences(this.store);
+          if (job?.trigger !== 'user') {
+            if (!prefs.enabled) return;
+            if (prefs.mode === 'attention' && group.daddyState !== 'needs_input') {
+              const tasks = this.store.tasks().filter((task) => task.groupId === group.id);
+              if (!tasks.length || tasks.some((task) => task.state !== 'complete')) return;
+            }
+          }
+        }
+        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}`;
+        if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
         this.store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        const text = new TelegramText().add('👨‍💻 daddy', 'bold').add('\n\n').markdown(message.text);
-        const card: TelegramCard = {
-          ...text,
-          buttons: [
-            [{ text: this.t('Tasks and worker pool'), callback_data: `dad:open:${group.id}` }],
-          ],
-        };
-        await this.api.send(destination, card);
+        const text = new TelegramText()
+          .add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold')
+          .add('\n\n');
+        if (message.sender === 'user') text.add(message.text);
+        else text.markdown(message.text);
+        await this.api.send(destination, text);
         this.store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
       })
       .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
@@ -1401,11 +1500,9 @@ export class TelegramWorkspace {
     for (const group of this.daddy.sessions()) {
       if (this.room())
         this.onEvent({ id: 0, taskId: group.id, type: 'daddy.created', data: {}, at: now() });
-      const message = this.store
+      for (const message of this.store
         .messages(group.id)
-        .filter((message) => message.sender !== 'user')
-        .at(-1);
-      if (message)
+        .filter((message) => ['user', 'agent'].includes(message.sender)))
         this.onEvent({
           id: 0,
           taskId: group.id,

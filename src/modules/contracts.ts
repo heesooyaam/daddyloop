@@ -82,6 +82,17 @@ export interface WorkspaceBackupSink {
   text(path: string, content: string): Promise<void>;
   warning(message: string): void;
 }
+export interface GitRepositorySource {
+  url: string;
+  host: string;
+  repo: string;
+  protocol: 'https:' | 'ssh:';
+}
+/** Git authentication and repository naming are supplied by the hosting module. */
+export interface GitRepositoryTransport {
+  parse(value: string): GitRepositorySource;
+  environment(source: GitRepositorySource): NodeJS.ProcessEnv;
+}
 export interface RepositoryModule {
   id: string;
   name: string;
@@ -91,6 +102,7 @@ export interface RepositoryModule {
     reader: TicketReader,
   ): Promise<{ source: TicketSource; ref: TicketRef }>;
   vcs: 'git' | 'arcadia';
+  git?: GitRepositoryTransport;
   backupWorkspace?(task: Task, sink: WorkspaceBackupSink): Promise<void>;
   matchesRepository(input: { vcs: 'git' | 'arcadia'; host: string; remotes: string[] }): number;
   parsePR(url: URL): PRRef | undefined;

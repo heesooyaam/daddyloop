@@ -1,3 +1,5 @@
+import { GitSessionWorkspace } from './git-sessions.js';
+import { gitTransport } from './git-source.js';
 import type { RepositoryModule, SubmissionBackend, SubmissionContext } from '../contracts.js';
 import type { PRRef, Task } from '../../core/types.js';
 import { GitLabProvider } from '../../providers/gitlab.js';
@@ -74,6 +76,8 @@ export const gitlabModule: RepositoryModule = {
   id: 'gitlab',
   name: 'GitLab',
   vcs: 'git',
+  sessionWorkspace: (context) => new GitSessionWorkspace(context, 'gitlab'),
+  git: gitTransport('gitlab', 'oauth2', /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/),
   matchesRepository: (input) =>
     input.vcs === 'git' && (input.host.includes('gitlab') || input.remotes.includes('gitlab'))
       ? 10

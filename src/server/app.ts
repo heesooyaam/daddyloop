@@ -97,7 +97,7 @@ export async function buildApp(options: ServerOptions) {
     store.setSetting('preferences', { locale: config.locale, version: 0 });
   if (!store.setting('server.instanceId')) store.setSetting('server.instanceId', randomUUID());
   const cache = new CacheManager(engine, dataDir, config.cache);
-  const checkouts = options.checkouts ?? new Workspaces(dataDir);
+  const checkouts = options.checkouts ?? new Workspaces(dataDir, repositories);
   const configuredExecutables = { ...config.executables };
   const executable = (id: string) => moduleExecutable(id, { executables: configuredExecutables });
   const agents =

@@ -15,7 +15,7 @@ A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he a
 You need a **Linux server** with access to your repositories and an account for your chosen agent. Run this on that server:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
 ```
 
 Arrows select a module; Space checks it. Codex and GitHub start checked. Add Claude, GitLab or Arcadia if you need them. The installer provides the selected engines, the `daddy` CLI, local voice recognition and a persistent background service. No manual tmux setup.
@@ -25,7 +25,7 @@ For Codex and GitHub:
 ```bash
 daddy auth agent codex
 daddy auth github
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/your-team/app --name App
 daddy
 ```
 
@@ -35,7 +35,7 @@ In the CLI: **`/new` → App → your task**. Or hand it over directly:
 daddy new --workspace App "Fix duplicate charges. Test repeated requests."
 ```
 
-A **workspace** is a familiar repository folder, such as App. A **session** is one job for daddy: one conversation with its own crew. You can create many sessions in App. Workers receive separate working copies; choosing another folder for one task keeps your workspace defaults intact.
+A **workspace** is a saved Git repository URL or source folder, such as App. A **session** is one job for daddy: one conversation with its own crew. You can create many sessions in App. Workers receive separate working copies; choosing another folder for one task keeps your workspace defaults intact.
 
 [Installation walkthrough](docs/start/en.md) · [Workspaces and folders](docs/workspaces/en.md) · [Your first task](docs/tasks/en.md)
 
@@ -50,6 +50,8 @@ Don’t feel like opening a terminal? Drop the ticket in chat. Tired of typing? 
 3. Press **Start** to pair the bot with your Telegram account.
 4. For separate conversations, create a group with **Topics**, add the bot as an administrator with Manage Topics permission, then send **`/group`** in the private bot chat and select that group.
 
+Sessions started in the CLI or website get topics too. Questions, progress and answers stay in one conversation, labelled `[user]` and `[daddy]`; tool logs stay out.
+
 **One job, one topic.** `/new` creates a daddy session and its topic. Send more tickets inside that topic to add work to the same crew. daddy handles the worker conversations.
 
 | You want to…                               | Send the bot…                            |
@@ -59,7 +61,7 @@ Don’t feel like opening a terminal? Drop the ticket in chat. Tired of typing? 
 | Choose daddy and worker models             | `/models`                                |
 | Grow the crew to three                     | `/pool 3`                                |
 | Check remaining usage and available resets | `/limits`                                |
-| Receive only results and questions         | `/notifications` → quiet mode            |
+| Private alerts for results and questions   | `/notifications` → quiet mode            |
 | Open the website on your phone             | `/web` in private chat after HTTPS setup |
 
 The bot runs on the server. Your laptop, SSH tunnel and browser tab can all be closed. Voice recognition runs locally, in English and Russian.
@@ -148,4 +150,4 @@ Agents share execution, model catalogue and usage contracts. Repository modules 
 
 Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/contributing/en.md#reproduce-the-visuals).
 
-[Release 0.18.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.18.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Release 0.19.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.19.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

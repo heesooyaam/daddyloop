@@ -77,3 +77,5 @@ Session instruction sets and queued-turn snapshots include the actual skill text
 The preset library is included in full, along with each session’s frozen preset copies and individual component choices. A library revision can differ from a session’s selected revision; restoring preserves both.
 
 Automatic Arc session copies are exported as patches and changed files; live FUSE trees are never copied recursively. The export can temporarily mount a parked owned copy and stop it again afterward. Completed deletion archives in `session-archives/` are included. Restore pauses unfinished sessions, clears pending deletion and native lease state, and lets the service prepare fresh copies when resumed.
+
+A workspace registered by Git URL keeps that URL when moved: no source-folder mapping is needed. Existing task copies and their unfinished changes are included; new tasks fetch from the same URL. Configure the destination host's SSH keys or HTTPS/API credentials separately. Deleted Git sessions' verified archives are included from `session-archives/` as well.
