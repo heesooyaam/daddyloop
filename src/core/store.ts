@@ -266,6 +266,7 @@ export class Store {
     text: string,
     runId?: string,
     workspace?: Message['workspace'],
+    origin?: Message['origin'],
   ) {
     const message: Message = {
       id: randomUUID(),
@@ -275,6 +276,7 @@ export class Store {
       text,
       runId,
       workspace,
+      origin,
       at: now(),
     };
     this.db
@@ -282,6 +284,12 @@ export class Store {
       .run(message.id, groupId, JSON.stringify(message));
     this.event(groupId, 'daddy.message', { messageId: message.id, sender }, runId);
     return message;
+  }
+  messageById(taskId: string, id: string): Message | undefined {
+    const row = this.db
+      .prepare('SELECT data FROM messages WHERE id=? AND task_id=?')
+      .get(id, taskId);
+    return row ? JSON.parse(String(row.data)) : undefined;
   }
   getGroup(id: string): ReviewGroup {
     const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);

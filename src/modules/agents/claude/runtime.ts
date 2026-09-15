@@ -221,6 +221,17 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
         if (message.type === 'rate_limit_event')
           this.options.usage?.observe(message.rate_limit_info, usageIdentity);
         if (message.type === 'assistant') {
+          const text = message.message.content
+            .filter((block) => block.type === 'text')
+            .map((block) => block.text)
+            .join('\n\n');
+          let structured = false;
+          try {
+            structured = resultSchema.safeParse(JSON.parse(text)).success;
+          } catch {
+            /* Ordinary assistant text. */
+          }
+          if (text && !structured) input.onAssistantMessage?.({ id: message.uuid, text });
           for (const block of message.message.content)
             if (block.type === 'text')
               input.onEvent('runtime.text', { delta: block.text, itemId: message.uuid });

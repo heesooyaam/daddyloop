@@ -4,6 +4,10 @@
 
 Run `daddy` for the interactive console. There is one conversation with daddy, a task board, workspace selection, worker pool and model choices.
 
+`daddy` is a client of the background service. Opening it in two terminals connects both clients to the same sessions, tasks and sent messages. Select the same conversation with `/sessions` or `daddy console SESSION_ID`, or work in different sessions. Each client's unsent draft stays local. Closing a terminal does not stop the agents.
+
+If a Telegram forum group is connected, a session created from the CLI also gets a topic automatically. Your sent messages appear there as `[user]`; daddy's progress messages and answers appear as `[daddy]`. Replies from that topic join the same conversation in the CLI and website. See [Telegram setup](../telegram/en.md).
+
 | Command                        | Purpose                                   |
 | ------------------------------ | ----------------------------------------- |
 | `/new`, `/workspaces`          | Select a workspace and start work         |

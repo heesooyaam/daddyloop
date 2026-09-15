@@ -138,6 +138,12 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         const item = params.item as Record<string, unknown> | undefined;
         if (item?.type === 'agentMessage' && item.phase !== 'commentary')
           final = String(item.text ?? '');
+        if (
+          item?.type === 'agentMessage' &&
+          item.phase === 'commentary' &&
+          typeof item.text === 'string'
+        )
+          input.onAssistantMessage?.({ id: String(item.id ?? ''), text: item.text });
         if (item && !['reasoning', 'userMessage'].includes(String(item.type)))
           input.onEvent('runtime.item', item);
       } else if (message.method === 'item/agentMessage/delta') {

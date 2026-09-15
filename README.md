@@ -50,6 +50,8 @@ Don’t feel like opening a terminal? Drop the ticket in chat. Tired of typing? 
 3. Press **Start** to pair the bot with your Telegram account.
 4. For separate conversations, create a group with **Topics**, add the bot as an administrator with Manage Topics permission, then send **`/group`** in the private bot chat and select that group.
 
+Sessions started in the CLI or website get topics too. Questions, progress and answers stay in one conversation, labelled `[user]` and `[daddy]`; tool logs stay out.
+
 **One job, one topic.** `/new` creates a daddy session and its topic. Send more tickets inside that topic to add work to the same crew. daddy handles the worker conversations.
 
 | You want to…                               | Send the bot…                            |

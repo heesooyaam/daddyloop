@@ -55,6 +55,8 @@ When a worker finishes, an event queues another coordinator turn. That is how it
 
 Code: [HTTP request handling](../../src/server/daddy.ts), [Daddy.chat(), tick(), onEvent() and tool checks](../../src/core/daddy.ts), [tasks from text and tickets](../../src/core/ticket-workflow.ts).
 
+Saved conversation messages feed all clients and the linked Telegram topic. `onAssistantMessage` carries completed public text blocks during a coordinator turn; diagnostics and tools use separate events. The host checks the run generation before saving public text. Telegram records the source of a user message to avoid echoing it into its original topic.
+
 ## 2. How an agent starts
 
 A **session** is a conversation with daddy and all its tasks. A **task** is one result, such as working search. A **run** is one step: implement it, review it or address findings. One task can have many runs.

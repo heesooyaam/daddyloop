@@ -50,6 +50,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   }
 });
 function complete() {
+  if (mode === 'messages') {
+    for (const item of [
+      {
+        type: 'agentMessage',
+        id: 'comment-1',
+        phase: 'commentary',
+        text: 'Checking the implementation.',
+      },
+      {
+        type: 'commandExecution',
+        id: 'command-1',
+        command: 'tail logs',
+        aggregatedOutput: 'PRIVATE COMMAND OUTPUT',
+      },
+      { type: 'reasoning', id: 'reason-1', content: 'PRIVATE REASONING' },
+    ])
+      send({ method: 'item/completed', params: { threadId, turnId, item } });
+  }
   send({
     method: 'item/completed',
     params: {

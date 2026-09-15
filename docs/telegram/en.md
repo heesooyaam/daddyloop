@@ -42,3 +42,13 @@ After a successful callback-button action sends a replacement message, the bot d
 For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session card offers **Delete session** with confirmation; the service archives its results and removes its copies. See [Arcadia](../arcadia/en.md).
 
 To register a repository from your phone: **Workspaces → Add workspace → GitHub/GitLab**, send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md).
+
+## One conversation across CLI, web and Telegram
+
+After `/group` connects a forum supergroup, **every new session** gets a topic, including sessions started with `daddy new` or from the website. A Telegram channel is not a forum group. The bot must have permission to create and manage topics; once connected, topic creation needs no manual step.
+
+The topic mirrors sent user messages as `[user]` and assistant messages as `[daddy]`. Progress arrives one completed text block at a time while the agent works; the final answer follows. Commands, tool arguments/results, stdout/stderr, reasoning, structured protocol output and private worker reports are not part of this feed. Codex and Claude publish through the same public-text adapter callback.
+
+Write in the topic to continue the same server-side session. The original Telegram message is not echoed into its own topic. A message sent in the private bot chat is mirrored to the session topic. Reconnecting replays unsent saved conversation messages using per-topic delivery receipts; reconnecting alone does not duplicate delivered messages. Notification preferences control private alerts; the linked topic keeps the conversation itself.
+
+The server hosts the agents, SQLite history and Telegram connection. A laptop terminal is just another client: closing it leaves the topic and agents running.

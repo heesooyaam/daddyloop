@@ -21,6 +21,8 @@ export interface SessionInput {
   signal: AbortSignal;
   onSession: (threadId: string, turnId?: string) => void;
   onEvent: (type: string, data: unknown) => void;
+  /** Completed user-facing text blocks, emitted during the turn; never tool output or reasoning. */
+  onAssistantMessage?: (message: { id: string; text: string }) => void;
   onTool: (name: string, args: unknown, callId?: string) => Promise<unknown>;
 }
 export const resultSchema = z

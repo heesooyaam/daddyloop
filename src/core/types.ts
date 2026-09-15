@@ -265,6 +265,8 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
+  origin?: { channel: 'telegram'; chatId: number; threadId?: number };
   workspace?: Workspace;
   id: string;
   taskId: string;

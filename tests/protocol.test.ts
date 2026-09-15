@@ -159,3 +159,27 @@ it('applies separate role models and efforts on thread start, resume and every t
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it('exposes only Codex commentary through the public assistant callback', async () => {
+  const onAssistantMessage = vi.fn();
+  const runtime = new CodexRuntime({
+    executable: process.execPath,
+    args: [resolve('tests/fixtures/fake-codex.mjs'), 'messages'],
+    timeoutMs: 5000,
+  });
+  const result = await runtime.runSession({
+    cwd: process.cwd(),
+    prompt: 'Fixture',
+    instructions: '',
+    readOnly: true,
+    signal: new AbortController().signal,
+    onSession: () => {},
+    onEvent: () => {},
+    onTool: async () => ({}),
+    onAssistantMessage,
+  });
+  expect(result.summary).toBe('Verified callback ordering');
+  expect(onAssistantMessage.mock.calls).toEqual([
+    [{ id: 'comment-1', text: 'Checking the implementation.' }],
+  ]);
+});

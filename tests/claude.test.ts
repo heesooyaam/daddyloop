@@ -23,6 +23,7 @@ it('routes Claude tools, structured output, model/effort and native resume throu
   const cwd = mkdtempSync(join(tmpdir(), 'daddyloop-claude-test-'));
   const onTool = vi.fn(async () => ({ comments: [] })),
     onSession = vi.fn();
+  const onAssistantMessage = vi.fn();
   let closed = false;
   const connect: ClaudeQuery = vi.fn(({ options }) => {
     expect(options?.resume).toBe('native-session');
@@ -49,6 +50,23 @@ it('routes Claude tools, structured output, model/effort and native resume throu
       } finally {
         await client.close();
       }
+      yield {
+        type: 'assistant',
+        uuid: 'assistant-text',
+        session_id: 'native-session',
+        message: {
+          content: [
+            { type: 'text', text: 'Checking the implementation.' },
+            { type: 'tool_use', id: 'tool', name: 'Bash', input: { command: 'PRIVATE COMMAND' } },
+            { type: 'thinking', thinking: 'PRIVATE REASONING' },
+          ],
+        },
+      };
+      yield {
+        type: 'assistant',
+        uuid: 'structured-result',
+        message: { content: [{ type: 'text', text: JSON.stringify(final) }] },
+      };
       yield {
         type: 'result',
         subtype: 'success',
@@ -81,8 +99,12 @@ it('routes Claude tools, structured output, model/effort and native resume throu
       onTool,
       onSession,
       onEvent: vi.fn(),
+      onAssistantMessage,
     });
     expect(result.summary).toBe('Verified');
+    expect(onAssistantMessage.mock.calls).toEqual([
+      [{ id: 'assistant-text', text: 'Checking the implementation.' }],
+    ]);
     expect(onTool).toHaveBeenCalledWith('read_review', {}, expect.any(String));
     expect(onSession).toHaveBeenCalledWith('native-session');
     expect(closed).toBe(true);

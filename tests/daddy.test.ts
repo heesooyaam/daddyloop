@@ -352,3 +352,38 @@ it('refreshes coordination tools while preserving saved history and the native r
     await f.close();
   }
 });
+
+it('shares intermediate assistant text with all clients, deduplicates the final answer and rejects late text after cancellation', async () => {
+  const f = daddyFixture();
+  let input!: SessionInput, finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  f.runtime.runSession.mockImplementation(async (value) => {
+    input = value;
+    value.onAssistantMessage?.({ id: 'first', text: 'User-facing progress' });
+    await gate;
+    return { status: 'completed', summary: 'User-facing progress', checkedHead: '' };
+  });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.daddy.chat(group.id, 'From terminal one');
+    f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(f.daddy.board(group.id).messages.at(-1)?.text).toBe('User-facing progress'),
+    );
+    finish();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id)[0].status).toBe('completed'));
+    expect(f.store.messages(group.id).filter((message) => message.sender === 'agent')).toHaveLength(
+      1,
+    );
+    await f.daddy.pause(group.id);
+    input.onAssistantMessage?.({ id: 'late', text: 'Stale reply' });
+    expect(f.store.messages(group.id).some((message) => message.text === 'Stale reply')).toBe(
+      false,
+    );
+  } finally {
+    finish();
+    await f.close();
+  }
+});

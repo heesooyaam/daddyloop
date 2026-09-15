@@ -116,7 +116,11 @@ export class TelegramWorkspace {
         'The session changed while recognizing the voice. Send it again to continue.',
       );
     const text = job.fileId ? '🎙️ ' + job.text : job.text!;
-    this.daddy.chat(group.id, text, receipt, job.route.workspace);
+    this.daddy.chat(group.id, text, receipt, job.route.workspace, {
+      channel: 'telegram',
+      chatId: job.route.chatId,
+      threadId: job.route.threadId,
+    });
     if (job.fileId)
       await this.api
         .send(
@@ -452,7 +456,11 @@ export class TelegramWorkspace {
     this.store.setSetting(this.creationKey(destination), null);
     if (destination.chatId === this.pair()?.chatId)
       this.store.setSetting('telegram.currentDaddy', group.id);
-    if (text) this.daddy.chat(group.id, text);
+    if (text)
+      this.daddy.chat(group.id, text, undefined, undefined, {
+        channel: 'telegram',
+        ...destination,
+      });
     const topic = await this.ensureTopic(group);
     if (topic && destination.chatId === topic.chatId && destination.threadId !== topic.threadId) {
       await this.api.send(destination, {
@@ -1315,7 +1323,10 @@ export class TelegramWorkspace {
         this.store.setSetting(nextKey, null);
         throw new Error(this.t('This selection expired. Choose the repository again.'));
       }
-      this.daddy.chat(groupId, text, receipt, next?.workspace);
+      this.daddy.chat(groupId, text, receipt, next?.workspace, {
+        channel: 'telegram',
+        ...destination,
+      });
       if (next) this.store.setSetting(nextKey, null);
       return true;
     } catch (error) {
@@ -1441,40 +1452,45 @@ export class TelegramWorkspace {
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
         const group = this.daddy.group(event.taskId),
-          message = this.store
-            .messages(group.id)
-            .find((message) => message.id === (event.data as { messageId: string }).messageId);
-        if (!message || message.sender === 'user') return;
-        const job = message.runId
-          ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
-          : undefined;
-        const board = this.daddy.board(group.id),
-          prefs = notificationPreferences(this.store);
-        const attention =
-          group.daddyState === 'needs_input' ||
-          (board.tasks.length > 0 && board.tasks.every((task) => task.state === 'complete'));
-        if (
-          job?.trigger !== 'user' &&
-          (!prefs.enabled || (prefs.mode === 'attention' && !attention))
-        )
-          return;
-        const id = `telegram:daddy:${message.id}`;
-        if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+          message = this.store.messageById(
+            group.id,
+            (event.data as { messageId: string }).messageId,
+          );
+        if (!message || !['user', 'agent'].includes(message.sender)) return;
         const topic = await this.ensureTopic(group);
         if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
           return;
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
-          : pair.chatId;
+          : { chatId: pair.chatId };
+        if (
+          message.origin?.channel === 'telegram' &&
+          message.origin.chatId === destination.chatId &&
+          message.origin.threadId === destination.threadId
+        )
+          return;
+        if (!topic && message.sender === 'agent') {
+          const job = message.runId
+            ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
+            : undefined;
+          const prefs = notificationPreferences(this.store);
+          if (job?.trigger !== 'user') {
+            if (!prefs.enabled) return;
+            if (prefs.mode === 'attention' && group.daddyState !== 'needs_input') {
+              const tasks = this.store.tasks().filter((task) => task.groupId === group.id);
+              if (!tasks.length || tasks.some((task) => task.state !== 'complete')) return;
+            }
+          }
+        }
+        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}`;
+        if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
         this.store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        const text = new TelegramText().add('👨‍💻 daddy', 'bold').add('\n\n').markdown(message.text);
-        const card: TelegramCard = {
-          ...text,
-          buttons: [
-            [{ text: this.t('Tasks and worker pool'), callback_data: `dad:open:${group.id}` }],
-          ],
-        };
-        await this.api.send(destination, card);
+        const text = new TelegramText()
+          .add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold')
+          .add('\n\n');
+        if (message.sender === 'user') text.add(message.text);
+        else text.markdown(message.text);
+        await this.api.send(destination, text);
         this.store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
       })
       .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
@@ -1484,11 +1500,9 @@ export class TelegramWorkspace {
     for (const group of this.daddy.sessions()) {
       if (this.room())
         this.onEvent({ id: 0, taskId: group.id, type: 'daddy.created', data: {}, at: now() });
-      const message = this.store
+      for (const message of this.store
         .messages(group.id)
-        .filter((message) => message.sender !== 'user')
-        .at(-1);
-      if (message)
+        .filter((message) => ['user', 'agent'].includes(message.sender)))
         this.onEvent({
           id: 0,
           taskId: group.id,
