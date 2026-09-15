@@ -111,6 +111,7 @@ export interface ReviewGroup {
 export interface Workspace {
   id: string;
   name: string;
+  /** Canonical Git URL or absolute path to a local Git/Arcadia source. */
   repoPath: string;
   scope: string;
   vcs: 'git' | 'arcadia';

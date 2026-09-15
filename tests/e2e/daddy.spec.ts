@@ -59,7 +59,7 @@ test('uses a one-request repository from a phone and resets the composer without
   const fields = page.locator('.daddy-composer .daddy-workspace-fields');
   await fields.getByRole('button', { name: 'Change folder for the next message' }).click();
   const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
-  await fields.getByLabel('Repository on this server').fill(alternate);
+  await fields.getByLabel('Repository URL or server folder').fill(alternate);
   await fields.getByRole('button', { name: 'Apply settings' }).click();
   await expect(
     fields.getByRole('button', { name: 'Change folder for the next message' }),

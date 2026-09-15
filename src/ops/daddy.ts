@@ -74,12 +74,13 @@ export function registerDaddyCommands(program: Command) {
   };
   const workspaces = program
     .command('workspaces')
-    .description('Register and choose workspace folders on the server');
+    .description('Register repository URLs or server folders as workspaces');
   workspaces.action(async () => print(await api('/workspaces')));
   workspaces
     .command('set')
     .argument('<workspace>')
-    .argument('<path>')
+    .argument('<source>', 'HTTPS/SSH repository URL or absolute server folder')
+    .option('--provider <module>', 'repository module for this source')
     .option('--scope <directory>')
     .option('--base <branch>')
     .option('--copies <mode>', 'session for automatic copies, pool for existing Arc mounts')
@@ -90,9 +91,10 @@ export function registerDaddyCommands(program: Command) {
         await api(`/workspaces/${selected.id}/defaults`, {
           name: selected.name,
           path,
+          provider: options.provider,
           scope: options.scope,
           base: options.base,
-          copyMode: options.copies ?? selected.copyMode,
+          copyMode: options.copies,
         }),
       );
     });
@@ -111,7 +113,7 @@ export function registerDaddyCommands(program: Command) {
     );
   workspaces
     .command('add')
-    .argument('<path>')
+    .argument('<source>', 'HTTPS/SSH repository URL or absolute server folder')
     .requiredOption('--name <name>')
     .option('--provider <module>', 'repository module for this remote')
     .option('--scope <directory>')
@@ -139,7 +141,7 @@ export function registerDaddyCommands(program: Command) {
     .option('--workspace <name>', 'workspace to use')
     .option('--title <title>')
     .option('--workers <count>', 'maximum simultaneous workers', '1')
-    .option('--repo <path>', 'repository for this session only')
+    .option('--repo <path>', 'repository URL or folder for this session only')
     .option('--scope <directory>', 'relative starting directory for this session')
     .option('--base <branch>', 'base branch for this session')
     .option('--copies <mode>', 'session for automatic copies, pool for existing Arc mounts')
@@ -165,7 +167,7 @@ export function registerDaddyCommands(program: Command) {
     .command('talk')
     .argument('<session>')
     .argument('<message>')
-    .option('--repo <path>', 'repository for this message only')
+    .option('--repo <path>', 'repository URL or folder for this message only')
     .option('--scope <directory>', 'relative starting directory for this message')
     .option('--base <branch>', 'base branch for this message')
     .description('Send a goal, ticket or question to daddy')

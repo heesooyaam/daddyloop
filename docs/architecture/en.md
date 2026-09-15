@@ -78,6 +78,8 @@ sequenceDiagram
 
 **Folder.** A named workspace points to the source repository and allowed scope. `Workspaces` prepares separate task copies; `ArcWorkspaces` handles Arcadia. In automatic mode the repository module prepares a session copy before the first model turn, then allocates workers their own copies. A worker changes its own copy, while the reviewer reads a pinned code version. Coordination has its own `DaddyWorkspace` copy. The user's source checkout is not switched, and uncommitted changes are preserved.
 
+For a Git URL, the hosting module validates the address and supplies authentication through `GitRepositoryTransport`. `Workspaces` asks Git for the default branch and commit, fetches that commit into a task-owned Git database, then creates a worktree. The next task gets a separate database and branch; retries reuse the existing copy. A local Git source is read without fetching into it. [The source-to-copy diagram](../workspaces/en.md#one-source-separate-workers) shows the separation.
+
 **Settings.** The agent profile and instructions are saved with the queued run. Changing the default model later leaves that waiting run's settings intact. `AgentRegistry` selects the adapter by `profile.engine`; individual model names do not control scheduler behavior.
 
 **Result.** The agent returns a status, report and the commit it worked against. `Engine` checks these against the task and repository. A “done” message is insufficient: an unfinished review, for example, leaves the task open.
@@ -207,6 +209,6 @@ Failures follow the same rules:
 - **A write already reached the repository:** pausing does not remove the comment or undo the push. The service checks the external result before continuing.
 - **Backup moved to another host:** application data and working files move, while unfinished tasks restore paused. Conversations inside the CLIs start afresh; see [backups](../backups/en.md).
 
-Deleting a managed session first cancels and waits for its runs. The repository module archives and verifies its results, then removes its owned copies. A failed export keeps the copies. See [the Arcadia lifecycle](../arcadia/en.md).
+Deleting a managed session first cancels and waits for its runs. The repository module archives and verifies its results, then removes its owned copies. A failed export keeps the copies. See [sources, copies and deletion](../workspaces/en.md) and [the Arcadia lifecycle](../arcadia/en.md).
 
 Code: [cancellation, revision changes and recovery](../../src/core/engine.ts), [coordinator recovery](../../src/core/daddy.ts), [resource checks](../../src/core/resources.ts). [buildApp()](../../src/server/app.ts) assembles all components.

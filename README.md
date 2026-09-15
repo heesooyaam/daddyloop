@@ -15,7 +15,7 @@ A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he a
 You need a **Linux server** with access to your repositories and an account for your chosen agent. Run this on that server:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
 ```
 
 Arrows select a module; Space checks it. Codex and GitHub start checked. Add Claude, GitLab or Arcadia if you need them. The installer provides the selected engines, the `daddy` CLI, local voice recognition and a persistent background service. No manual tmux setup.
@@ -25,7 +25,7 @@ For Codex and GitHub:
 ```bash
 daddy auth agent codex
 daddy auth github
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/your-team/app --name App
 daddy
 ```
 
@@ -35,7 +35,7 @@ In the CLI: **`/new` → App → your task**. Or hand it over directly:
 daddy new --workspace App "Fix duplicate charges. Test repeated requests."
 ```
 
-A **workspace** is a familiar repository folder, such as App. A **session** is one job for daddy: one conversation with its own crew. You can create many sessions in App. Workers receive separate working copies; choosing another folder for one task keeps your workspace defaults intact.
+A **workspace** is a saved Git repository URL or source folder, such as App. A **session** is one job for daddy: one conversation with its own crew. You can create many sessions in App. Workers receive separate working copies; choosing another folder for one task keeps your workspace defaults intact.
 
 [Installation walkthrough](docs/start/en.md) · [Workspaces and folders](docs/workspaces/en.md) · [Your first task](docs/tasks/en.md)
 
@@ -148,4 +148,4 @@ Agents share execution, model catalogue and usage contracts. Repository modules 
 
 Every guide has `docs/<topic>/en.md` and `ru.md`. Screenshots use isolated fixtures; the Telegram card illustrates the workflow. [Updating the media](docs/contributing/en.md#reproduce-the-visuals).
 
-[Release 0.18.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.18.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Release 0.19.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.19.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

@@ -1,3 +1,4 @@
+import { RepositoryModuleField } from './repository-module.js';
 import { useRef, useState, useEffect } from 'react';
 import { Check, ChevronDown, FolderGit2, FolderOpen, LoaderCircle, RotateCcw } from 'lucide-react';
 import type { DaddyApi } from '../client/daddy.js';
@@ -112,9 +113,9 @@ export function WorkspaceFields({
               {t(
                 value
                   ? compact
-                    ? 'Folder for the next message'
-                    : 'Folder for this session'
-                  : 'Workspace folder',
+                    ? 'Repository for the next message'
+                    : 'Repository for this session'
+                  : 'Workspace source',
               )}
             </span>
             <code>
@@ -153,7 +154,7 @@ export function WorkspaceFields({
           </button>
         </div>
       )}
-      {!editing && !compact && copyMode && (
+      {!editing && !compact && workspace.vcs === 'arcadia' && copyMode && (
         <label className="daddy-toggle">
           <input
             type="checkbox"
@@ -197,9 +198,9 @@ export function WorkspaceFields({
               )}
             </p>
             <label style={picking ? { display: 'none' } : undefined}>
-              {t('Repository folder')}
+              {t('Repository URL or server folder')}
               <input
-                aria-label={t('Repository on this server')}
+                aria-label={t('Repository URL or server folder')}
                 value={draft.path ?? ''}
                 onChange={(event) => setDraft({ path: event.target.value })}
               />
@@ -217,7 +218,7 @@ export function WorkspaceFields({
             {picking && (
               <FolderBrowser
                 api={api}
-                initialPath={draft.path}
+                initialPath={/^(\/|~)/.test(draft.path ?? '') ? draft.path : ''}
                 onSelect={(path) => {
                   setDraft({ path });
                   setPicking(false);
@@ -225,6 +226,11 @@ export function WorkspaceFields({
                 onCancel={() => setPicking(false)}
               />
             )}
+            <RepositoryModuleField
+              api={api}
+              value={draft.provider}
+              onChange={(provider) => setDraft({ ...draft, provider })}
+            />
             <details className="daddy-advanced-settings">
               <summary>
                 <ChevronDown size={15} />

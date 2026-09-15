@@ -1,3 +1,4 @@
+import { parseGitSource } from '../../modules/repositories/git-source.js';
 import { createReadStream, createWriteStream } from 'node:fs';
 import {
   chmod,
@@ -47,7 +48,14 @@ export const manifestSchema = z
     sources: z.array(
       z.object({
         id: z.string().regex(/^[a-f0-9]{20}$/),
-        path: z.string().startsWith('/'),
+        path: z.string().refine((value) => {
+          if (value.startsWith('/')) return !value.includes('\0');
+          try {
+            return !!parseGitSource(value);
+          } catch {
+            return false;
+          }
+        }, 'Expected an absolute source path or a safe Git repository URL'),
         vcs: z.enum(['git', 'arcadia']),
         bundle: safePath.optional(),
         head: z

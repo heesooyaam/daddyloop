@@ -2,29 +2,49 @@
 
 # Workspaces, sessions and working copies
 
-| Name      | Meaning                                                                                |
-| --------- | -------------------------------------------------------------------------------------- |
-| Workspace | A named source repository on this server: path, optional subdirectory and base branch. |
-| Session   | One conversation with daddy, its tasks and worker pool.                                |
-| Task      | One work item assigned to a worker.                                                    |
+| Name      | Meaning                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------- |
+| Workspace | A named repository source: Git URL or server folder, optional subdirectory and base branch. |
+| Session   | One conversation with daddy, its tasks and worker pool.                                     |
+| Task      | One work item assigned to a worker.                                                         |
 
 `Work` can mean `~/arcadia2` on one server and `~/arcadia` on another. These defaults belong to the host. Create as many sessions and tasks as needed within a workspace.
 
 ```bash
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/acme/app --name App
+daddy workspaces add git@gitlab.com:team/service.git --name Service --provider gitlab
+daddy workspaces add ~/work/local-app --name Local
 daddy workspaces add ~/arcadia2 --name Work --base trunk
 daddy workspaces set Work ~/arcadia --base trunk
 daddy workspaces discover
 daddy workspaces browse
 ```
 
-For a self-hosted Git service, select its module explicitly if necessary:
+For a company GitLab, choose the module explicitly:
 
 ```bash
-daddy workspaces add ~/work/app --name App --provider gitlab
+daddy workspaces add https://code.example.com/team/app --name Company --provider gitlab
 ```
 
 The corresponding repository module must be enabled. Arcadia also needs [its host setup](../arcadia/en.md).
+
+## One source, separate workers
+
+No manual clone is needed for a URL workspace. Save the address in **Workspaces → Add workspace → Repository URL or server folder**. In Telegram: **Workspaces → Add workspace**, choose the service, send the address, then the name.
+
+```mermaid
+flowchart TB
+  S["Workspace source<br/>Git URL / local Git / Arcadia mount"] -->|"Pinned starting commit"| D["daddy's own copy"]
+  S -->|"Task A"| A["Worker A's copy and branch"]
+  S -->|"Task B"| B["Worker B's copy and branch"]
+  A -->|"Commit for review"| R["Separate review snapshot"]
+```
+
+Before the first model turn, the service prepares daddy's copy. Each assigned task gets its own worker copy; retries and fixes reuse it. Two workers never share a writable folder. A task created later resolves the starting branch again; an existing task keeps its pinned commit.
+
+For Git URLs, the service reads the remote's default branch, fetches its commit into a private Git database for the task, and creates a worktree. This gives each task an independent checkout without cloning every branch. HTTPS uses the hosting module's token when configured, or the server's Git credentials; SSH uses the server's SSH setup and preserves SSH for pushes. Public repositories need no token for cloning. PRs and reviews still need the service's GitHub/GitLab API credentials. Tokens are never part of the URL.
+
+For Arcadia, register one existing mount, such as `~/arcadia`. The service creates separate mounts sharing the configured object store; it does not switch the source mount's branch. [Arcadia setup](../arcadia/en.md).
 
 ## Change the directory for one session or task
 
@@ -56,7 +76,7 @@ In **Workspaces**, names, repository types and paths are separate. A card opens 
 
 ![Saved workspaces](../media/en/daddy-workspaces.png)
 
-In Telegram and the interactive CLI, use `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.
+In Telegram and the interactive CLI, use `/repo https://github.com/acme/app` or `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.
 
 ## Automatic Arcadia copies
 
@@ -66,4 +86,10 @@ Arc workspaces use automatic session copies by default. The source can stay at `
 
 Git workers get managed working copies; Arcadia workers get leased mounts. The source branch and local changes remain in place. Uncommitted source edits are not copied into the worker's new checkout. A relative scope selects the starting directory inside the managed copy, not a second repository.
 
-The source repository needs an appropriate remote and a committed base revision. A workspace name is not permission to use an unrelated directory. Repository roots and scope boundaries are checked on the server.
+A local Git source needs an appropriate remote and a committed base revision. Its base is read locally; the service does not fetch into your checkout. URL sources fetch from the server. A workspace name is not permission to use an unrelated directory. Repository roots and scope boundaries are checked on the server.
+
+## Deleting a Git session
+
+Use **Delete session** or `daddy delete SESSION_ID --yes`. The service stops and waits for that session's runs, saves and verifies an archive, then removes its copies. Other sessions and source folders stay in place.
+
+The archive is under `<dataDir>/session-archives/<session>/git-<module>/g<generation>/`. It contains the conversation, task results, Git databases, indexes and working files, including untracked files and unpushed commits. The archive stays on disk and is included in backups. Automatic export is limited to 2 GiB per module and checks free disk space. If export fails, ownership changes or files change during export, deletion stops and the remaining copies are preserved.

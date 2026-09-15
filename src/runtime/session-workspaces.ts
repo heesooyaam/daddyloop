@@ -1,6 +1,7 @@
 import type { ReviewGroup } from '../core/types.js';
 import type { SessionWorkspaceBackend, SessionWorkspaceContext } from '../modules/contracts.js';
 import type { RepositoryRegistry } from '../modules/repositories/registry.js';
+import { join } from 'node:path';
 
 /** The coordinator only sees this lifecycle; repository modules own native copies. */
 export class SessionWorkspaces {
@@ -11,8 +12,11 @@ export class SessionWorkspaces {
   ) {}
   supports(group: Pick<ReviewGroup, 'workspace'>) {
     return (
-      group.workspace?.copyMode === 'session' &&
-      !!this.repositories.get(group.workspace.provider).sessionWorkspace
+      !!group.workspace &&
+      group.workspace.copyMode !== 'pool' &&
+      this.repositories
+        .list()
+        .some((module) => module.id === group.workspace!.provider && !!module.sessionWorkspace)
     );
   }
   private backend(id: string) {
@@ -55,6 +59,11 @@ export class SessionWorkspaces {
       const result = await this.backend(module.id)!.remove(group);
       if (result.archivePath) archives.push(result.archivePath);
     }
-    return { archivePath: archives[0] };
+    return {
+      archivePath:
+        archives.length > 1
+          ? join(this.context.dataDir, 'session-archives', group.id)
+          : archives[0],
+    };
   }
 }

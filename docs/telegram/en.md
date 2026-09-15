@@ -40,3 +40,5 @@ The session card opens **Instructions for this session**. `/instructions daddy <
 After a successful callback-button action sends a replacement message, the bot deletes the clicked card. Failed actions keep the old card for retry; messages in another topic do not remove it. Link buttons open their URL directly and do not notify the bot of a click.
 
 For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session card offers **Delete session** with confirmation; the service archives its results and removes its copies. See [Arcadia](../arcadia/en.md).
+
+To register a repository from your phone: **Workspaces → Add workspace → GitHub/GitLab**, send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md).

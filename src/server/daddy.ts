@@ -11,6 +11,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   {
     const prefix = '/api/workspaces';
     app.get(prefix, async () => daddy.workspaces.list());
+    app.get(`${prefix}/modules`, async () => daddy.workspaces.modules());
     app.get(`${prefix}/suggestions`, async () => daddy.workspaces.suggestions());
     app.get<{ Querystring: { path?: string } }>(`${prefix}/directories`, async (request) =>
       daddy.workspaces.browse(request.query.path),

@@ -1,53 +1,27 @@
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  writeFileSync,
+  readFileSync,
+  lstatSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { AppError, type Task, type Role, type TicketRef } from '../core/types.js';
-import { credential, redact, rememberSecret } from '../core/security.js';
+import { git } from './git.js';
+export { git } from './git.js';
+import { isGitAddress } from '../modules/repositories/git-source.js';
+import { allRepositories } from '../modules/repositories/index.js';
+import type { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { ArcWorkspaces } from './arc-workspaces.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 
-export async function git(
-  args: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv = {},
-  signal?: AbortSignal,
-): Promise<string> {
-  return new Promise((resolveResult, reject) => {
-    const child = spawn(
-      'git',
-      ['-c', 'core.hooksPath=/dev/null', '-c', 'http.followRedirects=false', ...args],
-      {
-        cwd,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env },
-        signal,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-    let output = '',
-      error = '';
-    const timer = setTimeout(() => child.kill('SIGTERM'), 120000);
-    child.stdout.on('data', (chunk) => {
-      output += chunk.toString();
-      if (output.length > 8_000_000) child.kill('SIGTERM');
-    });
-    child.stderr.on('data', (chunk) => {
-      if (error.length < 16000) error += chunk.toString();
-    });
-    child.once('error', (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      code === 0
-        ? resolveResult(output.trim())
-        : reject(new AppError('git_failed', redact(error || `git exited ${code}`), 422));
-    });
-  });
-}
 export class Workspaces {
   private arc: ArcWorkspaces;
-  constructor(readonly dataDir: string) {
+  constructor(
+    readonly dataDir: string,
+    private repositories: RepositoryRegistry = allRepositories(),
+  ) {
     this.arc = new ArcWorkspaces(dataDir, new ArcBridge(dataDir));
   }
   protectSources(paths: () => string[]) {
@@ -55,6 +29,11 @@ export class Workspaces {
   }
   async validate(path: string, provider?: string) {
     if (provider === 'arcadia') return this.arc.validate(path);
+    if (isGitAddress(path)) {
+      const source = provider ? this.remote(path, provider).source : undefined;
+      if (!source) throw new AppError('repository_module_required', 'Choose a repository module');
+      return source.url;
+    }
     if (!path || !existsSync(path))
       throw new AppError(
         'repository_missing',
@@ -65,28 +44,90 @@ export class Workspaces {
     const root = await git(['rev-parse', '--show-toplevel'], absolute);
     return realpathSync(root);
   }
-  private env(task: Task) {
-    const url = new URL(task.pr?.cloneUrl ?? task.ticketRepository?.cloneUrl ?? '');
-    if (
-      url.protocol !== 'https:' ||
-      url.hostname !== task.ref.host ||
-      url.username ||
-      url.password ||
-      url.port
-    )
-      throw new AppError(
-        'clone_url_mismatch',
-        'Provider returned a clone URL outside the configured HTTPS host',
+  private remote(value: string, provider: string, host?: string) {
+    const transport = this.repositories.get(provider).git;
+    if (!transport)
+      throw new AppError('git_transport_unavailable', 'The repository module has no Git transport');
+    const source = transport.parse(value);
+    if (host && source.host !== host)
+      throw new AppError('clone_url_mismatch', 'The repository URL belongs to another host');
+    return { source, env: transport.environment(source) };
+  }
+  private pushAddress(task: Task) {
+    const address = task.pr?.cloneUrl ?? task.ticketRepository?.cloneUrl ?? '';
+    const target = this.remote(address, task.ref.provider, task.ref.host).source;
+    const preferred =
+      task.ticketRepository?.cloneUrl ?? (isGitAddress(task.repoPath) ? task.repoPath : undefined);
+    if (preferred) {
+      const source = this.remote(preferred, task.ref.provider, task.ref.host).source;
+      if (source.repo === target.repo) return source.url;
+    }
+    return address;
+  }
+  private env(task: Task, address = task.pr?.cloneUrl ?? task.ticketRepository?.cloneUrl ?? '') {
+    return this.remote(address, task.ref.provider, task.ref.host).env;
+  }
+  private sourceEnv(task: Task) {
+    return isGitAddress(task.repoPath) ? this.env(task, task.repoPath) : {};
+  }
+  private async initialize(task: Task, signal?: AbortSignal) {
+    if (!/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('Invalid task ID');
+    const root = resolve(this.dataDir, 'workspaces', task.id),
+      bare = join(root, 'objects.git');
+    mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+    const parent = resolve(this.dataDir, 'workspaces');
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    if (realpathSync(parent) !== join(realpathSync(this.dataDir), 'workspaces'))
+      throw new Error('The Git workspace directory was redirected');
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const expected = join(realpathSync(this.dataDir), 'workspaces', task.id);
+    if (realpathSync(root) !== expected) throw new Error('The Git workspace was redirected');
+    const ownerPath = join(root, 'owner.json');
+    if (existsSync(ownerPath)) {
+      const owner = JSON.parse(readFileSync(ownerPath, 'utf8'));
+      if (
+        lstatSync(ownerPath).isSymbolicLink() ||
+        owner.application !== 'daddyloop' ||
+        owner.taskId !== task.id ||
+        owner.source !== task.repoPath ||
+        (owner.groupId && owner.groupId !== task.groupId) ||
+        (owner.provider && owner.provider !== task.ref.provider)
+      )
+        throw new Error('Git workspace ownership changed; it was preserved');
+    } else {
+      if (existsSync(bare))
+        throw new Error('The Git workspace has no ownership record; it was preserved');
+      writeFileSync(
+        ownerPath,
+        JSON.stringify({
+          application: 'daddyloop',
+          taskId: task.id,
+          source: task.repoPath,
+          groupId: task.groupId,
+          provider: task.ref.provider,
+        }),
+        { mode: 0o600, flag: 'wx' },
       );
-    const token = credential(task.ref.provider, task.ref.host);
-    const user = task.ref.provider === 'github' ? 'x-access-token' : 'oauth2';
-    return {
-      GIT_CONFIG_COUNT: '2',
-      GIT_CONFIG_KEY_0: `http.${url.origin}/.extraHeader`,
-      GIT_CONFIG_VALUE_0: `Authorization: Basic ${rememberSecret(Buffer.from(`${user}:${token}`).toString('base64'))}`,
-      GIT_CONFIG_KEY_1: 'credential.helper',
-      GIT_CONFIG_VALUE_1: '',
-    };
+    }
+    if (
+      existsSync(bare) &&
+      (realpathSync(bare) !== join(expected, 'objects.git') || lstatSync(bare).isSymbolicLink())
+    )
+      throw new Error('The Git object store was redirected');
+    if (!existsSync(join(bare, 'HEAD'))) await git(['init', '--bare', bare], root, {}, signal);
+    return { root, bare };
+  }
+  private async verifyCopy(target: string, bare: string, signal?: AbortSignal) {
+    if (
+      lstatSync(target).isSymbolicLink() ||
+      realpathSync(target) !== join(realpathSync(resolve(bare, '..')), target.split('/').at(-1)!)
+    )
+      throw new Error('The Git working copy was redirected; it was preserved');
+    const common = await git(['rev-parse', '--git-common-dir'], target, {}, signal);
+    if (realpathSync(resolve(target, common)) !== realpathSync(bare))
+      throw new Error(
+        `The Git working copy belongs to another repository; it was preserved: ${target} (${common})`,
+      );
   }
   readPaths(task: Task): string[] {
     return task.ref.provider === 'arcadia'
@@ -99,21 +140,7 @@ export class Workspaces {
       git(args, cwd, env, signal);
     if (!task.revision || !task.pr)
       throw new AppError('revision_missing', 'Fetch the PR revision before preparing a workspace');
-    const root = join(this.dataDir, 'workspaces', task.id),
-      bare = join(root, 'objects.git');
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    if (!existsSync(bare)) {
-      await run(['init', '--bare', bare], root);
-      writeFileSync(
-        join(root, 'owner.json'),
-        JSON.stringify({
-          application: 'daddyloop',
-          taskId: task.id,
-          source: task.repoPath,
-        }),
-        { mode: 0o600 },
-      );
-    }
+    const { root, bare } = await this.initialize(task, signal);
     for (const sha of new Set([task.revision.head, task.revision.base, task.revision.start])) {
       if (!/^[a-f0-9]{40,64}$/i.test(sha))
         throw new AppError('invalid_sha', 'Provider returned an invalid commit SHA');
@@ -121,7 +148,11 @@ export class Workspaces {
         await run(['--git-dir', bare, 'cat-file', '-e', `${sha}^{commit}`], root);
       } catch {
         try {
-          await run(['--git-dir', bare, 'fetch', '--no-tags', '--', task.repoPath, sha], root);
+          await run(
+            ['--git-dir', bare, 'fetch', '--no-tags', '--', task.repoPath, sha],
+            root,
+            this.sourceEnv(task),
+          );
         } catch {
           await run(
             ['--git-dir', bare, 'fetch', '--no-tags', '--', task.pr.cloneUrl, sha],
@@ -138,6 +169,7 @@ export class Workspaces {
             root,
             `reviewer-${task.revision.head.slice(0, 12)}-${task.revision.start.slice(0, 8)}`,
           );
+    if (existsSync(target)) await this.verifyCopy(target, bare, signal);
     if (!existsSync(target))
       await run(
         ['--git-dir', bare, 'worktree', 'add', '--detach', target, task.revision.head],
@@ -173,6 +205,7 @@ export class Workspaces {
         await run(['checkout', '--detach', task.revision.head], target);
       }
     }
+    await this.verifyCopy(target, bare, signal);
     if (role === 'author') {
       task.authorWorktree = target;
       task.authorBaseHead = task.revision.head;
@@ -215,8 +248,8 @@ export class Workspaces {
     await run(['check-ref-format', `refs/heads/${task.pr.branch}`]);
     // An ordinary push cannot overwrite concurrent remote commits.
     await run(
-      ['push', '--porcelain', '--', task.pr.cloneUrl, `HEAD:refs/heads/${task.pr.branch}`],
-      this.env(task),
+      ['push', '--porcelain', '--', this.pushAddress(task), `HEAD:refs/heads/${task.pr.branch}`],
+      this.env(task, this.pushAddress(task)),
     );
     return { head, pushed: true };
   }
@@ -283,6 +316,48 @@ export class Workspaces {
         },
       };
     }
+    if (isGitAddress(repoPath)) {
+      const { source, env } = this.remote(repoPath, input.provider, input.host);
+      if (input.repo && input.repo !== source.repo)
+        throw new AppError(
+          'remote_mismatch',
+          'The ticket and workspace refer to different repositories',
+        );
+      if (base && (!/^[A-Za-z0-9_./-]+$/.test(base) || base.startsWith('-')))
+        throw new Error('Invalid base branch');
+      mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+      const output = await git(
+        ['ls-remote', '--symref', '--', source.url, 'HEAD', 'refs/heads/*'],
+        this.dataDir,
+        env,
+        session?.signal,
+      );
+      const defaultBranch = output.match(/^ref: refs\/heads\/(.+)\tHEAD$/m)?.[1];
+      const branch = base?.replace(/^refs\/heads\//, '') ?? defaultBranch;
+      if (!branch)
+        throw new AppError(
+          'base_missing',
+          'The remote has no default branch; choose a base branch',
+        );
+      const refs = new Map(
+        output
+          .split('\n')
+          .map((line) => line.split('\t'))
+          .filter(([sha]) => /^[a-f0-9]{40,64}$/.test(sha))
+          .map(([sha, ref]) => [ref, sha]),
+      );
+      const baseHead = refs.get(`refs/heads/${branch}`);
+      if (!baseHead)
+        throw new AppError(
+          'base_missing',
+          'The selected branch does not exist in the remote repository',
+        );
+      return {
+        repoPath,
+        ref: { ...input, repo: source.repo },
+        repository: { baseHead, baseBranch: branch, cloneUrl: source.url, branch: '' },
+      };
+    }
     const remotes = (await git(['remote'], repoPath)).split('\n').filter(Boolean);
     const remote = remotes.includes('origin')
       ? 'origin'
@@ -292,27 +367,11 @@ export class Workspaces {
     if (!remote)
       throw new AppError(
         'remote_missing',
-        'Configure a GitHub remote in this checkout before starting ticket work',
+        'Configure a Git remote in this checkout before starting ticket work',
       );
     const address = await git(['remote', 'get-url', remote], repoPath);
-    const scp = address.match(/^(?:git@)?([^:/]+):([^/][^\s]+)$/);
-    const url = new URL(scp ? `https://${scp[1]}/${scp[2]}` : address);
-    const repo = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
-    if (
-      !['https:', 'ssh:'].includes(url.protocol) ||
-      url.hostname !== input.host ||
-      !(
-        input.provider === 'gitlab'
-          ? /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/
-          : /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-      ).test(repo) ||
-      url.password ||
-      url.port
-    )
-      throw new AppError(
-        'remote_mismatch',
-        'The checkout must have a GitHub remote on the ticket’s configured host',
-      );
+    const { source } = this.remote(address, input.provider, input.host);
+    const repo = source.repo;
     if (base && (base.startsWith('-') || /[\r\n\0]/.test(base)))
       throw new Error('Invalid base revision');
     let symbolic: string | undefined;
@@ -342,7 +401,7 @@ export class Workspaces {
           repository: {
             baseHead,
             baseBranch,
-            cloneUrl: `https://${url.hostname}/${repo}.git`,
+            cloneUrl: source.url,
             branch: '',
           },
         };
@@ -359,22 +418,17 @@ export class Workspaces {
     if (task.ref.provider === 'arcadia') return this.arc.prepare(task, role, signal);
     if (!task.revision || !task.ticketRepository)
       throw new Error('Ticket repository is not initialized');
-    const root = join(this.dataDir, 'workspaces', task.id),
-      bare = join(root, 'objects.git');
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    const run = (args: string[], cwd = root) => git(args, cwd, {}, signal);
-    if (!existsSync(bare)) {
-      await run(['init', '--bare', bare]);
-      writeFileSync(
-        join(root, 'owner.json'),
-        JSON.stringify({ application: 'daddyloop', taskId: task.id, source: task.repoPath }),
-        { mode: 0o600 },
-      );
-    }
+    const { root, bare } = await this.initialize(task, signal);
+    const run = (args: string[], cwd = root, env: NodeJS.ProcessEnv = {}) =>
+      git(args, cwd, env, signal);
     try {
       await run(['--git-dir', bare, 'cat-file', '-e', `${task.revision.head}^{commit}`]);
     } catch {
-      await run(['--git-dir', bare, 'fetch', '--no-tags', '--', task.repoPath, task.revision.head]);
+      await run(
+        ['--git-dir', bare, 'fetch', '--no-tags', '--', task.repoPath, task.revision.head],
+        root,
+        this.sourceEnv(task),
+      );
     }
     const target =
       role === 'author'
@@ -407,6 +461,7 @@ export class Workspaces {
         ]);
       }
     }
+    await this.verifyCopy(target, bare, signal);
     const head = await run(['rev-parse', 'HEAD'], target);
     if (role === 'author') {
       if ((await run(['symbolic-ref', '--short', 'HEAD'], target)) !== task.ticketRepository.branch)

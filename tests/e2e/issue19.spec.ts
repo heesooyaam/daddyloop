@@ -128,12 +128,12 @@ test('starting a session focuses on the goal, and folder edits require apply or 
   expect((await goal.boundingBox())!.y).toBeLessThan(
     (await dialog.getByLabel('Workspace', { exact: true }).boundingBox())!.y,
   );
-  await expect(dialog.getByLabel('Repository on this server')).toHaveCount(0);
+  await expect(dialog.getByLabel('Repository URL or server folder')).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Change folder for this session' }).click();
   await expect(dialog.getByRole('button', { name: 'Start session', exact: true })).toBeDisabled();
   await expect(dialog.getByLabel('Base branch (optional)')).not.toBeVisible();
   await dialog
-    .getByLabel('Repository on this server')
+    .getByLabel('Repository URL or server folder')
     .fill(resolve('.daddyloop/e2e/not-a-repository'));
   await dialog.getByRole('button', { name: 'Apply settings' }).click();
   await expect(dialog.getByRole('alert')).toBeVisible();
@@ -184,7 +184,7 @@ test('folder navigation never submits a form and adding a workspace keeps the ne
   await expect(browser.getByLabel('Server directory')).toHaveValue(alternate);
   await browser.getByLabel('Server directory').press('Enter');
   await expect(browser.getByRole('button', { name: 'Select this folder' })).toBeEnabled();
-  await expect(page.getByLabel('Repository on this server')).toHaveValue('');
+  await expect(page.getByLabel('Repository URL or server folder')).toHaveValue('');
   expect(writes).toHaveLength(0);
   await browser.getByRole('button', { name: 'Open folder src', exact: true }).click();
   await expect(browser.getByRole('button', { name: 'Select this folder' })).toBeEnabled();
@@ -192,7 +192,7 @@ test('folder navigation never submits a form and adding a workspace keeps the ne
   await browser.getByRole('button', { name: 'Parent folder', exact: true }).click();
   await expect(browser.getByRole('button', { name: 'Select this folder' })).toBeEnabled();
   await browser.getByRole('button', { name: 'Select this folder' }).click();
-  await expect(page.getByLabel('Repository on this server')).toHaveValue(alternate);
+  await expect(page.getByLabel('Repository URL or server folder')).toHaveValue(alternate);
   await expect(browser).toHaveCount(0);
   expect(writes).toHaveLength(0);
   await page.getByRole('button', { name: 'Save workspace', exact: true }).click();
@@ -211,7 +211,7 @@ test('cancelling a pending folder preview keeps the previous selection', async (
   const original = await dialog.locator('.daddy-repository-summary code').textContent();
   await dialog.getByLabel('What should daddy do?').fill('Keep this goal after cancellation');
   await dialog.getByRole('button', { name: 'Change folder for this session' }).click();
-  await dialog.getByLabel('Repository on this server').fill(root);
+  await dialog.getByLabel('Repository URL or server folder').fill(root);
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
     release = resolve;

@@ -1,3 +1,5 @@
+import { GitSessionWorkspace } from './git-sessions.js';
+import { gitTransport } from './git-source.js';
 import { parseTicket } from './tickets.js';
 import type { RepositoryModule, SubmissionBackend, SubmissionContext } from '../contracts.js';
 import type { PRRef, Task } from '../../core/types.js';
@@ -67,6 +69,8 @@ export const githubModule: RepositoryModule = {
   id: 'github',
   name: 'GitHub',
   vcs: 'git',
+  sessionWorkspace: (context) => new GitSessionWorkspace(context, 'github'),
+  git: gitTransport('github', 'x-access-token', /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   acceptsTicket(input) {
     try {
       return parseTicket(input).kind === 'github_issue';
@@ -75,7 +79,12 @@ export const githubModule: RepositoryModule = {
     }
   },
   readTicket: (input, reader) => reader.readBuiltin(input),
-  matchesRepository: (input) => (input.vcs === 'git' ? 1 : 0),
+  matchesRepository: (input) =>
+    input.vcs === 'git' &&
+    (input.host === (process.env.DADDYLOOP_GITHUB_HOST || 'github.com') ||
+      input.remotes.includes('github'))
+      ? 10
+      : 0,
   parsePR(url) {
     const match = url.pathname.match(/^\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)\/?$/);
     if (

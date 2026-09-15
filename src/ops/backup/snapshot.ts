@@ -1,3 +1,4 @@
+import { isGitAddress, parseGitSource } from '../../modules/repositories/git-source.js';
 import { agentFactories } from '../../modules/agents/index.js';
 import { VERSION } from '../../version.js';
 import { createRepositories } from '../../modules/repositories/index.js';
@@ -216,6 +217,10 @@ export async function createBackup(dataDir: string, output: string, config: Conf
         builder.manifest.sources.push(source);
         if (info.vcs === 'arcadia') {
           source.warning = 'Arcadia source must be mounted and mapped on the destination host.';
+          continue;
+        }
+        if (isGitAddress(path)) {
+          source.remotes = [{ name: 'origin', url: parseGitSource(path).url }];
           continue;
         }
         if (!existsSync(path)) {

@@ -437,3 +437,69 @@ it('creates a session from a group topic and isolates its wizard from another to
     await f.close();
   }
 });
+
+it('registers a named remote workspace from Telegram with owner, topic and cancellation checks', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  let id = 900;
+  const message = (text: string, user = 7, thread?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: user },
+      chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+      message_thread_id: thread,
+    },
+  });
+  const click = (data: string, user = 7, thread?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: user },
+      message: {
+        chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+        message_thread_id: thread,
+      },
+    },
+  });
+  try {
+    await bot.handle(click('dad:add-workspace'));
+    expect(
+      sent
+        .at(-1)
+        .buttons.flat()
+        .some((button: any) => button.callback_data === 'dad:add:gitlab'),
+    ).toBe(true);
+    await bot.handle(click('dad:add:gitlab', 7, 12));
+    await bot.handle(message('https://code.example.test/team/sub/app', 99, 12));
+    await bot.handle(message('https://code.example.test/team/sub/app', 7, 12));
+    expect(sent.at(-1).text).toContain('Workspace name');
+    await bot.handle(message('Company', 7, 13));
+    expect(f.workspaces.list().some((workspace) => workspace.name === 'Company')).toBe(false);
+    await bot.handle(message('Company', 7, 12));
+    expect(f.workspaces.list().find((workspace) => workspace.name === 'Company')).toMatchObject({
+      provider: 'gitlab',
+      repoPath: 'https://code.example.test/team/sub/app.git',
+      copyMode: 'session',
+    });
+    await bot.handle(click('dad:add:github'));
+    await bot.handle(message('/cancel'));
+    expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});

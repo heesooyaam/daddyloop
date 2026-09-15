@@ -9,6 +9,7 @@ import type { Store } from './store.js';
 import { git } from '../runtime/workspaces.js';
 import { allRepositories } from '../modules/repositories/index.js';
 import type { RepositoryRegistry } from '../modules/repositories/registry.js';
+import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 
 export const workspaceSchema = z
@@ -97,6 +98,42 @@ export class WorkspaceRegistry {
   }
   private async inspect(input: z.infer<typeof workspaceSchema>): Promise<Workspace> {
     input = workspaceSchema.parse(input);
+    if (isGitAddress(input.path)) {
+      const parsed = parseGitSource(input.path);
+      const module = this.repositories.forRepository(
+        { vcs: 'git', host: parsed.host, remotes: [] },
+        input.provider,
+      );
+      if (!module.git)
+        throw new AppError(
+          'git_transport_unavailable',
+          'The repository module has no Git transport',
+          422,
+        );
+      const source = module.git.parse(input.path);
+      if (input.copyMode === 'pool')
+        throw new AppError(
+          'invalid_copy_mode',
+          'The mount pool is available only for Arcadia',
+          400,
+        );
+      if (input.base && (!/^[A-Za-z0-9_./-]+$/.test(input.base) || input.base.startsWith('-')))
+        throw new Error('Invalid base branch');
+      return {
+        id: randomUUID(),
+        name: input.name,
+        repoPath: source.url,
+        scope: workspaceScope(input.scope ?? ''),
+        vcs: 'git',
+        provider: module.id,
+        host: source.host,
+        repo: source.repo,
+        base: input.base || undefined,
+        copyMode: 'session',
+        createdAt: now(),
+        updatedAt: now(),
+      };
+    }
     const path = this.path(input.path);
     let root = path,
       vcs: Workspace['vcs'] | undefined;
@@ -176,25 +213,28 @@ export class WorkspaceRegistry {
           'Add a GitHub or GitLab remote before registering this workspace',
           422,
         );
-      const address = await git(['remote', 'get-url', remote], root),
-        scp = address.match(/^(?:git@)?([^:/]+):([^/\s][^\s]*)$/);
-      const url = new URL(scp ? `ssh://git@${scp[1]}/${scp[2]}` : address);
-      if (
-        !['ssh:', 'https:'].includes(url.protocol) ||
-        url.password ||
-        url.port ||
-        (url.protocol === 'https:' && url.username)
-      )
+      const address = await git(['remote', 'get-url', remote], root);
+      const parsed = parseGitSource(address);
+      const module = this.repositories.forRepository(
+        { vcs: 'git', host: parsed.host, remotes },
+        input.provider,
+      );
+      if (!module.git)
         throw new AppError(
-          'project_remote_invalid',
-          'Use an SSH or HTTPS Git remote without embedded credentials',
+          'git_transport_unavailable',
+          'The repository module has no Git transport',
           422,
         );
-      host = url.hostname;
-      repo = url.pathname.replace(/^\//, '').replace(/\.git$/, '');
-      if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(repo))
-        throw new Error('Unsupported repository name');
-      provider = this.repositories.forRepository({ vcs: 'git', host, remotes }, input.provider).id;
+      const source = module.git.parse(address);
+      host = source.host;
+      repo = source.repo;
+      provider = module.id;
+      if (input.copyMode === 'pool')
+        throw new AppError(
+          'invalid_copy_mode',
+          'The mount pool is available only for Arcadia',
+          400,
+        );
     } else
       throw new AppError(
         'project_repository_missing',
@@ -220,10 +260,20 @@ export class WorkspaceRegistry {
       host,
       repo,
       base: input.base || (vcs === 'arcadia' ? 'trunk' : undefined),
-      ...(vcs === 'arcadia' ? { copyMode: input.copyMode ?? ('session' as const) } : {}),
+      copyMode: input.copyMode ?? 'session',
       createdAt: now(),
       updatedAt: now(),
     };
+  }
+  private sameSource(value: string, saved: string) {
+    if (isGitAddress(value) || isGitAddress(saved))
+      return (
+        isGitAddress(value) &&
+        isGitAddress(saved) &&
+        parseGitSource(value).url === parseGitSource(saved).url
+      );
+    const path = this.path(value);
+    return path === saved || path.startsWith(saved + sep);
   }
   async selection(workspace: Workspace, input?: RepositorySelection): Promise<Workspace> {
     this.repositories.get(workspace.provider);
@@ -232,14 +282,11 @@ export class WorkspaceRegistry {
         ? { ...workspace, copyMode: workspace.copyMode ?? 'session' }
         : { ...workspace };
     input = repositorySelectionSchema.parse(input);
-    const sameSource =
-      !input.path ||
-      this.path(input.path) === workspace.repoPath ||
-      this.path(input.path).startsWith(workspace.repoPath + sep);
+    const sameSource = !input.path || this.sameSource(input.path, workspace.repoPath);
     const selected = await this.inspect({
       provider: input.provider ?? (sameSource ? workspace.provider : undefined),
       name: workspace.name,
-      copyMode: input.copyMode ?? workspace.copyMode,
+      copyMode: input.copyMode ?? (sameSource ? workspace.copyMode : undefined),
       path: input.path ?? workspace.repoPath,
       scope: input.scope ?? (input.path ? undefined : workspace.scope),
       // A different repository must not inherit a branch name from another VCS.
@@ -265,12 +312,11 @@ export class WorkspaceRegistry {
   }
   async register(input: z.infer<typeof workspaceSchema>, id?: string): Promise<Workspace> {
     const previous = id ? this.get(id) : undefined;
-    const path = this.path(input.path);
-    const sameSource =
-      previous && (path === previous.repoPath || path.startsWith(previous.repoPath + sep));
+    const sameSource = previous && this.sameSource(input.path, previous.repoPath);
     const workspace = await this.inspect({
       ...input,
       provider: input.provider ?? (sameSource ? previous.provider : undefined),
+      copyMode: input.copyMode ?? (sameSource ? previous.copyMode : undefined),
     });
     const existing = id
       ? this.get(id)
@@ -317,11 +363,14 @@ export class WorkspaceRegistry {
       })
       .map((path) => ({ name: basename(path), path }));
   }
-  get(id: string) {
+  get(id: string): Workspace {
     const workspace = this.store.workspace(id);
     return workspace.vcs === 'arcadia'
-      ? { ...workspace, copyMode: workspace.copyMode ?? ('session' as const) }
+      ? { ...workspace, copyMode: workspace.copyMode ?? 'session' }
       : workspace;
+  }
+  modules() {
+    return this.repositories.list().map(({ id, name, vcs }) => ({ id, name, vcs }));
   }
   list() {
     return this.store

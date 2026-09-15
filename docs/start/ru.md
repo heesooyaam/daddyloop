@@ -7,7 +7,7 @@
 ## 1. Установка
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
 ```
 
 Выбирай модули стрелками **↑/↓**, переключай галочку **пробелом**, подтверждай **Enter**. Изначально выбраны Codex и GitHub. GitLab работает через REST API, Arcadia — через уже установленные корпоративные инструменты. Установщик скачивает выбранные CLI, ставит Node и локальную модель распознавания речи, затем запускает сервис systemd. Настраивать tmux не нужно.
@@ -15,7 +15,7 @@ curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/ins
 Без интерактивных вопросов:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash -s -- --yes --modules codex,github,arcadia
 ```
 
 Поддерживаются Linux x64 и ARM64. Нужны curl и tar; Git скрипт умеет поставить через apt. Для Git и постоянного сервиса может понадобиться одноразовый доступ через sudo. На macOS и Windows можно пользоваться сайтом. Управление сервисом описано в [эксплуатации](../operations/ru.md).
@@ -44,10 +44,10 @@ Codex предложит вход по коду устройства. GitHub —
 ## 3. Воркспейс
 
 ```bash
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/your-team/app --name App
 ```
 
-Это репозиторий на сервере, а не задача. Папки сервера можно выбирать и на сайте. Подробнее — [воркспейсы](../workspaces/ru.md).
+Так ты сохраняешь адрес источника. При начале работы daddy подготовит копию каждому воркеру. Можно указать и существующую папку Git или маунт Arcadia. Подробнее — [воркспейсы](../workspaces/ru.md).
 
 ## 4. Первая задача
 

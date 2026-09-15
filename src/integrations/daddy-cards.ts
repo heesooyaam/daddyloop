@@ -41,7 +41,7 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[]): Telegr
       .add(
         '\n\n' +
           t(
-            'Workspaces are folders on the server. daddy creates separate working copies for workers.',
+            'A workspace is a repository URL or a source folder. daddy gives every worker a separate copy.',
           ),
       );
   return {
@@ -50,7 +50,8 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[]): Telegr
       ...workspaces
         .slice(0, 20)
         .map((workspace) => [{ text: workspace.name, callback_data: `dad:new:${workspace.id}` }]),
-      [{ text: '＋ ' + t('Find workspaces on the server'), callback_data: 'dad:discover' }],
+      [{ text: '＋ ' + t('Add workspace'), callback_data: 'dad:add-workspace' }],
+      [{ text: '📁 ' + t('Find workspaces on the server'), callback_data: 'dad:discover' }],
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
   };

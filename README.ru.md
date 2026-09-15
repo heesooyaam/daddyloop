@@ -15,7 +15,7 @@
 Нужен **Linux-сервер** с доступом к твоим репозиториям и аккаунтом выбранного агента. Выполни на нём:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
 ```
 
 Стрелки — выбрать модуль, пробел — поставить галочку. Codex и GitHub отмечены сразу; Claude, GitLab и Arcadia можно добавить по желанию. Установщик поставит выбранные движки, CLI `daddy`, локальное распознавание голосовых и фоновый сервис. Вручную поднимать tmux не нужно.
@@ -25,7 +25,7 @@ curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.18.0/ins
 ```bash
 daddy auth agent codex
 daddy auth github
-daddy workspaces add ~/work/app --name App
+daddy workspaces add https://github.com/your-team/app --name App
 daddy
 ```
 
@@ -35,7 +35,7 @@ daddy
 daddy new --workspace App "Исправь повторные списания. Проверь повторы запросов."
 ```
 
-**Воркспейс** — знакомая папка, например App. **Сессия** — отдельное дело папочки: один разговор и своя бригада. В App можно завести сколько угодно разных сессий. Воркеры получают отдельные рабочие копии; папку для очередной задачи можно поменять, сохранив дефолт.
+**Воркспейс** — сохранённый URL репозитория Git или исходная папка, например App. **Сессия** — отдельное дело папочки: один разговор и своя бригада. В App можно завести сколько угодно разных сессий. Воркеры получают отдельные рабочие копии; папку для очередной задачи можно поменять, сохранив дефолт.
 
 [Установка по шагам](docs/start/ru.md) · [Воркспейсы и папки](docs/workspaces/ru.md) · [Первая задача](docs/tasks/ru.md)
 
@@ -148,4 +148,4 @@ daddy up
 
 Все инструкции ведём парами `docs/<тема>/en.md` и `ru.md`. Картинки показывают изолированные примеры; Telegram-карточка — иллюстрация сценария. [Как обновить медиа](docs/contributing/ru.md#воспроизведение-картинок).
 
-[Релиз 0.18.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.18.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Релиз 0.19.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.19.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

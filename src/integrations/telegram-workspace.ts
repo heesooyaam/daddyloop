@@ -21,6 +21,7 @@ import { instructionCommand, instructionLines } from '../client/instructions.js'
 import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
 import { findPreset, selectPreset, presetLines } from '../client/presets.js';
+import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
@@ -471,6 +472,9 @@ export class TelegramWorkspace {
   private repoKey(destination: Destination, groupId: string) {
     return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
   }
+  private registrationKey(destination: Destination) {
+    return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
+  }
   private async repository(choice: RepoChoice, browse = false) {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     this.store.db
@@ -517,7 +521,7 @@ export class TelegramWorkspace {
         ? [[button(this.t('Use workspace defaults'), { ...choice, input: undefined }, 'use')]]
         : []),
     ];
-    if (!choice.groupId && choice.workspace.copyMode) {
+    if (!choice.groupId && choice.workspace.vcs === 'arcadia' && choice.workspace.copyMode) {
       const mode = choice.input?.copyMode ?? choice.workspace.copyMode;
       title.add(
         '\n\n' +
@@ -539,9 +543,8 @@ export class TelegramWorkspace {
       ]);
     }
     if (browse) {
-      const listing = await this.daddy.workspaces.browse(
-        choice.input?.path ?? choice.workspace.repoPath,
-      );
+      const source = choice.input?.path ?? choice.workspace.repoPath;
+      const listing = await this.daddy.workspaces.browse(isGitAddress(source) ? undefined : source);
       if (listing.parent)
         buttons.push([
           button(
@@ -554,7 +557,9 @@ export class TelegramWorkspace {
         buttons.push([
           button(entry.name + ' →', { ...choice, input: { path: entry.path } }, 'browse'),
         ]);
-      title.add('\n\n' + this.t('You can also send /repo followed by an absolute server path.'));
+      title.add(
+        '\n\n' + this.t('You can also send /repo followed by a repository URL or server path.'),
+      );
     } else buttons.push([button(this.t('Browse server folders'), choice, 'browse')]);
     await this.api.send(choice.destination, { ...title, buttons });
   }
@@ -817,6 +822,44 @@ export class TelegramWorkspace {
       return true;
     }
     if (!data.startsWith('dad:')) return false;
+    if (data === 'dad:add-workspace') {
+      this.store.setSetting(this.registrationKey(destination), null);
+      await this.api.send(destination, {
+        ...new TelegramText()
+          .add('📦 ' + this.t('Add workspace'), 'bold')
+          .add('\n\n' + this.t('Choose the repository service.')),
+        buttons: [
+          ...this.daddy.workspaces
+            .modules()
+            .map((module) => [{ text: module.name, callback_data: `dad:add:${module.id}` }]),
+          [{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }],
+        ],
+      });
+      return true;
+    }
+    if (data.startsWith('dad:add:')) {
+      const module = this.daddy.workspaces.modules().find((module) => module.id === data.slice(8));
+      if (!module) throw new Error(this.t('Choose an enabled repository service.'));
+      this.store.setSetting(this.registrationKey(destination), {
+        provider: module.id,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      });
+      await this.api.send(destination, {
+        ...new TelegramText()
+          .add('📦 ' + module.name, 'bold')
+          .add(
+            '\n\n' +
+              this.t(
+                module.vcs === 'arcadia'
+                  ? 'Send the path of an existing Arcadia mount, for example ~/arcadia.'
+                  : 'Send an HTTPS or SSH repository URL, or an existing server folder.',
+              ),
+          ),
+        buttons: [[{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }]],
+      });
+      return true;
+    }
+    this.store.setSetting(this.registrationKey(destination), null);
     if (data === 'dad:group') {
       if (destination.chatId !== this.pair()?.chatId) throw new Error('Use the private bot chat');
       await this.setup();
@@ -1014,6 +1057,46 @@ export class TelegramWorkspace {
       }
       const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
       if (!text) return false;
+      const registrationKey = this.registrationKey(destination);
+      const registration = this.store.setting<{
+        provider: string;
+        path?: string;
+        expiresAt: string;
+      }>(registrationKey);
+      if (registration) {
+        if (registration.expiresAt <= now() || /^\/[a-z]+(?:\s|$)/i.test(text)) {
+          this.store.setSetting(registrationKey, null);
+          if (text === '/cancel') {
+            await this.api.send(
+              destination,
+              workspacePicker(this.locale(), this.daddy.workspaces.list()),
+            );
+            return true;
+          }
+        } else if (!registration.path) {
+          const path = isGitAddress(text) ? parseGitSource(text).url : text;
+          if (path.length > 4000 || (!isGitAddress(path) && !/^(\/|~\/)/.test(path)))
+            throw new Error(this.t('Send a repository URL or an absolute server path.'));
+          this.store.setSetting(registrationKey, { ...registration, path });
+          await this.api.send(destination, {
+            ...new TelegramText()
+              .add('📦 ' + this.t('Workspace name'), 'bold')
+              .add('\n\n' + this.t('Send a short name, for example Work or My app.')),
+            buttons: [[{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }]],
+          });
+          return true;
+        } else {
+          const workspace = await this.daddy.workspaces.register({
+            name: text,
+            path: registration.path,
+            provider: registration.provider,
+          });
+          this.store.setSetting(registrationKey, null);
+          await this.api.send(destination, workspacePicker(this.locale(), [workspace]));
+          return true;
+        }
+      }
+
       if (text === '/language') return await this.callback('language:show', destination);
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
