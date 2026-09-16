@@ -20,6 +20,7 @@ import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
 import type { RuntimeUpdaters, RuntimeUpdateOperation } from '../core/runtime-updater.js';
 import type { Daddy } from '../core/daddy.js';
 import { TelegramWorkspace } from './telegram-workspace.js';
+import { TelegramDelivery, deliveryStatus, type DeliveryOptions } from './telegram-delivery.js';
 import { daddyHome } from './daddy-cards.js';
 import type { Speech } from '../runtime/speech.js';
 import type { ResourceStatus } from '../core/types.js';
@@ -108,7 +109,9 @@ export class TelegramApi {
     messageId: number;
     replied: boolean;
     active: boolean;
+    deliveryManaged?: boolean;
   }>();
+  delivery?: TelegramDelivery;
   onCleanupError?: (error: unknown) => void;
   constructor(
     token: string,
@@ -156,7 +159,12 @@ export class TelegramApi {
             502,
           );
         }
-        let value: { ok: boolean; result?: T; description?: string };
+        let value: {
+          ok: boolean;
+          result?: T;
+          description?: string;
+          parameters?: { retry_after?: number };
+        };
         try {
           value = (await response.json()) as typeof value;
         } catch (error) {
@@ -174,10 +182,13 @@ export class TelegramApi {
             502,
           );
         if (!response.ok || !value.ok)
-          throw new AppError(
-            'telegram_error',
-            redact(value.description ?? `Telegram HTTP ${response.status}`),
-            502,
+          throw Object.assign(
+            new AppError(
+              'telegram_error',
+              redact(value.description ?? `Telegram HTTP ${response.status}`),
+              502,
+            ),
+            { retryAfter: value.parameters?.retry_after },
           );
         const navigation = this.navigation.getStore();
         const outgoing = body as { chat_id?: number; message_thread_id?: number };
@@ -222,6 +233,7 @@ export class TelegramApi {
       messageId: message.message_id,
       replied: false,
       active: true,
+      deliveryManaged: false,
     };
     let result: T;
     try {
@@ -229,7 +241,7 @@ export class TelegramApi {
     } finally {
       navigation.active = false;
     }
-    if (navigation.replied) {
+    if (navigation.replied && !navigation.deliveryManaged) {
       try {
         await this.call('deleteMessage', {
           chat_id: navigation.chatId,
@@ -297,11 +309,28 @@ export class TelegramApi {
     destination: number | { chatId: number; threadId?: number },
     content: string | TelegramCard,
     buttons?: TelegramButton[][],
+    delivery?: DeliveryOptions,
   ) {
     const chatId = typeof destination === 'number' ? destination : destination.chatId;
     const value = typeof content === 'string' ? new TelegramText().add(content) : content;
     const chunks = splitTelegramText(value);
     const keyboard = buttons ?? (value as TelegramCard).buttons;
+    if (this.delivery) {
+      const navigation = this.navigation.getStore();
+      const target = typeof destination === 'number' ? { chatId: destination } : destination;
+      const cleanup =
+        navigation?.active &&
+        target.chatId === navigation.chatId &&
+        target.threadId === navigation.threadId
+          ? { chatId: navigation.chatId, messageId: navigation.messageId }
+          : undefined;
+      if (cleanup) navigation!.deliveryManaged = true;
+      return this.delivery.send(
+        target,
+        { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
+        { ...delivery, deletePrevious: cleanup },
+      );
+    }
     let result: unknown;
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
@@ -368,6 +397,11 @@ export class Telegram {
     readonly username: string,
     private publicOrigin?: string,
   ) {
+    this.api.delivery = new TelegramDelivery(
+      engine.store,
+      this.api,
+      `${username}:${engine.store.setting('telegram.botId') ?? 'local'}`,
+    );
     this.api.onCleanupError = (error) =>
       this.engine.store.event('_system', 'telegram.card_cleanup_failed', {
         error: redact(error instanceof Error ? error.message : String(error)),
@@ -386,6 +420,7 @@ export class Telegram {
       configured: true,
       bot: this.username,
       paired: !!this.engine.store.setting('telegram.pairing'),
+      delivery: this.api.delivery?.status(),
       group: this.workspace?.room(),
       error:
         this.engine.store.setting('telegram.error') ??
@@ -405,6 +440,7 @@ export class Telegram {
     return this.engine.store.setting<Pairing>('telegram.pairing');
   }
   start() {
+    this.api.delivery?.start();
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
     this.currentUpdates();
@@ -634,10 +670,24 @@ export class Telegram {
         const pair = this.paired();
         if (this.stopped || !pair) return;
         const id = `telegram:runtime-update:${operation.engine}:${operation.id}`;
-        if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
-        store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-        await this.api.send(pair.chatId, runtimeOperationCard(this.locale(), operation));
-        store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+        if (
+          ['sent', 'superseded'].includes(
+            String(store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status),
+          )
+        )
+          return;
+        store.db
+          .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
+          .run(id, 'pending', now());
+        const result = await this.api.send(
+          pair.chatId,
+          runtimeOperationCard(this.locale(), operation),
+          undefined,
+          { key: id, notificationId: id },
+        );
+        store.db
+          .prepare('UPDATE notifications SET status=? WHERE id=?')
+          .run(deliveryStatus(result), id);
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
     void this.integrations?.updates.check(true).catch(() => {});
@@ -656,11 +706,25 @@ export class Telegram {
         const pair = this.paired();
         if (this.stopped || !pair || !enabled()) return;
         const id = `telegram:runtime:${notice.kind}:${notice.tool.id}:${notice.tool.installed}:${notice.kind === 'available' ? notice.tool.latest : notice.tool.changedFrom}`;
-        if (store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
-        store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
+        if (
+          ['sent', 'superseded'].includes(
+            String(store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status),
+          )
+        )
+          return;
+        store.db
+          .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
+          .run(id, 'pending', now());
         try {
-          await this.api.send(pair.chatId, updateCard(this.locale(), notice));
-          store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+          const result = await this.api.send(
+            pair.chatId,
+            updateCard(this.locale(), notice),
+            undefined,
+            { key: id, notificationId: id },
+          );
+          store.db
+            .prepare('UPDATE notifications SET status=? WHERE id=?')
+            .run(deliveryStatus(result), id);
         } catch (error) {
           store.setSetting('telegram.error', redact(String(error)));
         }
@@ -698,6 +762,7 @@ export class Telegram {
   async stop() {
     this.stopped = true;
     this.controller?.abort();
+    await this.api.delivery?.stop();
     this.engine.store.changes.off('event', this.onEvent);
     await this.polling;
     await this.notices;

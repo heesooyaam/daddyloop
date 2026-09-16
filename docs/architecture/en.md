@@ -207,10 +207,12 @@ Code-version checks solve a related problem: reviewing H1 does not verify a fix 
 Failures follow the same rules:
 
 - **Service restart:** the database keeps tasks, queues and history. Interrupted work is recorded as interrupted; the coordinator can inspect it and continue allowed steps.
-- **Low memory or disk:** new runs wait; active ones may be interrupted with their work preserved.
+- **Low memory or disk:** ordinary runs wait and active work is preserved. The monitor queues a separate bounded maintenance turn; measured recovery resumes only monitor-paused tasks. See [resource recovery](../operations/en.md#recovery-instead-of-a-silent-queue).
 - **A write already reached the repository:** pausing does not remove the comment or undo the push. The service checks the external result before continuing.
 - **Backup moved to another host:** application data and working files move, while unfinished tasks restore paused. Conversations inside the CLIs start afresh; see [backups](../backups/en.md).
 
 Deleting a managed session first cancels and waits for its runs. The repository module archives and verifies its results, then removes its owned copies. A failed export keeps the copies. See [sources, copies and deletion](../workspaces/en.md) and [the Arcadia lifecycle](../arcadia/en.md).
 
 Code: [cancellation, revision changes and recovery](../../src/core/engine.ts), [coordinator recovery](../../src/core/daddy.ts), [resource checks](../../src/core/resources.ts). [buildApp()](../../src/server/app.ts) assembles all components.
+
+Agent execution defaults to the service user on the host (`agentExecution: "host"`), including its DNS and local sockets. Explicit sandbox mode is separate from the workflow role. Telegram persists deliveries before sending, coalesces one agent turn into an editable card and retries failures independently of model execution. Topic names follow session rename events.

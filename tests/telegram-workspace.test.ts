@@ -481,9 +481,9 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
       sent
         .at(-1)
         .buttons.flat()
-        .some((button: any) => button.callback_data === 'dad:add:gitlab'),
+        .some((button: any) => button.callback_data === 'dad:workspace-module:gitlab'),
     ).toBe(true);
-    await bot.handle(click('dad:add:gitlab', 7, 12));
+    await bot.handle(click('dad:workspace-module:gitlab', 7, 12));
     await bot.handle(message('https://code.example.test/team/sub/app', 99, 12));
     await bot.handle(message('https://code.example.test/team/sub/app', 7, 12));
     expect(sent.at(-1).text).toContain('Workspace name');
@@ -495,7 +495,7 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
       repoPath: 'https://code.example.test/team/sub/app.git',
       copyMode: 'session',
     });
-    await bot.handle(click('dad:add:github'));
+    await bot.handle(click('dad:workspace-module:github'));
     await bot.handle(message('/cancel'));
     expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
   } finally {
@@ -589,6 +589,193 @@ it('mirrors a CLI-created session and live assistant messages to one topic witho
     finish();
     f.store.changes.off('event', listener);
     await bot.stop();
+    await f.close();
+  }
+});
+
+it('creates a task-named topic from /new, renames that topic and adds tasks without opening repository modules', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [],
+    native: { method: string; body: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method: string, body: any) => {
+      native.push({ method, body });
+      return { message_thread_id: 44 };
+    }),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const listener = (event: any) => bot.onEvent(event);
+  f.store.changes.on('event', listener);
+  let id = 1100;
+  const message = (text: string, user = 7): Update => ({
+    update_id: id++,
+    message: {
+      text,
+      message_id: id,
+      from: { id: user },
+      chat: { id: -10042, type: 'supergroup' },
+      message_thread_id: 44,
+    },
+  });
+  const click = (data: string, user = 7): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: user },
+      message: { chat: { id: -10042, type: 'supergroup' }, message_thread_id: 44 },
+    },
+  });
+  try {
+    await bot.handle(message('/new Fix the search timeout'));
+    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    const start = sent.at(-1).buttons[0][0].callback_data;
+    await bot.handle(click(start));
+    const group = f.daddy.sessions()[0];
+    expect(group.title).toBe('Fix the search timeout');
+    expect(native.find((call) => call.method === 'createForumTopic')?.body.name).toBe(group.title);
+    expect(f.store.messages(group.id)[0].text).toBe('Fix the search timeout');
+    await bot.handle(message('/rename Release search'));
+    await vi.waitFor(() =>
+      expect(
+        native.some(
+          (call) =>
+            call.method === 'editForumTopic' &&
+            call.body.name === 'Release search' &&
+            call.body.message_thread_id === 44,
+        ),
+      ).toBe(true),
+    );
+    expect(f.daddy.group(group.id).generation).toBe(group.generation);
+    await bot.handle(message('/rename Wrong owner', 99));
+    expect(f.daddy.group(group.id).title).toBe('Release search');
+    await bot.handle(click(`dad:add:${group.id}`));
+    expect(typeof sent.at(-1) === 'string' ? sent.at(-1) : sent.at(-1).text).toContain(
+      'More work for daddy',
+    );
+    expect(f.daddy.sessions()).toHaveLength(1);
+    expect(native.filter((call) => call.method === 'createForumTopic')).toHaveLength(1);
+    expect(sent.some((card) => card.text?.includes('Choose an enabled repository service'))).toBe(
+      false,
+    );
+  } finally {
+    f.store.changes.off('event', listener);
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('keeps Arc copy modes behind an explained settings screen (issue 19, item 12)', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  f.store.saveWorkspace({
+    ...f.workspace,
+    vcs: 'arcadia',
+    provider: 'arcadia',
+    copyMode: 'session',
+  });
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: 1 };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  let id = 1200;
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(click('dad:new'));
+    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    const buttons = sent.at(-1).buttons.flat();
+    expect(buttons.map((button: any) => button.text)).toEqual([
+      'Start session',
+      'Browse server folders',
+      '⚙️ Working copy settings',
+    ]);
+    await bot.handle(click(buttons[2].callback_data));
+    expect(sent.at(-1).text).toContain('an administrator must provide free Arcadia checkouts');
+    expect(sent.at(-1).buttons[0][0].text).toContain('recommended');
+    expect(f.daddy.sessions()).toHaveLength(0);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('retries topic creation after retry_after and delivers the saved conversation without another model turn', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const calls: string[] = [];
+  const api = {
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method: string) => {
+      calls.push(method);
+      if (method === 'createForumTopic' && calls.filter((name) => name === method).length === 1)
+        throw Object.assign(new Error('Rate limited'), {
+          name: 'AppError',
+          code: 'telegram_error',
+          retryAfter: 5,
+        });
+      return { message_thread_id: 61 };
+    }),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    message: 'Question saved while Telegram is down',
+  });
+  try {
+    vi.useFakeTimers();
+    // Use the real error class so a rejected create request can safely clear its native-write intent.
+    const { AppError } = await import('../src/core/types.js');
+    api.call = vi.fn(async (method: string) => {
+      calls.push(method);
+      if (method === 'createForumTopic' && calls.filter((name) => name === method).length === 1)
+        throw Object.assign(new AppError('telegram_error', 'Rate limited'), { retryAfter: 5 });
+      return { message_thread_id: 61 };
+    }) as TelegramApi['call'];
+    bot.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.filter((name) => name === 'createForumTopic')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(calls.filter((name) => name === 'createForumTopic')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(calls.filter((name) => name === 'createForumTopic')).toHaveLength(2);
+    expect(
+      sent.some(
+        (card) =>
+          card.text?.startsWith('👤 [user]') &&
+          card.text.includes('Question saved while Telegram is down'),
+      ),
+    ).toBe(true);
+    expect(f.store.setting('telegram.error')).toBeNull();
+    expect(f.daddy.group(group.id).title).toBe('Question saved while Telegram is down');
+  } finally {
+    await bot.stop();
+    vi.useRealTimers();
     await f.close();
   }
 });

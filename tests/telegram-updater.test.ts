@@ -22,7 +22,7 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
       });
     const body = JSON.parse(String(options?.body));
     if (body.text) sent.push(body);
-    return new Response(JSON.stringify({ ok: true, result: {} }));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length || 1 } }));
   });
   let selected = '/old/codex',
     finish!: () => void;
@@ -104,6 +104,9 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
     await updates.check(true);
     bot.start();
     await bot.handle(click('u:claude:install'));
+    await vi.waitFor(() =>
+      expect(sent.some((card) => card.text.includes('1.0.0 → 2.0.0'))).toBe(true),
+    );
     const confirmation = sent
       .at(-1)!
       .reply_markup!.inline_keyboard.flat()
@@ -113,10 +116,10 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
     await bot.handle(click(confirmation.callback_data!, 99));
     expect(install).not.toHaveBeenCalled();
     await bot.handle(click(confirmation.callback_data!));
-    expect(sent.at(-1)!.text).toContain('Обновление Claude Code началось');
+    await vi.waitFor(() => expect(sent.at(-1)!.text).toContain('Обновление Claude Code началось'));
     expect(updater.status().busy).toBe(true);
     await bot.handle(message('/tasks'));
-    expect(sent.at(-1)!.text).toContain('daddy');
+    await vi.waitFor(() => expect(sent.at(-1)!.text).toContain('daddy'));
     await bot.handle(click(confirmation.callback_data!));
     expect(install).toHaveBeenCalledOnce();
     finish();
@@ -130,6 +133,14 @@ it('runs a paired one-use update without blocking bot navigation, reports comple
       sent.filter((card) => card.text.includes('Версия Claude Code переключена')),
     ).toHaveLength(1);
     await bot.handle(message('/updates'));
+    await vi.waitFor(() =>
+      expect(
+        sent
+          .at(-1)
+          ?.reply_markup?.inline_keyboard.flat()
+          .some((button) => button.callback_data === 'u:claude:rollback'),
+      ).toBe(true),
+    );
     expect(
       sent
         .at(-1)!

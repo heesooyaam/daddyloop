@@ -36,9 +36,25 @@ daddy cache prune --apply  # remove verified eligible entries
 daddy cache auto on
 ```
 
-Cleanup only considers owned temporary downloads and old, clean managed reviewer copies. Active, dirty, unpushed, unknown and worker-owned work stays protected. Automatic cleanup is off by default and runs under disk pressure. Restart the service after changing its policy. It does not delete a large cache just because it is large.
+Cleanup only considers owned temporary downloads and old, clean managed reviewer copies. Active, dirty, unpushed, unknown and worker-owned work stays protected. Safe automatic cleanup is enabled by default; an explicit `cache.auto: false` disables automatic removal. Restart the service after changing its policy. It does not delete a large cache just because it is large.
 
 Before disk-heavy work inspect `df -h /home` and available RAM. Arcadia stores/mounts require ownership checks; never truncate a store as a routine cleanup step. `daddy cache arcadia-gc` is an explicit ordinary GC operation, not a blanket removal of user work.
+
+### Recovery instead of a silent queue
+
+```mermaid
+flowchart LR
+  M[Resource monitor] -->|Threshold crossed| P[Stop ordinary work<br/>preserve files and questions]
+  P --> R[daddy maintenance turn]
+  R --> C[Inspect / safe cleanup]
+  C --> V{Measure again}
+  V -->|Enough resources| W[Resume monitor-paused work]
+  V -->|Still blocked| U[Explain the blocker<br/>keep questions queued]
+```
+
+The monitor checks disk and RAM even when no agent is running. It queues one maintenance turn, using the session's daddy model in a separate directory and conversation. Its tools inspect resources, prune verified application caches and ask repository modules to reclaim idle owned resources. Arcadia may run ordinary `arc gc` and unmount idle service-owned copies while preserving their stores and edits. Other users' copies are not candidates.
+
+The guard still blocks ordinary work. Maintenance needs at least 1 GiB of free disk and 0.5 GiB of available RAM; below that floor the bot explains why it cannot start. Unsuccessful recovery is retried no more often than once per five minutes. Questions stay saved. Work resumes only after measured resources are healthy, and only for tasks paused by this monitor whose generation has not changed. A manual pause is preserved.
 
 ## Updates and removal
 

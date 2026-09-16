@@ -33,11 +33,9 @@ it('routes Claude tools, structured output, model/effort and native resume throu
     expect(options?.systemPrompt).toMatchObject({
       append: expect.stringContaining('Use concise review explanations.'),
     });
-    expect(options?.sandbox).toMatchObject({
-      enabled: true,
-      failIfUnavailable: true,
-      allowUnsandboxedCommands: false,
-    });
+    expect(options?.sandbox).toEqual({ enabled: false });
+    expect(options?.permissionMode).toBe('bypassPermissions');
+    expect(options?.allowDangerouslySkipPermissions).toBe(true);
     const iterable = (async function* () {
       const server = options!.mcpServers!.daddyloop as any;
       const client = new Client({ name: 'fixture', version: '1' });

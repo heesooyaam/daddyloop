@@ -2362,3 +2362,9 @@ body {
   margin: 2px 0 0;
   accent-color: var(--accent);
 }
+
+.daddy-resource-wait {
+  display: grid;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}

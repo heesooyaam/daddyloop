@@ -15,7 +15,7 @@
 Нужен **Linux-сервер** с доступом к твоим репозиториям и аккаунтом выбранного агента. Выполни на нём:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.19.0/install.sh | bash
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.0/install.sh | bash
 ```
 
 Стрелки — выбрать модуль, пробел — поставить галочку. Codex и GitHub отмечены сразу; Claude, GitLab и Arcadia можно добавить по желанию. Установщик поставит выбранные движки, CLI `daddy`, локальное распознавание голосовых и фоновый сервис. Вручную поднимать tmux не нужно.
@@ -150,4 +150,4 @@ daddy up
 
 Все инструкции ведём парами `docs/<тема>/en.md` и `ru.md`. Картинки показывают изолированные примеры; Telegram-карточка — иллюстрация сценария. [Как обновить медиа](docs/contributing/ru.md#воспроизведение-картинок).
 
-[Релиз 0.19.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.19.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)
+[Релиз 0.20.0](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.0) · [CI](https://github.com/heesooyaam/daddyloop/actions)

@@ -85,6 +85,13 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.get<{ Params: { id: string } }>('/api/daddy/sessions/:id', async (request) =>
     daddy.board(id.parse(request.params.id)),
   );
+  app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/rename', async (request) => {
+    const input = z
+      .object({ title: z.string().trim().min(1).max(200) })
+      .strict()
+      .parse(request.body);
+    return daddy.rename(id.parse(request.params.id), input.title);
+  });
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/chat', async (request) => {
     const input = z
       .object({

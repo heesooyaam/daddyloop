@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { AppError } from '../../../core/types.js';
-import { redact } from '../../../core/security.js';
+import { redact, rememberSecret } from '../../../core/security.js';
 import { VERSION } from '../../../version.js';
 
 export interface RpcMessage {
@@ -30,16 +30,19 @@ export class CodexConnection extends EventEmitter {
   ) {
     super();
   }
-  async start(cwd: string) {
-    // Provider credentials stay in the broker process, never in the agent's environment.
+  async start(cwd: string, host = false) {
+    // Host execution inherits the user's CLI environment, excluding application/bot control tokens.
     const env = { ...process.env };
     for (const name of Object.keys(env))
       if (
-        /^(GITHUB_TOKEN|GITLAB_TOKEN|GH_TOKEN|GLAB_TOKEN|ARC_TOKEN|ARC_OAUTH_TOKEN|TRACKER_TOKEN|TRACKER_OAUTH_TOKEN|TELEGRAM_BOT_TOKEN|DADDYLOOP_.*TOKEN.*|GIT_CONFIG_.*)$/.test(
-          name,
-        )
+        (host
+          ? /^(TELEGRAM_BOT_TOKEN|DADDYLOOP_.*TOKEN.*)$/
+          : /^(GITHUB_TOKEN|GITLAB_TOKEN|GH_TOKEN|GLAB_TOKEN|ARC_TOKEN|ARC_OAUTH_TOKEN|TRACKER_TOKEN|TRACKER_OAUTH_TOKEN|TELEGRAM_BOT_TOKEN|DADDYLOOP_.*TOKEN.*|GIT_CONFIG_.*)$/
+        ).test(name)
       )
         delete env[name];
+    for (const [name, value] of Object.entries(env))
+      if (value && /(?:_TOKEN|_API_KEY)$/.test(name)) rememberSecret(value);
     this.process = spawn(this.executable, this.args, {
       cwd,
       env,

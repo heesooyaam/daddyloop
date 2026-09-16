@@ -20,6 +20,7 @@ export const configSchema = z
     serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
     demo: z.boolean().default(true),
     locale: z.enum(['en', 'ru']).default('en'),
+    agentExecution: z.enum(['host', 'sandbox']).default('host'),
     modules: z
       .array(
         z
@@ -55,7 +56,7 @@ export const configSchema = z
         maxAgeDays: z.number().int().min(1),
         keepReviewerCopies: z.number().int().min(1),
       })
-      .default({ auto: false, maxAgeDays: 7, keepReviewerCopies: 1 }),
+      .default({ auto: true, maxAgeDays: 7, keepReviewerCopies: 1 }),
     telegram: z
       .object({ enabled: z.boolean().default(false), tokenFile: z.string().optional() })
       .default({ enabled: false }),

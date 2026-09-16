@@ -30,6 +30,34 @@ export class ArcadiaSessionWorkspace implements SessionWorkspaceBackend {
     ).prepare(group, signal);
     return { path: prepared.context.reviewerWorktree ?? prepared.cwd };
   }
+  async reclaim(group: ReviewGroup, signal: AbortSignal, collectCache: boolean) {
+    const parked: string[] = [];
+    let collected = false;
+    for (const record of this.mounts.records(group.id)) {
+      signal.throwIfAborted();
+      if (this.context.store.busy(record.taskId)) continue;
+      const native = (await this.mounts.nativeMounts()).find(
+        (mount) => mount.mount === record.mount,
+      );
+      if (native?.status !== 'mounted') continue;
+      // ensure verifies the exact mount, shared store and persistent lease owner.
+      const allocation = await this.mounts.ensure(
+        record.sessionId,
+        record.taskId,
+        record.role,
+        signal,
+      );
+      if (this.context.store.busy(record.taskId)) continue;
+      if (collectCache && !collected) {
+        await this.arc.native(['gc'], record.mount, signal);
+        collected = true;
+      }
+      signal.throwIfAborted();
+      await this.mounts.park(allocation.lease);
+      parked.push(record.mount);
+    }
+    return { parked, ordinaryGc: collected, workingDataPreserved: true };
+  }
   private async fingerprint(record: ManagedArcRecord) {
     const info = await this.arc.native(['info', '--json'], record.mount);
     const status = await this.arc.native(['status', '--short', '-u', 'all'], record.mount);

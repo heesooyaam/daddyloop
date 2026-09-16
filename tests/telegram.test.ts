@@ -8,7 +8,9 @@ function transport() {
   const sent: { method: string; body: Record<string, unknown> }[] = [];
   const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
     sent.push({ method: String(url).split('/').at(-1)!, body: JSON.parse(String(options?.body)) });
-    return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length || 1 } }), {
+      status: 200,
+    });
   });
   return { api, sent };
 }
@@ -189,7 +191,7 @@ it('sends one CLI update notice per version and respects notification opt-out', 
       );
     const body = JSON.parse(String(options?.body));
     if (body.text) sent.push(body.text);
-    return new Response(JSON.stringify({ ok: true, result: {} }));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length || 1 } }));
   });
   const bot = new Telegram(f.engine, api, 'fixture_bot');
   await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));

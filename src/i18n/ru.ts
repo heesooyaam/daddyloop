@@ -1,5 +1,42 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Choose an agent and model with /models inside a session. Use Add workspace to connect a repository.':
+    'Агент и модель выбираются через /models внутри сессии. Репозиторий подключается кнопкой «Добавить воркспейс».',
+  'Modules on this server': 'Модули на сервере',
+  'Modules connect daddy to agents and repository services. A workspace is the repository you want to work on.':
+    'Модули подключают движки агентов и сервисы репозиториев. Воркспейс — конкретный репозиторий для твоих задач.',
+  'Missing modules can be added by rerunning the installer on this server. Keep the currently enabled modules selected.':
+    'Отсутствующий модуль добавляется через установщик на сервере. При выборе сохрани галочки уже включённых модулей.',
+  'Open the session you want to rename.': 'Открой сессию, которую хочешь переименовать.',
+  'Send /rename followed by the new session name. Its Telegram topic will be renamed too.':
+    'Пришли /rename и новое название. Название темы Telegram тоже изменится.',
+  'Session renamed: {title}': 'Сессия переименована: {title}',
+  'Choose a session name between 1 and 200 characters':
+    'Название сессии должно содержать от 1 до 200 символов.',
+  'Rename a session and its connected Telegram topic': 'Переименовать сессию и её тему Telegram',
+  'Optional: send /new followed by your task description. The session and topic will use that description as their name.':
+    'Можно сразу написать /new и описание задачи. По нему daddy назовёт сессию и тему.',
+  'Working copy settings': 'Настройки рабочих копий',
+  'Automatic: daddy creates separate working folders for this session and removes them after saving results when you delete it.':
+    'Автоматически: daddy сам создаст отдельные папки для сессии. При её удалении сначала сохранит результаты, затем уберёт копии.',
+  'Prepared copies: an administrator must provide free Arcadia checkouts on this server. Use this only if you manage that pool yourself.':
+    'Готовые копии: на сервере должны быть заранее подключённые и свободные папки Arcadia. Этот вариант нужен, только если ты сам управляешь такими копиями.',
+  'Create copies automatically (recommended)': 'Создавать автоматически — рекомендуется',
+  'Use prepared server copies': 'Выдавать заранее подготовленные копии',
+  'Resources restored': 'Ресурсов снова достаточно',
+  'Waiting for server resources': 'Работа ждёт свободных ресурсов',
+  'Disk free: {disk} GiB · Used: {percent}% · RAM available: {memory} GiB':
+    'На диске свободно {disk} ГиБ · Занято {percent}% · Доступно RAM: {memory} ГиБ',
+  'Saved questions will continue. Work paused by the monitor resumes after checking its state.':
+    'Продолжаю сохранённые вопросы. Задачи, остановленные монитором, возобновятся после проверки состояния.',
+  'Safe recovery has not cleared the limit. Your questions and working files are saved; daddy will report what still needs attention.':
+    'Безопасной очистки пока недостаточно. Вопросы и рабочие файлы сохранены; daddy объяснит, что ещё мешает продолжить.',
+  'There is not enough room to start the maintenance agent. Your questions and working files are saved.':
+    'Ресурсов не хватает даже для запуска восстановления. Твои вопросы и рабочие файлы сохранены.',
+  'The resource monitor has asked daddy to inspect and repair this. Your questions are saved; ordinary work waits for the resource check.':
+    'Монитор уже передал daddy просьбу разобраться и восстановить ресурсы. Вопросы сохранены; обычная работа ждёт повторной проверки.',
+  'The monitor has asked daddy to recover resources. Your messages and working files are saved.':
+    'Монитор попросил daddy восстановить ресурсы. Сообщения и рабочие файлы сохранены.',
   'Repository URL or server folder': 'URL репозитория или папка на сервере',
   'Repository service': 'Сервис репозитория',
   'Detect from address': 'Определить по адресу',

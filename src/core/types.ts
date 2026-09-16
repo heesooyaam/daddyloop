@@ -68,6 +68,8 @@ export interface TicketSource {
 }
 export type PRTask = Task & { ref: PRRef };
 export interface ReviewGroup {
+  titleSource?: 'placeholder' | 'goal' | 'manual';
+  resourceWait?: { reasons: string[]; since: string; state: 'waiting' | 'repairing' | 'blocked' };
   instructions?: import('./instructions.js').SessionInstructions;
   id: string;
   title: string;
@@ -128,7 +130,7 @@ export interface DaddyJob {
   id: string;
   groupId: string;
   generation: number;
-  trigger: 'user' | 'worker' | 'recovery';
+  trigger: 'user' | 'worker' | 'recovery' | 'resources';
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
@@ -188,6 +190,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  resourcePause?: { generation: number; at: string };
   id: string;
   title: string;
   requirements: string;
@@ -265,6 +268,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
   origin?: { channel: 'telegram'; chatId: number; threadId?: number };
   workspace?: Workspace;

@@ -47,8 +47,21 @@ To register a repository from your phone: **Workspaces → Add workspace → Git
 
 After `/group` connects a forum supergroup, **every new session** gets a topic, including sessions started with `daddy new` or from the website. A Telegram channel is not a forum group. The bot must have permission to create and manage topics; once connected, topic creation needs no manual step.
 
-The topic mirrors sent user messages as `[user]` and assistant messages as `[daddy]`. Progress arrives one completed text block at a time while the agent works; the final answer follows. Commands, tool arguments/results, stdout/stderr, reasoning, structured protocol output and private worker reports are not part of this feed. Codex and Claude publish through the same public-text adapter callback.
+The topic mirrors sent user messages as `[user]` and assistant messages as `[daddy]`. Each turn has one message card. New progress updates edit it; the final answer replaces the progress text. Commands, tool arguments/results, stdout/stderr, reasoning, structured protocol output and private worker reports are not part of this feed. Codex and Claude publish through the same public-text adapter callback.
 
 Write in the topic to continue the same server-side session. The original Telegram message is not echoed into its own topic. A message sent in the private bot chat is mirrored to the session topic. Reconnecting replays unsent saved conversation messages using per-topic delivery receipts; reconnecting alone does not duplicate delivered messages. Notification preferences control private alerts; the linked topic keeps the conversation itself.
 
 The server hosts the agents, SQLite history and Telegram connection. A laptop terminal is just another client: closing it leaves the topic and agents running.
+
+## Session commands and delivery
+
+- `/new Your task description` saves the goal, then lets you choose a workspace. The description is optional. The session and topic use the goal as their name; a session started without a goal gets its name from the first message.
+- `/rename New name` changes this session and the same Telegram topic. It preserves topic ID, history, tasks and running agents. In private chat, open the intended session first.
+- **Add tasks** adds work to the current conversation and worker pool.
+- `/modules` shows enabled integrations. **Add workspace** registers a repository; `/models` selects an installed agent and model. Missing modules are added through the server installer.
+
+**Working copy settings** is a separate optional screen. Automatic copies are recommended: daddy creates the session's folders and removes them after archiving results on deletion. Prepared copies require an administrator-managed set of free server checkouts. The ordinary session screen keeps **Start session** and **Browse server folders** as its main actions.
+
+Outgoing messages are buffered in SQLite before sending. Failed deliveries retry after 1, 2, 4… seconds, capped at five minutes; new conversation messages also wake the buffer. Telegram's `retry_after` always takes precedence. Queues survive service restarts and preserve ordering within a topic. Superseded unsent progress is replaced by the newest text, and acknowledged parts of a long reply are not resent. Renaming a topic uses this queue too.
+
+If Telegram accepted a brand-new message but its acknowledgement was lost, its API offers no idempotency key to prove that fact: a retry can rarely create a duplicate. Edits of known message IDs can be retried safely. Changing or revoking the paired account prevents delivery to the old recipient. Backups retain conversation history, but do not transfer the old bot's delivery queue.

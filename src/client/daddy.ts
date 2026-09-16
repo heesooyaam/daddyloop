@@ -243,7 +243,7 @@ export class DaddyClient {
       this.update({ busy: false });
     }
   }
-  async action(action: 'pause' | 'resume' | 'settings' | 'delete', body: unknown = {}) {
+  async action(action: 'pause' | 'resume' | 'settings' | 'delete' | 'rename', body: unknown = {}) {
     const id = this.value.selected;
     if (!id || this.value.busy) return;
     this.update({ busy: true, error: undefined });
