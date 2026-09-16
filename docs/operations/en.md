@@ -25,9 +25,13 @@ Graceful stop interrupts agent turns and records recoverable incomplete work. Cr
 
 Root browser access uses the local `access-token`. HTTPS pairing creates separately revocable browser credentials. `daddy devices` lists them; `daddy revoke-device ID` revokes one. `daddy phone` creates a fresh one-use link. See [web access](../web/en.md).
 
+In host mode, daddy and workers may use existing credentials for their task. They check the filenames under `~/.tokens` and the tool's instructions before reporting missing authentication. Tools can read the appropriate file locally; if a tool requires an environment variable, a local script can pass it directly to that child process. Secret values must stay out of chat, model prompts, command output and repository files. There is no need to copy all tokens into the service environment.
+
 ## Resources and cleanup
 
-Defaults reserve 2 GiB of RAM and 10 GiB of disk, stop starting work at 90% disk usage, and cap the combined service/children at 8 GiB. Hosts can use stricter values. Memory checks include cgroup limits rather than host RAM alone.
+By default the service and its builds can use host RAM: `memoryMax: "infinity"`. daddyloop also adds no process/thread count cap. Resource checks still reserve 2 GiB of available RAM and 10 GiB of disk, and stop ordinary work at 90% disk usage. A container or parent systemd unit can impose its own limits; the monitor reports the effective available memory.
+
+To set an explicit cap, use a value such as `memoryMax: "24G"` in the config. Existing installations retain their configured value: replace an old `"8G"` with `"infinity"` to use host RAM. Apply service configuration with `daddy up` after active work has finished. Removing a service cap does not remove the disk and free-memory reserves.
 
 ```bash
 daddy cache status

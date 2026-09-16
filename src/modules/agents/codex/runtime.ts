@@ -179,13 +179,25 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
           : {}),
         developerInstructions: executionInstructions(input),
       };
-      if (threadId)
+      if (threadId) {
         await rpc.request('thread/resume', {
           ...common,
           threadId,
           excludeTurns: true,
         });
-      else {
+        // A resumed rollout can retain developer messages from its first launch.
+        // Append the current policy at developer priority before the model runs.
+        await rpc.request('thread/inject_items', {
+          threadId,
+          items: [
+            {
+              type: 'message',
+              role: 'developer',
+              content: [{ type: 'input_text', text: common.developerInstructions }],
+            },
+          ],
+        });
+      } else {
         const response = await rpc.request<{ thread: { id: string } }>('thread/start', {
           ...common,
           serviceName: 'daddyloop',

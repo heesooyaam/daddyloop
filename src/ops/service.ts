@@ -3,7 +3,7 @@ import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { command } from './process.js';
-import { configPath, loadConfig, type Config } from './config.js';
+import { configPath, configSchema, loadConfig, type Config } from './config.js';
 import { VERSION } from '../version.js';
 
 const name = 'daddyloop.service';
@@ -30,8 +30,8 @@ export function serviceUnit(options: {
     q(path);
     if (!isAbsolute(path)) throw new Error('Service paths must be absolute');
   }
-  if (!/^\d+(?:[KMGT])?$/.test(options.memoryMax)) throw new Error('Invalid memory limit');
-  return `[Unit]\nDescription=daddyloop orchestration service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=5\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('DADDYLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=512\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
+  configSchema.shape.memoryMax.parse(options.memoryMax);
+  return `[Unit]\nDescription=daddyloop orchestration service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=5\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('DADDYLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=infinity\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
 }
 export class ServiceManager {
   readonly runtimeDir = `/run/user/${userInfo().uid}`;

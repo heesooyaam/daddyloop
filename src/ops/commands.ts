@@ -99,7 +99,7 @@ export function registerOperations(program: Command) {
           const port = await rl.question(`Local port [${config.port}]: `);
           if (port.trim()) config.port = Number(port);
           const memory = await rl.question(
-            `Maximum memory for the service and its children [${config.memoryMax}]: `,
+            `Memory cap for the service and its children (infinity = use host RAM) [${config.memoryMax}]: `,
           );
           if (memory.trim()) config.memoryMax = memory.trim();
           const cache = await rl.question(

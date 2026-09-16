@@ -153,9 +153,54 @@ it('applies separate role models and efforts on thread start, resume and every t
           (packet) => packet.method === (role === 'reviewer' ? 'thread/resume' : 'thread/start'),
         ).params.developerInstructions,
       ).toContain(job.instructions.prompt);
+      const injected = packets.find((packet) => packet.method === 'thread/inject_items');
+      if (role === 'reviewer') {
+        expect(injected.params.threadId).toBe('thread-fixture');
+        expect(injected.params.items[0]).toMatchObject({
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: expect.stringContaining(job.instructions.prompt) }],
+        });
+        expect(injected.params.items[0].content[0].text).toContain('~/.tokens');
+        expect(packets.indexOf(injected)).toBeLessThan(
+          packets.findIndex((packet) => packet.method === 'turn/start'),
+        );
+      } else expect(injected).toBeUndefined();
     }
   } finally {
     f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('does not run a resumed Codex turn when refreshing its policy fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-policy-'));
+  try {
+    const log = join(dir, 'packets.jsonl');
+    const runtime = new CodexRuntime({
+      executable: process.execPath,
+      args: [resolve('tests/fixtures/fake-codex.mjs'), 'policy-error', log],
+      timeoutMs: 5000,
+    });
+    await expect(
+      runtime.runSession({
+        threadId: 'thread-fixture',
+        cwd: dir,
+        prompt: 'Continue',
+        instructions: 'Updated policy',
+        readOnly: false,
+        signal: new AbortController().signal,
+        onSession: () => {},
+        onEvent: () => {},
+        onTool: async () => ({}),
+      }),
+    ).rejects.toThrow('Policy update failed');
+    const packets = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(packets.some((packet) => packet.method === 'turn/start')).toBe(false);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -219,6 +264,9 @@ it.each(['host', 'sandbox'] as const)(
       );
       expect(start.config['shell_environment_policy.inherit']).toBe(
         execution === 'host' ? 'all' : 'core',
+      );
+      expect(start.developerInstructions.includes('inspect filenames under ~/.tokens')).toBe(
+        execution === 'host',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

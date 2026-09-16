@@ -1,5 +1,6 @@
 import { readFileSync, statfsSync } from 'node:fs';
 import { freemem, totalmem } from 'node:os';
+import { dirname } from 'node:path';
 import type { ResourceStatus } from './types.js';
 const GiB = 1024 ** 3;
 export function resources(
@@ -16,17 +17,25 @@ export function resources(
     /* Non-Linux hosts use os.freemem(). */
   }
   const hostAvailable = available;
+  const hostTotal = total;
   let memoryScope: 'host' | 'service' = 'host';
   try {
     const groups = readFileSync('/proc/self/cgroup', 'utf8')
       .trim()
       .split('\n')
       .map((line) => line.split(':'));
-    const candidates: { root: string; limit: string; usage: string; inactive: string }[] = [];
+    const candidates: {
+      root: string;
+      controller: string;
+      limit: string;
+      usage: string;
+      inactive: string;
+    }[] = [];
     const unified = groups.find((parts) => parts[0] === '0');
     if (unified)
       candidates.push({
         root: `/sys/fs/cgroup${unified[2]}`,
+        controller: '/sys/fs/cgroup',
         limit: 'memory.max',
         usage: 'memory.current',
         inactive: 'inactive_file',
@@ -35,24 +44,39 @@ export function resources(
     if (memoryGroup)
       candidates.push({
         root: `/sys/fs/cgroup/memory${memoryGroup[2]}`,
+        controller: '/sys/fs/cgroup/memory',
         limit: 'memory.limit_in_bytes',
         usage: 'memory.usage_in_bytes',
         inactive: 'total_inactive_file',
       });
     for (const candidate of candidates) {
-      try {
-        const limit = Number(readFileSync(`${candidate.root}/${candidate.limit}`, 'utf8').trim());
-        if (!Number.isFinite(limit) || limit <= 0 || limit >= total) continue;
-        const usage = Number(readFileSync(`${candidate.root}/${candidate.usage}`, 'utf8').trim());
-        const stats = readFileSync(`${candidate.root}/memory.stat`, 'utf8');
-        const inactive = Number(
-          stats.match(new RegExp(`^${candidate.inactive} (\\d+)`, 'm'))?.[1] ?? 0,
-        );
-        available = Math.min(available, Math.max(0, limit - Math.max(0, usage - inactive)));
-        total = limit;
-        memoryScope = 'service';
-      } catch {
-        /* Try the next available controller. */
+      // An unlimited service can still share a capped parent slice/container.
+      // Each ancestor's usage includes its siblings, so inspect all headroom limits.
+      for (
+        let root = candidate.root.replace(/\/+$/, '');
+        root === candidate.controller || root.startsWith(candidate.controller + '/');
+        root = dirname(root)
+      ) {
+        try {
+          const limit = Number(readFileSync(`${root}/${candidate.limit}`, 'utf8').trim());
+          if (!Number.isFinite(limit) || limit <= 0 || limit >= hostTotal) continue;
+          const usage = Number(readFileSync(`${root}/${candidate.usage}`, 'utf8').trim());
+          if (!Number.isFinite(usage) || usage < 0) continue;
+          let inactive = 0;
+          try {
+            const stats = readFileSync(`${root}/memory.stat`, 'utf8');
+            inactive = Number(
+              stats.match(new RegExp(`^${candidate.inactive} (\\d+)`, 'm'))?.[1] ?? 0,
+            );
+          } catch {
+            /* Missing cache statistics must not hide the memory limit. */
+          }
+          available = Math.min(available, Math.max(0, limit - Math.max(0, usage - inactive)));
+          total = Math.min(total, limit);
+          memoryScope = 'service';
+        } catch {
+          /* Try the parent or the next available controller. */
+        }
       }
     }
   } catch {
