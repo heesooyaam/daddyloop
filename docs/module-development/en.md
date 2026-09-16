@@ -41,6 +41,8 @@ Use [`claude/index.ts`](../../src/modules/agents/claude/index.ts) for a small co
 
 Honor `SessionInput.execution` / `AgentInput.execution` for every launch and resume. `host` is the default: use the service user's normal environment and network without CLI approvals. `sandbox` is explicit and must enforce its filesystem/network policy. In host mode, `readOnly` describes the role rather than an OS guarantee. Preserve service-side tool authorization, revision checks and generation fences in both modes. Never print credentials in diagnostics.
 
+Apply `executionInstructions(input)` to both new and resumed conversations. Host instructions allow task-specific use of existing local credentials without exposing their values. Updating a launch option alone is insufficient if a CLI retains older developer messages: the Codex adapter appends the current developer policy through [thread/inject_items](https://developers.openai.com/codex/app-server#inject-items-into-a-thread) before a resumed turn. It preserves conversation history and refuses to start the turn if that update fails. Claude receives the current policy in its SDK system prompt on each query.
+
 ## Usage is a capability of the agent
 
 [`AgentUsage`](../../src/core/usage.ts) separates provider facts from presentation:

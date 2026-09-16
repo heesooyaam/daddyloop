@@ -11,6 +11,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (m.method === 'initialize') send({ id: m.id, result: { userAgent: 'fixture' } });
   if (m.method === 'thread/start' || m.method === 'thread/resume')
     send({ id: m.id, result: { thread: { id: threadId } } });
+  if (m.method === 'thread/inject_items')
+    send(
+      mode === 'policy-error'
+        ? { id: m.id, error: { code: -32603, message: 'Policy update failed' } }
+        : { id: m.id, result: {} },
+    );
   if (m.method === 'turn/start') {
     if (mode === 'exit') {
       process.exit(2);

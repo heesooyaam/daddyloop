@@ -15,8 +15,8 @@ export const configSchema = z
     port: z.number().int().min(1024).max(65535).default(4317),
     memoryMax: z
       .string()
-      .regex(/^\d+(?:[KMGT])?$/)
-      .default('8G'),
+      .regex(/^(?:infinity|[1-9]\d*(?:[KMGT])?)$/)
+      .default('infinity'),
     serviceMode: z.enum(['auto', 'user', 'system']).default('auto'),
     demo: z.boolean().default(true),
     locale: z.enum(['en', 'ru']).default('en'),

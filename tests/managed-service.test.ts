@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest';
 import { serviceUnit, systemdQuote } from '../src/ops/service.js';
-import { validateServerUrl } from '../src/ops/config.js';
+import { configSchema, validateServerUrl } from '../src/ops/config.js';
 import { fixture } from './helpers.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -29,6 +29,27 @@ it('generates a service independent of terminals, with a separate user and memor
   expect(text).toContain('Restart=on-failure');
   expect(systemdQuote('/home/test%user/$file')).toContain('%%user');
   expect(() => systemdQuote('/tmp/a\nExecStart=bad')).toThrow();
+});
+it('uses host capacity by default and accepts an explicit memory cap', () => {
+  const options = {
+    executable: process.execPath,
+    entry: '/opt/daddyloop/cli.js',
+    dataDir: '/data/daddyloop',
+    configFile: '/data/config.json',
+    path: '/usr/bin',
+    memoryMax: configSchema.parse({}).memoryMax,
+    port: 4317,
+  };
+  expect(options.memoryMax).toBe('infinity');
+  const unit = serviceUnit(options);
+  expect(unit).toContain('MemoryHigh=infinity');
+  expect(unit).toContain('MemoryMax=infinity');
+  expect(unit).toContain('TasksMax=infinity');
+  expect(configSchema.parse({ memoryMax: '24G' }).memoryMax).toBe('24G');
+  for (const memoryMax of ['0', '-1G', 'unlimited', '8G\nExecStart=bad']) {
+    expect(() => configSchema.parse({ memoryMax })).toThrow();
+    expect(() => serviceUnit({ ...options, memoryMax })).toThrow();
+  }
 });
 it('rejects credential-bearing or plaintext remote server URLs', () => {
   expect(validateServerUrl('https://review.example/')).toBe('https://review.example');
@@ -65,7 +86,7 @@ it.skipIf(!existsSync('/usr/bin/systemd-analyze'))(
           dataDir: '/data/Review loop%test',
           configFile: '/data/Review loop/config.json',
           path: '/usr/bin',
-          memoryMax: '8G',
+          memoryMax: configSchema.parse({}).memoryMax,
           port: 4317,
         }),
       );

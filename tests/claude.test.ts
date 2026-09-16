@@ -33,6 +33,9 @@ it('routes Claude tools, structured output, model/effort and native resume throu
     expect(options?.systemPrompt).toMatchObject({
       append: expect.stringContaining('Use concise review explanations.'),
     });
+    expect(options?.systemPrompt).toMatchObject({
+      append: expect.stringContaining('inspect filenames under ~/.tokens'),
+    });
     expect(options?.sandbox).toEqual({ enabled: false });
     expect(options?.permissionMode).toBe('bypassPermissions');
     expect(options?.allowDangerouslySkipPermissions).toBe(true);
