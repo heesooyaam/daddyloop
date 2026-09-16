@@ -205,3 +205,19 @@ it('preserves Telegram retry_after in the transport error', async () => {
     retryAfter: 12,
   });
 });
+
+it('does not shorten a Telegram flood wait longer than one day', async () => {
+  const f = fixture();
+  try {
+    f.call.mockRejectedValueOnce(Object.assign(new Error('flood wait'), { retryAfter: 90000 }));
+    await f.queue.send({ chatId: 7 }, text('Delayed reply'), { key: 'long-wait' });
+    f.advance(86400000);
+    await f.queue.flush();
+    expect(f.call).toHaveBeenCalledTimes(1);
+    f.advance(3600000);
+    await f.queue.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+  } finally {
+    await f.close();
+  }
+});

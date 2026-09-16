@@ -318,7 +318,7 @@ export class TelegramDelivery {
       value.error = redact(String(error));
       const retryAfter = Number((error as { retryAfter?: number }).retryAfter);
       if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        this.rateLimitUntil = this.clock() + Math.min(retryAfter, 86400) * 1000;
+        this.rateLimitUntil = Math.min(8.64e15, this.clock() + retryAfter * 1000);
         this.store.setSetting(`telegram.deliveryLimit:${this.bot}`, this.rateLimitUntil);
       }
       value.nextAttemptAt = Math.max(
