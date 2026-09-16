@@ -6,7 +6,20 @@ export interface RuntimeTool {
   description: string;
   inputSchema: Record<string, unknown>;
 }
+export interface RunOwner {
+  runId: string;
+  groupId: string;
+  taskId?: string;
+  kind: 'worker' | 'daddy' | 'maintenance';
+}
+/** Adapters must pass these values to the CLI and its command environment. */
+export interface RunProcessScope {
+  env: Record<string, string>;
+  cacheDir: string;
+}
 export interface SessionInput {
+  owner?: RunOwner;
+  processScope?: RunProcessScope;
   /** host uses the service user's normal filesystem/network; sandbox is an explicit opt-in. */
   execution?: 'host' | 'sandbox';
   cwd: string;
@@ -38,6 +51,7 @@ export const resultSchema = z
   })
   .strict();
 export interface AgentInput {
+  processScope?: RunProcessScope;
   execution?: SessionInput['execution'];
   readPaths?: string[];
   task: Task;
@@ -68,7 +82,10 @@ export function executionInstructions(input: SessionInput) {
           : '');
   return (
     'Current daddyloop role and execution policy for this turn. These instructions replace earlier daddyloop role and execution instructions wherever they differ.\n' +
-    policy
+    policy +
+    (input.processScope
+      ? '\nCommands and background descendants belong to this run. The host stops them when the run finishes or is cancelled, including detached processes. Wait for required builds and tests before returning a result; save incomplete work before ending a turn. Preserve the DADDYLOOP_RUN_SCOPE environment marker in child processes. Reuse existing host caches in place; do not duplicate entire caches under disk pressure. Use $DADDYLOOP_RUN_CACHE only for reproducible temporary caches and downloads: the service may remove it after the run under resource pressure. Keep source changes, unique results, logs needed for review and deliverables in the managed working copy or persistent task artifacts.'
+      : '')
   );
 }
 

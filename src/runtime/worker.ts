@@ -43,13 +43,28 @@ export class Worker {
       () => this.taskRuns.delete(run),
     );
   }
-  async waitForGroup(groupId: string) {
-    await this.tickDone;
-    await Promise.allSettled(
-      [...this.taskRuns.entries()]
-        .filter(([, taskId]) => this.engine.store.getTask(taskId).groupId === groupId)
-        .map(([run]) => run),
-    );
+  async waitForGroup(groupId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const pending = (async () => {
+      await this.tickDone;
+      signal?.throwIfAborted();
+      await Promise.allSettled(
+        [...this.taskRuns.entries()]
+          .filter(([, taskId]) => this.engine.store.getTask(taskId).groupId === groupId)
+          .map(([run]) => run),
+      );
+    })();
+    if (!signal) return pending;
+    let onAbort!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([pending, interrupted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
   autoCleanup?: () => Promise<unknown>;
   autoSubmit?: (id: string) => Promise<unknown>;

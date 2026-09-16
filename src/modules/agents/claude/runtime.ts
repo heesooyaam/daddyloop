@@ -214,9 +214,15 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
               allowUnsandboxedCommands: false,
               filesystem: {
                 denyRead: [homedir(), ...(this.options.protectedPaths ?? [])],
-                allowRead: [workspaceRoot, ...readPaths],
+                allowRead: [
+                  workspaceRoot,
+                  ...readPaths,
+                  ...(input.processScope ? [input.processScope.cacheDir] : []),
+                ],
                 denyWrite: input.readOnly ? [cwd, '/tmp'] : [],
-                allowWrite: input.readOnly ? [] : [cwd],
+                allowWrite: input.readOnly
+                  ? []
+                  : [cwd, ...(input.processScope ? [input.processScope.cacheDir] : [])],
               },
               network: {
                 allowedDomains: [],
@@ -237,6 +243,7 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
         maxBudgetUsd: this.options.maxBudgetUSD,
         stderr: (text) => input.onEvent('runtime.diagnostic', redact(text).slice(0, 8000)),
       };
+      if (input.processScope) Object.assign(options.env!, input.processScope.env);
       if (!options.env?.ANTHROPIC_API_KEY)
         throw new AppError(
           'credentials_missing',

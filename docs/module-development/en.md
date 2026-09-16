@@ -43,6 +43,10 @@ Honor `SessionInput.execution` / `AgentInput.execution` for every launch and res
 
 Apply `executionInstructions(input)` to both new and resumed conversations. Host instructions allow task-specific use of existing local credentials without exposing their values. Updating a launch option alone is insufficient if a CLI retains older developer messages: the Codex adapter appends the current developer policy through [thread/inject_items](https://developers.openai.com/codex/app-server#inject-items-into-a-thread) before a resumed turn. It preserves conversation history and refuses to start the turn if that update fails. Claude receives the current policy in its SDK system prompt on each query.
 
+**Process ownership.** Forward every `input.processScope.env` entry to the CLI and its shell-command environment. `AgentRegistry` creates the scope, records its owner before launch and closes it after completion, cancellation or failure. The marker follows detached descendants; `RunProcesses` stops only matching processes of the same user and host boot, checking process start times before signalling. Adapters must preserve these variables even in an explicit sandbox. Do not replace this with a sweep by executable name or working directory.
+
+`DADDYLOOP_RUN_CACHE` is a private location for reproducible downloads and temporary caches. Keep source changes, unique results and review artifacts in persistent task storage. After the run, resource recovery can delete this cache once owned processes have stopped; redirected paths and active mounts are preserved. Backups omit process ownership records and these disposable caches.
+
 ## Usage is a capability of the agent
 
 [`AgentUsage`](../../src/core/usage.ts) separates provider facts from presentation:

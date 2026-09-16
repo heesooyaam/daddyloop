@@ -821,6 +821,7 @@ export class Daddy {
       let calls = 0;
       const publicMessages = new Set<string>();
       const result = await this.runtime.runSession({
+        owner: { runId: job.id, groupId: job.groupId, kind: 'daddy' },
         cwd: prepared.cwd,
         workspaceRoot: prepared.context?.reviewerWorktree ?? prepared.cwd,
         readPaths: prepared.readPaths,

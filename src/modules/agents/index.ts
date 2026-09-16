@@ -4,6 +4,7 @@ import { AgentRegistry } from './registry.js';
 import { codexModule, codexPrivatePaths } from './codex/index.js';
 import type { Executable } from '../../runtime/executable.js';
 export interface AgentModuleContext {
+  processes?: import('../../runtime/run-processes.js').RunProcesses;
   execution?: import('../../runtime/agent.js').SessionInput['execution'];
   dataDir?: string;
   store: import('../../core/store.js').Store;
@@ -29,5 +30,6 @@ export function createAgents(enabled: string[], context: AgentModuleContext) {
       .filter((module) => enabled.includes(module.id))
       .map((module) => module.create(context)),
     context.execution,
+    context.processes,
   );
 }

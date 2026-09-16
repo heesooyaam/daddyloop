@@ -30,7 +30,7 @@ export class CodexConnection extends EventEmitter {
   ) {
     super();
   }
-  async start(cwd: string, host = false) {
+  async start(cwd: string, host = false, processEnvironment: Record<string, string> = {}) {
     // Host execution inherits the user's CLI environment, excluding application/bot control tokens.
     const env = { ...process.env };
     for (const name of Object.keys(env))
@@ -43,6 +43,7 @@ export class CodexConnection extends EventEmitter {
         delete env[name];
     for (const [name, value] of Object.entries(env))
       if (value && /(?:_TOKEN|_API_KEY)$/.test(name)) rememberSecret(value);
+    Object.assign(env, processEnvironment);
     this.process = spawn(this.executable, this.args, {
       cwd,
       env,
@@ -142,9 +143,10 @@ export class CodexConnection extends EventEmitter {
     this.removeAllListeners('message');
     this.removeAllListeners('diagnostic');
     const kill = (signal: NodeJS.Signals) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
       try {
-        if (child.pid && process.platform !== 'win32') process.kill(-child.pid, signal);
-        else child.kill(signal);
+        // The common run owner stops descendants, including new process groups.
+        child.kill(signal);
       } catch {
         /* Already exited. */
       }

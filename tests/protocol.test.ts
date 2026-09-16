@@ -242,6 +242,10 @@ it.each(['host', 'sandbox'] as const)(
       });
       await runtime.runSession({
         execution,
+        processScope: {
+          cacheDir: dir,
+          env: { DADDYLOOP_RUN_SCOPE: 'fixture-owned-run', DADDYLOOP_RUN_CACHE: dir },
+        },
         cwd: dir,
         prompt: 'Fixture',
         readOnly: false,
@@ -265,6 +269,10 @@ it.each(['host', 'sandbox'] as const)(
       expect(start.config['shell_environment_policy.inherit']).toBe(
         execution === 'host' ? 'all' : 'core',
       );
+      expect(start.config['shell_environment_policy.set']).toEqual({
+        DADDYLOOP_RUN_SCOPE: 'fixture-owned-run',
+        DADDYLOOP_RUN_CACHE: dir,
+      });
       expect(start.developerInstructions.includes('inspect filenames under ~/.tokens')).toBe(
         execution === 'host',
       );

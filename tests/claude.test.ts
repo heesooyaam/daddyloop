@@ -39,6 +39,8 @@ it('routes Claude tools, structured output, model/effort and native resume throu
     expect(options?.sandbox).toEqual({ enabled: false });
     expect(options?.permissionMode).toBe('bypassPermissions');
     expect(options?.allowDangerouslySkipPermissions).toBe(true);
+    expect(options?.env?.DADDYLOOP_RUN_SCOPE).toBe('fixture-owned-run');
+    expect(options?.env?.DADDYLOOP_RUN_CACHE).toBe(join(cwd, 'cache'));
     const iterable = (async function* () {
       const server = options!.mcpServers!.daddyloop as any;
       const client = new Client({ name: 'fixture', version: '1' });
@@ -96,6 +98,10 @@ it('routes Claude tools, structured output, model/effort and native resume throu
       prompt: 'Review',
       readOnly: true,
       instructions: withInstructions('Scoped task', { prompt: 'Use concise review explanations.' }),
+      processScope: {
+        cacheDir: join(cwd, 'cache'),
+        env: { DADDYLOOP_RUN_SCOPE: 'fixture-owned-run', DADDYLOOP_RUN_CACHE: join(cwd, 'cache') },
+      },
       signal: new AbortController().signal,
       onTool,
       onSession,

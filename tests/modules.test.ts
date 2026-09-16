@@ -11,6 +11,7 @@ import type { SessionInput, AgentInput } from '../src/runtime/agent.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { TicketReader } from '../src/modules/repositories/tickets.js';
 import { TicketWorkflow } from '../src/core/ticket-workflow.js';
+import { RunProcesses } from '../src/runtime/run-processes.js';
 const result = { status: 'completed' as const, summary: 'Checked.', checkedHead: '' };
 function module(id: string): AgentModule {
   return {
@@ -82,6 +83,33 @@ it('rejects disabled engines and cancelled turns before invoking any runtime', a
   abort.abort();
   expect(() => registry.runSession({ ...input, signal: abort.signal })).toThrow();
   expect(available.runtime.runSession).not.toHaveBeenCalled();
+});
+
+it('gives a third-party engine the common process scope and closes ownership before returning', async () => {
+  const f = daddyFixture(),
+    adapter = module('third'),
+    processes = new RunProcesses(f.store, f.dir);
+  const registry = new AgentRegistry([adapter], 'host', processes);
+  try {
+    expect(() => registry.runSession(session('third'))).toThrow('run owner');
+    const owner = {
+      runId: 'scope-fixture-run',
+      groupId: 'scope-fixture-group',
+      kind: 'daddy' as const,
+    };
+    vi.mocked(adapter.runtime.runSession).mockImplementation(async (input) => {
+      expect(input.processScope?.env.DADDYLOOP_RUN_SCOPE).toMatch(/^[a-f0-9-]{36}$/);
+      expect(input.processScope?.env.DADDYLOOP_RUN_CACHE).toBe(input.processScope?.cacheDir);
+      expect(processes.inspect(owner.groupId)).toMatchObject([
+        { runId: owner.runId, active: true },
+      ]);
+      return result;
+    });
+    expect(await registry.runSession({ ...session('third'), owner, cwd: f.dir })).toEqual(result);
+    expect(processes.inspect(owner.groupId)).toEqual([]);
+  } finally {
+    await f.close();
+  }
 });
 it('keeps repository parsing and matching inside registered modules', () => {
   const custom = {

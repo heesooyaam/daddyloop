@@ -8,6 +8,7 @@ import type {
 } from '../../runtime/agent.js';
 import type { AgentModule, AgentCatalogue } from '../contracts.js';
 import { profileSchema, type ModelCatalogueInfo } from '../../core/agents.js';
+import type { RunProcesses } from '../../runtime/run-processes.js';
 
 /** Thread handles are opaque outside this router and cannot cross engine boundaries. */
 export const sessionHandle = (engine: string, id: string) => `${engine}:${id}`;
@@ -26,6 +27,7 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
   constructor(
     modules: AgentModule[],
     private execution: SessionInput['execution'] = 'host',
+    private processes?: RunProcesses,
   ) {
     this.modules = new Map();
     for (const module of modules) {
@@ -91,23 +93,44 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
     input.onEvent('runtime.execution', { engine, mode: input.execution ?? this.execution });
     const key = input.job.role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
     task[key] = nativeSession(engine, task[key]);
-    return module.runtime.run({
-      ...input,
-      execution: input.execution ?? this.execution,
-      task,
-      onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
-    });
+    const run = (processScope?: AgentInput['processScope']) =>
+      module.runtime.run({
+        ...input,
+        processScope,
+        execution: input.execution ?? this.execution,
+        task,
+        onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
+      });
+    return this.processes
+      ? this.processes.run(
+          {
+            runId: input.job.id,
+            taskId: input.task.id,
+            groupId: input.task.groupId ?? input.task.id,
+            kind: 'worker',
+          },
+          run,
+        )
+      : run(input.processScope);
   }
   runSession(input: SessionInput) {
     input.signal.throwIfAborted();
     const engine = input.profile?.engine;
     if (!engine) throw new AppError('agent_profile_missing', 'The session has no agent profile');
+    if (this.processes && !input.owner)
+      throw new AppError('run_owner_missing', 'A managed agent session requires a run owner');
     input.onEvent('runtime.execution', { engine, mode: input.execution ?? this.execution });
-    return this.get(engine).runtime.runSession({
-      ...input,
-      execution: input.execution ?? this.execution,
-      threadId: nativeSession(engine, input.threadId),
-      onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
-    });
+    const runtime = this.get(engine).runtime;
+    const run = (processScope?: SessionInput['processScope']) =>
+      runtime.runSession({
+        ...input,
+        processScope,
+        execution: input.execution ?? this.execution,
+        threadId: nativeSession(engine, input.threadId),
+        onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
+      });
+    return this.processes && input.owner
+      ? this.processes.run(input.owner, run)
+      : run(input.processScope);
   }
 }

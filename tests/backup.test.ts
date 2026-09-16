@@ -132,6 +132,9 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     );
     store.setSetting('preferences', { locale: 'ru' });
     store.setSetting('telegram.pairing', { secret: 'must-not-transfer' });
+    store.setSetting('runtime.processScope:fixture', { runId: 'old-run', pid: 42 });
+    mkdirSync(join(data, 'run-cache', 'fixture'), { recursive: true });
+    writeFileSync(join(data, 'run-cache', 'fixture', 'disposable'), 'reproducible cache');
     store.setSetting('telegram.delivery:fixture', {
       text: 'Do not send from another host',
       status: 'queued',
@@ -194,6 +197,8 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
         'unfinished worker result',
       );
       expect(restored.setting('telegram.pairing')).toBeUndefined();
+      expect(restored.setting('runtime.processScope:fixture')).toBeUndefined();
+      expect(existsSync(join(target, 'run-cache'))).toBe(false);
       expect(restored.setting('telegram.delivery:fixture')).toBeUndefined();
       expect(restored.setting('preferences')).toEqual({ locale: 'ru' });
       expect(
