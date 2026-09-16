@@ -22,9 +22,12 @@ import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
 import { findPreset, selectPreset, presetLines } from '../client/presets.js';
 import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
+import { clipTitle } from '../core/session-title.js';
+import { moduleCatalogue } from '../modules/catalogue.js';
+import { deliveryStatus } from './telegram-delivery.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
-type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number };
+type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
 type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
@@ -40,6 +43,7 @@ export class TelegramWorkspace {
   private stopped = false;
   private topics = new Map<string, Promise<Topic>>();
   private voice?: VoiceInbox;
+  private retryTimer?: NodeJS.Timeout;
   constructor(
     readonly daddy: Daddy,
     private api: TelegramApi,
@@ -75,6 +79,18 @@ export class TelegramWorkspace {
   start() {
     this.voice?.start();
     this.replay();
+    this.retryTimer = setInterval(() => {
+      for (const row of this.store.db
+        .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.eventRetry:%'")
+        .all()) {
+        const retry = JSON.parse(String(row.value)) as { groupId: string; nextAt: number } | null;
+        if (!retry || retry.nextAt > Date.now() || this.stopped) continue;
+        this.store.setSetting(String(row.key), { ...retry, nextAt: Date.now() + 60000 });
+        const group = this.daddy.sessions().find((group) => group.id === retry.groupId);
+        if (group) this.replayGroup(group, true);
+      }
+    }, 1000);
+    this.retryTimer.unref();
   }
   private voiceRoute(destination: Destination): VoiceRoute | undefined {
     const pair = this.pair();
@@ -185,7 +201,33 @@ export class TelegramWorkspace {
     if (!room) return;
     const key = this.key(room, group.id),
       existing = this.topic(room, group.id);
-    if (existing) return existing;
+    if (existing) {
+      const title = clipTitle(group.title);
+      if (existing.title !== title) {
+        if (this.api.delivery) {
+          const result = await this.api.delivery.send(existing, new TelegramText().add(title), {
+            key: `topic-name:${existing.threadId}`,
+            operation: 'renameTopic',
+            replace: true,
+            order: group.updatedAt,
+          });
+          if (result.status !== 'sent') return existing;
+        } else {
+          try {
+            await this.api.call('editForumTopic', {
+              chat_id: existing.chatId,
+              message_thread_id: existing.threadId,
+              name: title,
+            });
+          } catch (error) {
+            if (!/topic[_ ](?:is[_ ])?not[_ ]modified/i.test(String(error))) throw error;
+          }
+        }
+        existing.title = title;
+        this.saveTopic(existing);
+      }
+      return existing;
+    }
     const pending = this.topics.get(key);
     if (pending) return pending;
     const operation = `telegram:topic:${key}`;
@@ -197,7 +239,7 @@ export class TelegramWorkspace {
         async () => {
           const value = await this.api.call<{ message_thread_id: number }>('createForumTopic', {
             chat_id: room.chatId,
-            name: group.title.slice(0, 128),
+            name: clipTitle(group.title),
           });
           if (!Number.isSafeInteger(value.message_thread_id) || value.message_thread_id <= 0)
             throw new Error('Telegram returned an invalid topic ID');
@@ -206,6 +248,7 @@ export class TelegramWorkspace {
             threadId: value.message_thread_id,
             groupId: group.id,
             ownerId: room.ownerId,
+            title: clipTitle(group.title),
           };
           this.saveTopic(topic);
           return topic;
@@ -450,7 +493,6 @@ export class TelegramWorkspace {
     const group = this.daddy.create({
       workspaceId,
       workspace,
-      title: text?.split('\n')[0].slice(0, 80),
       requirements: text,
     });
     this.store.setSetting(this.creationKey(destination), null);
@@ -483,14 +525,18 @@ export class TelegramWorkspace {
   private registrationKey(destination: Destination) {
     return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
   }
-  private async repository(choice: RepoChoice, browse = false) {
+  private async repository(choice: RepoChoice, browse = false, copies = false) {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
       )
       .run(now());
-    const button = (text: string, next: RepoChoice, action: 'use' | 'browse' | 'mode') => {
+    const button = (
+      text: string,
+      next: RepoChoice,
+      action: 'use' | 'browse' | 'mode' | 'copies' | 'show',
+    ) => {
       const id = randomBytes(12).toString('base64url');
       this.store.setSetting(`telegram.repo:${id}`, next);
       return { text, callback_data: `dad:repo:${id}:${action}` };
@@ -539,16 +585,43 @@ export class TelegramWorkspace {
               : 'This session will use the existing Arc pool. Pool copies are kept.',
           ),
       );
-      buttons.push([
-        button(
-          this.t(mode === 'session' ? 'Use the existing Arc pool' : 'Create copies automatically'),
-          {
-            ...choice,
-            input: { ...choice.input, copyMode: mode === 'session' ? 'pool' : 'session' },
-          },
-          'mode',
-        ),
-      ]);
+      if (copies) {
+        await this.api.send(choice.destination, {
+          ...new TelegramText()
+            .add('⚙️ ' + this.t('Working copy settings'), 'bold')
+            .add(
+              '\n\n' +
+                this.t(
+                  'Automatic: daddy creates separate working folders for this session and removes them after saving results when you delete it.',
+                ),
+            )
+            .add(
+              '\n\n' +
+                this.t(
+                  'Prepared copies: an administrator must provide free Arcadia checkouts on this server. Use this only if you manage that pool yourself.',
+                ),
+            ),
+          buttons: [
+            [
+              button(
+                (mode === 'session' ? '✓ ' : '') +
+                  this.t('Create copies automatically (recommended)'),
+                { ...choice, input: { ...choice.input, copyMode: 'session' } },
+                'mode',
+              ),
+            ],
+            [
+              button(
+                (mode === 'pool' ? '✓ ' : '') + this.t('Use prepared server copies'),
+                { ...choice, input: { ...choice.input, copyMode: 'pool' } },
+                'mode',
+              ),
+            ],
+            [button(this.t('Back'), choice, 'show')],
+          ],
+        });
+        return;
+      }
     }
     if (browse) {
       const source = choice.input?.path ?? choice.workspace.repoPath;
@@ -569,10 +642,12 @@ export class TelegramWorkspace {
         '\n\n' + this.t('You can also send /repo followed by a repository URL or server path.'),
       );
     } else buttons.push([button(this.t('Browse server folders'), choice, 'browse')]);
+    if (!choice.groupId && choice.workspace.vcs === 'arcadia')
+      buttons.push([button('⚙️ ' + this.t('Working copy settings'), choice, 'copies')]);
     await this.api.send(choice.destination, { ...title, buttons });
   }
   private async repositoryCallback(data: string, destination: Destination) {
-    const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse|mode)$/);
+    const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse|mode|copies|show)$/);
     if (!match) return false;
     const key = `telegram.repo:${match[1]}`,
       choice = this.store.setting<RepoChoice>(key);
@@ -591,8 +666,8 @@ export class TelegramWorkspace {
         choice.creationExpiresAt
     )
       throw new Error(this.t('This selection expired. Start a new session again.'));
-    if (match[2] === 'browse' || match[2] === 'mode')
-      await this.repository(choice, match[2] === 'browse');
+    if (match[2] !== 'use')
+      await this.repository(choice, match[2] === 'browse', match[2] === 'copies');
     else {
       const selected = await this.daddy.workspaces.selection(choice.workspace, choice.input);
       if (choice.groupId) {
@@ -614,6 +689,42 @@ export class TelegramWorkspace {
       this.store.setSetting(key, null);
     }
     return true;
+  }
+  private async modules(destination: Destination) {
+    const enabled = new Set([
+      ...this.daddy.workspaces.modules().map((module) => module.id),
+      ...(this.daddy.catalogue.engines?.().map((engine) => engine.id) ?? []),
+    ]);
+    const text = new TelegramText().add('🧩 ' + this.t('Modules on this server'), 'bold');
+    for (const module of moduleCatalogue)
+      text.add(`\n${enabled.has(module.id) ? '✅' : '○'} ${module.name}`);
+    text.add(
+      '\n\n' +
+        this.t(
+          'Modules connect daddy to agents and repository services. A workspace is the repository you want to work on.',
+        ),
+    );
+    text.add(
+      '\n\n' +
+        this.t(
+          'Choose an agent and model with /models inside a session. Use Add workspace to connect a repository.',
+        ),
+    );
+    const missing = moduleCatalogue.filter((module) => !enabled.has(module.id));
+    if (missing.length)
+      text.add(
+        '\n\n' +
+          this.t(
+            'Missing modules can be added by rerunning the installer on this server. Keep the currently enabled modules selected.',
+          ),
+      );
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        [{ text: this.t('Add workspace'), callback_data: 'dad:add-workspace' }],
+        [{ text: this.t('Workspaces'), callback_data: 'dad:workspaces' }],
+      ],
+    });
   }
   private async discover(destination: Destination) {
     const suggestions = (await this.daddy.workspaces.suggestions()).slice(0, 20);
@@ -830,6 +941,10 @@ export class TelegramWorkspace {
       return true;
     }
     if (!data.startsWith('dad:')) return false;
+    if (data === 'dad:modules') {
+      await this.modules(destination);
+      return true;
+    }
     if (data === 'dad:add-workspace') {
       this.store.setSetting(this.registrationKey(destination), null);
       await this.api.send(destination, {
@@ -839,14 +954,18 @@ export class TelegramWorkspace {
         buttons: [
           ...this.daddy.workspaces
             .modules()
-            .map((module) => [{ text: module.name, callback_data: `dad:add:${module.id}` }]),
+            .map((module) => [
+              { text: module.name, callback_data: `dad:workspace-module:${module.id}` },
+            ]),
           [{ text: this.t('Cancel'), callback_data: 'dad:workspaces' }],
         ],
       });
       return true;
     }
-    if (data.startsWith('dad:add:')) {
-      const module = this.daddy.workspaces.modules().find((module) => module.id === data.slice(8));
+    if (data.startsWith('dad:workspace-module:')) {
+      const module = this.daddy.workspaces
+        .modules()
+        .find((module) => module.id === data.slice('dad:workspace-module:'.length));
       if (!module) throw new Error(this.t('Choose an enabled repository service.'));
       this.store.setSetting(this.registrationKey(destination), {
         provider: module.id,
@@ -1105,6 +1224,10 @@ export class TelegramWorkspace {
         }
       }
 
+      if (text === '/modules') {
+        await this.modules(destination);
+        return true;
+      }
       if (text === '/language') return await this.callback('language:show', destination);
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
@@ -1178,6 +1301,26 @@ export class TelegramWorkspace {
       const groupId = privateChat
         ? this.store.setting<string>('telegram.currentDaddy')
         : this.groupAt(destination);
+      const rename = text.match(/^\/rename(?:\s+([\s\S]+))?$/);
+      if (rename) {
+        if (!groupId) throw new Error(this.t('Open the session you want to rename.'));
+        this.authorize(destination, groupId);
+        if (!rename[1]) {
+          await this.api.send(
+            destination,
+            this.t(
+              'Send /rename followed by the new session name. Its Telegram topic will be renamed too.',
+            ),
+          );
+          return true;
+        }
+        const board = this.daddy.rename(groupId, rename[1]);
+        await this.api.send(
+          destination,
+          this.t('Session renamed: {title}', { title: board.group.title }),
+        );
+        return true;
+      }
       const pool = text.match(/^\/pool(?:\s+([1-8]))?$/);
       const repo = text.match(/^\/repo(?:\s+(.+))?$/);
       if (repo) {
@@ -1349,31 +1492,88 @@ export class TelegramWorkspace {
     const pair = this.pair();
     if (!pair || !group.parentGroupId) return;
     const id = `telegram:child-session:${group.id}`;
-    if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+    if (
+      ['sent', 'superseded'].includes(
+        String(
+          this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
+        ),
+      )
+    )
+      return;
     const parent = this.room()
       ? await this.ensureTopic(this.daddy.group(group.parentGroupId))
       : undefined;
     const destination = parent ? { chatId: parent.chatId, threadId: parent.threadId } : pair.chatId;
     if (this.pair()?.userId !== pair.userId || (parent && this.room()?.chatId !== parent.chatId))
       return;
-    this.store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
-    await this.api.send(destination, {
-      ...new TelegramText().add(
-        this.t('New session created: {title}', { title: group.title }),
-        'bold',
-      ),
-      buttons: [
-        [
-          topic
-            ? { text: this.t('Open session topic'), url: this.link(topic) }
-            : { text: this.t('Open session'), callback_data: `dad:open:${group.id}` },
+    this.store.db
+      .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
+      .run(id, 'pending', now());
+    const result = await this.api.send(
+      destination,
+      {
+        ...new TelegramText().add(
+          this.t('New session created: {title}', { title: group.title }),
+          'bold',
+        ),
+        buttons: [
+          [
+            topic
+              ? { text: this.t('Open session topic'), url: this.link(topic) }
+              : { text: this.t('Open session'), callback_data: `dad:open:${group.id}` },
+          ],
         ],
-      ],
+      },
+      undefined,
+      { key: id, notificationId: id },
+    );
+    this.store.db
+      .prepare('UPDATE notifications SET status=? WHERE id=?')
+      .run(deliveryStatus(result), id);
+  }
+  private eventDeferred(event: Event) {
+    const deferred = this.store.setting<{
+      nextAt: number;
+      blockedUntil?: number;
+      attempts: number;
+    }>(`telegram.eventRetry:${event.taskId}`);
+    return (
+      !!deferred &&
+      ((deferred.blockedUntil ?? 0) > Date.now() ||
+        (event.id < 0 &&
+          deferred.attempts > Number((event.data as { retryAttempt?: number }).retryAttempt ?? 0) &&
+          deferred.nextAt > Date.now()) ||
+        (event.id === 0 && deferred.nextAt > Date.now()))
+    );
+  }
+  private deferEvent(event: Event, error: unknown) {
+    const key = `telegram.eventRetry:${event.taskId}`;
+    const previous = this.store.setting<{ attempts: number }>(key);
+    const attempts = (previous?.attempts ?? 0) + 1;
+    const retryAfter = Number((error as { retryAfter?: number }).retryAfter) || 0;
+    const blockedUntil = Date.now() + retryAfter * 1000;
+    this.store.setSetting(key, {
+      groupId: event.taskId,
+      attempts,
+      blockedUntil,
+      error: redact(String(error)),
+      nextAt: Math.max(
+        blockedUntil,
+        Date.now() + Math.min(300000, 1000 * 2 ** Math.min(attempts - 1, 9)),
+      ),
     });
-    this.store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+    this.store.setSetting('telegram.error', redact(String(error)));
+  }
+  private clearDeferred(groupId: string) {
+    const key = `telegram.eventRetry:${groupId}`;
+    const retry = this.store.setting<{ error?: string }>(key);
+    if (retry?.error && this.store.setting('telegram.error') === retry.error)
+      this.store.setSetting('telegram.error', null);
+    this.store.setSetting(key, null);
   }
   onEvent(event: Event): boolean {
     if (!event.type.startsWith('daddy.')) return false;
+    if (this.eventDeferred(event)) return true;
     if (
       [
         'daddy.workspace_ready',
@@ -1384,6 +1584,7 @@ export class TelegramWorkspace {
     ) {
       this.pending = this.pending
         .then(async () => {
+          if (this.eventDeferred(event)) return;
           const pair = this.pair();
           if (this.stopped || !pair) return;
           const group = this.store.getGroup(event.taskId);
@@ -1417,37 +1618,110 @@ export class TelegramWorkspace {
             await this.api.send(destination, daddyBoard(this.locale(), this.daddy.board(group.id)));
           }
         })
-        .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
+        .catch((error) => this.deferEvent(event, error));
+      return true;
+    }
+    if (['daddy.resource_wait', 'daddy.resources_restored'].includes(event.type)) {
+      this.pending = this.pending
+        .then(async () => {
+          if (this.eventDeferred(event)) return;
+          const pair = this.pair();
+          if (this.stopped || !pair) return;
+          const group = this.daddy.group(event.taskId),
+            topic = await this.ensureTopic(group);
+          const data = event.data as {
+            resources: ResourceStatus;
+            state?: string;
+            canRecover?: boolean;
+          };
+          const restored = data.resources.ok;
+          const text = new TelegramText()
+            .add(
+              (restored ? '✅ ' : '⚠️ ') +
+                this.t(restored ? 'Resources restored' : 'Waiting for server resources'),
+              'bold',
+            )
+            .add(
+              '\n\n' +
+                this.t('Disk free: {disk} GiB · Used: {percent}% · RAM available: {memory} GiB', {
+                  disk: data.resources.diskAvailableGiB.toFixed(1),
+                  percent: data.resources.diskUsedPercent.toFixed(1),
+                  memory: data.resources.memoryAvailableGiB.toFixed(1),
+                }),
+            )
+            .add(
+              '\n\n' +
+                this.t(
+                  restored
+                    ? 'Saved questions will continue. Work paused by the monitor resumes after checking its state.'
+                    : data.state === 'blocked'
+                      ? 'Safe recovery has not cleared the limit. Your questions and working files are saved; daddy will report what still needs attention.'
+                      : data.canRecover === false
+                        ? 'There is not enough room to start the maintenance agent. Your questions and working files are saved.'
+                        : 'The resource monitor has asked daddy to inspect and repair this. Your questions are saved; ordinary work waits for the resource check.',
+                ),
+            );
+          await this.api.send(topic ?? { chatId: pair.chatId }, text, undefined, {
+            key: `resources:${group.id}`,
+            replace: true,
+            order: event.at,
+          });
+        })
+        .catch((error) => this.deferEvent(event, error));
+      return true;
+    }
+    if (event.type === 'daddy.renamed') {
+      this.pending = this.pending
+        .then(async () => {
+          if (this.eventDeferred(event)) return;
+          if (!this.stopped && this.pair()) await this.ensureTopic(this.daddy.group(event.taskId));
+        })
+        .catch((error) => this.deferEvent(event, error));
       return true;
     }
     if (event.type === 'daddy.created') {
       this.pending = this.pending
         .then(async () => {
+          if (this.eventDeferred(event)) return;
           const room = this.room();
           if (this.stopped) return;
           if (this.store.getGroup(event.taskId).deletedAt) return;
           const group = this.daddy.group(event.taskId),
             topic = await this.ensureTopic(group);
+          this.clearDeferred(group.id);
           await this.announceChild(group, topic);
           if (!topic || !room) return;
           if (this.room()?.chatId !== topic.chatId || this.pair()?.userId !== topic.ownerId) return;
           const id = `telegram:daddy-intro:${room.chatId}:${group.id}`;
-          if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
+          if (
+            ['sent', 'superseded'].includes(
+              String(
+                this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)
+                  ?.status,
+              ),
+            )
+          )
+            return;
           this.store.db
-            .prepare('INSERT INTO notifications VALUES(?,?,?)')
+            .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
             .run(id, 'pending', now());
-          await this.api.send(
+          const result = await this.api.send(
             { chatId: topic.chatId, threadId: topic.threadId },
             daddyBoard(this.locale(), this.daddy.board(group.id)),
+            undefined,
+            { key: id, notificationId: id },
           );
-          this.store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+          this.store.db
+            .prepare('UPDATE notifications SET status=? WHERE id=?')
+            .run(deliveryStatus(result), id);
         })
-        .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
+        .catch((error) => this.deferEvent(event, error));
       return true;
     }
     if (event.type !== 'daddy.message') return true;
     this.pending = this.pending
       .then(async () => {
+        if (this.eventDeferred(event)) return;
         const pair = this.pair();
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
@@ -1482,38 +1756,73 @@ export class TelegramWorkspace {
             }
           }
         }
-        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}`;
-        if (this.store.db.prepare('SELECT 1 FROM notifications WHERE id=?').get(id)) return;
-        this.store.db.prepare('INSERT INTO notifications VALUES(?,?,?)').run(id, 'pending', now());
+        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`;
+        if (
+          ['sent', 'superseded'].includes(
+            String(
+              this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
+            ),
+          )
+        )
+          return;
+        this.store.db
+          .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
+          .run(id, 'pending', now());
         const text = new TelegramText()
           .add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold')
           .add('\n\n');
         if (message.sender === 'user') text.add(message.text);
         else text.markdown(message.text);
-        await this.api.send(destination, text);
-        this.store.db.prepare("UPDATE notifications SET status='sent' WHERE id=?").run(id);
+        const result = await this.api.send(destination, text, undefined, {
+          key: message.sender === 'agent' && message.runId ? `turn:${message.runId}` : id,
+          replace: message.sender === 'agent' && !!message.runId,
+          order: message.at,
+          final: message.phase !== 'progress',
+          notificationId: id,
+        });
+        this.store.db
+          .prepare('UPDATE notifications SET status=? WHERE id=?')
+          .run(deliveryStatus(result), id);
+        this.clearDeferred(group.id);
       })
-      .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
+      .catch((error) => this.deferEvent(event, error));
     return true;
   }
+  private replayGroup(group: ReviewGroup, retry = false) {
+    const retryAttempt = retry
+      ? this.store.setting<{ attempts: number }>(`telegram.eventRetry:${group.id}`)?.attempts
+      : undefined;
+    if (this.room())
+      this.onEvent({
+        id: retry ? -1 : 0,
+        taskId: group.id,
+        type: 'daddy.created',
+        data: { retryAttempt },
+        at: now(),
+      });
+    const messages = this.store.messages(group.id);
+    const completedRuns = new Set(
+      messages.filter((message) => message.phase === 'final').map((message) => message.runId),
+    );
+    for (const message of messages.filter(
+      (message) =>
+        ['user', 'agent'].includes(message.sender) &&
+        !(message.phase === 'progress' && completedRuns.has(message.runId)),
+    ))
+      this.onEvent({
+        id: retry ? -1 : 0,
+        taskId: group.id,
+        type: 'daddy.message',
+        data: { messageId: message.id, retryAttempt },
+        at: now(),
+      });
+  }
   replay() {
-    for (const group of this.daddy.sessions()) {
-      if (this.room())
-        this.onEvent({ id: 0, taskId: group.id, type: 'daddy.created', data: {}, at: now() });
-      for (const message of this.store
-        .messages(group.id)
-        .filter((message) => ['user', 'agent'].includes(message.sender)))
-        this.onEvent({
-          id: 0,
-          taskId: group.id,
-          type: 'daddy.message',
-          data: { messageId: message.id },
-          at: now(),
-        });
-    }
+    for (const group of this.daddy.sessions()) this.replayGroup(group);
   }
   async stop() {
     this.stopped = true;
+    clearInterval(this.retryTimer);
     await this.voice?.stop();
     await this.pending;
     await Promise.allSettled([...this.topics.values()]);

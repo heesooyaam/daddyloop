@@ -119,6 +119,7 @@ function portableConfig(config: Config) {
     version: config.version,
     modules: config.modules,
     agents: config.agents,
+    agentExecution: config.agentExecution,
     locale: config.locale,
     maxConcurrentAgents: config.maxConcurrentAgents,
     resources: config.resources,

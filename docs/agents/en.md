@@ -26,7 +26,13 @@ daddy auth agent claude --token-file /private/anthropic-key
 
 The hidden prompt saves the key to `~/.tokens/anthropic`. `ANTHROPIC_API_KEY` in the service environment takes precedence; `DADDYLOOP_CLAUDE_API_KEY_FILE` selects another private file. API access is billed separately from a Claude Pro/Max subscription. This integration uses the [official Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview).
 
-Claude command execution requires Bubblewrap and socat, installed on supported apt-based hosts when you select the module. The host must allow user namespaces. Workers can edit their working copies; coordination and review are read-only. If the sandbox is unavailable, execution stops with an error.
+## Where commands run
+
+By default, Codex and Claude run directly as the service user on the server: `agentExecution: "host"`. They use the host network, DNS, local sockets and configured command-line tools. There are no CLI approval prompts and no mandatory Bubblewrap/socat dependency. Existing agent conversations use this mode on their next launch too.
+
+Tasks still have separate working copies and service-side review/submission checks. In host mode, the coordinator/reviewer read-only role is a workflow instruction, not an operating-system file barrier.
+
+For an explicitly isolated installation, set `agentExecution: "sandbox"` in the server config and restart. That mode restricts writes and network access; Claude additionally needs Bubblewrap, socat and supported user namespaces. The execution mode is shared by the adapter interface and reported by `/api/status`.
 
 ## Choose models
 
@@ -78,4 +84,4 @@ Preparing a reset does not spend it. Confirm the displayed request to consume on
 
 ## Troubleshooting
 
-Run `daddy doctor` for enabled-adapter diagnostics without a model turn. For authentication failures, check the account/key on the host; for an empty catalogue, run `daddy models --refresh`. A CLI protocol or sandbox error leaves work unfinished. Inspect the error, fix the cause and resume; use rollback after an incompatible CLI update.
+Run `daddy doctor` for enabled-adapter diagnostics without a model turn. For authentication failures, check the account/key on the host; for an empty catalogue, run `daddy models --refresh`. A CLI protocol or execution error leaves work unfinished. Inspect the error, fix the cause and resume; use rollback after an incompatible CLI update.

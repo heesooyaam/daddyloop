@@ -248,6 +248,7 @@ export class Worker {
                 if (
                   group.daddyState === 'paused' ||
                   group.daddyState === 'archived' ||
+                  group.resourceWait?.state === 'repairing' ||
                   group.deletion
                 )
                   return false;

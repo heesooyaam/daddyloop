@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { CodexConnection, type RpcMessage } from './protocol.js';
 import {
   resultSchema,
+  executionInstructions,
   taskSession,
   type AgentRuntime,
   type AgentInput,
@@ -31,6 +32,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     const rpc = new CodexConnection(codexExecutable(this.options.executable), this.options.args);
     const profile = input.profile,
       readOnly = input.readOnly;
+    const host = input.execution !== 'sandbox';
     let threadId = input.threadId;
     let turnId: string | undefined;
     let final = '',
@@ -159,23 +161,23 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     });
     try {
       if (input.signal.aborted) throw new AppError('run_cancelled', 'Run is already cancelled');
-      await rpc.start(input.cwd);
+      await rpc.start(input.cwd, host);
       const config = {
         'features.apps': false,
         'features.multi_agent': false,
         mcp_servers: {},
-        'shell_environment_policy.inherit': 'core',
+        'shell_environment_policy.inherit': host ? 'all' : 'core',
       };
       const common = {
         cwd: input.cwd,
         runtimeWorkspaceRoots: [input.cwd],
         approvalPolicy: 'never',
-        sandbox: readOnly ? 'read-only' : 'workspace-write',
+        sandbox: host ? 'danger-full-access' : readOnly ? 'read-only' : 'workspace-write',
         config,
         ...(profile?.model || this.options.model
           ? { model: profile?.model ?? this.options.model }
           : {}),
-        developerInstructions: input.instructions,
+        developerInstructions: executionInstructions(input),
       };
       if (threadId)
         await rpc.request('thread/resume', {
@@ -199,15 +201,17 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         runtimeWorkspaceRoots: [input.cwd],
         input: [{ type: 'text', text: input.prompt }],
         outputSchema: z.toJSONSchema(resultSchema, { target: 'draft-7' }),
-        sandboxPolicy: readOnly
-          ? { type: 'readOnly', networkAccess: false }
-          : {
-              type: 'workspaceWrite',
-              writableRoots: [input.cwd],
-              networkAccess: false,
-              excludeTmpdirEnvVar: true,
-              excludeSlashTmp: true,
-            },
+        sandboxPolicy: host
+          ? { type: 'dangerFullAccess' }
+          : readOnly
+            ? { type: 'readOnly', networkAccess: false }
+            : {
+                type: 'workspaceWrite',
+                writableRoots: [input.cwd],
+                networkAccess: false,
+                excludeTmpdirEnvVar: true,
+                excludeSlashTmp: true,
+              },
       });
       turnId = response.turn.id;
       input.onSession(threadId!, turnId);

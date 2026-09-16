@@ -30,7 +30,10 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[]): TelegramCard {
         { text: '⬆️ ' + t('Updates'), callback_data: 'updates:show' },
         { text: '🌐 ' + t('Language'), callback_data: 'language:show' },
       ],
-      [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
+      [
+        { text: '📊 ' + t('Limits'), callback_data: 'dad:limits' },
+        { text: '🧩 ' + t('Modules'), callback_data: 'dad:modules' },
+      ],
     ],
   };
 }
@@ -44,6 +47,12 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[]): Telegr
             'A workspace is a repository URL or a source folder. daddy gives every worker a separate copy.',
           ),
       );
+  text.add(
+    '\n\n' +
+      t(
+        'Optional: send /new followed by your task description. The session and topic will use that description as their name.',
+      ),
+  );
   return {
     ...text,
     buttons: [
@@ -52,6 +61,7 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[]): Telegr
         .map((workspace) => [{ text: workspace.name, callback_data: `dad:new:${workspace.id}` }]),
       [{ text: '＋ ' + t('Add workspace'), callback_data: 'dad:add-workspace' }],
       [{ text: '📁 ' + t('Find workspaces on the server'), callback_data: 'dad:discover' }],
+      [{ text: t('Modules'), callback_data: 'dad:modules' }],
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
   };
@@ -105,6 +115,7 @@ export function daddyBoard(
           ? [[{ text: t('Retry deletion'), callback_data: `dad:delete:${board.group.id}` }]]
           : []),
         [{ text: t('Refresh'), callback_data: `dad:open:${board.group.id}` }],
+        [{ text: t('Modules'), callback_data: 'dad:modules' }],
         [{ text: t('Sessions'), callback_data: 'dad:home' }],
       ],
     };
@@ -142,7 +153,10 @@ export function daddyBoard(
           callback_data: `dad:instructions:${board.group.id}`,
         },
       ],
-      [{ text: '📊 ' + t('Limits'), callback_data: 'dad:limits' }],
+      [
+        { text: '📊 ' + t('Limits'), callback_data: 'dad:limits' },
+        { text: '🧩 ' + t('Modules'), callback_data: 'dad:modules' },
+      ],
       [
         {
           text: '📁 ' + t('Repository for next task'),
@@ -159,6 +173,7 @@ export function daddyBoard(
       ...(board.canDelete
         ? [[{ text: t('Delete session'), callback_data: `dad:delete:${board.group.id}` }]]
         : []),
+      [{ text: t('Modules'), callback_data: 'dad:modules' }],
       [{ text: t('Sessions'), callback_data: 'dad:home' }],
     ],
   };

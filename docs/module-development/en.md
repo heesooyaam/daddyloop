@@ -39,7 +39,7 @@ Use [`claude/index.ts`](../../src/modules/agents/claude/index.ts) for a small co
 4. **Report events and a result.** Use `onEvent` for progress. Validate structured output with `resultSchema`. Return `AgentResult`; invalid output, cancellation, missing completion or transport failure must not become `completed`.
 5. **Discover models.** `catalogue.list(refresh, signal)` returns engine-tagged `ModelOption[]`; `validate(profile)` rejects unsupported model/effort combinations. Query the engine's public discovery mechanism. Do not infer its identity from a model prefix or promise account entitlement merely because a model is listed.
 
-The adapter must enforce the task's file and tool boundaries in its transport or sandbox. Instructions alone are not an implementation of read-only mode. Keep account/provider credentials out of agent shell environments and redact diagnostics.
+Honor `SessionInput.execution` / `AgentInput.execution` for every launch and resume. `host` is the default: use the service user's normal environment and network without CLI approvals. `sandbox` is explicit and must enforce its filesystem/network policy. In host mode, `readOnly` describes the role rather than an OS guarantee. Preserve service-side tool authorization, revision checks and generation fences in both modes. Never print credentials in diagnostics.
 
 ## Usage is a capability of the agent
 
@@ -99,7 +99,7 @@ Run `npm run check` and the relevant browser/installer tests. Good starting poin
 
 Ordinary tests must stay offline and use isolated state. Put paid model calls in an explicit smoke script; do not make a PR or change account limits during a unit test.
 
-`workspaceRoot` and `readPaths` grant read access to the managed repository and shared VCS metadata. Writes remain limited to `cwd`; adapters must not turn a metadata read grant into a write grant.
+`workspaceRoot` and `readPaths` describe the managed repository and VCS metadata. In sandbox mode, writes remain limited to `cwd`; metadata read access must not grant writes. Host mode uses normal OS permissions.
 
 Task instructions are part of the common runtime contract: use `taskSession(input)` for task jobs and pass `SessionInput.instructions` intact to the engine. The helper includes the frozen job instructions and workflow policy. The coordinator has already composed its session instructions. Do not reread local/global skills or replace these instructions based on the engine.
 
@@ -108,3 +108,5 @@ A repository module can provide `sessionWorkspace(context): SessionWorkspaceBack
 Git hosting modules expose `git: GitRepositoryTransport`: `parse(address)` validates a repository URL and returns its host, repository and transport; `environment(source)` provides authentication for the Git process. GitHub and GitLab supply their own repository naming rules and token usernames through [git-source.ts](../../src/modules/repositories/git-source.ts). `Workspaces` calls this contract for fetch and push; it does not infer a host from a model or a fallback provider. SSH URLs keep their transport. Use [GitSessionWorkspace](../../src/modules/repositories/git-sessions.ts) for the shared Git allocation/export/removal lifecycle. Its archives contain complete task Git data; the host must stop and wait for all session runs before calling `remove`.
 
 `SessionInput.onAssistantMessage({ id, text })` is the optional public conversation callback. Emit completed assistant text blocks during a turn with stable native item IDs. Exclude tool calls/results, stderr, reasoning and the structured `AgentResult`; the host publishes its validated final summary separately. The coordinator persists this text for all clients and rejects callbacks from cancelled or completed runs. Worker runtimes receive no conversation callback. Codex emits commentary items; Claude emits assistant text blocks.
+
+A repository session backend may implement `reclaim(group, signal, collectCache)` for resource recovery. Verify ownership and active jobs again before each operation. Arcadia uses ordinary `arc gc` and parks idle owned mounts without forgetting their stores. Never truncate a store, delete worker changes or reclaim a source/human mount.

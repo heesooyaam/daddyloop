@@ -296,6 +296,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
           </div>
         )}
+        {board?.group.resourceWait && (
+          <div className="daddy-error daddy-resource-wait" role="status">
+            <strong>{t('Waiting for server resources')}</strong>
+            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
+            <span>
+              {t(
+                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+              )}
+            </span>
+          </div>
+        )}
         {board?.group.workspacePreparation && !board.group.deletion && (
           <div
             className={

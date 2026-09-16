@@ -722,6 +722,8 @@ export class Engine {
       task.resumeState = task.state;
       task.generation++;
       if (reviewerActive) task.reviewFinished = false;
+      if (source === 'resource.pause')
+        task.resourcePause = { generation: task.generation, at: now() };
       this.store.cancelJobs(id);
       this.onCancel(id);
       this.state(task, 'needs_input', reason);

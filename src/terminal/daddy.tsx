@@ -56,6 +56,7 @@ const commands = [
   '/pool',
   '/limits',
   '/repo',
+  '/rename',
   '/models',
   '/notifications',
   '/updates',
@@ -433,6 +434,16 @@ export function DaddyTerminal({
       return;
     }
     if (!state.selected) throw new Error(t('Start a daddy session first.'));
+    if (name === '/rename') {
+      if (!argument.trim())
+        throw new Error(
+          t(
+            'Send /rename followed by the new session name. Its Telegram topic will be renamed too.',
+          ),
+        );
+      await model.action('rename', { title: argument.trim() });
+      return;
+    }
     if (name === '/repo') {
       if (!argument || argument === 'default') model.repository(undefined);
       else {
@@ -646,6 +657,14 @@ export function DaddyTerminal({
         ...markdown(message.text, width),
         { text: '' },
       );
+    if (state.board.group.resourceWait)
+      content.push({
+        text:
+          t('Waiting for server resources') +
+          ': ' +
+          state.board.group.resourceWait.reasons.map((reason) => t(reason)).join('; '),
+        kind: 'accent',
+      });
     if (state.board.daddyBusy)
       content.push({
         text: ['·', '•', '●', '•'][frame % 4] + ' ' + t('daddy is working'),

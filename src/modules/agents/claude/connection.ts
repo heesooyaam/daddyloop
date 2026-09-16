@@ -8,10 +8,13 @@ export type ClaudeQuery = typeof import('@anthropic-ai/claude-agent-sdk').query;
 export const claudeExecutable = (executable?: Executable) =>
   (typeof executable === 'function' ? executable() : executable) ?? 'claude';
 
-export function claudeEnvironment() {
+export function claudeEnvironment(host = false) {
   const env: Record<string, string | undefined> = Object.fromEntries(
     Object.keys(process.env).map((key) => [key, undefined]),
   );
+  if (host)
+    for (const [name, value] of Object.entries(process.env))
+      if (!/^(TELEGRAM_BOT_TOKEN|DADDYLOOP_.*TOKEN.*)$/.test(name)) env[name] = value;
   for (const key of [
     'HOME',
     'PATH',
@@ -27,15 +30,17 @@ export function claudeEnvironment() {
     process.env.ANTHROPIC_API_KEY ??
     (existsSync(keyFile) ? readFileSync(keyFile, 'utf8').trim() : undefined);
   if (key) env.ANTHROPIC_API_KEY = rememberSecret(key);
+  for (const [name, value] of Object.entries(env))
+    if (value && /(?:_TOKEN|_API_KEY)$/.test(name)) rememberSecret(value);
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
   env.DISABLE_AUTOUPDATER = '1';
   env.GIT_OPTIONAL_LOCKS = '0';
   return env;
 }
-export function connectionOptions(executable?: Executable): Options {
+export function connectionOptions(executable?: Executable, host = false): Options {
   return {
     pathToClaudeCodeExecutable: claudeExecutable(executable),
-    env: claudeEnvironment(),
+    env: claudeEnvironment(host),
     settingSources: [],
     strictMcpConfig: true,
     mcpServers: {},

@@ -96,3 +96,39 @@ test('confirms session deletion, sends its generation and clears the deleted sel
     0,
   );
 });
+
+test('explains resource waits on a phone instead of leaving the conversation silently pending', async ({
+  page,
+}) => {
+  await page.route('**/api/daddy/sessions/**', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    if (!body.group) return route.fulfill({ json: body });
+    await route.fulfill({
+      json: {
+        ...body,
+        group: {
+          ...body.group,
+          resourceWait: {
+            state: 'repairing',
+            since: new Date().toISOString(),
+            reasons: ['Disk-space threshold reached'],
+          },
+        },
+      },
+    });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill('Resource status fixture');
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByText('Waiting for server resources', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});

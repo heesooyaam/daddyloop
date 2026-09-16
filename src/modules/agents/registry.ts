@@ -23,7 +23,10 @@ function nativeSession(engine: string, handle?: string) {
 export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalogue {
   private modules: Map<string, AgentModule>;
   private errors = new Map<string, string>();
-  constructor(modules: AgentModule[]) {
+  constructor(
+    modules: AgentModule[],
+    private execution: SessionInput['execution'] = 'host',
+  ) {
     this.modules = new Map();
     for (const module of modules) {
       if (!/^[a-z][a-z0-9-]{0,31}$/.test(module.id) || this.modules.has(module.id))
@@ -85,10 +88,12 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
     if (!engine) throw new AppError('agent_profile_missing', 'The queued job has no agent profile');
     const module = this.get(engine),
       task = { ...input.task };
+    input.onEvent('runtime.execution', { engine, mode: input.execution ?? this.execution });
     const key = input.job.role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
     task[key] = nativeSession(engine, task[key]);
     return module.runtime.run({
       ...input,
+      execution: input.execution ?? this.execution,
       task,
       onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
     });
@@ -97,8 +102,10 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
     input.signal.throwIfAborted();
     const engine = input.profile?.engine;
     if (!engine) throw new AppError('agent_profile_missing', 'The session has no agent profile');
+    input.onEvent('runtime.execution', { engine, mode: input.execution ?? this.execution });
     return this.get(engine).runtime.runSession({
       ...input,
+      execution: input.execution ?? this.execution,
       threadId: nativeSession(engine, input.threadId),
       onSession: (id, turn) => input.onSession(sessionHandle(engine, id), turn),
     });

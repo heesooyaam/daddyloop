@@ -164,6 +164,14 @@ export function registerDaddyCommands(program: Command) {
       );
     });
   program
+    .command('rename')
+    .argument('<session>')
+    .argument('<title>')
+    .description('Rename a session and its connected Telegram topic')
+    .action(async (id, title) =>
+      print(await api(`/daddy/sessions/${(await session(id)).id}/rename`, { title })),
+    );
+  program
     .command('talk')
     .argument('<session>')
     .argument('<message>')

@@ -33,6 +33,30 @@ export class SessionWorkspaces {
     if (!this.supports(group)) return undefined;
     return this.backend(group.workspace!.provider)!.prepare(group, signal);
   }
+  async reclaim(group: ReviewGroup, signal: AbortSignal, collectCache: boolean) {
+    const results: { module: string; result: unknown }[] = [];
+    for (const module of this.repositories.list()) {
+      signal.throwIfAborted();
+      const backend = this.backend(module.id);
+      if (backend?.reclaim)
+        results.push({
+          module: module.id,
+          result: await backend.reclaim(group, signal, collectCache),
+        });
+    }
+    return results;
+  }
+  reclaimOptions() {
+    return this.repositories
+      .list()
+      .filter((module) => !!this.backend(module.id)?.reclaim)
+      .map((module) => ({
+        module: module.id,
+        name: module.name,
+        action:
+          'Reclaim idle owned runtime resources and native caches without removing working data',
+      }));
+  }
   async remove(group: ReviewGroup) {
     const contexts = this.context.store.db
       .prepare("SELECT value FROM settings WHERE key LIKE 'daddy.context:%'")

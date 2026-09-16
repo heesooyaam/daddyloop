@@ -132,6 +132,10 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
     );
     store.setSetting('preferences', { locale: 'ru' });
     store.setSetting('telegram.pairing', { secret: 'must-not-transfer' });
+    store.setSetting('telegram.delivery:fixture', {
+      text: 'Do not send from another host',
+      status: 'queued',
+    });
     store.event(task.id, 'review.evidence', { markdown: '**Keep this review**' });
     store.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     store.close();
@@ -190,6 +194,7 @@ it('moves a snapshot to a new path with source commits, staged edits, worker fil
         'unfinished worker result',
       );
       expect(restored.setting('telegram.pairing')).toBeUndefined();
+      expect(restored.setting('telegram.delivery:fixture')).toBeUndefined();
       expect(restored.setting('preferences')).toEqual({ locale: 'ru' });
       expect(
         restored.db

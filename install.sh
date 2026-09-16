@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-daddyloop_version="0.19.0"
+daddyloop_version="0.20.0"
 daddyloop_prefix="${DADDYLOOP_INSTALL_DIR:-$HOME/.local/share/daddyloop}"
 daddyloop_bin_dir="${DADDYLOOP_BIN_DIR:-$HOME/.local/bin}"
 daddyloop_base="${DADDYLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/daddyloop/releases/download/v$daddyloop_version}"
@@ -83,11 +83,6 @@ while IFS=$'\t' read -r daddyloop_id daddyloop_artifact daddyloop_command; do
   mv -- "$daddyloop_addon" "$daddyloop_payload/modules/$daddyloop_id"
 done < "$daddyloop_tmp/modules"
 cp -- "$daddyloop_tmp/selection.json" "$daddyloop_payload/installed-modules.json"
-if [[ -d "$daddyloop_payload/modules/claude" ]]; then
-  if ! command -v bwrap >/dev/null || ! command -v socat >/dev/null; then
-    daddyloop_system_packages bubblewrap socat
-  fi
-fi
 cat "$daddyloop_tmp/selection.json" >> "$daddyloop_tmp/components"
 daddyloop_signature="$(sha256sum "$daddyloop_tmp/components")"; daddyloop_signature="${daddyloop_signature%% *}"
 daddyloop_destination="$daddyloop_prefix/releases/$daddyloop_version-${daddyloop_signature:0:12}"

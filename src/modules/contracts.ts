@@ -121,4 +121,6 @@ export interface SessionWorkspaceContext {
 export interface SessionWorkspaceBackend {
   prepare(group: ReviewGroup, signal: AbortSignal): Promise<{ path: string }>;
   remove(group: ReviewGroup): Promise<{ archivePath?: string }>;
+  /** Reclaim only idle owned runtime resources; preserve working data and repository sources. */
+  reclaim?(group: ReviewGroup, signal: AbortSignal, collectCache: boolean): Promise<unknown>;
 }

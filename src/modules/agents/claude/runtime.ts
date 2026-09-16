@@ -6,6 +6,7 @@ import { dirname, resolve, relative, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
   resultSchema,
+  executionInstructions,
   taskSession,
   type AgentInput,
   type SessionInput,
@@ -104,6 +105,7 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
     return this.runSession(taskSession(input));
   }
   async runSession(input: SessionInput): Promise<AgentResult> {
+    const host = input.execution !== 'sandbox';
     input.signal.throwIfAborted();
     const { query, createSdkMcpServer } = await import('@anthropic-ai/claude-agent-sdk');
     input.signal.throwIfAborted();
@@ -153,24 +155,49 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
         ? ['Read', 'Glob', 'Grep', 'Bash']
         : ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'];
       const options: Options = {
-        ...connectionOptions(this.options.executable),
+        ...connectionOptions(this.options.executable, host),
         cwd,
         abortController: controller,
         resume: input.threadId,
         model: input.profile?.model,
         effort: input.profile?.effort as Options['effort'],
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: input.instructions },
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: executionInstructions(input),
+        },
         tools: builtin,
         allowedTools: [...custom],
-        permissionMode: 'default',
+        permissionMode: host ? 'bypassPermissions' : 'default',
+        allowDangerouslySkipPermissions: host,
         mcpServers: { daddyloop: server },
         hooks: {
           PreToolUse: [
-            { hooks: [claudeToolGuard(cwd, input.readOnly, custom, workspaceRoot, readPaths)] },
+            {
+              hooks: [
+                host
+                  ? async (event) =>
+                      event.hook_event_name === 'PreToolUse' &&
+                      !custom.has(event.tool_name) &&
+                      event.tool_name !== 'StructuredOutput' &&
+                      !builtin.includes(event.tool_name)
+                        ? {
+                            hookSpecificOutput: {
+                              hookEventName: 'PreToolUse',
+                              permissionDecision: 'deny',
+                              permissionDecisionReason:
+                                'Use daddyloop tools for delegation and user questions',
+                            },
+                          }
+                        : {}
+                  : claudeToolGuard(cwd, input.readOnly, custom, workspaceRoot, readPaths),
+              ],
+            },
           ],
         },
         canUseTool: async (name, args) => {
           if (
+            (host && builtin.includes(name)) ||
             custom.has(name) ||
             name === 'StructuredOutput' ||
             (builtin.includes(name) && name !== 'Bash')
@@ -178,28 +205,30 @@ export class ClaudeRuntime implements AgentRuntime, SessionRuntime {
             return { behavior: 'allow', updatedInput: args };
           return { behavior: 'deny', message: 'daddyloop did not grant this host permission' };
         },
-        sandbox: {
-          enabled: true,
-          failIfUnavailable: true,
-          autoAllowBashIfSandboxed: true,
-          allowUnsandboxedCommands: false,
-          filesystem: {
-            denyRead: [homedir(), ...(this.options.protectedPaths ?? [])],
-            allowRead: [workspaceRoot, ...readPaths],
-            denyWrite: input.readOnly ? [cwd, '/tmp'] : [],
-            allowWrite: input.readOnly ? [] : [cwd],
-          },
-          network: {
-            allowedDomains: [],
-            strictAllowlist: true,
-            allowUnixSockets: [],
-            allowLocalBinding: false,
-          },
-          credentials: {
-            envVars: [{ name: 'ANTHROPIC_API_KEY', mode: 'deny' }],
-            files: [{ path: join(homedir(), '.tokens'), mode: 'deny' }],
-          },
-        },
+        sandbox: host
+          ? { enabled: false }
+          : {
+              enabled: true,
+              failIfUnavailable: true,
+              autoAllowBashIfSandboxed: true,
+              allowUnsandboxedCommands: false,
+              filesystem: {
+                denyRead: [homedir(), ...(this.options.protectedPaths ?? [])],
+                allowRead: [workspaceRoot, ...readPaths],
+                denyWrite: input.readOnly ? [cwd, '/tmp'] : [],
+                allowWrite: input.readOnly ? [] : [cwd],
+              },
+              network: {
+                allowedDomains: [],
+                strictAllowlist: true,
+                allowUnixSockets: [],
+                allowLocalBinding: false,
+              },
+              credentials: {
+                envVars: [{ name: 'ANTHROPIC_API_KEY', mode: 'deny' }],
+                files: [{ path: join(homedir(), '.tokens'), mode: 'deny' }],
+              },
+            },
         outputFormat: {
           type: 'json_schema',
           schema: z.toJSONSchema(resultSchema, { target: 'draft-7' }),

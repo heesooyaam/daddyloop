@@ -1,4 +1,5 @@
 import { ModuleUsage } from '../modules/agents/usage.js';
+import { ResourceRecovery } from '../core/resource-recovery.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import serveStatic from '@fastify/static';
@@ -103,6 +104,7 @@ export async function buildApp(options: ServerOptions) {
   const agents =
     options.agents ??
     createAgents(config.modules, {
+      execution: config.agentExecution,
       store,
       dataDir,
       executable: (id) => () => executable(id),
@@ -256,6 +258,12 @@ export async function buildApp(options: ServerOptions) {
           .map((task) => task.repoPath),
       ),
   );
+  const sessionWorkspaces = new SessionWorkspaces(repositories, {
+    store,
+    dataDir,
+    registry: workspaces,
+    checkouts,
+  });
   const daddy = new Daddy(
     engine,
     workspaces,
@@ -265,9 +273,32 @@ export async function buildApp(options: ServerOptions) {
     getResources,
     catalogue,
     options.daddyWorkspace,
-    new SessionWorkspaces(repositories, { store, dataDir, registry: workspaces, checkouts }),
+    sessionWorkspaces,
   );
-  if (config.cache.auto) worker.autoCleanup = () => cache.prune(true);
+  daddy.resourceRecovery = new ResourceRecovery(
+    engine,
+    options.daddyRuntime ?? agents,
+    getResources,
+    {
+      directory: join(dataDir, 'maintenance'),
+      allowCleanup: config.cache.auto,
+      inspect: async () => ({
+        files: await cache.prune(false),
+        repositoryMaintenance: sessionWorkspaces.reclaimOptions(),
+      }),
+      clean: async (groupId, signal) => {
+        await worker.waitForGroup(groupId);
+        signal.throwIfAborted();
+        const files = await cache.prune(true);
+        const native = await sessionWorkspaces.reclaim(
+          daddy.group(groupId),
+          signal,
+          getResources().reasons.some((reason) => reason.includes('Disk')),
+        );
+        return { files, native };
+      },
+    },
+  );
   const token = options.token ?? accessToken(dataDir);
   const access = new Access(store, token);
   let telegram: Telegram | undefined;
@@ -459,6 +490,7 @@ export async function buildApp(options: ServerOptions) {
     return {
       version: VERSION,
       application: 'daddyloop',
+      agentExecution: config.agentExecution,
       preferences: preferences(store),
       instanceId: store.setting('server.instanceId'),
       runtimes: cliModules.map(({ id, cli }) => ({

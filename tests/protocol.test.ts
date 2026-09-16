@@ -183,3 +183,45 @@ it('exposes only Codex commentary through the public assistant callback', async 
     [{ id: 'comment-1', text: 'Checking the implementation.' }],
   ]);
 });
+
+it.each(['host', 'sandbox'] as const)(
+  'uses the shared %s execution mode for Codex start and turns',
+  async (execution) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddyloop-execution-'));
+    try {
+      const path = join(dir, 'packets.jsonl');
+      const runtime = new CodexRuntime({
+        executable: process.execPath,
+        args: [resolve('tests/fixtures/fake-codex.mjs'), 'happy', path],
+        timeoutMs: 5000,
+      });
+      await runtime.runSession({
+        execution,
+        cwd: dir,
+        prompt: 'Fixture',
+        readOnly: false,
+        instructions: 'Fixture',
+        signal: new AbortController().signal,
+        onSession: () => {},
+        onEvent: () => {},
+        onTool: async () => ({}),
+      });
+      const packets = readFileSync(path, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const start = packets.find((packet) => packet.method === 'thread/start').params;
+      const turn = packets.find((packet) => packet.method === 'turn/start').params;
+      expect(start.approvalPolicy).toBe('never');
+      expect(start.sandbox).toBe(execution === 'host' ? 'danger-full-access' : 'workspace-write');
+      expect(turn.sandboxPolicy.type).toBe(
+        execution === 'host' ? 'dangerFullAccess' : 'workspaceWrite',
+      );
+      expect(start.config['shell_environment_policy.inherit']).toBe(
+        execution === 'host' ? 'all' : 'core',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
