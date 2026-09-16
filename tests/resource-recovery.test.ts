@@ -16,7 +16,8 @@ function fixture() {
     reasons: ['Disk-space threshold reached'],
   };
   const inspect = vi.fn(async () => ({ candidates: ['verified disposable cache'] }));
-  const clean = vi.fn(async () => {
+  const stopProcesses = vi.fn(async () => ({ stopped: [42], remaining: [] }));
+  const clean = vi.fn(async (_groupId: string, _signal: AbortSignal) => {
     resources = healthy();
     return { removedBytes: 1024 };
   });
@@ -35,6 +36,7 @@ function fixture() {
     allowCleanup: true,
     inspect,
     clean,
+    stopProcesses,
   });
   const calls: SessionInput[] = [];
   f.runtime.runSession.mockImplementation(async (input) => {
@@ -45,6 +47,8 @@ function fixture() {
       );
       await expect(input.onTool('dispatch', {})).rejects.toThrow('bounded');
       await input.onTool('inspect_cache', {});
+      await expect(input.onTool('stop_processes', { pid: 42 })).rejects.toThrow('bounded');
+      await input.onTool('stop_processes', {});
       await input.onTool('clean_cache', {});
       expect(((await input.onTool('read_resources', {})) as ResourceStatus).ok).toBe(true);
     }
@@ -55,6 +59,7 @@ function fixture() {
     daddy,
     clean,
     inspect,
+    stopProcesses,
     calls,
     setResources: (value: ResourceStatus) => {
       resources = value;
@@ -82,6 +87,7 @@ it('asks daddy to repair resource pressure without allocating a repository and k
     );
     expect(f.clean).toHaveBeenCalledOnce();
     expect(f.inspect).toHaveBeenCalledOnce();
+    expect(f.stopProcesses).toHaveBeenCalledTimes(2);
     expect(f.context.prepare).not.toHaveBeenCalled();
     expect(f.store.daddyJobs(group.id).find((job) => job.trigger === 'user')).toMatchObject({
       status: 'queued',
@@ -118,6 +124,128 @@ it('does not start a model at the hard resource floor or create a repair job eve
       1,
     );
     expect(f.store.messages(group.id)[0].text).toBe('Keep my question');
+  } finally {
+    await f.close();
+  }
+});
+
+it('stops owned leftovers before calling a model and skips the model when that restores resources', async () => {
+  const f = fixture();
+  try {
+    f.stopProcesses.mockImplementation(async () => {
+      f.setResources(healthy());
+      return { stopped: [42], remaining: [] };
+    });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.daddy.chat(group.id, 'Keep working');
+    f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).find((j) => j.trigger === 'resources')?.status).toBe(
+        'completed',
+      ),
+    );
+    expect(f.stopProcesses).toHaveBeenCalledOnce();
+    expect(f.runtime.runSession).not.toHaveBeenCalled();
+    expect(f.clean).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('replaces a late cleanup question with measured recovery instead of asking the user to kill a finished process', async () => {
+  const f = fixture();
+  try {
+    f.runtime.runSession.mockImplementation(async () => {
+      f.setResources(healthy());
+      return {
+        status: 'needs_input',
+        summary: 'Please stop the build.',
+        question: 'Kill PID 42 manually?',
+        checkedHead: '',
+      };
+    });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.daddy.chat(group.id, 'Keep working');
+    f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).find((j) => j.trigger === 'resources')?.status).toBe(
+        'completed',
+      ),
+    );
+    const messages = f.store.messages(group.id).filter((m) => m.sender === 'agent');
+    expect(messages.at(-1)?.text).toContain('Resources are available again');
+    expect(messages.some((m) => m.text.includes('Kill PID'))).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+it('cancels pending cleanup when the maintenance model disconnects', async () => {
+  const f = fixture();
+  let cancelled = false;
+  f.clean.mockImplementation(async (_groupId, signal) => {
+    await new Promise<void>((_resolve, reject) =>
+      signal.addEventListener(
+        'abort',
+        () => {
+          cancelled = true;
+          reject(new Error('cleanup cancelled'));
+        },
+        { once: true },
+      ),
+    );
+    return { removedBytes: 0 };
+  });
+  f.runtime.runSession.mockImplementation(async (input) => {
+    void input.onTool('clean_cache', {}).catch(() => {});
+    throw new Error('model disconnected');
+  });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.daddy.chat(group.id, 'Continue');
+    f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).find((j) => j.trigger === 'resources')?.status).toBe(
+        'failed',
+      ),
+    );
+    expect(cancelled).toBe(true);
+  } finally {
+    await f.close();
+  }
+});
+
+it('lets cancelled maintenance stop waiting for an active worker without cancelling that worker', async () => {
+  const f = daddyFixture();
+  let began!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    began = resolve;
+  });
+  f.agentRuntime.run.mockImplementation(async (input) => {
+    began();
+    await new Promise<void>((resolve) =>
+      input.signal.addEventListener('abort', () => resolve(), { once: true }),
+    );
+    return { status: 'incomplete', summary: 'Stopped', checkedHead: '' };
+  });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: 'Fixture',
+      requirements: 'Fixture',
+      createdByAction: 'wait-fixture',
+    });
+    await f.engine.implement(task.id);
+    await f.worker.tick();
+    await ready;
+    const controller = new AbortController();
+    const waiting = f.worker.waitForGroup(group.id, controller.signal);
+    controller.abort(new Error('maintenance cancelled'));
+    await expect(waiting).rejects.toThrow('maintenance cancelled');
+    expect(f.store.busy(task.id)).toBe(true);
   } finally {
     await f.close();
   }

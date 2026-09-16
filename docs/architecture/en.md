@@ -90,6 +90,23 @@ The saved objects are `ReviewGroup` (session), `Task` (task), `Job` (task run) a
 
 Code: [Worker](../../src/runtime/worker.ts), [Store](../../src/core/store.ts), [data types](../../src/core/types.ts), [Git copies](../../src/runtime/workspaces.ts), [Arc copies](../../src/runtime/arc-workspaces.ts), [coordinator copy](../../src/runtime/daddy-workspace.ts).
 
+### Who stops a build when a run ends
+
+```mermaid
+flowchart LR
+    R[AgentRegistry] -->|Save owner and launch marker| O[RunProcesses]
+    O -->|Marker in environment| A[Agent adapter]
+    A --> C[CLI]
+    C -->|Inherited marker| P[Shell / build / detached child]
+    E[Run ends or is cancelled] --> O
+    O -->|Verify identity, then stop| P
+    O <-->|Ownership receipts| D[(SQLite)]
+```
+
+Closing the CLI alone is insufficient: a background build can detach and keep its working copy busy. The host records ownership before launch. Both adapters pass that marker to commands, so the host can find descendants even after their original parent exits. On completion, failure or cancellation it sends SIGTERM, waits briefly, then uses SIGKILL if necessary. It checks the user, host boot and process start time before signalling. Surviving processes are recorded as still stopping; their files remain intact.
+
+Recovery retries verified leftovers before asking a model for a cleanup plan. It can remove disposable run caches after their processes stop; active runs and redirected or mounted cache paths are protected. Startup recovers abandoned run ownership before scheduling new work. See [RunProcesses](../../src/runtime/run-processes.ts), [adapter contract](../module-development/en.md) and [lifecycle tests](../../tests/run-processes.test.ts).
+
 ## 3. How an agent calls tools
 
 Suppose the reviewer finds a bug and wants to leave a comment. It sends the application a command with the text and code location. This is the command's path:

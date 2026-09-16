@@ -161,12 +161,13 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     });
     try {
       if (input.signal.aborted) throw new AppError('run_cancelled', 'Run is already cancelled');
-      await rpc.start(input.cwd, host);
+      await rpc.start(input.cwd, host, input.processScope?.env);
       const config = {
         'features.apps': false,
         'features.multi_agent': false,
         mcp_servers: {},
         'shell_environment_policy.inherit': host ? 'all' : 'core',
+        ...(input.processScope ? { 'shell_environment_policy.set': input.processScope.env } : {}),
       };
       const common = {
         cwd: input.cwd,
@@ -219,7 +220,10 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
             ? { type: 'readOnly', networkAccess: false }
             : {
                 type: 'workspaceWrite',
-                writableRoots: [input.cwd],
+                writableRoots: [
+                  input.cwd,
+                  ...(input.processScope ? [input.processScope.cacheDir] : []),
+                ],
                 networkAccess: false,
                 excludeTmpdirEnvVar: true,
                 excludeSlashTmp: true,

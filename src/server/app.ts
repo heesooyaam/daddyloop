@@ -1,5 +1,6 @@
 import { ModuleUsage } from '../modules/agents/usage.js';
 import { ResourceRecovery } from '../core/resource-recovery.js';
+import { RunProcesses } from '../runtime/run-processes.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import serveStatic from '@fastify/static';
@@ -100,11 +101,13 @@ export async function buildApp(options: ServerOptions) {
   const cache = new CacheManager(engine, dataDir, config.cache);
   const checkouts = options.checkouts ?? new Workspaces(dataDir, repositories);
   const configuredExecutables = { ...config.executables };
+  const runProcesses = new RunProcesses(store, dataDir);
   const executable = (id: string) => moduleExecutable(id, { executables: configuredExecutables });
   const agents =
     options.agents ??
     createAgents(config.modules, {
       execution: config.agentExecution,
+      processes: runProcesses,
       store,
       dataDir,
       executable: (id) => () => executable(id),
@@ -240,6 +243,11 @@ export async function buildApp(options: ServerOptions) {
     config.maxConcurrentAgents,
   );
   worker.autoSubmit = (id) => tickets.submit(id);
+  if (config.cache.auto)
+    worker.autoCleanup = async () => {
+      await runProcesses.recover(true);
+      return cache.prune(true);
+    };
   const workspaces =
     options.workspaces ??
     new WorkspaceRegistry(store, config.workspaces.roots, undefined, repositories);
@@ -282,20 +290,26 @@ export async function buildApp(options: ServerOptions) {
     {
       directory: join(dataDir, 'maintenance'),
       allowCleanup: config.cache.auto,
-      inspect: async () => ({
+      inspect: async (groupId) => ({
         files: await cache.prune(false),
+        runs: runProcesses.inspect(groupId),
         repositoryMaintenance: sessionWorkspaces.reclaimOptions(),
       }),
-      clean: async (groupId, signal) => {
-        await worker.waitForGroup(groupId);
+      stopProcesses: async (groupId, signal) => {
         signal.throwIfAborted();
+        return runProcesses.reclaim(groupId, false, signal);
+      },
+      clean: async (groupId, signal) => {
+        await worker.waitForGroup(groupId, signal);
+        signal.throwIfAborted();
+        const processes = await runProcesses.reclaim(groupId, true, signal);
         const files = await cache.prune(true);
         const native = await sessionWorkspaces.reclaim(
           daddy.group(groupId),
           signal,
           getResources().reasons.some((reason) => reason.includes('Disk')),
         );
-        return { files, native };
+        return { processes, files, native };
       },
     },
   );
@@ -740,6 +754,7 @@ export async function buildApp(options: ServerOptions) {
     }
   });
   if (options.startWorker !== false) {
+    await runProcesses.recover();
     worker.start();
     daddy.start();
   }

@@ -1,5 +1,7 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Resources are available again. Saved work can continue; no manual process cleanup is needed.':
+    'Ресурсов снова хватает. Сохранённую работу можно продолжать; вручную останавливать процессы не нужно.',
   'Choose an agent and model with /models inside a session. Use Add workspace to connect a repository.':
     'Агент и модель выбираются через /models внутри сессии. Репозиторий подключается кнопкой «Добавить воркспейс».',
   'Modules on this server': 'Модули на сервере',
