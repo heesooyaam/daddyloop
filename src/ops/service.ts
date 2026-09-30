@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { command } from './process.js';
 import { configPath, configSchema, loadConfig, type Config } from './config.js';
 import { VERSION } from '../version.js';
+import { acquireDataLock } from './data-lock.js';
+import { AppError } from '../core/types.js';
 
 const name = 'daddyloop.service';
 export function cliEntry() {
@@ -31,7 +33,7 @@ export function serviceUnit(options: {
     if (!isAbsolute(path)) throw new Error('Service paths must be absolute');
   }
   configSchema.shape.memoryMax.parse(options.memoryMax);
-  return `[Unit]\nDescription=daddyloop orchestration service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=120\nStartLimitBurst=5\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('DADDYLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=infinity\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
+  return `[Unit]\nDescription=daddyloop orchestration service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n${options.user ? `User=${options.user.uid}\nGroup=${options.user.gid}\n` : ''}WorkingDirectory=${options.dataDir.replaceAll('%', '%%')}\nExecStart=:${q(options.executable)} ${q(options.entry)} --data-dir ${q(options.dataDir)} serve --port ${options.port}${options.demo ? ' --demo' : ''}\nEnvironment=${q('PATH=' + options.path)}\nEnvironment=${q('DADDYLOOP_CONFIG=' + options.configFile)}\nEnvironment=NODE_ENV=production\nEnvironment=NODE_USE_SYSTEM_CA=1\nUMask=0077\nRestart=on-failure\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\nMemoryAccounting=yes\nMemoryHigh=${options.memoryMax}\nMemoryMax=${options.memoryMax}\nTasksMax=infinity\n\n[Install]\nWantedBy=${options.user ? 'multi-user' : 'default'}.target\n`;
 }
 export class ServiceManager {
   readonly runtimeDir = `/run/user/${userInfo().uid}`;
@@ -148,8 +150,16 @@ export class ServiceManager {
       const state = await this.status();
       if (Number(state.MainPID) > 0 || state.ActiveState === 'active') await this.stop();
     }
+    let locked = false;
+    try {
+      const release = await acquireDataLock(dataDir, false);
+      await release();
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'state_locked') throw error;
+      locked = true;
+    }
     const lock = join(dataDir, 'server.lock');
-    if (existsSync(lock)) {
+    if (locked) {
       const pid = Number(readFileSync(lock, 'utf8'));
       if (Number.isInteger(pid) && pid > 1 && existsSync(`/proc/${pid}/cmdline`)) {
         const state = await this.status();
@@ -167,7 +177,7 @@ export class ServiceManager {
           if (existsSync(`/proc/${pid}`))
             throw new Error('Previous foreground server did not stop cleanly');
         }
-      }
+      } else throw new Error('Another process owns the state directory; it was preserved');
     }
     await this.writeUnit(name, unit, 'Description=daddyloop orchestration service');
     await this.ctl(['daemon-reload']);

@@ -242,8 +242,8 @@ export class TelegramDelivery {
               i === chunks.length - 1 ? ((content as TelegramCard).buttons ?? []) : [],
           },
         };
-        const fingerprint = digest(body),
-          existing = value.messages[i];
+        const fingerprint = digest(body);
+        let existing: Delivery['messages'][number] | undefined = value.messages[i];
         if (existing?.fingerprint === fingerprint) continue;
         if (existing) {
           try {
@@ -253,8 +253,11 @@ export class TelegramDelivery {
               this.controller.signal,
             );
           } catch (error) {
-            if (!/message is not modified/i.test(String(error))) throw error;
+            if (/message to edit not found/i.test(String(error))) existing = undefined;
+            else if (!/message is not modified/i.test(String(error))) throw error;
           }
+        }
+        if (existing) {
           existing.fingerprint = fingerprint;
         } else {
           const result = await this.api.call<{ message_id: number }>(
@@ -269,7 +272,7 @@ export class TelegramDelivery {
           );
           if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0)
             throw new Error('Telegram did not return a message ID');
-          value.messages.push({ id: result.message_id, fingerprint });
+          value.messages[i] = { id: result.message_id, fingerprint };
         }
         this.save(key, value);
       }

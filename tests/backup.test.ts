@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBackup, restoreBackup, inspectBackup } from '../src/ops/backup/snapshot.js';
 import { configSchema } from '../src/ops/config.js';
+import { acquireDataLock } from '../src/ops/data-lock.js';
 import { Store } from '../src/core/store.js';
 import { fixture } from './helpers.js';
 import { Workspaces, git as runGit } from '../src/runtime/workspaces.js';
@@ -227,8 +228,8 @@ it('refuses a live host, oversized archive and an existing output without touchi
   const root = mkdtempSync(join(tmpdir(), 'daddyloop-backup-lock-')),
     data = join(root, 'data');
   mkdirSync(data);
+  const release = await acquireDataLock(data);
   try {
-    writeFileSync(join(data, 'server.lock'), String(process.pid));
     await expect(createBackup(data, join(root, 'save.tar.gz'), config)).rejects.toThrow(
       'daddy down',
     );
@@ -239,6 +240,7 @@ it('refuses a live host, oversized archive and an existing output without touchi
     );
     expect(readFileSync(join(root, 'existing'), 'utf8')).toBe('preserve');
   } finally {
+    await release();
     rmSync(root, { recursive: true, force: true });
   }
 });

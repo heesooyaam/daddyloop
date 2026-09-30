@@ -223,6 +223,7 @@ Code-version checks solve a related problem: reviewing H1 does not verify a fix 
 
 Failures follow the same rules:
 
+- **One server per data directory:** the server and backups acquire the same OS file lock. The kernel releases ownership on exit, so an empty PID file left by a full disk cannot impersonate a running server. [Lock implementation](../../src/ops/data-lock.ts) and [crash tests](../../tests/data-lock.test.ts).
 - **Service restart:** the database keeps tasks, queues and history. Interrupted work is recorded as interrupted; the coordinator can inspect it and continue allowed steps.
 - **Low memory or disk:** ordinary runs wait and active work is preserved. The monitor queues a separate bounded maintenance turn; measured recovery resumes only monitor-paused tasks. See [resource recovery](../operations/en.md#recovery-instead-of-a-silent-queue).
 - **A write already reached the repository:** pausing does not remove the comment or undo the push. The service checks the external result before continuing.

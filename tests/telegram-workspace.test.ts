@@ -506,11 +506,11 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
 
 it('mirrors a CLI-created session and live assistant messages to one topic without tool logs or Telegram echoes', async () => {
   const f = daddyFixture();
-  const sent: { destination: any; card: any }[] = [];
+  const sent: { destination: any; card: any; options?: any }[] = [];
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
-    send: vi.fn(async (destination, card) => {
-      sent.push({ destination, card });
+    send: vi.fn(async (destination, card, _buttons, options) => {
+      sent.push({ destination, card, options });
       return { message_id: sent.length };
     }),
     call: vi.fn(async () => ({ message_thread_id: 31 })),
@@ -580,7 +580,15 @@ it('mirrors a CLI-created session and live assistant messages to one topic witho
     const count = sent.length;
     bot.replay();
     await new Promise((resolve) => setImmediate(resolve));
-    expect(sent).toHaveLength(count);
+    expect(sent.slice(count)).toEqual([
+      expect.objectContaining({
+        card: expect.objectContaining({ text: expect.stringContaining(group.title) }),
+        options: expect.objectContaining({
+          key: `telegram:daddy-intro:-10042:${group.id}`,
+          replace: true,
+        }),
+      }),
+    ]);
     expect(api.call).toHaveBeenCalledTimes(1);
     expect(f.daddy.board(group.id).messages.map((message) => message.text)).toContain(
       'Question from the phone',

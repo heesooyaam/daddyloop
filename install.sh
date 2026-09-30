@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-daddyloop_version="0.20.2"
+daddyloop_version="0.20.3"
 daddyloop_prefix="${DADDYLOOP_INSTALL_DIR:-$HOME/.local/share/daddyloop}"
 daddyloop_bin_dir="${DADDYLOOP_BIN_DIR:-$HOME/.local/bin}"
 daddyloop_base="${DADDYLOOP_DOWNLOAD_BASE:-https://github.com/heesooyaam/daddyloop/releases/download/v$daddyloop_version}"
@@ -34,6 +34,7 @@ daddyloop_system_packages() {
   else printf 'Install these system packages and rerun: %s\n' "$*" >&2; exit 1; fi
 }
 if ! command -v git >/dev/null; then daddyloop_system_packages git ca-certificates; fi
+if ! command -v flock >/dev/null; then daddyloop_system_packages util-linux; fi
 mkdir -p "$daddyloop_prefix/releases" "$daddyloop_bin_dir"
 daddyloop_lock="$daddyloop_prefix/.install-lock"
 mkdir "$daddyloop_lock" 2>/dev/null || { printf 'An installation lock exists: %s\n' "$daddyloop_lock" >&2; exit 1; }

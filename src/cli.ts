@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { registerBackupCommands } from './ops/backup/commands.js';
 import { Command, Option, Help } from 'commander';
-import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -26,6 +26,7 @@ import { registerDaddyCommands } from './ops/daddy.js';
 import { registerInstructionCommands } from './ops/instructions.js';
 import { webConnectionText } from './ops/web.js';
 import { normalizeLocale, translator } from './i18n/index.js';
+import { acquireDataLock } from './ops/data-lock.js';
 
 const helpOnly = process.argv.some((arg) => ['--help', '-h', '--version', '-V'].includes(arg));
 const initialConfig = helpOnly ? configSchema.parse({}) : loadConfig();
@@ -76,18 +77,8 @@ program
   .action(async (options) => {
     const dir = dataDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const lock = join(dir, 'server.lock');
-    if (existsSync(lock)) {
-      const pid = Number(readFileSync(lock, 'utf8'));
-      try {
-        process.kill(pid, 0);
-        throw new Error(`daddyloop is already running (PID ${pid})`);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-        unlinkSync(lock);
-      }
-    }
-    writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 });
+    const release = await acquireDataLock(dir);
+    let closeApp: (() => Promise<void>) | undefined;
     try {
       const { app } = await buildApp({
         dataDir: dir,
@@ -96,6 +87,7 @@ program
         maxDiskPercent: Number(options.maxDiskPercent),
         minMemoryGiB: Number(options.minMemoryGib),
       });
+      closeApp = () => app.close();
       await app.listen({ host: '127.0.0.1', port: Number(options.port) });
       process.stdout.write(
         `daddyloop: http://127.0.0.1:${options.port}\nAccess token: ${join(dir, 'access-token')} (daddy token)\nMode: ${options.demo ? 'live integrations + demo fixtures' : 'live integrations'}\n`,
@@ -105,7 +97,7 @@ program
         if (closing) return;
         closing = true;
         await app.close();
-        if (existsSync(lock)) unlinkSync(lock);
+        await release();
         process.exit(0);
       };
       process.on('SIGINT', () => {
@@ -115,7 +107,11 @@ program
         void shutdown();
       });
     } catch (error) {
-      unlinkSync(lock);
+      try {
+        await closeApp?.();
+      } finally {
+        await release();
+      }
       throw error;
     }
   });
