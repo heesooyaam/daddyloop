@@ -14,6 +14,8 @@ The Linux systemd service runs as your user. On unified cgroups it uses the ling
 
 Graceful stop interrupts agent turns and records recoverable incomplete work. Crash recovery also fences interrupted generations. Inspect the task report and resume through daddy; neither restart nor resume silently treats unfinished review as complete. A lost native write is reconciled before it is repeated.
 
+After a crash, systemd retries startup every 30 seconds until it succeeds, including after a full disk has been cleared. An explicit `daddy down` stays stopped. The server and backup command share an OS file lock: the OS releases it when the process exits, even after a forced stop. An empty or stale `server.lock` does not block startup; do not delete it while the service or a backup is running.
+
 ## Files and accounts
 
 - Config: `~/.config/daddyloop/config.json`; override with `DADDYLOOP_CONFIG`.

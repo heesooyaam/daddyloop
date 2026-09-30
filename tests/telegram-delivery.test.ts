@@ -30,6 +30,37 @@ function fixture() {
 }
 const text = (value: string) => new TelegramText().add(value);
 
+it('replaces a confirmed deleted card, but keeps editing after a transient failure', async () => {
+  const f = fixture();
+  try {
+    const options = { key: 'session', replace: true };
+    await f.queue.send({ chatId: 7 }, text('Preparing'), options);
+    f.call.mockRejectedValueOnce(new Error('connection reset'));
+    await f.queue.send({ chatId: 7 }, text('Ready'), options);
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual(['sendMessage', 'editMessageText']);
+    f.call.mockRejectedValueOnce(new Error('Bad Request: message to edit not found'));
+    f.advance(1000);
+    await f.queue.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'editMessageText',
+      'editMessageText',
+      'sendMessage',
+    ]);
+    expect(f.queue.status().pending).toBe(0);
+    await f.queue.send({ chatId: 7 }, text('Ready'), options);
+    expect(f.call).toHaveBeenCalledTimes(4);
+    await f.queue.send({ chatId: 7 }, text('Working'), options);
+    expect(f.call.mock.calls.at(-1)).toEqual([
+      'editMessageText',
+      expect.objectContaining({ message_id: 2, text: 'Working' }),
+      expect.anything(),
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
 it('persists refused messages and retries with exponential backoff after restart', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;

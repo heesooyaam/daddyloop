@@ -408,6 +408,16 @@ export class TelegramWorkspace {
       ),
     );
   }
+  private sessionBoard(groupId: string, destination: Destination, link?: string) {
+    const board = this.daddy.board(groupId);
+    const id = `telegram:daddy-intro:${destination.chatId}:${groupId}`;
+    return this.api.send(destination, daddyBoard(this.locale(), board, link), undefined, {
+      key: id,
+      replace: true,
+      order: board.group.updatedAt,
+      notificationId: id,
+    });
+  }
   private async home(destination: Destination) {
     this.store.setSetting(this.creationKey(destination), null);
     const groups = this.daddy.sessions();
@@ -514,10 +524,7 @@ export class TelegramWorkspace {
       });
       return;
     }
-    await this.api.send(
-      destination,
-      daddyBoard(this.locale(), this.daddy.board(group.id), topic ? this.link(topic) : undefined),
-    );
+    await this.sessionBoard(group.id, destination, topic ? this.link(topic) : undefined);
   }
   private repoKey(destination: Destination, groupId: string) {
     return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
@@ -1615,7 +1622,10 @@ export class TelegramWorkspace {
                 message_thread_id: topic.threadId,
               });
           } else {
-            await this.api.send(destination, daddyBoard(this.locale(), this.daddy.board(group.id)));
+            await this.sessionBoard(
+              group.id,
+              typeof destination === 'number' ? { chatId: destination } : destination,
+            );
           }
         })
         .catch((error) => this.deferEvent(event, error));
@@ -1705,12 +1715,10 @@ export class TelegramWorkspace {
           this.store.db
             .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
             .run(id, 'pending', now());
-          const result = await this.api.send(
-            { chatId: topic.chatId, threadId: topic.threadId },
-            daddyBoard(this.locale(), this.daddy.board(group.id)),
-            undefined,
-            { key: id, notificationId: id },
-          );
+          const result = await this.sessionBoard(group.id, {
+            chatId: topic.chatId,
+            threadId: topic.threadId,
+          });
           this.store.db
             .prepare('UPDATE notifications SET status=? WHERE id=?')
             .run(deliveryStatus(result), id);

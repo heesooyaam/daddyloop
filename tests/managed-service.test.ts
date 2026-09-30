@@ -27,6 +27,9 @@ it('generates a service independent of terminals, with a separate user and memor
   expect(text).toContain('WantedBy=multi-user.target');
   expect(text).not.toContain('tmux');
   expect(text).toContain('Restart=on-failure');
+  expect(text).toContain('RestartSec=30');
+  expect(text).toContain('StartLimitIntervalSec=0');
+  expect(text).not.toContain('StartLimitBurst=');
   expect(systemdQuote('/home/test%user/$file')).toContain('%%user');
   expect(() => systemdQuote('/tmp/a\nExecStart=bad')).toThrow();
 });

@@ -12,7 +12,6 @@ import {
   rm,
   readFile,
   writeFile,
-  open,
   lstat,
   chmod,
   copyFile,
@@ -31,6 +30,8 @@ import {
 } from './archive.js';
 import { configSchema, type Config } from '../config.js';
 import { command } from '../process.js';
+import { acquireDataLock } from '../data-lock.js';
+import { AppError } from '../../core/types.js';
 import type { Task, Workspace } from '../../core/types.js';
 
 const gib = 1024 ** 3;
@@ -86,33 +87,15 @@ const idFor = (path: string) => createHash('sha256').update(path).digest('hex').
 
 /** Use the same exclusive host lock as serve: no worker can start halfway through a snapshot. */
 async function lockData(dataDir: string) {
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  const path = join(dataDir, 'server.lock');
-  if (existsSync(path)) {
-    const saved = await readFile(path, 'utf8'),
-      pid = Number(saved);
-    if (Number.isSafeInteger(pid) && pid > 1) {
-      try {
-        process.kill(pid, 0);
-      } catch (error) {
-        if (
-          (error as NodeJS.ErrnoException).code === 'ESRCH' &&
-          (await readFile(path, 'utf8')) === saved
-        )
-          await rm(path);
-      }
-    }
+  try {
+    return await acquireDataLock(dataDir);
+  } catch (error) {
+    if (error instanceof AppError && error.code === 'state_locked')
+      throw new Error(
+        'Stop daddyloop with daddy down before creating a backup; running work must settle first.',
+      );
+    throw error;
   }
-  const handle = await open(path, 'wx', 0o600).catch(() => {
-    throw new Error(
-      'Stop daddyloop with daddy down before creating a backup; running work must settle first.',
-    );
-  });
-  await handle.writeFile(String(process.pid));
-  return async () => {
-    await handle.close();
-    await rm(path);
-  };
 }
 function portableConfig(config: Config) {
   return {
