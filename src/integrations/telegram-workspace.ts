@@ -1703,15 +1703,9 @@ export class TelegramWorkspace {
           if (!topic || !room) return;
           if (this.room()?.chatId !== topic.chatId || this.pair()?.userId !== topic.ownerId) return;
           const id = `telegram:daddy-intro:${room.chatId}:${group.id}`;
-          if (
-            ['sent', 'superseded'].includes(
-              String(
-                this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)
-                  ?.status,
-              ),
-            )
-          )
-            return;
+          // Replay refreshes the current board too: preparation may have completed
+          // just before a crash, without reaching the delivery queue. The stable
+          // delivery key avoids resending an unchanged card.
           this.store.db
             .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
             .run(id, 'pending', now());

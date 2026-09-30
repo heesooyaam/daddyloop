@@ -66,9 +66,10 @@ it('updates the initial private-chat card after /new as well', async () => {
   }
 });
 
-it.each([false, true])(
-  'edits the session card after preparation, including a failed edit and restart (%s)',
-  async (failEdit) => {
+it.each(['online', 'failed-edit', 'missed-event'])(
+  'edits the session card after preparation and replay: %s',
+  async (mode) => {
+    const failEdit = mode === 'failed-edit';
     const f = daddyFixture(true);
     const sent: { method: string; body: Record<string, any> }[] = [];
     let unavailable = false;
@@ -86,6 +87,7 @@ it.each([false, true])(
     const delivery = () => new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
     const integration = () => new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
     api.delivery = delivery();
+    const send = vi.spyOn(api, 'send');
     let workspace = integration();
     f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
     f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
@@ -119,10 +121,12 @@ it.each([false, true])(
         data: {},
         at: group.updatedAt,
       };
-      workspace.onEvent(ready);
-      await vi.waitFor(() =>
-        expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(1),
-      );
+      if (mode !== 'missed-event') {
+        workspace.onEvent(ready);
+        await vi.waitFor(() =>
+          expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(1),
+        );
+      }
       await workspace.stop();
       await api.delivery.stop();
       if (failEdit) expect(api.delivery.status().pending).toBe(1);
@@ -131,8 +135,12 @@ it.each([false, true])(
       api.delivery = delivery();
       workspace = integration();
       await api.delivery.flush();
+      const beforeReplay = send.mock.calls.length;
       workspace.replay();
-      workspace.onEvent(ready);
+      if (mode !== 'missed-event') workspace.onEvent(ready);
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledTimes(beforeReplay + (mode === 'missed-event' ? 1 : 2)),
+      );
       await workspace.stop();
       await api.delivery.flush();
       expect(api.delivery.status().pending).toBe(0);
