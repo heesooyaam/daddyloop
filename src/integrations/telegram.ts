@@ -33,6 +33,7 @@ import {
   updatesCard,
 } from './telegram-meta.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
+const updateRetentionMs = 24 * 60 * 60 * 1000;
 type User = { id: number; is_bot?: boolean };
 type Chat = { id: number; type: string; title?: string; is_forum?: boolean };
 export interface Update {
@@ -354,6 +355,7 @@ export class Telegram {
   private stopped = false;
   private controller?: AbortController;
   private polling?: Promise<void>;
+  private pollError?: string;
   private notices = Promise.resolve();
   private workspace?: TelegramWorkspace;
   private integrations?: {
@@ -422,10 +424,7 @@ export class Telegram {
       paired: !!this.engine.store.setting('telegram.pairing'),
       delivery: this.api.delivery?.status(),
       group: this.workspace?.room(),
-      error:
-        this.engine.store.setting('telegram.error') ??
-        this.engine.store.setting('telegram.pollError') ??
-        null,
+      error: this.pollError ?? this.engine.store.setting('telegram.error') ?? null,
     };
   }
   unpair() {
@@ -732,28 +731,31 @@ export class Telegram {
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
   }
   private async poll() {
+    const store = this.engine.store;
     while (!this.stopped) {
       this.controller = new AbortController();
       try {
-        const offset = this.engine.store.setting<number>('telegram.offset') ?? 0;
+        // Telegram can start a new update ID sequence after a week of inactivity.
+        const age = Date.now() - (store.setting<number>('telegram.offsetAt') ?? 0);
+        const offset =
+          age >= 0 && age < updateRetentionMs ? (store.setting<number>('telegram.offset') ?? 0) : 0;
         const updates = await this.api.call<Update[]>(
           'getUpdates',
           { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] },
           AbortSignal.any([this.controller.signal, AbortSignal.timeout(35000)]),
         );
-        this.engine.store.setSetting('telegram.pollError', null);
         for (const update of updates) {
           if (this.stopped) break;
-          try {
-            await this.handle(update);
-          } catch (error) {
-            this.engine.store.setSetting('telegram.error', redact(String(error)));
-          }
-          this.engine.store.setSetting('telegram.offset', update.update_id + 1);
+          await this.handle(update);
+          store.transaction(() => {
+            store.setSetting('telegram.offset', update.update_id + 1);
+            store.setSetting('telegram.offsetAt', Date.now());
+          });
         }
+        this.pollError = undefined;
       } catch (error) {
         if (!this.stopped) {
-          this.engine.store.setSetting('telegram.pollError', redact(String(error)));
+          this.pollError = redact(String(error));
           await delay(3000, undefined, { signal: this.controller.signal }).catch(() => {});
         }
       }
@@ -787,6 +789,7 @@ export class Telegram {
       engine.store.transaction(() => {
         engine.store.setSetting('telegram.botId', me.id);
         engine.store.setSetting('telegram.offset', 0);
+        engine.store.setSetting('telegram.offsetAt', null);
         engine.store.setSetting('telegram.pairing', null);
         engine.store.setSetting('telegram.pairCode', null);
         engine.store.db.prepare('DELETE FROM bot_receipts').run();

@@ -262,6 +262,14 @@ const { app } = await buildApp({
   },
   dataDir: dir,
   demo: true,
+  resourceCheck: () => ({
+    memoryAvailableGiB: 6,
+    memoryTotalGiB: 8,
+    diskAvailableGiB: 64,
+    diskUsedPercent: 45,
+    ok: true,
+    reasons: [],
+  }),
   config: configSchema.parse({ publicOrigin: 'https://localhost:4319', agents: fixtureProfiles }),
 });
 await app.listen({ host: '127.0.0.1', port: 4318 });

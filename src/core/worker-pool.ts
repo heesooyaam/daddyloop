@@ -1,8 +1,7 @@
 import type { Store } from './store.js';
 import type { ReviewGroup } from './types.js';
 
-export function workerPool(store: Store, group: ReviewGroup) {
-  const jobs = store.jobs().filter((job) => job.groupId === group.id);
+export function workerPool(store: Store, group: ReviewGroup, jobs = store.activeJobs()) {
   const taskIds = group.workerTasks!.filter(
     (id) => store.getTask(id).state !== 'complete' || store.busy(id),
   );
@@ -14,7 +13,9 @@ export function workerPool(store: Store, group: ReviewGroup) {
     pending: limit !== target,
     occupied: taskIds.length,
     retiring: Math.max(0, taskIds.length - target),
-    active: jobs.filter((job) => job.role === 'author' && job.status === 'running').length,
+    active: jobs.filter(
+      (job) => job.groupId === group.id && job.role === 'author' && job.status === 'running',
+    ).length,
     hostLimit: store.setting<number>('worker.maxAgents') ?? 1,
     taskIds,
   };

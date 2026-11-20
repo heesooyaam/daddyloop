@@ -61,13 +61,17 @@ it('resets polling receipts and chat binding when the configured bot changes', a
   try {
     await Telegram.create(f.engine, path);
     f.store.setSetting('telegram.offset', 1000);
+    const offsetAt = Date.now();
+    f.store.setSetting('telegram.offsetAt', offsetAt);
     f.store.setSetting('telegram.pairing', { userId: 7 });
     f.store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(999, new Date().toISOString());
     await Telegram.create(f.engine, path);
     expect(f.store.setting('telegram.offset')).toBe(1000);
+    expect(f.store.setting('telegram.offsetAt')).toBe(offsetAt);
     identity = 13;
     await Telegram.create(f.engine, path);
     expect(f.store.setting('telegram.offset')).toBe(0);
+    expect(f.store.setting('telegram.offsetAt')).toBeNull();
     expect(f.store.setting('telegram.pairing')).toBeNull();
     expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM bot_receipts').get()?.n).toBe(0);
   } finally {

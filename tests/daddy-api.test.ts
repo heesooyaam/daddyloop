@@ -1,8 +1,66 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { buildApp } from '../src/server/app.js';
+import { registerDaddy } from '../src/server/daddy.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { healthy, catalogue } from './planning-fixture.js';
+
+it('lists session counts and running roles without reading job or conversation history', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  try {
+    const workers = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: { daddy: { prompt: 'Fixture instructions' }, worker: {} },
+    });
+    const review = f.daddy.create({ workspaceId: f.workspace.id });
+    const coordination = f.daddy.create({ workspaceId: f.workspace.id, message: 'Start' });
+    const local = (groupId: string, title: string) =>
+      f.tickets.local({
+        workspace: f.workspace,
+        groupId,
+        groupGeneration: 1,
+        title,
+        requirements: 'Fixture task',
+        createdByAction: title,
+      });
+    const completed = await local(workers.id, 'Completed');
+    completed.state = 'complete';
+    f.store.saveTask(completed);
+    const author = await local(workers.id, 'Author');
+    const reviewer = await local(review.id, 'Reviewer');
+    const pastReview = f.store.enqueue(completed, 'reviewer', 'review', 'Prior review');
+    pastReview.status = 'completed';
+    f.store.saveJob(pastReview);
+    f.store.enqueue(author, 'author', 'implement', 'Implement');
+    f.store.enqueue(reviewer, 'reviewer', 'review', 'Review');
+    f.store.claim();
+    f.store.claim();
+    const [daddyJob] = f.store.daddyJobs(coordination.id);
+    daddyJob.status = 'running';
+    f.store.saveDaddyJob(daddyJob);
+
+    const messages = vi.spyOn(f.store, 'messages');
+    const jobs = vi.spyOn(f.store, 'jobs');
+    const result = await app.inject('/api/daddy/sessions');
+    expect(result.statusCode).toBe(200);
+    const sessions = result.json();
+    expect(sessions).toMatchObject([
+      { id: coordination.id, total: 0, complete: 0, daddyBusy: true, workers: { active: 0 } },
+      { id: review.id, total: 1, complete: 0, daddyBusy: true, workers: { active: 0 } },
+      { id: workers.id, total: 2, complete: 1, daddyBusy: false, workers: { active: 1 } },
+    ]);
+    expect(sessions[2]).not.toHaveProperty('instructions');
+    expect(messages).not.toHaveBeenCalled();
+    expect(jobs).not.toHaveBeenCalled();
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
+
 it('checks the viewed revision after acquiring the task lock before a human approval', async () => {
   const f = daddyFixture();
   let release!: () => void, entered!: () => void;

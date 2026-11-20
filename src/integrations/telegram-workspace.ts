@@ -4,7 +4,15 @@ import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from 
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
 import { TelegramText } from './telegram-text.js';
-import { daddyHome, workspacePicker, daddyBoard, poolCard } from './daddy-cards.js';
+import {
+  daddyHome,
+  workspacePicker,
+  daddyBoard,
+  poolCard,
+  botSettings,
+  sessionSettings,
+} from './daddy-cards.js';
+import { TelegramProgress } from './telegram-progress.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { notificationPreferences } from './notifications.js';
 import type { Workspace } from '../core/types.js';
@@ -44,13 +52,32 @@ export class TelegramWorkspace {
   private topics = new Map<string, Promise<Topic>>();
   private voice?: VoiceInbox;
   private retryTimer?: NodeJS.Timeout;
+  private progress: TelegramProgress;
   constructor(
     readonly daddy: Daddy,
     private api: TelegramApi,
     private username: string,
     private locale: () => Locale,
     private usage?: UsageBackend,
-  ) {}
+  ) {
+    this.progress = new TelegramProgress(
+      daddy.engine.store,
+      api,
+      `telegram.progress:${username}:`,
+      locale,
+      (groupId, previous) => {
+        const pair = this.pair();
+        if (!pair) return;
+        const room = this.room();
+        if (room) return this.topic(room, groupId);
+        if (
+          this.store.setting<string>('telegram.currentDaddy') === groupId ||
+          (previous?.ownerId === pair.userId && previous.chatId === pair.chatId)
+        )
+          return { chatId: pair.chatId, ownerId: pair.userId };
+      },
+    );
+  }
   configureVoice(dataDir: string, speech: Speech, resources: () => ResourceStatus) {
     this.voice = new VoiceInbox(
       this.store,
@@ -79,6 +106,7 @@ export class TelegramWorkspace {
   start() {
     this.voice?.start();
     this.replay();
+    this.progress.start();
     this.retryTimer = setInterval(() => {
       for (const row of this.store.db
         .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.eventRetry:%'")
@@ -396,9 +424,10 @@ export class TelegramWorkspace {
   async show(groupId: string, destination: Destination) {
     const group = this.authorize(destination, groupId),
       topic = await this.ensureTopic(group);
-    if (destination.chatId === this.pair()?.chatId)
-      if (destination.chatId === this.pair()?.chatId)
-        this.store.setSetting('telegram.currentDaddy', group.id);
+    if (destination.chatId === this.pair()?.chatId) {
+      this.store.setSetting('telegram.currentDaddy', group.id);
+      this.store.setSetting(this.creationKey(destination), null);
+    }
     await this.api.send(
       destination,
       daddyBoard(
@@ -407,6 +436,13 @@ export class TelegramWorkspace {
         destination.chatId === this.pair()?.chatId && topic ? this.link(topic) : undefined,
       ),
     );
+  }
+  private async showStatus(groupId: string, destination: Destination) {
+    const group = this.authorize(destination, groupId);
+    await this.api.send(destination, {
+      ...this.progress.card(group),
+      buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
+    });
   }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
     const board = this.daddy.board(groupId);
@@ -422,7 +458,10 @@ export class TelegramWorkspace {
     this.store.setSetting(this.creationKey(destination), null);
     const groups = this.daddy.sessions();
     if (destination.chatId === this.pair()?.chatId) {
-      await this.api.send(destination, daddyHome(this.locale(), groups));
+      await this.api.send(
+        destination,
+        daddyHome(this.locale(), groups, this.store.setting<string>('telegram.currentDaddy')),
+      );
       return;
     }
     const text = new TelegramText()
@@ -431,8 +470,7 @@ export class TelegramWorkspace {
     await this.api.send(destination, {
       ...text,
       buttons: [
-        [{ text: this.t('New session'), callback_data: 'dad:new' }],
-        [{ text: this.t('Workspaces'), callback_data: 'dad:workspaces' }],
+        [{ text: this.t('New task'), callback_data: 'dad:new' }],
         ...groups.slice(0, 15).map((group) => {
           const topic = this.room() ? this.topic(this.room()!, group.id) : undefined;
           return [
@@ -444,7 +482,7 @@ export class TelegramWorkspace {
         }),
         [
           {
-            text: this.t('Private setup and CLI updates'),
+            text: this.t('Settings'),
             url: `https://t.me/${this.username}?start=daddy`,
           },
         ],
@@ -956,7 +994,7 @@ export class TelegramWorkspace {
       this.store.setSetting(this.registrationKey(destination), null);
       await this.api.send(destination, {
         ...new TelegramText()
-          .add('📦 ' + this.t('Add workspace'), 'bold')
+          .add('📦 ' + this.t('Add repository'), 'bold')
           .add('\n\n' + this.t('Choose the repository service.')),
         buttons: [
           ...this.daddy.workspaces
@@ -999,8 +1037,28 @@ export class TelegramWorkspace {
       await this.setup();
       return true;
     }
-    if (data === 'dad:home') {
+    if (data === 'dad:home' || data === 'dad:sessions') {
       await this.home(destination);
+      return true;
+    }
+    if (data === 'dad:settings') {
+      if (destination.chatId === this.pair()?.chatId)
+        await this.api.send(destination, botSettings(this.locale()));
+      else
+        await this.api.send(destination, {
+          ...new TelegramText().add(this.t('Bot settings are in the private chat.')),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+      return true;
+    }
+    const status = data.match(/^dad:(status|settings):([a-f0-9-]{36})$/);
+    if (status) {
+      const [, action, id] = status;
+      if (action === 'status') await this.showStatus(id, destination);
+      else {
+        this.authorize(destination, id);
+        await this.api.send(destination, sessionSettings(this.locale(), this.daddy.board(id)));
+      }
       return true;
     }
     if (data === 'dad:discover') {
@@ -1413,7 +1471,7 @@ export class TelegramWorkspace {
         return this.callback(`dad:pool:${groupId}${pool[1] ? ':' + pool[1] : ''}`, destination);
       }
       if (text === '/status' && groupId) {
-        await this.show(groupId, destination);
+        await this.showStatus(groupId, destination);
         return true;
       }
       if (text === '/pause' && groupId) {
@@ -1480,6 +1538,8 @@ export class TelegramWorkspace {
       if (next) this.store.setSetting(nextKey, null);
       return true;
     } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ERR_SQLITE_ERROR')
+        throw error;
       const message =
         error instanceof AppError && error.code === 'ambiguous_write'
           ? this.t(
@@ -1825,6 +1885,7 @@ export class TelegramWorkspace {
   async stop() {
     this.stopped = true;
     clearInterval(this.retryTimer);
+    await this.progress.stop();
     await this.voice?.stop();
     await this.pending;
     await Promise.allSettled([...this.topics.values()]);

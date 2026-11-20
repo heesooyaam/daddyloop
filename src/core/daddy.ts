@@ -16,6 +16,7 @@ import {
   type Task,
   type AgentProfiles,
   type AgentProfile,
+  type Job,
 } from './types.js';
 import type { Engine } from './engine.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
@@ -181,10 +182,30 @@ export class Daddy {
     if (selected) workspaces.set(selected.id, selected);
     return workspaces;
   }
+  private sessionActivity(group: ReviewGroup, jobs: Job[]) {
+    return {
+      workers: workerPool(this.store, group, jobs),
+      daddyBusy:
+        this.store.hasRunningDaddyJob(group.id) ||
+        jobs.some(
+          (job) => job.groupId === group.id && job.role === 'reviewer' && job.status === 'running',
+        ),
+    };
+  }
+  sessionSummaries() {
+    const counts = this.store.taskCountsByGroup();
+    const jobs = this.store.activeJobs();
+    return this.sessions().map((group) => ({
+      ...group,
+      instructions: undefined,
+      ...this.sessionActivity(group, jobs),
+      ...(counts.get(group.id) ?? { total: 0, complete: 0 }),
+    }));
+  }
   board(id: string) {
-    const group = this.group(id),
-      jobs = this.store.jobs();
-    const tasks = this.store.tasks().filter((task) => task.groupId === id);
+    const group = this.group(id);
+    const jobs = this.store.activeJobs();
+    const tasks = this.store.tasks(id);
     return {
       group,
       canDelete: !!this.sessionWorkspaces?.supports(group),
@@ -207,12 +228,7 @@ export class Daddy {
         running: jobs.some((job) => job.taskId === task.id && job.status === 'running'),
         queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
       })),
-      workers: workerPool(this.store, group),
-      daddyBusy:
-        this.store.daddyJobs(id).some((job) => job.status === 'running') ||
-        jobs.some(
-          (job) => job.groupId === id && job.role === 'reviewer' && job.status === 'running',
-        ),
+      ...this.sessionActivity(group, jobs),
       messages: this.store.messages(id),
       jobs: this.store
         .daddyJobs(id)
@@ -838,6 +854,7 @@ export class Daddy {
             throw new Error('daddy returned a different thread identity');
           current.daddyThreadId = threadId;
           this.store.saveGroup(current);
+          this.store.event(group.id, 'daddy.session_attached', {}, job.id);
         },
         onEvent: (type, data) =>
           this.store.event(

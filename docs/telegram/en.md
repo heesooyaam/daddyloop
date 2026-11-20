@@ -16,6 +16,12 @@ daddy telegram unpair    # revoke the binding
 
 The bot token belongs to this service installation. A dedicated bot must not simultaneously use another webhook/poller. Only the paired user can control work.
 
+## Work from the chat
+
+In the private chat, choose **New task** or open a conversation from the list. The bot shows which conversation receives your next message. In a group topic, send a task description or an issue link. **Settings** in the private chat opens repositories, group setup, notifications and updates.
+
+The bot posts a status card to the session topic or to the selected private conversation when there is no group. The card updates when the phase changes and roughly once a minute during work. It shows the queue, current phase, elapsed time and the latest agent activity. The server timestamp updates while the agent is quiet. If the server goes offline, the card shows the last update time. Send `/status` for the current status.
+
 ## A topic per daddy session
 
 Create a Telegram **supergroup with Topics enabled**, add the bot as administrator, and allow it to manage topics. In the private bot chat send `/group` and select the group using Telegram's picker. The service verifies your membership and the bot's rights. Telegram requires you to create/join the group; the bot cannot silently create one and add you.
@@ -33,7 +39,7 @@ Each daddy session gets a topic. Send goals and tickets there; workers report to
 
 Send `/notifications` to choose quiet completion/decision notices, all updates, or mute. Voice messages follow the same session routing; see [voice](../voice/en.md).
 
-The session card opens **Instructions for this session**. `/instructions daddy <text>` and `/instructions worker <text>` set separate prompts; `/skill <role> <GitHub URL>` adds a skill. These commands work in private conversations and their group topics. See [task instructions](../instructions/en.md).
+Open **Settings → Instructions for this session** from the session card. `/instructions daddy <text>` and `/instructions worker <text>` set separate prompts. `/skill <role> <GitHub URL>` adds a skill. These commands work in private conversations and their group topics. [Task instructions](../instructions/en.md)
 
 `/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected in the website’s session settings.
 
@@ -41,9 +47,9 @@ After a successful callback-button action sends a replacement message, the bot d
 
 Session preparation updates one card: “Preparing the session copy” changes to “Session copy ready” in place. A failed preparation uses the same card. Delivery retries and service restarts preserve its Telegram message ID. If the card was deleted through navigation, the bot creates a replacement only after Telegram confirms that it no longer exists.
 
-For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session card offers **Delete session** with confirmation; the service archives its results and removes its copies. See [Arcadia](../arcadia/en.md).
+For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session settings offer **Delete session** with confirmation. The service archives its results and removes its copies. [Arcadia](../arcadia/en.md)
 
-To register a repository from your phone: **Workspaces → Add workspace → GitHub/GitLab**, send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md).
+To register a repository from your phone, open **Settings → Repositories → Add repository**. Choose GitHub or GitLab and send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md)
 
 ## One conversation across CLI, web and Telegram
 
@@ -59,10 +65,12 @@ The server hosts the agents, SQLite history and Telegram connection. A laptop te
 
 - `/new Your task description` saves the goal, then lets you choose a workspace. The description is optional. The session and topic use the goal as their name; a session started without a goal gets its name from the first message.
 - `/rename New name` changes this session and the same Telegram topic. It preserves topic ID, history, tasks and running agents. In private chat, open the intended session first.
-- **Add tasks** adds work to the current conversation and worker pool.
-- `/modules` shows enabled integrations. **Add workspace** registers a repository; `/models` selects an installed agent and model. Missing modules are added through the server installer.
+- A new message in the current conversation gives work to the same daddy.
+- `/modules` shows enabled integrations. `/models` selects an installed agent and model. Missing modules are added through the server installer.
 
 **Working copy settings** is a separate optional screen. Automatic copies are recommended: daddy creates the session's folders and removes them after archiving results on deletion. Prepared copies require an administrator-managed set of free server checkouts. The ordinary session screen keeps **Start session** and **Browse server folders** as its main actions.
+
+If SQLite fails while saving an incoming text or voice message, the bot fetches the unconfirmed message again and preserves the order. Use `daddy telegram status` to see a polling error. Telegram retains incoming updates for up to 24 hours. [Telegram Bot API](https://core.telegram.org/bots/api#getting-updates)
 
 Outgoing messages are buffered in SQLite before sending. Failed deliveries retry after 1, 2, 4… seconds, capped at five minutes; new conversation messages also wake the buffer. Telegram's `retry_after` always takes precedence. Queues survive service restarts and preserve ordering within a topic. Superseded unsent progress is replaced by the newest text, and acknowledged parts of a long reply are not resent. Renaming a topic uses this queue too.
 

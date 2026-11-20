@@ -159,3 +159,146 @@ it.each(['online', 'failed-edit', 'missed-event'])(
     }
   },
 );
+
+it.each(['private', 'topic'])(
+  'updates one progress card for a silent agent and reports failure in %s',
+  async (mode) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const f = daddyFixture(true);
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      calls.push({ method, body: JSON.parse(String(options?.body)) });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic' ? { message_thread_id: 31 } : { message_id: calls.length },
+      });
+    });
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    f.runtime.runSession.mockImplementation(async (input) => {
+      if (mode === 'topic') {
+        input.onSession('daddy-thread');
+        input.onEvent('runtime.item', { aggregatedOutput: 'PRIVATE SHELL OUTPUT' });
+      }
+      await running;
+      throw new Error('PRIVATE AGENT ERROR');
+    });
+    try {
+      const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Fix search' });
+      f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+      f.store.setSetting('telegram.currentDaddy', group.id);
+      const topic = mode === 'topic';
+      if (topic) {
+        f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+        await workspace.ensureTopic(group);
+      }
+      f.daddy.chat(group.id, 'Fix the timeout', undefined, undefined, {
+        channel: 'telegram',
+        chatId: topic ? -10042 : 7,
+        threadId: topic ? 31 : undefined,
+      });
+      workspace.start();
+      await vi.advanceTimersByTimeAsync(5000);
+      const initial = calls.find((call) =>
+        call.body.text?.includes('Request saved. Waiting to start.'),
+      );
+      expect(initial).toMatchObject({
+        method: 'sendMessage',
+        body: { chat_id: topic ? -10042 : 7 },
+      });
+      expect(initial?.body.message_thread_id).toBe(topic ? 31 : undefined);
+      const messageId = calls.indexOf(initial!) + 1;
+      const edits = () =>
+        calls.filter(
+          (call) => call.method === 'editMessageText' && call.body.message_id === messageId,
+        );
+
+      f.daddy.tick();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(edits().at(-1)?.body.text).toContain('Codex · Handling your request');
+      const activity = (text: string) =>
+        text.split('\n').find((line) => line.startsWith('Last agent activity'));
+      const first = edits().at(-1)?.body.text;
+      if (topic) expect(activity(first)).toBeDefined();
+      else expect(first).toContain('No agent activity received yet');
+
+      await workspace.stop();
+      await api.delivery.stop();
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+      workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+      workspace.start();
+      await vi.advanceTimersByTimeAsync(605000);
+      const later = edits().at(-1)?.body.text;
+      expect(later).toContain('10 min elapsed');
+      expect(later).not.toBe(first);
+      expect(activity(later)).toBe(activity(first));
+
+      finish();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(edits().at(-1)?.body.text).toContain('Agent run failed');
+      const afterFailure = edits().length;
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(edits()).toHaveLength(afterFailure);
+      expect(
+        calls.filter(
+          (call) => call.method === 'sendMessage' && call.body.text.includes('Server status'),
+        ),
+      ).toHaveLength(1);
+      expect(calls.some((call) => call.body.text?.includes('PRIVATE'))).toBe(false);
+    } finally {
+      finish();
+      await workspace.stop();
+      await api.delivery.stop();
+      await f.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('keeps task entry on the home screen and opens configuration on demand', async () => {
+  const f = daddyFixture();
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async () => {
+    throw new Error('Expected mocked delivery');
+  });
+  const send = vi.spyOn(api, 'send').mockResolvedValue({ message_id: 1 });
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const destination = { chatId: 7 };
+  const from = { id: 7 },
+    chat = { id: 7, type: 'private' };
+  const buttons = () =>
+    (send.mock.lastCall?.[1] as { buttons: { callback_data: string }[][] }).buttons
+      .flat()
+      .map((button) => button.callback_data);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Поиск' });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    await workspace.callback('dad:home', destination);
+    expect(buttons()).toEqual(['dad:new', `dad:open:${group.id}`, 'dad:settings']);
+    await workspace.callback('dad:settings', destination);
+    expect(buttons()).toContain('dad:workspaces');
+    expect(buttons()).toContain('notifications:show');
+
+    await workspace.callback('dad:new', destination);
+    await workspace.callback(`dad:open:${group.id}`, destination);
+    expect(buttons()).toContain(`dad:status:${group.id}`);
+    expect(buttons()).not.toContain(`dad:models:${group.id}`);
+    await workspace.callback(`dad:settings:${group.id}`, destination);
+    expect(buttons()).toContain(`dad:models:${group.id}`);
+
+    await workspace.handle({ update_id: 1, message: { chat, from, text: 'Исправь поиск' } });
+    expect(f.store.messages(group.id).map((message) => message.text)).toEqual(['Исправь поиск']);
+    await workspace.handle({ update_id: 2, message: { chat, from, text: '/status' } });
+    expect(send.mock.lastCall?.[1]).toMatchObject({
+      text: expect.stringContaining('Запрос сохранён. Ждёт запуска.'),
+    });
+  } finally {
+    await workspace.stop();
+    await f.close();
+  }
+});

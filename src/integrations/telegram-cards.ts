@@ -30,13 +30,8 @@ const card = (text: LocalText, buttons?: TelegramButton[][]): TelegramCard => ({
 });
 const navigation = (): TelegramButton[][] => [
   [
-    { text: '📋 Задачи', callback_data: 'dad:sessions' },
-    { text: '🔔 Уведомления', callback_data: 'notifications:show' },
-  ],
-  [
-    { text: '🌐 Language', callback_data: 'language:show' },
-    { text: '🤖 Models', callback_data: 'models:refresh' },
-    { text: '⬆️ Updates', callback_data: 'updates:show' },
+    { text: 'Sessions', callback_data: 'dad:home' },
+    { text: 'Settings', callback_data: 'dad:settings' },
   ],
 ];
 export function notificationsCard(
@@ -64,7 +59,7 @@ export function notificationsCard(
   ).map(([key, label, value]) => [
     { text: `${mode === key ? '✓ ' : ''}${label}`, callback_data: `notifications:${value}` },
   ]);
-  buttons.push([{ text: '📋 Задачи', callback_data: 'dad:sessions' }]);
+  buttons.push([{ text: 'Back', callback_data: 'dad:settings' }]);
   return card(text, buttons);
 }
 export function noteCard(title: string, body: string, locale: Locale = 'ru'): TelegramCard {

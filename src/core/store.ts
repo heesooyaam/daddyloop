@@ -92,11 +92,34 @@ export class Store {
     if (!row) throw new AppError('not_found', 'Task not found', 404);
     return JSON.parse(row.data as string);
   }
-  tasks(): Task[] {
-    return this.db
-      .prepare('SELECT data FROM tasks ORDER BY rowid DESC')
-      .all()
-      .map((row) => JSON.parse(row.data as string));
+  tasks(groupId?: string): Task[] {
+    const rows =
+      groupId === undefined
+        ? this.db.prepare('SELECT data FROM tasks ORDER BY rowid DESC').all()
+        : this.db
+            .prepare(
+              "SELECT data FROM tasks WHERE json_extract(data,'$.groupId')=? ORDER BY rowid DESC",
+            )
+            .all(groupId);
+    return rows.map((row) => JSON.parse(row.data as string));
+  }
+  taskCountsByGroup() {
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(data,'$.groupId') AS groupId,
+                count(*) AS total,
+                count(*) FILTER (WHERE json_extract(data,'$.state')='complete') AS complete
+         FROM tasks
+         WHERE json_extract(data,'$.groupId') IS NOT NULL
+         GROUP BY groupId`,
+      )
+      .all();
+    return new Map(
+      rows.map((row) => [
+        row.groupId as string,
+        { total: Number(row.total), complete: Number(row.complete) },
+      ]),
+    );
   }
   saveTask(task: Task) {
     task.updatedAt = now();
@@ -178,6 +201,12 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
+  activeJobs(): Job[] {
+    return this.db
+      .prepare("SELECT data FROM jobs WHERE status IN ('queued','running') ORDER BY rowid")
+      .all()
+      .map((row) => JSON.parse(row.data as string));
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,
@@ -252,6 +281,17 @@ export class Store {
       ? this.db.prepare('SELECT data FROM daddy_jobs WHERE group_id=? ORDER BY rowid').all(groupId)
       : this.db.prepare('SELECT data FROM daddy_jobs ORDER BY rowid').all();
     return rows.map((row) => JSON.parse(row.data as string));
+  }
+  activeDaddyJobs(): DaddyJob[] {
+    return this.db
+      .prepare("SELECT data FROM daddy_jobs WHERE status IN ('queued','running') ORDER BY rowid")
+      .all()
+      .map((row) => JSON.parse(row.data as string));
+  }
+  hasRunningDaddyJob(groupId: string) {
+    return !!this.db
+      .prepare("SELECT 1 FROM daddy_jobs WHERE group_id=? AND status='running' LIMIT 1")
+      .get(groupId);
   }
   saveDaddyJob(job: DaddyJob) {
     this.db

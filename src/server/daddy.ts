@@ -34,26 +34,13 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         .parse(request.body);
       return daddy.workspaces.selection(
         input.sessionId
-          ? daddy.board(input.sessionId).workspace!
+          ? daddy.group(input.sessionId).workspace!
           : daddy.workspaces.get(input.workspaceId!),
         input.repository,
       );
     });
   }
-  app.get('/api/daddy/sessions', async () =>
-    daddy.sessions().map((group) => {
-      const board = daddy.board(group.id);
-      return {
-        ...group,
-        instructions: undefined,
-        workspace: board.workspace,
-        workers: board.workers,
-        daddyBusy: board.daddyBusy,
-        total: board.tasks.length,
-        complete: board.tasks.filter((task) => task.state === 'complete').length,
-      };
-    }),
-  );
+  app.get('/api/daddy/sessions', async () => daddy.sessionSummaries());
   app.post('/api/daddy/sessions', { bodyLimit: 1048576 }, async (request, reply) => {
     const input = z
       .object({
@@ -103,7 +90,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       .parse(request.body);
     const sessionId = id.parse(request.params.id);
     const workspace = await daddy.workspaces.selection(
-      daddy.board(sessionId).workspace!,
+      daddy.group(sessionId).workspace!,
       input.repository,
     );
     return daddy.chat(
