@@ -12,7 +12,7 @@ import {
   type TelegramCard,
   type TelegramButton,
 } from './telegram-text.js';
-import { notificationsCard, noteCard, errorCard } from './telegram-cards.js';
+import { notificationsCard, noteCard, errorCard, scheduledCleanupCard } from './telegram-cards.js';
 import { preferences, setLocale } from '../core/preferences.js';
 import type { Locale } from '../i18n/index.js';
 import type { Catalogue } from '../server/planning.js';
@@ -24,6 +24,7 @@ import { TelegramDelivery, deliveryStatus, type DeliveryOptions } from './telegr
 import { daddyHome } from './daddy-cards.js';
 import type { Speech } from '../runtime/speech.js';
 import type { ResourceStatus } from '../core/types.js';
+import { lastScheduledCleanup, type CleanupReport } from '../ops/scheduled-cleanup.js';
 import {
   runtimeConfirmationCard,
   runtimeOperationCard,
@@ -444,9 +445,15 @@ export class Telegram {
     this.polling = this.poll();
     this.currentUpdates();
     this.workspace?.start();
+    const cleanup = lastScheduledCleanup(this.engine.store);
+    if (cleanup) this.cleanupNotice(cleanup);
   }
   private onEvent = (event: Event) => {
     if (this.workspace?.onEvent(event)) return;
+    if (event.type === 'cache.scheduled_finished') {
+      this.cleanupNotice(event.data as CleanupReport);
+      return;
+    }
     if (event.type === 'runtime.update_finished') {
       this.runtimeResult(event.data as RuntimeUpdateOperation);
       return;
@@ -727,6 +734,18 @@ export class Telegram {
         } catch (error) {
           store.setSetting('telegram.error', redact(String(error)));
         }
+      })
+      .catch((error) => store.setSetting('telegram.error', redact(String(error))));
+  }
+  private cleanupNotice(report: CleanupReport) {
+    const store = this.engine.store;
+    this.notices = this.notices
+      .then(async () => {
+        const pair = this.paired();
+        if (this.stopped || !pair || !notificationPreferences(store).enabled) return;
+        await this.api.send(pair.chatId, scheduledCleanupCard(this.locale(), report), undefined, {
+          key: `cache-scheduled:${report.id}`,
+        });
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
   }

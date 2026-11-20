@@ -978,6 +978,14 @@ Object.assign(ru, {
     'PR подключён. Общий ревьюер проверит эту ревизию.',
   'Not enough available RAM': 'Недостаточно свободной RAM',
   'Disk-space threshold reached': 'Достигнут порог заполнения диска',
+  'Scheduled cache cleanup': 'Плановая уборка кэшей',
+  'Disk usage {before}% → {after}%. Free space gained {gain} GiB.':
+    'Диск {before}% → {after}%. Свободного места прибавилось на {gain} ГиБ.',
+  'Disk usage is now within the cleanup threshold.': 'Заполнение диска в пределах порога уборки.',
+  'Disk usage is still above the cleanup threshold.': 'Диск всё ещё заполнен выше порога уборки.',
+  'Scheduled cleanup ended with an error. See daddy cache schedule.':
+    'Уборка завершилась с ошибкой. Подробности в daddy cache schedule.',
+  'Scheduled cleanup was interrupted.': 'Плановая уборка прервана.',
 });
 Object.assign(ru, {
   Plan: 'План',

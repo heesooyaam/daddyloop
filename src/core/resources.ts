@@ -3,6 +3,14 @@ import { freemem, totalmem } from 'node:os';
 import { dirname } from 'node:path';
 import type { ResourceStatus } from './types.js';
 const GiB = 1024 ** 3;
+export function diskResources(path: string) {
+  const fs = statfsSync(path);
+  return {
+    diskAvailableGiB: (fs.bavail * fs.bsize) / GiB,
+    diskUsedPercent: ((fs.blocks - fs.bfree) / (fs.blocks - fs.bfree + fs.bavail)) * 100,
+  };
+}
+
 export function resources(
   path: string,
   limits = { minDiskGiB: 10, maxDiskPercent: 95, minMemoryGiB: 2 },
@@ -82,9 +90,7 @@ export function resources(
   } catch {
     /* No Linux cgroup information is available. */
   }
-  const fs = statfsSync(path),
-    diskAvailableGiB = (fs.bavail * fs.bsize) / GiB;
-  const diskUsedPercent = ((fs.blocks - fs.bfree) / (fs.blocks - fs.bfree + fs.bavail)) * 100;
+  const { diskAvailableGiB, diskUsedPercent } = diskResources(path);
   const reasons: string[] = [];
   if (available / GiB < limits.minMemoryGiB) reasons.push('Not enough available RAM');
   if (diskAvailableGiB < limits.minDiskGiB || diskUsedPercent >= limits.maxDiskPercent)

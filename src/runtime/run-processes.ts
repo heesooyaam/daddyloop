@@ -306,7 +306,12 @@ export class RunProcesses {
     this.store.db.prepare('DELETE FROM settings WHERE key=?').run(prefix + record.id);
     return true;
   }
-  async reclaim(groupId: string, removeCaches = false, signal?: AbortSignal) {
+  async reclaim(
+    groupId: string,
+    removeCaches = false,
+    signal?: AbortSignal,
+    shouldContinue?: () => boolean,
+  ) {
     return this.lock(groupId, async () => {
       const results = [];
       const active = this.records(groupId).some(
@@ -314,18 +319,30 @@ export class RunProcesses {
       );
       for (const record of this.records(groupId).filter((record) => this.eligible(record))) {
         signal?.throwIfAborted();
+        if (shouldContinue && !shouldContinue()) break;
         const result = await this.stop(record);
         record.state = 'finished';
         this.save(record);
+        signal?.throwIfAborted();
         const cacheRemoved =
-          !active && !result.remaining.length && (await this.removeCache(record, removeCaches));
+          !active &&
+          !result.remaining.length &&
+          (!shouldContinue || shouldContinue()) &&
+          (await this.removeCache(record, removeCaches));
         results.push({ runId: record.runId, ...result, cacheRemoved });
       }
       return results;
     });
   }
-  async recover(removeCaches = false) {
+  async recover(
+    removeCaches = false,
+    options?: { signal: AbortSignal; shouldContinue: () => boolean },
+  ) {
     const groups = new Set(this.records().map((record) => record.groupId));
-    for (const groupId of groups) await this.reclaim(groupId, removeCaches);
+    for (const groupId of groups) {
+      options?.signal.throwIfAborted();
+      if (options && !options.shouldContinue()) break;
+      await this.reclaim(groupId, removeCaches, options?.signal, options?.shouldContinue);
+    }
   }
 }

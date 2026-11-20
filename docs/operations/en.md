@@ -46,6 +46,34 @@ Cleanup only considers owned temporary downloads and old, clean managed reviewer
 
 Before disk-heavy work inspect `df -h /home` and available RAM. Arcadia stores/mounts require ownership checks; never truncate a store as a routine cleanup step. `daddy cache arcadia-gc` is an explicit ordinary GC operation, not a blanket removal of user work.
 
+### Scheduled cleanup
+
+Enable scheduled cleanup separately. It checks the filesystem that holds the service data even when there are no open sessions. Cleanup runs in the background when usage exceeds the configured threshold. The check interval is at least 30 minutes. The default cleanup threshold is 80%, and the emergency pause threshold is configured separately.
+
+```bash
+daddy cache schedule --enable --interval-minutes 30 --disk-percent 80 --pause-percent 90
+daddy restart
+daddy cache schedule
+```
+
+The status shows the next check and the last cleanup result. The service measures usage and free space before and after cleanup. It stops when usage reaches the configured threshold. The report goes to the paired Telegram chat when notifications are enabled. `daddy cache schedule --disable` disables the schedule after restart. The global `daddy cache auto off` setting disables automatic cache cleanup, including scheduled cleanup.
+
+Choose a Markdown file or a folder containing `SKILL.md` for a dedicated skill. The service saves a copy of the text and gives the agent a list of approved operations. The agent can order or skip operations. The service verifies and executes the selected operations. If the agent fails to return a valid plan, the status reports the failure.
+
+```bash
+daddy cache schedule --skill-file ~/skills/cache-cleanup/SKILL.md
+daddy restart
+```
+
+Register a dedicated directory of reproducible cache files on the same filesystem for additional cleanup. This example permits regular files beginning with `build-` that have gone at least seven days without access or modification. Registration records local approval in the directory. The service checks the approval, ownership, location and overlaps with session data before cleanup. Directories, links and other filenames are preserved.
+
+```bash
+daddy cache target add ~/.cache/my-build --prefix build- --age-days 7
+daddy restart
+```
+
+`daddy cache target remove ~/.cache/my-build` removes the directory from the schedule after restart.
+
 ### Recovery instead of a silent queue
 
 ```mermaid

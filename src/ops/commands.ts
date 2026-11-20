@@ -3,12 +3,16 @@ import { moduleExecutable } from '../runtime/executable.js';
 import { checkedModules } from '../modules/catalogue.js';
 import type { Command } from 'commander';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { ServiceManager } from './service.js';
 import {
+  cacheScheduleSchema,
+  cacheTargetSchema,
+  configSchema,
   configPath,
   defaultDataDir,
   loadConfig,
@@ -16,6 +20,8 @@ import {
   saveConfig,
   validateServerUrl,
 } from './config.js';
+import { approveCacheTarget } from './cache-targets.js';
+import { InstructionSources, instructionPath } from './instruction-sources.js';
 import { api as client } from './client.js';
 import { command } from './process.js';
 import { TelegramApi } from '../integrations/telegram.js';
@@ -408,6 +414,83 @@ export function registerOperations(program: Command) {
       config.cache.auto = mode === 'on';
       saveConfig(config);
       output('Cache policy saved. Restart the service to apply it.');
+    });
+  cache
+    .command('schedule')
+    .description('Show or configure background cache cleanup')
+    .option('--enable', 'enable scheduled cleanup')
+    .option('--disable', 'disable scheduled cleanup')
+    .option('--interval-minutes <minutes>', 'check at this interval, at least 30 minutes')
+    .option('--disk-percent <percent>', 'clean above this disk usage percentage')
+    .option('--pause-percent <percent>', 'pause work at this disk usage percentage')
+    .option('--skill-file <path>', 'import a dedicated cleanup skill')
+    .option('--clear-skill', 'remove the dedicated skill')
+    .action(async (options) => {
+      if (!Object.keys(options).length) {
+        output(await api('/cache/schedule'));
+        return;
+      }
+      if (options.enable && options.disable) throw new Error('Choose either --enable or --disable');
+      if (options.skillFile && options.clearSkill)
+        throw new Error('Choose either --skill-file or --clear-skill');
+      const config = loadConfig();
+      const schedule = config.cache.schedule ?? cacheScheduleSchema.parse({});
+      if (options.enable || options.disable) schedule.enabled = !!options.enable;
+      if (options.intervalMinutes !== undefined)
+        schedule.intervalMinutes = Number(options.intervalMinutes);
+      if (options.diskPercent !== undefined) schedule.diskPercent = Number(options.diskPercent);
+      if (options.pausePercent !== undefined)
+        config.resources.maxDiskPercent = Number(options.pausePercent);
+      if (options.skillFile)
+        schedule.skill = await new InstructionSources().import({
+          kind: 'local',
+          path: options.skillFile,
+        });
+      if (options.clearSkill) delete schedule.skill;
+      config.cache.schedule = schedule;
+      saveConfig(configSchema.parse(config));
+      output('Cleanup schedule saved. Restart the service to apply it.');
+    });
+  const targets = cache
+    .command('target')
+    .description('Manage explicitly approved disposable cache directories');
+  targets
+    .command('add')
+    .argument('<directory>')
+    .requiredOption('--prefix <prefix>', 'only remove regular files starting with this prefix')
+    .option('--age-days <days>', 'minimum age since last modification or access', '7')
+    .action(async (directory, options) => {
+      const config = loadConfig();
+      const schedule = config.cache.schedule ?? cacheScheduleSchema.parse({});
+      const target = cacheTargetSchema.parse({
+        directory: await realpath(instructionPath(directory)),
+        prefix: options.prefix,
+        minAgeDays: Number(options.ageDays),
+      });
+      schedule.targets = [
+        ...schedule.targets.filter((entry) => entry.directory !== target.directory),
+        target,
+      ];
+      config.cache.schedule = schedule;
+      const next = configSchema.parse(config);
+      await approveCacheTarget(target, dir());
+      saveConfig(next);
+      output('Cache target approved. Restart the service to apply it.');
+    });
+  targets
+    .command('remove')
+    .argument('<directory>')
+    .action(async (directory) => {
+      const config = loadConfig();
+      const selected = instructionPath(directory);
+      const canonical = await realpath(selected).catch(() => selected);
+      if (config.cache.schedule) {
+        config.cache.schedule.targets = config.cache.schedule.targets.filter(
+          (entry) => entry.directory !== canonical,
+        );
+        saveConfig(config);
+      }
+      output('Cache target removed from the schedule. Restart the service to apply it.');
     });
   cache
     .command('arcadia-gc')

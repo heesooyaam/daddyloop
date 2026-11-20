@@ -6,6 +6,7 @@ import {
   symlinkSync,
   existsSync,
   rmSync,
+  realpathSync,
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,17 +29,23 @@ it('prunes only explicitly owned, expired temporary artifacts and never follows 
     utimesSync(old, new Date(0), new Date(0));
     symlinkSync(outside, join(cache, 'download-link'));
     writeFileSync(join(cache, 'credentials'), 'preserve');
-    const manager = new CacheManager(f.engine, dir, {
-      auto: false,
-      maxAgeDays: 7,
-      keepReviewerCopies: 1,
-    });
+    const mounted = join(cache, 'temporary-mounted', 'child');
+    mkdirSync(mounted, { recursive: true });
+    writeFileSync(join(mounted, 'keep'), 'mounted data');
+    utimesSync(join(cache, 'temporary-mounted'), new Date(0), new Date(0));
+    const manager = new CacheManager(
+      f.engine,
+      dir,
+      { auto: false, maxAgeDays: 7, keepReviewerCopies: 1 },
+      () => [realpathSync(mounted)],
+    );
     expect((await manager.prune(false)).removed).toHaveLength(0);
     expect(existsSync(old)).toBe(true);
     const result = await manager.prune(true);
     expect(result.removed).toEqual([old]);
     expect(existsSync(join(outside, 'keep'))).toBe(true);
     expect(existsSync(join(cache, 'credentials'))).toBe(true);
+    expect(existsSync(join(mounted, 'keep'))).toBe(true);
   } finally {
     f.store.close();
     rmSync(dir, { recursive: true, force: true });
