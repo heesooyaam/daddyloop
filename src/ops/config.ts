@@ -1,9 +1,35 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { profilesSchema, inheritedProfiles } from '../core/agents.js';
+import { skillSnapshotSchema } from '../core/instructions.js';
+
+export const cacheTargetSchema = z
+  .object({
+    directory: z.string().max(4096).refine(isAbsolute, 'Use an absolute cache directory'),
+    prefix: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/),
+    minAgeDays: z.number().int().positive().default(7),
+  })
+  .strict();
+export type CacheTarget = z.infer<typeof cacheTargetSchema>;
+export const cacheScheduleSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    intervalMinutes: z.number().int().min(30).default(30),
+    diskPercent: z.number().min(1).lt(100).default(80),
+    skill: skillSnapshotSchema.optional(),
+    targets: z
+      .array(cacheTargetSchema)
+      .refine(
+        (targets) => new Set(targets.map((target) => target.directory)).size === targets.length,
+        'Register each cache directory once',
+      )
+      .default([]),
+  })
+  .strict();
+export type CacheSchedule = z.infer<typeof cacheScheduleSchema>;
 
 export const configSchema = z
   .object({
@@ -55,6 +81,7 @@ export const configSchema = z
         auto: z.boolean(),
         maxAgeDays: z.number().int().min(1),
         keepReviewerCopies: z.number().int().min(1),
+        schedule: cacheScheduleSchema.optional(),
       })
       .default({ auto: true, maxAgeDays: 7, keepReviewerCopies: 1 }),
     telegram: z
@@ -68,7 +95,16 @@ export const configSchema = z
       })
       .default({ enabled: false, arcanumCli: 'arcanum-cli' }),
   })
-  .strict();
+  .strict()
+  .refine(
+    (config) =>
+      !config.cache.schedule?.enabled ||
+      config.cache.schedule.diskPercent < config.resources.maxDiskPercent,
+    {
+      path: ['cache', 'schedule', 'diskPercent'],
+      message: 'The cleanup threshold must be lower than the pause threshold',
+    },
+  );
 export type Config = z.infer<typeof configSchema>;
 export function configPath() {
   return (

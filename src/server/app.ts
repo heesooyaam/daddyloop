@@ -12,7 +12,7 @@ import { Store } from '../core/store.js';
 import { Engine } from '../core/engine.js';
 import { AppError, type Event, type ResourceStatus, type PRRef } from '../core/types.js';
 import { accessToken, credential, redact, safeEqual } from '../core/security.js';
-import { resources } from '../core/resources.js';
+import { diskResources, resources } from '../core/resources.js';
 import { providers } from '../providers/index.js';
 import { type ReviewProvider } from '../providers/provider.js';
 import { Workspaces } from '../runtime/workspaces.js';
@@ -24,12 +24,21 @@ import { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { repositoryModules } from '../modules/repositories/index.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { DemoRuntime } from '../runtime/demo.js';
-import { loadConfig, saveConfig, validateServerUrl, type Config } from '../ops/config.js';
+import {
+  cacheScheduleSchema,
+  configPath,
+  loadConfig,
+  saveConfig,
+  validateServerUrl,
+  type Config,
+} from '../ops/config.js';
 import { Access, allowedRequest } from './access.js';
 import { VERSION } from '../version.js';
 import { Telegram, connectTelegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
+import { pruneCacheTarget } from '../ops/cache-targets.js';
+import { ScheduledCleanup } from '../ops/scheduled-cleanup.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../modules/repositories/tickets.js';
 import { registerPlanning, type Catalogue } from './planning.js';
@@ -251,6 +260,49 @@ export async function buildApp(options: ServerOptions) {
   const workspaces =
     options.workspaces ??
     new WorkspaceRegistry(store, config.workspaces.roots, undefined, repositories);
+  const schedule = config.cache.schedule ?? cacheScheduleSchema.parse({});
+  const pausePercent = options.maxDiskPercent ?? config.resources.maxDiskPercent;
+  const scheduledCleanup = new ScheduledCleanup(store, schedule, {
+    allowed: config.cache.auto && schedule.diskPercent < pausePercent,
+    measure: options.resourceCheck ?? (() => diskResources(dataDir)),
+    canPlan: () => {
+      const status = getResources();
+      return status.diskAvailableGiB >= 1 && status.memoryAvailableGiB >= 0.5;
+    },
+    directory: join(dataDir, 'maintenance', 'scheduled'),
+    runtime: options.daddyRuntime ?? agents,
+    profile: () => engine.defaultAgents().daddy,
+    actions: [
+      {
+        id: 'run-caches',
+        description: 'Disposable caches and abandoned processes owned by finished agent runs',
+        run: (signal, shouldContinue) => runProcesses.recover(true, { signal, shouldContinue }),
+      },
+      {
+        id: 'review-caches',
+        description: 'Expired temporary downloads and old verified clean review copies',
+        run: (signal, shouldContinue) => cache.prune(true, { signal, shouldContinue }),
+      },
+      ...schedule.targets.map((target, index) => ({
+        id: `registered-${index + 1}`,
+        description: `Registered cache ${redact(target.directory)}, prefix ${target.prefix}, at least ${target.minAgeDays} days old`,
+        run: (signal: AbortSignal, shouldContinue: () => boolean) =>
+          pruneCacheTarget(
+            target,
+            dataDir,
+            [
+              configPath(),
+              ...workspaces.list().map((workspace) => workspace.repoPath),
+              ...store.groups().map((group) => group.workspace?.repoPath ?? ''),
+              ...store.daddyJobs().map((job) => job.workspace?.repoPath ?? ''),
+              ...store.tasks().map((task) => task.repoPath),
+            ],
+            signal,
+            shouldContinue,
+          ),
+      })),
+    ],
+  });
   checkouts.protectSources(() =>
     [
       ...workspaces.list(),
@@ -449,6 +501,7 @@ export async function buildApp(options: ServerOptions) {
   });
   app.get('/api/devices', async () => access.devices());
   app.get('/api/cache', async () => cache.prune(false));
+  app.get('/api/cache/schedule', async () => ({ ...scheduledCleanup.status(), pausePercent }));
   app.post('/api/cache/prune', async (request) => {
     const { apply } = z
       .object({ apply: z.boolean().default(false) })
@@ -693,6 +746,7 @@ export async function buildApp(options: ServerOptions) {
     if (!options.store) store.close();
   });
   app.addHook('preClose', async () => {
+    await scheduledCleanup.stop();
     await daddy.stop();
     store.changes.off('event', refreshRuntime);
     await updaters.stop();
@@ -757,6 +811,7 @@ export async function buildApp(options: ServerOptions) {
     await runProcesses.recover();
     worker.start();
     daddy.start();
+    scheduledCleanup.start();
   }
   return { app, engine, worker, store, daddy, workspaces };
 }

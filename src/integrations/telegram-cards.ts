@@ -1,7 +1,30 @@
-import { translate, type Locale } from '../i18n/index.js';
+import { translate, translator, type Locale } from '../i18n/index.js';
 import type { TextEntity } from './telegram-text.js';
 import type { NotificationPreferences } from './notifications.js';
 import { TelegramText, type TelegramCard, type TelegramButton } from './telegram-text.js';
+import type { CleanupReport } from '../ops/scheduled-cleanup.js';
+
+export function scheduledCleanupCard(locale: Locale, report: CleanupReport) {
+  const t = translator(locale);
+  const outcomes = {
+    cleared: 'Disk usage is now within the cleanup threshold.',
+    still_high: 'Disk usage is still above the cleanup threshold.',
+    failed: 'Scheduled cleanup ended with an error. See daddy cache schedule.',
+    interrupted: 'Scheduled cleanup was interrupted.',
+  };
+  const gain = Math.max(0, report.after.diskAvailableGiB - report.before.diskAvailableGiB);
+  return new TelegramText()
+    .add(t('Scheduled cache cleanup'), 'bold')
+    .add(
+      '\n\n' +
+        t('Disk usage {before}% → {after}%. Free space gained {gain} GiB.', {
+          before: report.before.diskUsedPercent.toFixed(1),
+          after: report.after.diskUsedPercent.toFixed(1),
+          gain: gain.toFixed(2),
+        }),
+    )
+    .add('\n' + t(outcomes[report.status]));
+}
 
 class LocalText extends TelegramText {
   constructor(readonly locale: Locale) {
