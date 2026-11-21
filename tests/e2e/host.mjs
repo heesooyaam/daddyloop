@@ -174,7 +174,7 @@ const updates = new UpdateMonitor(store, {
   agents: cliModules.map(({ id, cli }) => ({ id, cli, managedUpdates: true })),
 });
 await updates.check(true);
-const { app } = await buildApp({
+const { app, worker } = await buildApp({
   usage: usageFixture(),
   updaters: new RuntimeUpdaters(cliModules.map((module) => module.updater)),
   agents: new AgentRegistry(
@@ -245,8 +245,6 @@ const { app } = await buildApp({
       for (const source of sources) {
         const result = await input.onTool('import_ticket', { source }, `import-${index}`);
         const task = store.getTask(result.taskId);
-        task.policy.autoPush = false;
-        store.saveTask(task);
         if (task.state === 'discussing' && !store.busy(task.id))
           await input.onTool('dispatch', { taskId: task.id }, `dispatch-${index}`);
         index++;
@@ -272,6 +270,8 @@ const { app } = await buildApp({
   }),
   config: configSchema.parse({ publicOrigin: 'https://localhost:4319', agents: fixtureProfiles }),
 });
+// The browser fixture keeps completed implementations local, with no native writes.
+worker.autoSubmit = undefined;
 await app.listen({ host: '127.0.0.1', port: 4318 });
 const proxy = https.createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },

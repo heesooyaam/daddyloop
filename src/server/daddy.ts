@@ -56,7 +56,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       })
       .strict()
       .parse(request.body);
-    const { repository, ...options } = input;
+    const { repository, publication: _publication, autoPush: _autoPush, ...options } = input;
     const workspace = await daddy.workspaces.selection(
       daddy.workspaces.get(input.workspaceId),
       repository,
@@ -134,7 +134,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const input = z
       .object({
         taskId: id,
-        action: z.enum(['approve-plan', 'waive-checks', 'publish', 'submit']),
+        action: z.enum(['approve-plan', 'waive-checks']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
       })
@@ -151,8 +151,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       generation: input.expectedGeneration,
       groupId: request.params.id,
     };
-    if (input.action === 'publish') return daddy.engine.publish(task.id, expected);
-    if (input.action === 'submit') return daddy.tickets.submit(task.id, expected);
     return daddy.engine.action(task.id, input.action, '', expected);
   });
 }

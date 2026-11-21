@@ -270,7 +270,7 @@ export class ArcWorkspaces {
     } else task.reviewerWorktree = saved.mount;
     return saved.mount;
   }
-  async commit(task: Task, message: string, signal?: AbortSignal) {
+  private async checkedAuthor(task: Task, signal?: AbortSignal) {
     const saved = task.arcWorkspaces?.author as Saved | undefined;
     if (!saved || !task.revision) throw new Error('Arc author workspace is not initialized');
     const owned = (await this.bridge.mounts()).some(
@@ -291,6 +291,10 @@ export class ArcWorkspaces {
       throw new Error(
         'The Arc author branch changed outside daddyloop; no commit or push was performed',
       );
+    return { saved, head: before.hash };
+  }
+  async commit(task: Task, message: string, signal?: AbortSignal) {
+    const { saved } = await this.checkedAuthor(task, signal);
     const status = await this.bridge.native(['status', '--short'], saved.mount, signal);
     if (status) {
       const files = status
@@ -319,16 +323,13 @@ export class ArcWorkspaces {
     ).hash;
     return head;
   }
-  async submit(task: Task, message: string, signal?: AbortSignal) {
-    if (!task.pr || !task.revision || !task.arcWorkspaces?.author)
-      throw new Error('Arc author workspace is not initialized');
-    const saved = task.arcWorkspaces.author;
-    const head = await this.commit(task, message, signal);
-    if (head === task.revision.head || !task.policy.autoPush) return { head, pushed: false };
-    if (!task.pr.branch.startsWith('users/') || /\s/.test(task.pr.branch))
+  async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
+    const author = await this.checkedAuthor(task, signal);
+    if (author.head !== head)
+      throw new Error('The Arc author branch changed after the fixes were saved');
+    if (!task.pr?.branch.startsWith('users/') || /\s/.test(task.pr.branch))
       throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
-    await this.bridge.native(['push', '-u', task.pr.branch], saved.mount, signal);
-    return { head, pushed: true };
+    await this.bridge.native(['push', '-u', task.pr.branch], author.saved.mount, signal);
   }
   async planDocuments(task: Task, cwd: string) {
     const list = await this.bridge.native(

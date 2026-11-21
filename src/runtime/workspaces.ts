@@ -212,12 +212,8 @@ export class Workspaces {
     } else task.reviewerWorktree = target;
     return target;
   }
-  async submit(
-    task: Task,
-    message: string,
-    signal?: AbortSignal,
-  ): Promise<{ head: string; pushed: boolean }> {
-    if (task.ref.provider === 'arcadia') return this.arc.submit(task, message, signal);
+  async commitFix(task: Task, message: string, signal?: AbortSignal): Promise<string> {
+    if (task.ref.provider === 'arcadia') return this.arc.commit(task, message, signal);
     if (!task.authorWorktree || !task.revision || !task.pr)
       throw new AppError('workspace_missing', 'Author workspace is not initialized');
     const cwd = resolve(task.authorWorktree);
@@ -242,16 +238,37 @@ export class Workspaces {
         message,
       ]);
     }
-    const head = await run(['rev-parse', 'HEAD']);
-    if (head === task.revision.head) return { head, pushed: false };
-    if (!task.policy.autoPush) return { head, pushed: false };
+    return run(['rev-parse', 'HEAD']);
+  }
+  async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
+    if (task.ref.provider === 'arcadia') return this.arc.pushSavedFix(task, head, signal);
+    if (!task.authorWorktree || !task.pr || !task.revision || !/^[a-f0-9]{40,64}$/i.test(head))
+      throw new AppError(
+        'workspace_missing',
+        'A saved author commit and PR workspace are required',
+      );
+    const root = join(realpathSync(this.dataDir), 'workspaces', task.id);
+    const cwd = realpathSync(task.authorWorktree);
+    if (cwd !== join(root, 'author') || realpathSync(root) !== root)
+      throw new AppError(
+        'workspace_invalid',
+        'The author workspace is outside the managed task directory',
+      );
+    await this.verifyCopy(task.authorWorktree, join(root, 'objects.git'), signal);
+    const run = (args: string[], env: NodeJS.ProcessEnv = {}) => git(args, cwd, env, signal);
+    if ((await run(['rev-parse', 'HEAD'])) !== head)
+      throw new AppError(
+        'stale_author_head',
+        'The author branch changed after the fixes were saved',
+      );
+    await run(['merge-base', '--is-ancestor', task.revision.head, head]);
     await run(['check-ref-format', `refs/heads/${task.pr.branch}`]);
+    const address = this.pushAddress(task);
     // An ordinary push cannot overwrite concurrent remote commits.
     await run(
-      ['push', '--porcelain', '--', this.pushAddress(task), `HEAD:refs/heads/${task.pr.branch}`],
-      this.env(task, this.pushAddress(task)),
+      ['push', '--porcelain', '--', address, `${head}:refs/heads/${task.pr.branch}`],
+      this.env(task, address),
     );
-    return { head, pushed: true };
   }
   async arcPlanDocuments(task: Task, cwd: string) {
     return this.arc.planDocuments(task, cwd);

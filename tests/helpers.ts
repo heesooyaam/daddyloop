@@ -17,7 +17,6 @@ export async function fixture(overrides: Partial<Task> = {}) {
     },
     repoPath: '/tmp',
     requirements: 'Preserve session generation invariants',
-    policy: { publication: 'human' },
   });
   task = { ...task, ...overrides };
   store.saveTask(task);
