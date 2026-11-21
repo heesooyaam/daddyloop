@@ -18,7 +18,6 @@ export type State =
 export interface Policy {
   publication: 'human' | 'auto';
   planApproval: 'human' | 'auto';
-  maxRounds: number;
   maxNoProgress: number;
   requireChecks: boolean;
   autoPush: boolean;
@@ -26,7 +25,6 @@ export interface Policy {
 export const defaultPolicy: Policy = {
   publication: 'auto',
   planApproval: 'human',
-  maxRounds: 3,
   maxNoProgress: 2,
   requireChecks: true,
   autoPush: true,

@@ -81,6 +81,7 @@ export class Worker {
   }
   start() {
     this.engine.recoverInterruptedJobs();
+    this.engine.recoverReviewRoundLimits();
     this.timer = setInterval(() => {
       void this.tick().catch((error) =>
         this.engine.store.event('_system', 'worker.error', { error: redact(String(error)) }),

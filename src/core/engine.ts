@@ -29,6 +29,10 @@ import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
 
+const oldReviewStartLimit = 'Review round limit reached';
+const oldPublishedReviewLimit =
+  'Review round limit reached; inspect the remaining published findings';
+
 export class Engine {
   readonly broker: Broker;
   private locks = new Map<string, Promise<unknown>>();
@@ -193,13 +197,7 @@ export class Engine {
           'review_exists',
           'This revision already has a review. Discuss it or use retry to continue an interrupted run.',
         );
-      if (!task.review) {
-        if (task.round >= task.policy.maxRounds) {
-          this.state(task, 'needs_input', 'Review round limit reached');
-          return task;
-        }
-        task.round++;
-      }
+      if (!task.review) task.round++;
       task.pr = pr;
       task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
@@ -325,22 +323,7 @@ export class Engine {
             'needs_input',
             'The same findings keep returning; human decision is required',
           );
-        else if (task.round >= task.policy.maxRounds)
-          this.state(
-            task,
-            'needs_input',
-            'Review round limit reached; inspect the remaining published findings',
-          );
-        else
-          this.store.transaction(() => {
-            this.state(task, 'fixing', 'Author is addressing the published review');
-            this.store.enqueue(
-              task,
-              'author',
-              'fix',
-              'Address exactly the published feedback snapshot. Explain disputes. Do not treat the reviewer’s private draft or old summary as additional requirements.',
-            );
-          });
+        else this.queuePublishedFix(task, 'Author is addressing the published review');
       } else await this.finish(task);
     } else if (task.state === 'awaiting_checks' || task.state === 'awaiting_plan_approval')
       await this.finish(task);
@@ -371,6 +354,71 @@ export class Engine {
         'complete',
         'Current revision reviewed; publication, findings and checks are accounted for',
       );
+    }
+  }
+  private queuePublishedFix(task: Task, reason: string) {
+    this.store.transaction(() => {
+      this.state(task, 'fixing', reason);
+      this.store.enqueue(
+        task,
+        'author',
+        'fix',
+        'Address exactly the published feedback snapshot. Explain disputes. Do not treat the reviewer’s private draft or old summary as additional requirements.',
+      );
+    });
+  }
+
+  recoverReviewRoundLimits() {
+    for (const task of this.store.tasks()) {
+      if (!['needs_input', 'awaiting_push'].includes(task.state) || this.store.busy(task.id))
+        continue;
+      if (task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (
+          group.deletedAt ||
+          group.deletion ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          continue;
+      }
+      if (task.state === 'needs_input' && task.reason === oldReviewStartLimit && !task.review) {
+        this.state(task, 'queued', 'Review can continue on the saved revision');
+        continue;
+      }
+      if (
+        !task.revision ||
+        !task.reviewFinished ||
+        !task.review ||
+        task.snapshot?.status !== 'published' ||
+        task.feedback?.status !== 'published' ||
+        !task.feedback.comments.length ||
+        task.noProgress >= task.policy.maxNoProgress ||
+        !sameRevision(task.review.revision, task.revision) ||
+        !sameRevision(task.snapshot.revision, task.revision) ||
+        !sameRevision(task.feedback.revision, task.revision) ||
+        (task.pendingAuthorHead && task.pendingAuthorHead !== task.revision.head)
+      )
+        continue;
+      // A legacy resume may have changed the visible reason without queuing an author.
+      const stop = this.store.db
+        .prepare(
+          `SELECT 1 FROM events stopped
+           WHERE stopped.task_id=? AND stopped.type='task.state'
+             AND json_extract(stopped.data,'$.reason')=?
+             AND json_extract(stopped.data,'$.generation')=?
+             AND json_extract(stopped.data,'$.head')=?
+             AND NOT EXISTS (
+               SELECT 1 FROM events later
+               WHERE later.task_id=stopped.task_id AND later.id>stopped.id
+                 AND later.type='job.queued'
+                 AND json_extract(later.data,'$.kind') IN ('review','fix')
+             )
+           LIMIT 1`,
+        )
+        .get(task.id, oldPublishedReviewLimit, task.generation, task.revision.head);
+      if (!stop) continue;
+      this.queuePublishedFix(task, 'Continuing against the saved published findings');
     }
   }
   async publish(id: string, expected?: ExpectedTask) {

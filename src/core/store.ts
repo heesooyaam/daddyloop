@@ -18,6 +18,12 @@ import {
   type DaddyJob,
 } from './types.js';
 
+function readTask(data: string): Task {
+  const task: Task = JSON.parse(data);
+  if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
+  return task;
+}
+
 export class Store {
   readonly db: DatabaseSync;
   readonly changes = new EventEmitter();
@@ -90,7 +96,7 @@ export class Store {
   getTask(id: string): Task {
     const row = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
     if (!row) throw new AppError('not_found', 'Task not found', 404);
-    return JSON.parse(row.data as string);
+    return readTask(row.data as string);
   }
   tasks(groupId?: string): Task[] {
     const rows =
@@ -101,7 +107,7 @@ export class Store {
               "SELECT data FROM tasks WHERE json_extract(data,'$.groupId')=? ORDER BY rowid DESC",
             )
             .all(groupId);
-    return rows.map((row) => JSON.parse(row.data as string));
+    return rows.map((row) => readTask(row.data as string));
   }
   taskCountsByGroup() {
     const rows = this.db

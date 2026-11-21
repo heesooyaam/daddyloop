@@ -238,8 +238,16 @@ describe('publication gates and revision safety', () => {
     expect(implementation.approvedPlan?.head).toBe(f.task.revision?.head);
     f.store.close();
   });
-  it('enforces a review-round limit without reporting success', async () => {
-    const f = await fixture({ policy: { ...defaultPolicy, maxRounds: 1 } });
+  it('resumes a task at the old cap and fixes new findings in the fourth review', async () => {
+    const f = await fixture();
+    const legacy = f.store.getTask(f.task.id);
+    legacy.state = 'needs_input';
+    legacy.reason = 'Review round limit reached';
+    legacy.round = 3;
+    Object.assign(legacy.policy, { maxRounds: 3 });
+    f.store.saveTask(legacy);
+    f.engine.recoverReviewRoundLimits();
+    expect(f.store.getTask(f.task.id).state).toBe('queued');
     await f.engine.review(f.task.id);
     await f.engine.broker.call(f.job(), 'add_comment', {
       key: 'R1',
@@ -247,8 +255,65 @@ describe('publication gates and revision safety', () => {
     });
     await f.run();
     await f.engine.publish(f.task.id);
-    expect(f.store.getTask(f.task.id).state).toBe('needs_input');
-    expect(f.store.jobs().filter((j) => j.kind === 'fix')).toHaveLength(0);
+    const task = f.store.getTask(f.task.id);
+    expect(task.state).toBe('fixing');
+    expect(task.round).toBe(4);
+    expect(task.policy).not.toHaveProperty('maxRounds');
+    expect(f.store.jobs().filter((j) => j.kind === 'fix')).toHaveLength(1);
+    f.store.close();
+  });
+  it.each([true, false])(
+    'recovers the old stop from published feedback only for its saved revision (%s)',
+    async (currentRevision) => {
+      const f = await fixture();
+      await f.engine.review(f.task.id);
+      await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'A real defect' });
+      await f.run();
+      await f.engine.publish(f.task.id);
+      const task = f.store.getTask(f.task.id);
+      // A legacy cap recorded publication and stopped before enqueuing the author.
+      f.store.db.prepare('DELETE FROM jobs WHERE task_id=? AND status=?').run(task.id, 'queued');
+      task.state = 'needs_input';
+      task.reason = 'An older resume already changed the displayed reason';
+      task.resumeState = 'awaiting_push';
+      task.pendingAuthorHead = task.revision!.head;
+      f.store.saveTask(task);
+      f.store.event(task.id, 'task.state', {
+        state: 'needs_input',
+        reason: 'Review round limit reached; inspect the remaining published findings',
+        generation: task.generation,
+        head: currentRevision ? task.revision!.head : 'f'.repeat(40),
+      });
+      f.engine.recoverReviewRoundLimits();
+      f.engine.recoverReviewRoundLimits();
+      expect(f.store.getTask(task.id).state).toBe(currentRevision ? 'fixing' : 'needs_input');
+      expect(f.store.getTask(task.id).noProgress).toBe(task.noProgress);
+      expect(f.store.jobs(task.id).filter((job) => job.kind === 'fix')).toHaveLength(
+        currentRevision ? 1 : 0,
+      );
+      expect(
+        f.store.events(task.id).filter((event) => event.type === 'review.published'),
+      ).toHaveLength(1);
+      f.store.close();
+    },
+  );
+  it('still stops when the same findings recur without progress', async () => {
+    const f = await fixture({ policy: { ...defaultPolicy, maxNoProgress: 1 } });
+    const review = async () => {
+      await f.engine.review(f.task.id);
+      await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'Same finding' });
+      await f.run();
+      await f.engine.publish(f.task.id);
+    };
+    await review();
+    const fix = f.store.claim()!;
+    await f.provider.advance(prRef(f.task));
+    await f.engine.completeJob(fix, f.result());
+    fix.status = 'completed';
+    f.store.saveJob(fix);
+    await review();
+    expect(f.store.getTask(f.task.id).reason).toContain('same findings keep returning');
+    expect(f.store.jobs(f.task.id).filter((job) => job.kind === 'fix')).toHaveLength(1);
     f.store.close();
   });
   it('requires independent verification of prior findings before completing a clean round', async () => {
