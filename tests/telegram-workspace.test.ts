@@ -3,6 +3,7 @@ import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
 import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
+import { TelegramText } from '../src/integrations/telegram-text.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
@@ -501,6 +502,111 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
     expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
   } finally {
     await bot.stop();
+    await f.close();
+  }
+});
+
+it('migrates a queued legacy progress delivery when the same message becomes final', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 100;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    return Response.json({
+      ok: true,
+      result:
+        method === 'createForumTopic'
+          ? { message_thread_id: 31 }
+          : method === 'sendMessage'
+            ? { message_id: ++nextMessageId }
+            : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Saved history' });
+  const setup = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  const topic = await setup.ensureTopic(group);
+  await setup.stop();
+  const progress = f.store.daddyMessage(
+    group.id,
+    'agent',
+    'The answer is ready.',
+    'legacy-run',
+    undefined,
+    { phase: 'progress' },
+  );
+  const destination = { chatId: -10042, threadId: topic!.threadId };
+  const progressNotification = `telegram:dialog:-10042:${topic!.threadId}:${progress.id}:progress`;
+  f.store.db
+    .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
+    .run(progressNotification, 'pending', progress.at);
+  const legacy = new TelegramDelivery(f.store, api, 'fixture_bot');
+  api.delivery = legacy;
+  await legacy.stop();
+  await legacy.send(
+    destination,
+    new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(progress.text),
+    {
+      key: 'turn:legacy-run',
+      replace: true,
+      order: progress.at,
+      final: false,
+      notificationId: progressNotification,
+    },
+  );
+  const final = f.store.finishDaddyReply(group.id, progress.text, 'legacy-run');
+  expect(final).toMatchObject({ id: progress.id, phase: 'final' });
+  const finalNotification = `telegram:dialog:-10042:${topic!.threadId}:${progress.id}:final`;
+  const agentMessages = () =>
+    calls.filter(
+      (call) => call.method === 'sendMessage' && call.body.text?.startsWith('👨‍💻 [daddy]'),
+    );
+  let delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  api.delivery = delivery;
+  let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    workspace.replay();
+    await vi.waitFor(() => expect(agentMessages()).toHaveLength(1));
+    expect(agentMessages()[0].body.text).toContain(progress.text);
+    expect(['sent', 'superseded']).toContain(
+      f.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(progressNotification)
+        ?.status,
+    );
+    expect(
+      f.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(finalNotification)
+        ?.status,
+    ).toBe('sent');
+    const saved = f.store.db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .all()
+      .map((row) => JSON.parse(String(row.value)))
+      .filter((value) => value.options.notificationId?.includes(progress.id));
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      status: 'sent',
+      options: {
+        key: `message:${progress.id}`,
+        notificationId: finalNotification,
+        final: true,
+      },
+      messages: [{ id: expect.any(Number) }],
+    });
+
+    await workspace.stop();
+    await delivery.stop();
+    delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    api.delivery = delivery;
+    workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    workspace.replay();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(agentMessages()).toHaveLength(1);
+  } finally {
+    await workspace.stop();
+    await delivery.stop();
+    await legacy.stop();
     await f.close();
   }
 });

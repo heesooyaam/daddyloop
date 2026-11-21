@@ -45,6 +45,7 @@ type Transport = {
 const prefix = 'telegram.delivery:';
 const pinRetryMs = 60 * 60 * 1000;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const notificationIdentity = (value: string) => value.replace(/:(?:progress|final)$/, '');
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
 }
@@ -87,10 +88,10 @@ export class TelegramDelivery {
         value.options?.key?.startsWith('turn:') &&
         value.options.notificationId
       )
-        this.legacyByNotification.set(digest([value.destination, value.options.notificationId]), {
-          key,
-          value,
-        });
+        this.legacyByNotification.set(
+          digest([value.destination, notificationIdentity(value.options.notificationId)]),
+          { key, value },
+        );
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -139,7 +140,7 @@ export class TelegramDelivery {
     notificationId: string,
     deliveryKey?: string,
   ) {
-    const legacyKey = digest([destination, notificationId]);
+    const legacyKey = digest([destination, notificationIdentity(notificationId)]);
     const row = this.legacyByNotification.get(legacyKey);
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';

@@ -101,12 +101,13 @@ it('migrates a queued legacy turn delivery with its acknowledged chunks', async 
   try {
     const destination = { chatId: -10042, threadId: 4 };
     const content = 'A'.repeat(4096) + 'B'.repeat(4096) + 'C'.repeat(808);
-    const notificationId = 'telegram:dialog:-10042:4:message-id:final';
+    const notificationId = 'telegram:dialog:-10042:4:message-id:progress';
+    const finalNotificationId = 'telegram:dialog:-10042:4:message-id:final';
     f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
     await f.queue.send(destination, text(content), {
       key: 'turn:legacy-run',
       replace: true,
-      final: true,
+      final: false,
       notificationId,
     });
     expect(f.call).toHaveBeenCalledTimes(2);
@@ -117,7 +118,7 @@ it('migrates a queued legacy turn delivery with its acknowledged chunks', async 
       key: 'message:message-id',
       replace: true,
       final: true,
-      notificationId,
+      notificationId: finalNotificationId,
     });
     await restored.flush();
     expect(f.call).toHaveBeenCalledTimes(4);
@@ -129,11 +130,12 @@ it('migrates a queued legacy turn delivery with its acknowledged chunks', async 
       .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
       .all()
       .map((row) => JSON.parse(String(row.value)))
-      .filter((value) => value.options.notificationId === notificationId);
+      .filter((value) => value.options.notificationId?.includes('message-id'));
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0].messages).toHaveLength(3);
     expect(deliveries[0].status).toBe('sent');
     expect(deliveries[0].options.key).toBe('message:message-id');
+    expect(deliveries[0].options.notificationId).toBe(finalNotificationId);
   } finally {
     await restored?.stop();
     await f.close();
