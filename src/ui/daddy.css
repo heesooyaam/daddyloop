@@ -1005,6 +1005,50 @@
   color: var(--muted);
   line-height: 1.8;
 }
+.daddy-task-version {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.daddy-task-version > div {
+  display: grid;
+  grid-template-columns: 95px minmax(0, 1fr);
+  gap: 10px;
+}
+.daddy-task-version dt,
+.daddy-task-version dd,
+.daddy-check-list {
+  margin: 0;
+  font-size: 11px;
+}
+.daddy-task-version dt,
+.daddy-check-list {
+  color: var(--muted);
+}
+.daddy-task-version code {
+  overflow-wrap: anywhere;
+}
+.daddy-check-list {
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.daddy-waiver {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+.daddy-waiver label {
+  display: grid;
+  gap: 7px;
+  font-size: 11px;
+}
+.daddy-waiver textarea {
+  resize: vertical;
+}
 .daddy-task-report h4 {
   font-size: 11px;
   text-transform: uppercase;
@@ -1042,6 +1086,26 @@
 .daddy-telegram-setup p {
   font-size: 11px;
   line-height: 1.8;
+}
+.daddy-module-list {
+  display: grid;
+  gap: 10px;
+}
+.daddy-module-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.daddy-module-item > span:last-child {
+  display: grid;
+  gap: 3px;
+}
+.daddy-module-item small {
+  color: var(--muted);
 }
 .mobile-menu,
 .daddy-mobile-tabs,

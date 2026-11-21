@@ -1,9 +1,17 @@
-import { randomBytes, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
-import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
+import {
+  AppError,
+  now,
+  type AgentProfiles,
+  type Event,
+  type HumanTaskAction,
+  type ReviewGroup,
+  type Task,
+} from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
-import { TelegramText } from './telegram-text.js';
+import { TelegramText, type TelegramButton } from './telegram-text.js';
 import {
   daddyHome,
   workspacePicker,
@@ -28,11 +36,14 @@ import { languageCard } from './telegram-meta.js';
 import { instructionCommand, instructionLines } from '../client/instructions.js';
 import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
+import { sessionInstructionsSchema, type SkillSnapshot } from '../core/instructions.js';
+import { presetParts } from '../core/preset-parts.js';
 import { findPreset, selectPreset, presetLines } from '../client/presets.js';
 import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
+import { normalizeTelegramCommand, telegramCommands } from './telegram-commands.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
@@ -46,8 +57,42 @@ type RepoChoice = {
   expiresAt: string;
   creationExpiresAt?: string;
 };
+type TaskControl = {
+  kind: 'task' | 'prepare' | 'confirm';
+  destination: Destination;
+  ownerId: number;
+  groupId: string;
+  taskId: string;
+  action?: HumanTaskAction;
+  expectedHead?: string;
+  expectedGeneration?: number;
+  reason?: string;
+  expiresAt: string;
+  outcome?: 'completed' | 'stale';
+};
+type PendingDocument = {
+  kind: 'instructions' | 'skill';
+  ownerId: number;
+  chatId: number;
+  groupId: string;
+  generation: number;
+  instructionsHash: string;
+  role?: 'daddy' | 'worker';
+  expiresAt: string;
+};
+type PresetControl = {
+  kind: 'delete' | 'part';
+  ownerId: number;
+  destination: Destination;
+  presetId: string;
+  revision: number;
+  groupId?: string;
+  part?: string;
+  expiresAt: string;
+};
 export class TelegramWorkspace {
   private pending = Promise.resolve();
+  private commandSync = Promise.resolve();
   private stopped = false;
   private topics = new Map<string, Promise<Topic>>();
   private voice?: VoiceInbox;
@@ -107,6 +152,7 @@ export class TelegramWorkspace {
     this.voice?.start();
     this.replay();
     this.progress.start();
+    this.commandSync = this.syncCommands();
     this.retryTimer = setInterval(() => {
       for (const row of this.store.db
         .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.eventRetry:%'")
@@ -180,6 +226,43 @@ export class TelegramWorkspace {
   }
   private get t() {
     return translator(this.locale());
+  }
+  async syncCommands(previousGroupId?: number) {
+    try {
+      await this.api.call('setMyCommands', {
+        scope: { type: 'all_private_chats' },
+        commands: telegramCommands(this.locale(), 'private'),
+      });
+      const room = this.room();
+      if (previousGroupId && previousGroupId !== room?.chatId)
+        await this.api.call('deleteMyCommands', {
+          scope: { type: 'chat', chat_id: previousGroupId },
+        });
+      if (room)
+        await this.api.call('setMyCommands', {
+          scope: { type: 'chat', chat_id: room.chatId },
+          commands: telegramCommands(this.locale(), 'group'),
+        });
+    } catch (error) {
+      this.store.setSetting('telegram.error', redact(String(error)));
+    }
+  }
+  private async privateStep(destination: Destination, message: string) {
+    await this.api.send(destination, {
+      ...new TelegramText().add(message),
+      buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+    });
+  }
+  private async privateSessionStep(destination: Destination, group: ReviewGroup, message: string) {
+    await this.privateStep(
+      destination,
+      message +
+        '\n\n' +
+        this.t('In the private chat send /session {id}, then repeat the command for {title}.', {
+          id: group.id.slice(0, 8),
+          title: group.title,
+        }),
+    );
   }
   private pair() {
     return this.store.setting<Pair>('telegram.pairing');
@@ -402,6 +485,7 @@ export class TelegramWorkspace {
       this.store.setting<{ id: number }>('telegram.workspaceRequest')?.id !== request.id
     )
       throw new Error(this.t('Group selection expired. Send /group again.'));
+    const previousRoom = this.store.setting<Room>('telegram.group');
     const room: Room = { chatId: shared.chat_id, title: chat.title, ownerId: pair.userId };
     this.store.transaction(() => {
       this.store.setSetting('telegram.group', room);
@@ -412,14 +496,20 @@ export class TelegramWorkspace {
       text: this.t('Workspace connected: {name}', { name: room.title }),
       reply_markup: { remove_keyboard: true },
     });
+    await this.syncCommands(previousRoom?.chatId);
     await this.api.send(pair.chatId, daddyHome(this.locale(), this.daddy.sessions()));
     this.replay();
   }
   private authorize(destination: Destination, groupId: string) {
     const pair = this.pair();
-    if (destination.chatId !== pair?.chatId && this.groupAt(destination) !== groupId)
-      throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
-    return this.daddy.group(groupId);
+    if (destination.chatId === pair?.chatId || this.groupAt(destination) === groupId)
+      return this.daddy.group(groupId);
+    if (
+      this.room()?.chatId === destination.chatId &&
+      this.store.setting<string>(this.selectedSessionKey(destination)) === groupId
+    )
+      return this.daddy.group(groupId);
+    throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
   }
   async show(groupId: string, destination: Destination) {
     const group = this.authorize(destination, groupId),
@@ -442,6 +532,736 @@ export class TelegramWorkspace {
     await this.api.send(destination, {
       ...this.progress.card(group),
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
+    });
+  }
+  private selectedSessionKey(destination: Destination) {
+    return `telegram.selectedSession:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
+  }
+  private selectedTaskKey(destination: Destination, groupId: string) {
+    return `telegram.selectedTask:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
+  }
+  private documentKey(destination: Destination) {
+    return `telegram.documentImport:${this.pair()!.userId}:${destination.chatId}`;
+  }
+  private instructionsHash(group: ReviewGroup) {
+    return createHash('sha256')
+      .update(JSON.stringify(group.instructions ?? null))
+      .digest('hex');
+  }
+  private async requestDocument(
+    destination: Destination,
+    group: ReviewGroup,
+    kind: PendingDocument['kind'],
+    role?: PendingDocument['role'],
+  ) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateSessionStep(
+        destination,
+        group,
+        this.t('Instruction files are accepted only in the paired private chat.'),
+      );
+    this.store.setSetting(this.documentKey(destination), {
+      kind,
+      role,
+      ownerId: this.pair()!.userId,
+      chatId: destination.chatId,
+      groupId: group.id,
+      generation: group.generation,
+      instructionsHash: this.instructionsHash(group),
+      expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+    } satisfies PendingDocument);
+    await this.api.send(
+      destination,
+      kind === 'instructions'
+        ? this.t(
+            'Send a UTF-8 JSON instruction set up to 1 MiB. The request expires in 10 minutes.',
+          )
+        : this.t(
+            'Send one UTF-8 Markdown or text skill file up to 64 KiB. The request expires in 10 minutes.',
+          ),
+    );
+  }
+  private async handleDocument(update: Update, destination: Destination, privateChat: boolean) {
+    const document = update.message?.document;
+    if (!document) return false;
+    if (!privateChat) {
+      await this.privateStep(
+        destination,
+        this.t('Instruction files are accepted only in the paired private chat.'),
+      );
+      return true;
+    }
+    const pending = this.store.setting<PendingDocument>(this.documentKey(destination));
+    if (
+      !pending ||
+      pending.expiresAt <= now() ||
+      pending.ownerId !== this.pair()?.userId ||
+      pending.chatId !== destination.chatId
+    )
+      throw new Error(
+        this.t('Start an instruction or skill import command before sending a file.'),
+      );
+    const group = this.daddy.group(pending.groupId);
+    if (
+      group.generation !== pending.generation ||
+      this.instructionsHash(group) !== pending.instructionsHash
+    )
+      throw new Error(this.t('The session changed. Start the file import again.'));
+    const filename = (document.file_name ?? '').split(/[\\/]/).at(-1) || 'instructions.json';
+    const limit = pending.kind === 'skill' ? 65536 : 1024 * 1024;
+    if (
+      (document.file_size ?? 0) > limit ||
+      (pending.kind === 'instructions'
+        ? !/\.json$/i.test(filename)
+        : !/\.(?:md|txt)$/i.test(filename))
+    )
+      throw new Error(
+        this.t(
+          pending.kind === 'instructions'
+            ? 'Choose a JSON instruction set up to 1 MiB.'
+            : 'Choose a Markdown or text skill file up to 64 KiB.',
+        ),
+      );
+    const bytes = await this.api.downloadDocument(document.file_id);
+    const current = this.daddy.group(pending.groupId);
+    if (
+      current.generation !== pending.generation ||
+      this.instructionsHash(current) !== pending.instructionsHash
+    )
+      throw new Error(this.t('The session changed. Start the file import again.'));
+    if (pending.kind === 'instructions') {
+      let value: unknown;
+      try {
+        value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch {
+        throw new Error(this.t('Choose a valid UTF-8 JSON instruction set.'));
+      }
+      await this.daddy.settings(current.id, {
+        instructions: sessionInstructionsSchema.parse(value),
+      });
+    } else {
+      if (bytes.byteLength > 65536)
+        throw new Error(this.t('Choose a Markdown or text skill file up to 64 KiB.'));
+      let text: string;
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch {
+        throw new Error(this.t('Choose a UTF-8 Markdown or text file.'));
+      }
+      const skill = await new InstructionSources().import({ kind: 'file', name: filename, text });
+      await this.addSkill(current, pending.role!, skill);
+    }
+    this.store.setSetting(this.documentKey(destination), null);
+    await this.api.send(
+      destination,
+      this.t(pending.kind === 'instructions' ? 'Instruction set imported.' : 'Skill imported.'),
+    );
+    return true;
+  }
+  private async exportInstructions(group: ReviewGroup, destination: Destination) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateSessionStep(
+        destination,
+        group,
+        this.t('Instruction exports are available only in the paired private chat.'),
+      );
+    const body = JSON.stringify(group.instructions ?? { daddy: {}, worker: {} }, null, 2) + '\n';
+    await this.api.sendDocument(
+      destination,
+      `daddy-instructions-${group.id.slice(0, 8)}.json`,
+      Buffer.from(body),
+      this.t('Instructions for {title}', { title: group.title })
+        .replace(/\s+/g, ' ')
+        .slice(0, 1024),
+    );
+  }
+  private async addSkill(group: ReviewGroup, role: 'daddy' | 'worker', skill: SkillSnapshot) {
+    const current = this.daddy.group(group.id);
+    const instructions = structuredClone(current.instructions ?? { daddy: {}, worker: {} });
+    const skills = instructions[role].skills ?? [];
+    if (!skills.some((item) => item.checksum === skill.checksum))
+      instructions[role].skills = [...skills, skill];
+    await this.daddy.settings(current.id, { instructions });
+  }
+  private presetControl(data: Omit<PresetControl, 'ownerId' | 'expiresAt'>) {
+    const id = randomBytes(12).toString('base64url');
+    this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
+      id,
+      JSON.stringify({
+        ...data,
+        ownerId: this.pair()!.userId,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      } satisfies PresetControl),
+    );
+    return `dad:preset:${id}`;
+  }
+  private readPresetControl(data: string, destination: Destination) {
+    const id = /^dad:preset:([A-Za-z0-9_-]{16})$/.exec(data)?.[1];
+    if (!id) return;
+    const row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(id);
+    if (!row) throw new Error(this.t('This preset action expired. Open the preset again.'));
+    const control = JSON.parse(String(row.data)) as PresetControl;
+    if (
+      control.ownerId !== this.pair()?.userId ||
+      control.destination.chatId !== destination.chatId ||
+      control.destination.threadId !== destination.threadId ||
+      control.expiresAt <= now()
+    )
+      throw new Error(this.t('This preset action expired. Open the preset again.'));
+    return { id, control, consumed: !!row.consumed };
+  }
+  private async presetPartsCard(group: ReviewGroup, presetId: string, destination: Destination) {
+    this.authorize(destination, group.id);
+    const applied = group.instructions?.presets?.find((item) => item.preset.id === presetId);
+    if (!applied) throw new Error(this.t('Enable this preset in the session first.'));
+    const parts = presetParts(applied.preset);
+    await this.api.send(destination, {
+      ...new TelegramText()
+        .add('🧩 ' + applied.preset.name, 'bold')
+        .add(
+          '\n\n' + this.t('Choose which saved prompt and skill components apply to this session.'),
+        ),
+      buttons: [
+        ...parts.map((part) => [
+          {
+            text:
+              (applied.omit.includes(part.key) ? '○ ' : '✓ ') +
+              (part.kind === 'prompt'
+                ? `${part.role}: ${this.t('Prompt')}`
+                : `${part.role}: ${part.name}`),
+            callback_data: this.presetControl({
+              kind: 'part',
+              destination,
+              groupId: group.id,
+              presetId: applied.preset.id,
+              revision: applied.preset.revision,
+              part: part.key,
+            }),
+          },
+        ]),
+        [{ text: this.t('Back'), callback_data: `dad:instructions:${group.id}` }],
+      ],
+    });
+  }
+  private async presetControlCallback(data: string, destination: Destination) {
+    const entry = this.readPresetControl(data, destination);
+    if (!entry) return false;
+    const { id, control } = entry;
+    if (entry.consumed) {
+      await this.api.send(destination, this.t('This preset action was already completed.'));
+      return true;
+    }
+    const library = new InstructionPresets(this.store);
+    if (control.kind === 'delete') {
+      if (destination.chatId !== this.pair()?.chatId)
+        throw new Error(this.t('Preset library changes are available only in the private chat.'));
+      if (library.all().some((preset) => preset.id === control.presetId))
+        library.remove(control.presetId, control.revision);
+      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+      await this.api.send(destination, this.t('Preset deleted.'));
+      return true;
+    }
+    const group = this.authorize(destination, control.groupId!);
+    const instructions = structuredClone(group.instructions ?? { daddy: {}, worker: {} });
+    const applied = instructions.presets?.find((item) => item.preset.id === control.presetId);
+    if (!applied || applied.preset.revision !== control.revision)
+      throw new Error(this.t('This preset selection changed. Open it again.'));
+    applied.omit = applied.omit.includes(control.part!)
+      ? applied.omit.filter((part) => part !== control.part)
+      : [...applied.omit, control.part!];
+    await this.daddy.settings(group.id, { instructions });
+    await this.presetPartsCard(this.daddy.group(group.id), control.presetId, destination);
+    return true;
+  }
+  private async savePreset(
+    group: ReviewGroup,
+    name: string,
+    update: boolean,
+    destination: Destination,
+  ) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateSessionStep(
+        destination,
+        group,
+        this.t('Preset library changes are available only in the private chat.'),
+      );
+    const library = new InstructionPresets(this.store);
+    const prior = update ? library.get(findPreset(library.list(), name).id) : undefined;
+    const preset = library.save(
+      {
+        name: prior?.name ?? name,
+        description: prior?.description ?? '',
+        instructions: group.instructions ?? { daddy: {}, worker: {} },
+        expectedRevision: prior?.revision,
+      },
+      prior?.id,
+    );
+    await this.api.send(
+      destination,
+      this.t(update ? 'Preset updated from this session.' : 'Preset saved from this session.') +
+        `\n\n${preset.name} · ${this.t('version')} ${preset.revision}`,
+    );
+  }
+  private async confirmPresetDelete(name: string, destination: Destination) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateStep(
+        destination,
+        this.t('Preset library changes are available only in the private chat.'),
+      );
+    const library = new InstructionPresets(this.store),
+      preset = library.get(findPreset(library.list(), name).id);
+    await this.api.send(destination, {
+      ...new TelegramText()
+        .add(this.t('Delete preset') + ': ' + preset.name, 'bold')
+        .add(
+          '\n\n' +
+            this.t('Existing sessions keep their saved copy. This removes the library version.'),
+        ),
+      buttons: [
+        [
+          {
+            text: this.t('Delete preset'),
+            callback_data: this.presetControl({
+              kind: 'delete',
+              destination,
+              presetId: preset.id,
+              revision: preset.revision,
+            }),
+          },
+        ],
+        [{ text: this.t('Cancel'), callback_data: 'dad:settings' }],
+      ],
+    });
+  }
+  private findSession(value: string) {
+    const query = value.trim().toLowerCase();
+    const matches = this.daddy
+      .sessions()
+      .filter(
+        (group) =>
+          group.id === query || group.id.startsWith(query) || group.title.toLowerCase() === query,
+      );
+    if (matches.length !== 1)
+      throw new Error(this.t('Choose one session by its exact name or unique ID prefix.'));
+    return matches[0];
+  }
+  private sessionForControl(destination: Destination, selector?: string) {
+    const pair = this.pair()!;
+    let id: string | undefined;
+    if (selector) id = this.findSession(selector).id;
+    const topicGroup = this.groupAt(destination);
+    if (topicGroup) {
+      if (id && id !== topicGroup)
+        throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
+      return this.daddy.group(topicGroup);
+    }
+    if (destination.chatId === pair.chatId) {
+      id ??= this.store.setting<string>('telegram.currentDaddy');
+      if (!id) throw new Error(this.t('Choose a session with /session <name or ID>.'));
+      if (selector) this.store.setSetting('telegram.currentDaddy', id);
+      return this.daddy.group(id);
+    }
+    if (this.room()?.chatId !== destination.chatId)
+      throw new AppError('wrong_topic', 'Use the connected Telegram group', 403);
+    id ??= this.store.setting<string>(this.selectedSessionKey(destination));
+    if (!id) throw new Error(this.t('Choose a session with /session <name or ID>.'));
+    if (selector) this.store.setSetting(this.selectedSessionKey(destination), id);
+    return this.daddy.group(id);
+  }
+  private authorizeControl(destination: Destination, groupId: string) {
+    const pair = this.pair();
+    if (!pair) throw new Error('Pair the bot first');
+    if (destination.chatId === pair.chatId) return this.daddy.group(groupId);
+    if (this.groupAt(destination) === groupId) return this.daddy.group(groupId);
+    if (
+      this.room()?.chatId === destination.chatId &&
+      this.store.setting<string>(this.selectedSessionKey(destination)) === groupId
+    )
+      return this.daddy.group(groupId);
+    throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
+  }
+  private findTask(groupId: string, value: string) {
+    const query = value.trim().toLowerCase();
+    const matches = this.store
+      .tasks(groupId)
+      .filter(
+        (task) =>
+          task.id === query || task.id.startsWith(query) || task.title.toLowerCase() === query,
+      );
+    if (matches.length !== 1)
+      throw new Error(this.t('Choose one task by its exact name or unique ID prefix.'));
+    return matches[0];
+  }
+  private taskActionLabel(action: HumanTaskAction) {
+    const labels: Record<Locale, Record<HumanTaskAction, string>> = {
+      en: {
+        'approve-plan': 'Approve plan',
+        'waive-checks': 'Waive CI checks',
+        publish: 'Publish review',
+        submit: 'Submit for review',
+      },
+      ru: {
+        'approve-plan': 'Принять план',
+        'waive-checks': 'Разрешить пропуск CI',
+        publish: 'Опубликовать ревью',
+        submit: 'Отправить на ревью',
+      },
+    };
+    return labels[this.locale()][action];
+  }
+  private availableTaskActions(task: Task): HumanTaskAction[] {
+    return [
+      ...(task.state === 'ready_for_review' && !task.policy.autoPush ? (['submit'] as const) : []),
+      ...(task.state === 'awaiting_publication' && task.policy.publication === 'human'
+        ? (['publish'] as const)
+        : []),
+      ...(task.state === 'awaiting_plan_approval' ? (['approve-plan'] as const) : []),
+      ...(task.state === 'awaiting_checks' ? (['waive-checks'] as const) : []),
+    ];
+  }
+  private taskControl(data: Omit<TaskControl, 'ownerId' | 'expiresAt'>) {
+    const id = randomBytes(12).toString('base64url');
+    const value: TaskControl = {
+      ...data,
+      ownerId: this.pair()!.userId,
+      expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+    };
+    this.store.db
+      .prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)')
+      .run(id, JSON.stringify(value));
+    return `dad:task:${id}`;
+  }
+  private readTaskControl(data: string, destination: Destination) {
+    const id = /^dad:task:([A-Za-z0-9_-]{16})$/.exec(data)?.[1];
+    if (!id) return;
+    const row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(id);
+    if (!row) throw new Error(this.t('This task action expired. Open the task again.'));
+    const control = JSON.parse(String(row.data)) as TaskControl;
+    if (
+      control.ownerId !== this.pair()?.userId ||
+      control.destination.chatId !== destination.chatId ||
+      control.destination.threadId !== destination.threadId ||
+      control.expiresAt <= now()
+    )
+      throw new Error(this.t('This task action expired. Open the task again.'));
+    this.authorizeControl(destination, control.groupId);
+    this.daddy.task(control.groupId, control.taskId);
+    return { id, control, consumed: !!row.consumed };
+  }
+  private taskVersion(task: Task) {
+    return {
+      head: task.revision?.head ?? '',
+      generation: task.generation,
+    };
+  }
+  private safeUrl(value: string) {
+    try {
+      const url = new URL(value);
+      if (
+        !['https:', 'http:'].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        [...url.searchParams.keys()].some((key) =>
+          /token|secret|key|auth|signature|credential/i.test(key),
+        )
+      )
+        return;
+      return url.href;
+    } catch {
+      return;
+    }
+  }
+  private sameTaskVersion(task: Task, control: TaskControl) {
+    return (
+      task.revision?.head === control.expectedHead && task.generation === control.expectedGeneration
+    );
+  }
+  private taskActionCompleted(task: Task, control: TaskControl) {
+    if (control.action === 'approve-plan') return !!task.approvedAt;
+    if (control.action === 'waive-checks') return !!task.checksWaivedAt;
+    if (control.action === 'publish') return task.snapshot?.status === 'published';
+    if (control.action === 'submit')
+      return task.ref.kind !== 'ticket' && task.revision?.head === control.expectedHead;
+    return false;
+  }
+  private finishTaskControl(id: string, control: TaskControl, outcome: 'completed' | 'stale') {
+    this.store.db
+      .prepare('UPDATE bot_actions SET data=?,consumed=1 WHERE id=?')
+      .run(JSON.stringify({ ...control, outcome }), id);
+  }
+  private async tasksCard(group: ReviewGroup, destination: Destination) {
+    this.authorizeControl(destination, group.id);
+    const tasks = this.store.tasks(group.id);
+    const text = new TelegramText()
+      .add('📋 ' + (this.locale() === 'ru' ? 'Задачи' : 'Tasks'), 'bold')
+      .add('\n' + group.title);
+    if (!tasks.length)
+      text.add(
+        '\n\n' +
+          (this.locale() === 'ru'
+            ? 'В этой сессии пока нет задач.'
+            : 'This session has no tasks yet.'),
+      );
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        ...tasks.slice(0, 30).map((task) => [
+          {
+            text: `${task.state === 'complete' ? '✅' : '•'} ${task.title}`.slice(0, 60),
+            callback_data: this.taskControl({
+              kind: 'task',
+              destination,
+              groupId: group.id,
+              taskId: task.id,
+            }),
+          },
+        ]),
+        [{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }],
+      ],
+    });
+  }
+  private async taskCard(task: Task, destination: Destination) {
+    this.authorizeControl(destination, task.groupId!);
+    this.store.setSetting(this.selectedTaskKey(destination, task.groupId!), task.id);
+    const version = this.taskVersion(task);
+    const text = new TelegramText()
+      .add(task.title, 'bold')
+      .add('\n\n' + this.t(task.state))
+      .add('\n' + this.t(task.reason))
+      .add(
+        '\n\n' +
+          (this.locale() === 'ru' ? 'Версия' : 'Version') +
+          ': ' +
+          (version.head || (this.locale() === 'ru' ? 'ещё не создана' : 'not created yet')),
+        version.head ? 'code' : undefined,
+      )
+      .add(
+        '\n' + (this.locale() === 'ru' ? 'Поколение' : 'Generation') + ': ' + version.generation,
+      );
+    if (task.pr)
+      text.add(
+        '\n' +
+          (this.locale() === 'ru' ? 'CI-проверки' : 'CI checks') +
+          ': ' +
+          this.t(task.pr.checks),
+      );
+    for (const check of task.pr?.checkDetails.slice(0, 12) ?? [])
+      text.add(`\n• ${check.name}: ${check.status}`);
+    if (task.summary && destination.chatId === this.pair()?.chatId)
+      text
+        .add('\n\n' + (this.locale() === 'ru' ? 'Сводка' : 'Summary'), 'bold')
+        .add('\n')
+        .markdown(task.summary.slice(0, 3000));
+    const buttons: TelegramButton[][] = this.availableTaskActions(task).map((action) => [
+      {
+        text: this.taskActionLabel(action),
+        callback_data: this.taskControl({
+          kind: 'prepare',
+          destination,
+          groupId: task.groupId!,
+          taskId: task.id,
+          action,
+          expectedHead: version.head,
+          expectedGeneration: version.generation,
+        }),
+      },
+    ]);
+    if (destination.chatId === this.pair()?.chatId)
+      for (const check of task.pr?.checkDetails.slice(0, 12) ?? []) {
+        const url = check.url ? this.safeUrl(check.url) : undefined;
+        if (url) buttons.push([{ text: `CI · ${check.name}`.slice(0, 60), url }]);
+      }
+    const reviewUrl = task.ref.kind !== 'ticket' ? this.safeUrl(task.ref.url) : undefined;
+    if (reviewUrl) buttons.push([{ text: this.t('Open native review'), url: reviewUrl }]);
+    buttons.push([
+      {
+        text: this.locale() === 'ru' ? 'К задачам' : 'Back to tasks',
+        callback_data: `dad:tasks:${task.groupId}`,
+      },
+    ]);
+    await this.api.send(destination, { ...text, buttons });
+  }
+  private async taskConfirmation(
+    task: Task,
+    destination: Destination,
+    action: HumanTaskAction,
+    reason?: string,
+  ) {
+    const version = this.taskVersion(task);
+    if (!this.availableTaskActions(task).includes(action))
+      throw new Error(this.t('This action is not available for the current task state.'));
+    if (action === 'waive-checks' && !reason?.trim()) {
+      await this.api.send(
+        destination,
+        new TelegramText()
+          .add(this.taskActionLabel(action), 'bold')
+          .add(
+            '\n\n' +
+              (this.locale() === 'ru'
+                ? 'Укажи причину командой /waive <причина>. Обычное сообщение не считается разрешением.'
+                : 'Give a reason with /waive <reason>. An ordinary message is not authorization.'),
+          ),
+      );
+      return;
+    }
+    const text = new TelegramText()
+      .add(this.taskActionLabel(action), 'bold')
+      .add('\n\n' + task.title)
+      .add(
+        '\n\n' + (this.locale() === 'ru' ? 'Подтверждается версия' : 'Confirming version') + ':\n',
+      )
+      .add(version.head, 'code')
+      .add(
+        '\n' + (this.locale() === 'ru' ? 'Поколение' : 'Generation') + ': ' + version.generation,
+      );
+    if (reason) text.add('\n\n' + (this.locale() === 'ru' ? 'Причина' : 'Reason') + ': ' + reason);
+    text.add(
+      '\n\n' +
+        (this.locale() === 'ru'
+          ? 'Сервис ещё раз проверит сессию, задачу и эту точную версию. Изменившееся подтверждение будет отклонено.'
+          : 'The service will recheck the session, task and exact version. A changed confirmation will be rejected.'),
+    );
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        [
+          {
+            text:
+              (this.locale() === 'ru' ? 'Подтвердить: ' : 'Confirm: ') +
+              this.taskActionLabel(action).toLowerCase(),
+            callback_data: this.taskControl({
+              kind: 'confirm',
+              destination,
+              groupId: task.groupId!,
+              taskId: task.id,
+              action,
+              expectedHead: version.head,
+              expectedGeneration: version.generation,
+              reason: reason?.trim(),
+            }),
+          },
+        ],
+        [
+          {
+            text: this.t('Cancel'),
+            callback_data: this.taskControl({
+              kind: 'task',
+              destination,
+              groupId: task.groupId!,
+              taskId: task.id,
+            }),
+          },
+        ],
+      ],
+    });
+  }
+  private async taskControlCallback(data: string, destination: Destination) {
+    const entry = this.readTaskControl(data, destination);
+    if (!entry) return false;
+    const { id, control } = entry;
+    let task = this.daddy.task(control.groupId, control.taskId);
+    if (control.kind === 'task') {
+      await this.taskCard(task, destination);
+      return true;
+    }
+    if (entry.consumed) {
+      await this.api.send(
+        destination,
+        new TelegramText().add(
+          control.outcome === 'completed'
+            ? this.locale() === 'ru'
+              ? 'Это подтверждение уже выполнено.'
+              : 'This confirmation was already completed.'
+            : this.locale() === 'ru'
+              ? 'Это подтверждение уже устарело.'
+              : 'This confirmation is already stale.',
+        ),
+      );
+      await this.taskCard(task, destination);
+      return true;
+    }
+    if (!this.sameTaskVersion(task, control)) {
+      this.finishTaskControl(id, control, 'stale');
+      await this.api.send(
+        destination,
+        new TelegramText().add(
+          this.locale() === 'ru'
+            ? 'Задача изменилась. Открой новую версию и подтверди её отдельно.'
+            : 'The task changed. Open the new version and confirm it separately.',
+        ),
+      );
+      await this.taskCard(task, destination);
+      return true;
+    }
+    if (control.kind === 'prepare') {
+      await this.taskConfirmation(task, destination, control.action!, control.reason);
+      return true;
+    }
+    try {
+      task = await this.daddy.taskAction(
+        control.groupId,
+        control.taskId,
+        control.action!,
+        { head: control.expectedHead!, generation: control.expectedGeneration! },
+        control.reason,
+      );
+    } catch (error) {
+      task = this.daddy.task(control.groupId, control.taskId);
+      if (!this.taskActionCompleted(task, control)) throw error;
+    }
+    this.finishTaskControl(id, control, 'completed');
+    await this.api.send(
+      destination,
+      new TelegramText().add(
+        (this.locale() === 'ru' ? 'Готово: ' : 'Done: ') +
+          this.taskActionLabel(control.action!).toLowerCase(),
+        'bold',
+      ),
+    );
+    await this.taskCard(task, destination);
+    return true;
+  }
+  private async help(destination: Destination, privateChat: boolean) {
+    const topic = !!this.groupAt(destination);
+    const text = new TelegramText().add(
+      this.locale() === 'ru' ? 'Команды daddyloop' : 'daddyloop commands',
+      'bold',
+    );
+    if (privateChat)
+      text.add(
+        '\n\n' +
+          (this.locale() === 'ru'
+            ? '/sessions и /session — выбрать сессию\n/new — новая сессия\n/tasks и /task — задачи и ручные действия\n/status, /models, /pool, /repo — управление сессией\n/workspaces и /workspace — репозитории\n/instructions, /skill, /presets, /preset — инструкции и файлы\n/limits, /notifications, /updates — служебные действия\n/group — подключить группу с темами'
+            : '/sessions and /session — choose a session\n/new — new session\n/tasks and /task — tasks and manual actions\n/status, /models, /pool, /repo — session controls\n/workspaces and /workspace — repositories\n/instructions, /skill, /presets, /preset — instructions and files\n/limits, /notifications, /updates — service controls\n/group — connect a forum group'),
+      );
+    else if (topic)
+      text.add(
+        '\n\n' +
+          (this.locale() === 'ru'
+            ? 'Эта тема уже привязана к одной сессии. /tasks открывает её задачи; /submit, /approve, /publish и /waive сначала показывают точную версию и только потом дают кнопку подтверждения.'
+            : 'This topic is bound to one session. /tasks opens its tasks; /submit, /approve, /publish and /waive show the exact version before offering confirmation.'),
+      );
+    else
+      text.add(
+        '\n\n' +
+          (this.locale() === 'ru'
+            ? 'В общей теме сначала явно выбери сессию: /session <имя или ID>. Обычные сообщения отсюда не попадут ни в одну сессию. Для разговора открой её собственную тему.'
+            : 'In the general topic, choose a session explicitly with /session <name or ID>. Ordinary messages here are never routed to a session. Open its own topic for conversation.'),
+      );
+    text.add(
+      '\n\n' +
+        (this.locale() === 'ru'
+          ? `Можно писать /command@${this.username}. Команды с приватными ссылками и обновлениями выполняются только в личке; бот не показывает группе токены и секреты.`
+          : `You can use /command@${this.username}. Commands with private links and updates run only in the private chat; the bot never shows tokens or secrets to the group.`),
+    );
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        [{ text: this.t('Sessions'), callback_data: 'dad:home' }],
+        ...(!privateChat
+          ? [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]]
+          : []),
+      ],
     });
   }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
@@ -771,6 +1591,112 @@ export class TelegramWorkspace {
       ],
     });
   }
+  private findWorkspace(value: string) {
+    const query = value.trim().toLowerCase();
+    const matches = this.daddy.workspaces
+      .list()
+      .filter(
+        (workspace) =>
+          workspace.id === query ||
+          workspace.id.startsWith(query) ||
+          workspace.name.toLowerCase() === query,
+      );
+    if (matches.length !== 1)
+      throw new Error(this.t('Choose one workspace by its exact name or unique ID prefix.'));
+    return matches[0];
+  }
+  private async workspacesCard(destination: Destination) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateStep(
+        destination,
+        this.t('Repository paths and defaults are available in the private bot chat.'),
+      );
+    const workspaces = this.daddy.workspaces.list();
+    await this.api.send(destination, {
+      ...new TelegramText()
+        .add('📁 ' + this.t('Repositories'), 'bold')
+        .add(
+          '\n\n' +
+            this.t(
+              'Choose a workspace to inspect or edit its saved name, source, scope, base branch and copy mode.',
+            ),
+        ),
+      buttons: [
+        ...workspaces.map((workspace) => [
+          {
+            text: workspace.name,
+            callback_data: `dad:workspace:${workspace.id}`,
+          },
+        ]),
+        [{ text: '＋ ' + this.t('Add repository'), callback_data: 'dad:add-workspace' }],
+        [{ text: this.t('Find on server'), callback_data: 'dad:discover' }],
+        [{ text: this.t('Back'), callback_data: 'dad:settings' }],
+      ],
+    });
+  }
+  private async workspaceCard(workspace: Workspace, destination: Destination) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateStep(
+        destination,
+        this.t('Repository paths and defaults are available in the private bot chat.'),
+      );
+    const text = new TelegramText()
+      .add('📁 ' + workspace.name, 'bold')
+      .add('\n\nID: ' + workspace.id, 'code')
+      .add('\n' + this.t('Source') + ': ' + workspace.repoPath, 'code')
+      .add('\n' + this.t('Scope') + ': ' + (workspace.scope || '/'), 'code')
+      .add('\n' + this.t('Base branch') + ': ' + (workspace.base ?? this.t('Default')), 'code')
+      .add(
+        '\n' +
+          this.t('Working copies') +
+          ': ' +
+          (workspace.copyMode ?? (workspace.vcs === 'arcadia' ? 'session' : 'session')),
+        'code',
+      )
+      .add(
+        '\n\n' +
+          this.t(
+            'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use root or default to clear scope or base.',
+          ),
+      );
+    await this.api.send(destination, {
+      ...text,
+      buttons: [[{ text: this.t('Back'), callback_data: 'dad:workspaces' }]],
+    });
+  }
+  private async editWorkspace(
+    workspace: Workspace,
+    field: 'name' | 'path' | 'scope' | 'base' | 'provider' | 'copies',
+    raw: string,
+    destination: Destination,
+  ) {
+    if (destination.chatId !== this.pair()?.chatId)
+      return this.privateStep(
+        destination,
+        this.t('Repository paths and defaults are available in the private bot chat.'),
+      );
+    const value = raw.trim();
+    if (!value) throw new Error(this.t('Send a value to save.'));
+    if (field === 'copies' && !['session', 'pool'].includes(value))
+      throw new Error(this.t('Choose session or pool copy mode.'));
+    const saved = await this.daddy.workspaces.register(
+      {
+        name: field === 'name' ? value : workspace.name,
+        path: field === 'path' ? value : workspace.repoPath,
+        scope: field === 'scope' ? (value === 'root' ? '' : value) : workspace.scope,
+        base: field === 'base' ? (value === 'default' ? undefined : value) : workspace.base,
+        copyMode:
+          field === 'copies'
+            ? value === 'session' || value === 'pool'
+              ? value
+              : undefined
+            : workspace.copyMode,
+        provider: field === 'provider' ? value : workspace.provider,
+      },
+      workspace.id,
+    );
+    await this.workspaceCard(saved, destination);
+  }
   private async discover(destination: Destination) {
     const suggestions = (await this.daddy.workspaces.suggestions()).slice(0, 20);
     const text = new TelegramText().add('📁 ' + this.t('Workspaces on this server'), 'bold');
@@ -870,9 +1796,17 @@ export class TelegramWorkspace {
     return key;
   }
   async callback(data: string, destination: Destination): Promise<boolean> {
+    if (await this.presetControlCallback(data, destination)) return true;
+    if (await this.taskControlCallback(data, destination)) return true;
+    const taskList = /^dad:tasks:([a-f0-9-]{36})$/.exec(data);
+    if (taskList) {
+      await this.tasksCard(this.authorizeControl(destination, taskList[1]), destination);
+      return true;
+    }
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
       if (language[1] !== 'show') setLocale(this.store, language[1] as 'en' | 'ru');
+      if (language[1] !== 'show') await this.syncCommands();
       await this.api.send(destination, languageCard(this.locale()));
       return true;
     }
@@ -990,6 +1924,11 @@ export class TelegramWorkspace {
       await this.modules(destination);
       return true;
     }
+    const workspaceDetails = data.match(/^dad:workspace:([a-f0-9-]{36})$/);
+    if (workspaceDetails) {
+      await this.workspaceCard(this.daddy.workspaces.get(workspaceDetails[1]), destination);
+      return true;
+    }
     if (data === 'dad:add-workspace') {
       this.store.setSetting(this.registrationKey(destination), null);
       await this.api.send(destination, {
@@ -1065,11 +2004,14 @@ export class TelegramWorkspace {
       await this.discover(destination);
       return true;
     }
-    if (data === 'dad:new' || data === 'dad:workspaces') {
-      if (data === 'dad:new')
-        this.store.setSetting(this.creationKey(destination), {
-          expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
-        });
+    if (data === 'dad:workspaces') {
+      await this.workspacesCard(destination);
+      return true;
+    }
+    if (data === 'dad:new') {
+      this.store.setSetting(this.creationKey(destination), {
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      });
       await this.api.send(
         destination,
         workspacePicker(this.locale(), this.daddy.workspaces.list()),
@@ -1214,6 +2156,7 @@ export class TelegramWorkspace {
         await this.bind(message.chat_shared);
         return true;
       }
+      if (message?.document) return await this.handleDocument(update, destination, privateChat);
       if (message?.voice) {
         if (!this.voice)
           throw new Error(this.t('Voice recognition is unavailable on this server.'));
@@ -1247,8 +2190,15 @@ export class TelegramWorkspace {
           .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
         return true;
       }
-      const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+      const text = message?.text
+        ? normalizeTelegramCommand(message.text, this.username)
+        : undefined;
       if (!text) return false;
+      if (text === '/cancel' && this.store.setting(this.documentKey(destination))) {
+        this.store.setSetting(this.documentKey(destination), null);
+        await this.api.send(destination, this.t('File import cancelled.'));
+        return true;
+      }
       const registrationKey = this.registrationKey(destination);
       const registration = this.store.setting<{
         provider: string;
@@ -1293,10 +2243,15 @@ export class TelegramWorkspace {
         await this.modules(destination);
         return true;
       }
+      if (text === '/help') {
+        await this.help(destination, privateChat);
+        return true;
+      }
       if (text === '/language') return await this.callback('language:show', destination);
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
         setLocale(this.store, language[1] as 'en' | 'ru');
+        await this.syncCommands();
         await this.api.send(destination, this.t('Language updated.'));
         return true;
       }
@@ -1304,6 +2259,17 @@ export class TelegramWorkspace {
       if (text === '/updates' && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(this.t('Open the private bot chat for CLI updates.')),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+        return true;
+      }
+      if (text === '/web' && !privateChat) {
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.locale() === 'ru'
+              ? 'Приватная ссылка входа доступна только в личном чате с ботом.'
+              : 'A private login link is available only in the private bot chat.',
+          ),
           buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
         });
         return true;
@@ -1323,7 +2289,7 @@ export class TelegramWorkspace {
         await this.setup();
         return true;
       }
-      if (['/sessions', '/start', '/start daddy', '/help'].includes(text)) {
+      if (['/sessions', '/start', '/start daddy'].includes(text)) {
         await this.home(destination);
         return true;
       }
@@ -1340,6 +2306,28 @@ export class TelegramWorkspace {
           return true;
         }
         return this.callback('dad:workspaces', destination);
+      }
+      const workspaceEdit = text.match(
+        /^\/workspace\s+(\S+)\s+(name|path|scope|base|provider|copies)\s+([\s\S]+)$/,
+      );
+      const workspaceCommand = text.match(/^\/workspace(?:\s+([\s\S]+))?$/);
+      if (workspaceEdit || workspaceCommand) {
+        if (!workspaceEdit && !workspaceCommand?.[1]) {
+          await this.workspacesCard(destination);
+          return true;
+        }
+        const workspace = this.findWorkspace(
+          workspaceEdit ? workspaceEdit[1] : workspaceCommand![1],
+        );
+        if (!workspaceEdit) await this.workspaceCard(workspace, destination);
+        else
+          await this.editWorkspace(
+            workspace,
+            workspaceEdit[2] as 'name' | 'path' | 'scope' | 'base' | 'provider' | 'copies',
+            workspaceEdit[3],
+            destination,
+          );
+        return true;
       }
       const attach = text.match(/^\/attach\s+([a-f0-9-]{8,36})$/);
       if (attach && !privateChat && destination.threadId) {
@@ -1363,9 +2351,75 @@ export class TelegramWorkspace {
         await this.show(groups[0].id, destination);
         return true;
       }
-      const groupId = privateChat
+      const conversationGroupId = privateChat
         ? this.store.setting<string>('telegram.currentDaddy')
         : this.groupAt(destination);
+      const groupId =
+        conversationGroupId ??
+        (!privateChat && this.room()?.chatId === destination.chatId
+          ? this.store.setting<string>(this.selectedSessionKey(destination))
+          : undefined);
+      const session = text.match(/^\/session(?:\s+([\s\S]+))?$/);
+      if (session) {
+        if (!session[1]) {
+          await this.home(destination);
+          await this.api.send(
+            destination,
+            this.locale() === 'ru'
+              ? 'Выбери сессию кнопкой или отправь /session <имя или ID>.'
+              : 'Choose a session above or send /session <name or ID>.',
+          );
+          return true;
+        }
+        const selected = this.sessionForControl(destination, session[1]);
+        await this.tasksCard(selected, destination);
+        return true;
+      }
+      const tasks = text.match(/^\/tasks(?:\s+([\s\S]+))?$/);
+      if (tasks) {
+        const selected = this.sessionForControl(destination, tasks[1]);
+        await this.tasksCard(selected, destination);
+        return true;
+      }
+      const taskCommand = text.match(/^\/task(?:\s+([\s\S]+))?$/);
+      if (taskCommand) {
+        const selected = this.sessionForControl(destination);
+        if (!taskCommand[1]) await this.tasksCard(selected, destination);
+        else await this.taskCard(this.findTask(selected.id, taskCommand[1]), destination);
+        return true;
+      }
+      const actionCommand = text.match(/^\/(submit|approve|publish)(?:\s+([\s\S]+))?$/);
+      if (actionCommand) {
+        const selected = this.sessionForControl(destination);
+        const taskId = actionCommand[2]
+          ? this.findTask(selected.id, actionCommand[2]).id
+          : this.store.setting<string>(this.selectedTaskKey(destination, selected.id));
+        if (!taskId) throw new Error(this.t('Open a task with /task before confirming an action.'));
+        const actions = {
+          submit: 'submit',
+          approve: 'approve-plan',
+          publish: 'publish',
+        } as const;
+        await this.taskConfirmation(
+          this.daddy.task(selected.id, taskId),
+          destination,
+          actions[actionCommand[1] as keyof typeof actions],
+        );
+        return true;
+      }
+      const waiver = text.match(/^\/waive(?:\s+([\s\S]+))?$/);
+      if (waiver) {
+        const selected = this.sessionForControl(destination);
+        const taskId = this.store.setting<string>(this.selectedTaskKey(destination, selected.id));
+        if (!taskId) throw new Error(this.t('Open a task with /task before confirming an action.'));
+        await this.taskConfirmation(
+          this.daddy.task(selected.id, taskId),
+          destination,
+          'waive-checks',
+          waiver[1],
+        );
+        return true;
+      }
       const rename = text.match(/^\/rename(?:\s+([\s\S]+))?$/);
       if (rename) {
         if (!groupId) throw new Error(this.t('Open the session you want to rename.'));
@@ -1418,7 +2472,78 @@ export class TelegramWorkspace {
         await this.models(groupId, destination);
         return true;
       }
+      const instructionTransfer = text.match(/^\/instructions\s+(import|export)$/);
+      if (instructionTransfer) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        const group = this.authorize(destination, groupId);
+        if (instructionTransfer[1] === 'import')
+          await this.requestDocument(destination, group, 'instructions');
+        else await this.exportInstructions(group, destination);
+        return true;
+      }
+      const skillFile = text.match(/^\/skill\s+(daddy|worker)(?:\s+file)?$/);
+      if (skillFile) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        await this.requestDocument(
+          destination,
+          this.authorize(destination, groupId),
+          'skill',
+          skillFile[1] as 'daddy' | 'worker',
+        );
+        return true;
+      }
+      const localSkill = text.match(/^\/skill\s+(daddy|worker)\s+local\s+([\s\S]+)$/);
+      if (localSkill) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        const group = this.authorize(destination, groupId);
+        if (!privateChat)
+          await this.privateSessionStep(
+            destination,
+            group,
+            this.t('Local instruction paths are accepted only in the paired private chat.'),
+          );
+        else
+          await this.addSkill(
+            group,
+            localSkill[1] as 'daddy' | 'worker',
+            await new InstructionSources().import({ kind: 'local', path: localSkill[2].trim() }),
+          );
+        return true;
+      }
+      const textSkill = text.match(
+        /^\/skill\s+(daddy|worker)\s+text\s+([^:\r\n]{1,100})\s+::\s+([\s\S]+)$/,
+      );
+      if (textSkill) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        const group = this.authorize(destination, groupId);
+        if (!privateChat)
+          await this.privateSessionStep(
+            destination,
+            group,
+            this.t('Pasted instruction text is accepted only in the paired private chat.'),
+          );
+        else
+          await this.addSkill(
+            group,
+            textSkill[1] as 'daddy' | 'worker',
+            await new InstructionSources().import({
+              kind: 'text',
+              name: textSkill[2].trim(),
+              text: textSkill[3],
+            }),
+          );
+        return true;
+      }
       if (/^\/(instructions|skill)(?:\s|$)/.test(text)) {
+        if (!privateChat && text === '/instructions') {
+          if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+          await this.privateSessionStep(
+            destination,
+            this.authorize(destination, groupId),
+            this.t('Instruction text and skills are managed only in the paired private chat.'),
+          );
+          return true;
+        }
         if (!groupId) throw new Error(this.t('Start a daddy session first.'));
         this.authorize(destination, groupId);
         const instructions = await instructionCommand(
@@ -1429,9 +2554,11 @@ export class TelegramWorkspace {
         if (instructions) await this.daddy.settings(groupId, { instructions });
         await this.api.send(
           destination,
-          new TelegramText().add(
-            instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
-          ),
+          privateChat
+            ? new TelegramText().add(
+                instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
+              )
+            : this.t('Session instructions updated. Full text is available in the private chat.'),
         );
         return true;
       }
@@ -1445,6 +2572,75 @@ export class TelegramWorkspace {
                 presetLines(new InstructionPresets(this.store).list(), this.locale()).join('\n'),
             ),
         );
+        return true;
+      }
+      const presetMetadata = text.match(
+        /^\/preset\s+(rename|describe)\s+([^:\r\n]+?)\s+::\s*([\s\S]+)$/,
+      );
+      if (presetMetadata) {
+        if (!privateChat) {
+          await this.privateStep(
+            destination,
+            this.t('Preset library changes are available only in the private chat.'),
+          );
+          return true;
+        }
+        const library = new InstructionPresets(this.store),
+          preset = library.get(findPreset(library.list(), presetMetadata[2]).id),
+          renamed = presetMetadata[1] === 'rename';
+        const saved = library.save(
+          {
+            name: renamed ? presetMetadata[3].trim() : preset.name,
+            description: renamed ? preset.description : presetMetadata[3].trim(),
+            instructions: preset.instructions,
+            expectedRevision: preset.revision,
+          },
+          preset.id,
+        );
+        await this.api.send(
+          destination,
+          this.t(renamed ? 'Preset renamed.' : 'Preset description updated.') +
+            `\n\n${saved.name} · ${this.t('version')} ${saved.revision}`,
+        );
+        return true;
+      }
+      const presetCommand = text.match(
+        /^\/preset\s+(save|update|delete|parts|enable|disable)\s+([\s\S]+)$/,
+      );
+      if (presetCommand) {
+        const action = presetCommand[1],
+          name = presetCommand[2].trim();
+        if (action === 'delete') await this.confirmPresetDelete(name, destination);
+        else {
+          if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+          const group = this.authorize(destination, groupId);
+          if (action === 'save' || action === 'update')
+            await this.savePreset(group, name, action === 'update', destination);
+          else {
+            if (action === 'parts') {
+              const applied = findPreset(
+                (group.instructions?.presets ?? []).map((item) => ({
+                  id: item.preset.id,
+                  name: item.preset.name,
+                })),
+                name,
+              );
+              await this.presetPartsCard(group, applied.id, destination);
+            } else {
+              const library = new InstructionPresets(this.store),
+                preset = library.get(findPreset(library.list(), name).id);
+              await this.daddy.settings(group.id, {
+                instructions: selectPreset(group.instructions, preset, action === 'enable'),
+              });
+              await this.api.send(
+                destination,
+                this.t(
+                  action === 'enable' ? 'Preset enabled for this session' : 'Preset disabled.',
+                ),
+              );
+            }
+          }
+        }
         return true;
       }
       const presetName = text.match(/^\/preset\s+(.+)$/)?.[1];
@@ -1490,7 +2686,7 @@ export class TelegramWorkspace {
       }
       if (text.startsWith('/')) return !privateChat;
       const pending = this.store.setting<{ expiresAt: string }>(this.creationKey(destination));
-      if ((!groupId && privateChat) || (pending && pending.expiresAt > now())) {
+      if ((!conversationGroupId && privateChat) || (pending && pending.expiresAt > now())) {
         this.store.setSetting(this.creationKey(destination), {
           text,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
@@ -1501,14 +2697,14 @@ export class TelegramWorkspace {
         );
         return true;
       }
-      if (!groupId) {
+      if (!conversationGroupId) {
         await this.api.send(
           destination,
           this.t('Open a session topic, or send /new here to create one.'),
         );
         return true;
       }
-      this.authorize(destination, groupId);
+      this.authorize(destination, conversationGroupId);
       const route = this.voiceRoute(destination);
       if (route && this.voice?.pending(route)) {
         this.store.transaction(() => {
@@ -1519,19 +2715,19 @@ export class TelegramWorkspace {
               { text },
             )
           )
-            this.store.setSetting(this.repoKey(destination, groupId), null);
+            this.store.setSetting(this.repoKey(destination, conversationGroupId), null);
         });
         return true;
       }
       const receipt = `telegram:${chat.id}:${message?.message_id ?? update.update_id}`;
       if (this.store.setting(`daddy.receipt:${receipt}`)) return true;
-      const nextKey = this.repoKey(destination, groupId),
+      const nextKey = this.repoKey(destination, conversationGroupId),
         next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(nextKey);
       if (next && next.expiresAt <= now()) {
         this.store.setSetting(nextKey, null);
         throw new Error(this.t('This selection expired. Choose the repository again.'));
       }
-      this.daddy.chat(groupId, text, receipt, next?.workspace, {
+      this.daddy.chat(conversationGroupId, text, receipt, next?.workspace, {
         channel: 'telegram',
         ...destination,
       });
@@ -1887,6 +3083,7 @@ export class TelegramWorkspace {
     clearInterval(this.retryTimer);
     await this.progress.stop();
     await this.voice?.stop();
+    await this.commandSync;
     await this.pending;
     await Promise.allSettled([...this.topics.values()]);
   }

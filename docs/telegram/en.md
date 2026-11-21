@@ -30,18 +30,28 @@ Each daddy session gets a topic. Send goals and tickets there; workers report to
 
 ## Commands
 
-| Where                                     | Commands                                                                                                                                                                                                                |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
-| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                                            |
+| Where                                     | Commands                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private chat and connected session topics | `/new`, `/sessions`, `/session`, `/tasks`, `/task`, `/submit`, `/approve`, `/publish`, `/waive`, `/workspaces`, `/workspace`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
+| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                                                                                                                                      |
 
 `/web` creates a browser login link after [permanent HTTPS access](../web/en.md) is configured. CLI updates and account confirmations stay in the private chat. Work continues when the phone and laptop are offline.
+
+Telegram receives separate slash-command menus for the private chat and the connected group. Both `/command` and `/command@botname` work; commands addressed to another bot are ignored. `/help` explains the routing rules for the current chat.
+
+Use `/tasks` and `/task` to open a task. Manual submit, plan approval, review publication and CI waiver show the exact revision and generation, then require a separate button confirmation. `/waive <reason>` also records the reason. The confirmation is bound to the paired owner, chat, topic, session and task, and becomes stale when the task changes. An ordinary message or an agent reply is never authorization.
+
+Outside a session topic, choose the session explicitly with `/session <name or ID>`. In the group’s general topic this selection applies only to control commands; ordinary messages are not routed to that session. This prevents a message intended for one topic from reaching another.
 
 Send `/notifications` to choose quiet completion/decision notices, all updates, or mute. Voice messages follow the same session routing; see [voice](../voice/en.md).
 
 Open **Settings → Instructions for this session** from the session card. `/instructions daddy <text>` and `/instructions worker <text>` set separate prompts. `/skill <role> <GitHub URL>` adds a skill. These commands work in private conversations and their group topics. [Task instructions](../instructions/en.md)
 
-`/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected in the website’s session settings.
+The paired private chat also supports `/skill <role> file`, `/skill <role> local <server path>` and `/skill <role> text <name> :: <text>`. `/instructions import` accepts a bounded JSON document and `/instructions export` returns one. A group command that needs file contents links to the private chat; the bot does not echo saved prompts or documents into the group.
+
+`/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected with `/preset parts <name>` or in the website’s session settings.
+
+From the private chat, `/preset save|update|delete <name>` manages snapshots, `/preset rename|describe <name> :: <value>` edits metadata, and `/preset parts <name>` selects components for the current session. Existing sessions keep their selected snapshot when the library copy changes or is deleted.
 
 After a successful callback-button action sends a replacement message, the bot deletes the clicked card. Failed actions keep the old card for retry; messages in another topic do not remove it. Link buttons open their URL directly and do not notify the bot of a click.
 
@@ -50,6 +60,10 @@ Session preparation updates one card: “Preparing the session copy” changes t
 For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session settings offer **Delete session** with confirmation. The service archives its results and removes its copies. [Arcadia](../arcadia/en.md)
 
 To register a repository from your phone, open **Settings → Repositories → Add repository**. Choose GitHub or GitLab and send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md)
+
+In the private chat, `/workspace <name or ID>` shows saved defaults. Change one field with `/workspace <ID> name|path|scope|base|provider|copies <value>`; use `root` or `default` to clear the scope or base branch.
+
+The bot never prints credentials or tokens in a group. CLI updates, browser login links and group connection stay in the paired private chat. A group command that needs one of these steps links to the private chat instead. The current and remaining cross-client coverage is tracked in [Web and Telegram control coverage](../control-surfaces/en.md).
 
 ## One conversation across CLI, web and Telegram
 

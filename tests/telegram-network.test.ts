@@ -37,6 +37,31 @@ it('does not repeat a sendMessage whose successful response might have been lost
   });
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+it('downloads bounded documents and uploads exports without putting the bot token in form fields', async () => {
+  const requests: { url: string; body?: BodyInit | null }[] = [];
+  const fetcher = vi.fn(async (url: string | URL | Request, options?: RequestInit) => {
+    requests.push({ url: String(url), body: options?.body });
+    if (String(url).endsWith('/getFile'))
+      return Response.json({
+        ok: true,
+        result: { file_path: 'documents/instructions.json', file_size: 18 },
+      });
+    if (String(url).includes('/file/bot')) return new Response('{"daddy":{},"worker":{}}');
+    return Response.json({ ok: true, result: { message_id: 7 } });
+  });
+  const api = new TelegramApi(token, fetcher as typeof fetch);
+  await expect(api.downloadDocument('document-id')).resolves.toEqual(
+    Buffer.from('{"daddy":{},"worker":{}}'),
+  );
+  await api.sendDocument({ chatId: 7, threadId: 11 }, 'instructions.json', Buffer.from('{}'));
+  const upload = requests.find((request) => request.url.endsWith('/sendDocument'))!;
+  expect(upload.body).toBeInstanceOf(FormData);
+  const form = upload.body as FormData;
+  expect(form.get('chat_id')).toBe('7');
+  expect(form.get('message_thread_id')).toBe('11');
+  expect(form.get('document')).toBeInstanceOf(Blob);
+  expect([...form.keys()]).not.toContain('token');
+});
 it('reports safe network diagnostics after bounded read retries without disclosing tokens', async () => {
   const error = new TypeError('fetch failed', {
     cause: Object.assign(new Error(`https://api.telegram.org/bot${token}/getMe`), {

@@ -130,7 +130,10 @@ export function daddyBoard(
     buttons: [
       ...(topicUrl ? [[{ text: '🧵 ' + t('Open session topic'), url: topicUrl }]] : []),
       [
+        { text: t('Tasks'), callback_data: `dad:tasks:${board.group.id}` },
         { text: t('Status'), callback_data: `dad:status:${board.group.id}` },
+      ],
+      [
         {
           text: t(board.group.daddyState === 'paused' ? 'Resume' : 'Pause'),
           callback_data: `dad:${board.group.daddyState === 'paused' ? 'resume' : 'pause'}:${board.group.id}`,

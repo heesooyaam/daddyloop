@@ -176,6 +176,27 @@ Publication and submission are automatic by default; manual mode adds a wait. In
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
+### How a human confirms a task action
+
+Suppose automatic push is disabled and commit H2 is ready. The website sends H2 and the task generation to the service. Telegram first shows those values, then saves a short-lived confirmation bound to the paired user and its exact chat or topic.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Web / Telegram
+    participant D as Daddy task action
+    participant E as Engine / TicketWorkflow
+    U->>T: Confirm H2, generation 4
+    T->>D: Session, task, action,<br/>H2 and generation 4
+    D->>E: Same expected version
+    E->>E: Lock task and compare again
+    E-->>T: Completed or stale
+```
+
+Both clients call `Daddy.taskAction()`. It delegates to the existing publication, approval, waiver or submission method; it does not weaken automatic-push or review policy. The final comparison happens after the task lock is acquired. Telegram confirmation records survive a service restart, become unusable in another topic and are marked completed after the shared action returns. A retry reconciles the saved task and submission outbox instead of granting a second action. [HTTP routing](../../src/server/daddy.ts), [Telegram controls](../../src/integrations/telegram-workspace.ts) and [offline confirmation tests](../../tests/telegram-task-actions.test.ts) enforce this path.
+
+Sensitive configuration uses the paired private chat. Telegram instruction imports are bounded UTF-8 documents; the service validates them with the same instruction and skill schemas used by the website before saving snapshots. Files, saved prompts and repository defaults are not echoed to a group. Group commands can still update an explicitly supplied prompt, but their response contains no saved instruction text. Document bytes are never passed to an agent as an executable plugin.
+
 ## 5. Which runs can work in parallel
 
 **One task has at most one active agent run.** While a worker implements “Fix search,” a second run for that task waits. Another task — such as updating documentation — can run alongside it.

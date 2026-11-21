@@ -344,6 +344,7 @@ export interface ExpectedTask {
   generation: number;
   groupId?: string;
 }
+export type HumanTaskAction = 'approve-plan' | 'waive-checks' | 'publish' | 'submit';
 export function assertTaskVersion(task: Task, expected?: ExpectedTask) {
   if (
     expected &&

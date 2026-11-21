@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
 import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
 import { profilesSchema } from '../core/agents.js';
-import { AppError } from '../core/types.js';
 import { sessionInstructionsSchema } from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
@@ -137,22 +136,16 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         action: z.enum(['approve-plan', 'waive-checks', 'publish', 'submit']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
+        reason: z.string().trim().max(2000).optional(),
       })
       .strict()
       .parse(request.body);
-    const task = daddy.task(id.parse(request.params.id), input.taskId);
-    if (task.revision?.head !== input.expectedHead || task.generation !== input.expectedGeneration)
-      throw new AppError(
-        'stale_task',
-        'The task changed. Refresh it before confirming this action.',
-      );
-    const expected = {
-      head: input.expectedHead,
-      generation: input.expectedGeneration,
-      groupId: request.params.id,
-    };
-    if (input.action === 'publish') return daddy.engine.publish(task.id, expected);
-    if (input.action === 'submit') return daddy.tickets.submit(task.id, expected);
-    return daddy.engine.action(task.id, input.action, '', expected);
+    return daddy.taskAction(
+      id.parse(request.params.id),
+      input.taskId,
+      input.action,
+      { head: input.expectedHead, generation: input.expectedGeneration },
+      input.reason,
+    );
   });
 }

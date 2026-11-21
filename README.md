@@ -66,7 +66,7 @@ Sessions started in the CLI or website get topics too. Questions, progress and a
 
 The bot runs on the server. Your laptop, SSH tunnel and browser tab can all be closed. Voice recognition runs locally, in English and Russian.
 
-[Telegram walkthrough](docs/telegram/en.md) · [Voice notes](docs/voice/en.md)
+[Telegram walkthrough](docs/telegram/en.md) · [Web/Telegram control coverage](docs/control-surfaces/en.md) · [Voice notes](docs/voice/en.md)
 
 ## Open the website from your laptop
 

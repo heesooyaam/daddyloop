@@ -90,6 +90,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'notifications'
       | 'limits'
       | 'presets'
+      | 'modules'
       | 'delete'
       | null
     >(null),
@@ -201,6 +202,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <button onClick={() => setModal('presets')}>
             <Settings2 size={17} />
             {t('Presets')}
+          </button>
+          <button onClick={() => setModal('modules')}>
+            <Settings2 size={17} />
+            {t('Modules')}
           </button>
           <button onClick={() => setModal('updates')}>
             <RefreshCw size={17} />
@@ -700,6 +705,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <PresetLibrary api={api} />
         </Dialog>
       )}
+      {modal === 'modules' && (
+        <Dialog title={t('Modules on this server')} onClose={() => setModal(null)}>
+          <ModulesPanel api={api} />
+        </Dialog>
+      )}
       {modal === 'delete' && board && (
         <Dialog title={t('Delete session')} onClose={() => setModal(null)}>
           <p>
@@ -766,6 +776,46 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
           <TaskReport api={api} id={inspect} board={board} onChange={() => void model.refresh()} />
         </Dialog>
+      )}
+    </div>
+  );
+}
+function ModulesPanel({ api }: { api: DaddyApi }) {
+  const { t } = useLocale();
+  const [modules, setModules] = useState<
+      { id: string; name: string; kind: 'agent' | 'repository'; enabled: boolean }[]
+    >([]),
+    [error, setError] = useState('');
+  useEffect(() => {
+    const controller = new AbortController();
+    void api<typeof modules>('/modules', undefined, controller.signal)
+      .then(setModules)
+      .catch((error) => {
+        if (!controller.signal.aborted) setError(error.message);
+      });
+    return () => controller.abort();
+  }, [api]);
+  return (
+    <div className="daddy-module-list">
+      <p className="daddy-muted">
+        {t(
+          'Modules connect daddy to agents and repository services. A workspace is the repository you want to work on.',
+        )}
+      </p>
+      {modules.map((module) => (
+        <div key={module.id} className="daddy-module-item">
+          <span aria-hidden>{module.enabled ? '✅' : '○'}</span>
+          <span>
+            <strong>{module.name}</strong>
+            <small>{t(module.kind === 'agent' ? 'Agent' : 'Repository')}</small>
+          </span>
+        </div>
+      ))}
+      {!modules.length && !error && <LoaderCircle className="spin" />}
+      {error && (
+        <p className="daddy-field-error" role="alert">
+          {t(error)}
+        </p>
       )}
     </div>
   );
@@ -1355,7 +1405,8 @@ function TaskReport({
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
     [error, setError] = useState(''),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [waiverReason, setWaiverReason] = useState('');
   useEffect(() => {
     let active = true;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
@@ -1369,7 +1420,7 @@ function TaskReport({
       active = false;
     };
   }, [id]);
-  const action = async (action: string) => {
+  const action = async (action: string, reason?: string) => {
     if (!board || !value) return;
     setBusy(true);
     try {
@@ -1378,6 +1429,7 @@ function TaskReport({
         action,
         expectedHead: value.task.revision?.head ?? '',
         expectedGeneration: value.task.generation,
+        ...(reason?.trim() ? { reason: reason.trim() } : {}),
       });
       onChange();
       const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
@@ -1402,6 +1454,40 @@ function TaskReport({
             {t(stateCopy[value.task.state] ?? value.task.state)}
           </span>
           <p>{value.task.reason}</p>
+          <dl className="daddy-task-version">
+            <div>
+              <dt>{t('Exact revision')}</dt>
+              <dd>
+                <code>{value.task.revision?.head ?? t('Not created yet')}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>{t('Generation')}</dt>
+              <dd>{value.task.generation}</dd>
+            </div>
+            {value.task.pr && (
+              <div>
+                <dt>{t('CI checks')}</dt>
+                <dd>{t(value.task.pr.checks)}</dd>
+              </div>
+            )}
+          </dl>
+          {!!value.task.pr?.checkDetails.length && (
+            <ul className="daddy-check-list">
+              {value.task.pr.checkDetails.map((check) => (
+                <li key={`${check.name}:${check.url ?? ''}`}>
+                  {check.url && safeUrl(check.url) ? (
+                    <a href={safeUrl(check.url)} target="_blank" rel="noreferrer">
+                      {check.name}
+                    </a>
+                  ) : (
+                    check.name
+                  )}{' '}
+                  · {check.status}
+                </li>
+              ))}
+            </ul>
+          )}
           {value.task.ref.kind !== 'ticket' && safeUrl(value.task.ref.url) && (
             <a
               className="daddy-button outline"
@@ -1441,6 +1527,29 @@ function TaskReport({
             >
               {t('Submit for review')}
             </button>
+          )}
+          {value.task.state === 'awaiting_checks' && (
+            <div className="daddy-waiver">
+              <label>
+                {t('Reason for allowing this revision without passing CI')}
+                <textarea
+                  rows={3}
+                  maxLength={2000}
+                  value={waiverReason}
+                  onChange={(event) => setWaiverReason(event.target.value)}
+                />
+              </label>
+              <p className="daddy-muted">
+                {t('This exception applies only to the exact revision and generation shown above.')}
+              </p>
+              <button
+                disabled={busy || !waiverReason.trim()}
+                className="daddy-button primary"
+                onClick={() => void action('waive-checks', waiverReason)}
+              >
+                {t('Allow without passing CI')}
+              </button>
+            </div>
           )}
           <h4>{t('Original requirements')}</h4>
           <div className="daddy-prose">

@@ -74,6 +74,8 @@ The server folder picker works like this:
 
 In **Workspaces**, names, repository types and paths are separate. A card opens its saved defaults; **Add workspace** creates another entry. Coming here from a new task preserves its draft and selects the newly saved workspace when you return.
 
+In the paired Telegram private chat, `/workspace <name or ID>` opens the same saved defaults. Change one field with `/workspace <ID> name|path|scope|base|provider|copies <value>`. Repository paths stay out of group replies. Existing sessions keep their snapshot after either client changes the defaults.
+
 ![Saved workspaces](../media/en/daddy-workspaces.png)
 
 In Telegram and the interactive CLI, use `/repo https://github.com/acme/app` or `/repo /absolute/server/path`; `/repo default` cancels it. The Telegram selection expires after ten minutes. An expired selection is rejected rather than silently sending work to another directory.

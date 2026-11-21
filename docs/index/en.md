@@ -10,6 +10,7 @@ New here? [Install daddy](../start/en.md), then open the [website](../web/en.md)
 - [Website: laptop, phone and themes](../web/en.md)
 - [Interactive CLI and commands](../terminal/en.md)
 - [Telegram: bot setup and task topics](../telegram/en.md)
+- [Web and Telegram control coverage](../control-surfaces/en.md)
 - [Voice messages](../voice/en.md)
 
 ## Give daddy work

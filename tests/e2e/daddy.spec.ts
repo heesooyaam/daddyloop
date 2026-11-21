@@ -38,6 +38,9 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await expect(page.locator('.daddy-work-item')).toHaveCount(2, { timeout: 20000 });
   await page.locator('.daddy-work-item').first().click();
   await expect(page.getByText('Read-only worker reports', { exact: true })).toBeVisible();
+  await expect(page.getByText('Exact revision', { exact: true })).toBeVisible();
+  await expect(page.locator('.daddy-task-version code')).toHaveText(/^[a-f0-9]{40}$/);
+  await expect(page.getByText('Generation', { exact: true })).toBeVisible();
   await expect(page.getByRole('dialog').locator('textarea')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByLabel('Maximum workers')).toHaveValue('2');
@@ -162,4 +165,14 @@ test('shows quota remaining on a phone and requires confirmation before spending
   await expect(dialog.getByText('7 days: 100% remaining')).toBeVisible();
   expect(writes).toHaveLength(1);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+test('shows the same enabled module summary available from Telegram', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Modules', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: 'Modules on this server' })).toBeVisible();
+  await expect(dialog.getByText('Codex', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('GitHub', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Agent', { exact: true }).first()).toBeVisible();
+  await expect(dialog.getByText('Repository', { exact: true }).first()).toBeVisible();
 });

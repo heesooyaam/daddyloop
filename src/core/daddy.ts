@@ -16,6 +16,7 @@ import {
   type Task,
   type AgentProfiles,
   type AgentProfile,
+  type HumanTaskAction,
   type Job,
 } from './types.js';
 import type { Engine } from './engine.js';
@@ -241,6 +242,25 @@ export class Daddy {
     if (task.groupId !== groupId)
       throw new AppError('wrong_session', 'This task belongs to another daddy session', 403);
     return task;
+  }
+  async taskAction(
+    groupId: string,
+    taskId: string,
+    action: HumanTaskAction,
+    expected: { head: string; generation: number },
+    reason = '',
+  ) {
+    if (reason.length > 2000)
+      throw new AppError(
+        'action_reason_too_long',
+        'Keep the action reason within 2000 characters',
+        400,
+      );
+    const task = this.task(groupId, taskId);
+    const version = { ...expected, groupId };
+    if (action === 'publish') return this.engine.publish(task.id, version);
+    if (action === 'submit') return this.tickets.submit(task.id, version);
+    return this.engine.action(task.id, action, reason, version);
   }
   chat(
     id: string,

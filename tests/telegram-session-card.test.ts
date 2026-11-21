@@ -286,6 +286,7 @@ it('keeps task entry on the home screen and opens configuration on demand', asyn
 
     await workspace.callback('dad:new', destination);
     await workspace.callback(`dad:open:${group.id}`, destination);
+    expect(buttons()).toContain(`dad:tasks:${group.id}`);
     expect(buttons()).toContain(`dad:status:${group.id}`);
     expect(buttons()).not.toContain(`dad:models:${group.id}`);
     await workspace.callback(`dad:settings:${group.id}`, destination);

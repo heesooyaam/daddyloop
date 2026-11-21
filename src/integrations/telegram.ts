@@ -33,6 +33,7 @@ import {
   updateCard,
   updatesCard,
 } from './telegram-meta.js';
+import { normalizeTelegramCommand } from './telegram-commands.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const updateRetentionMs = 24 * 60 * 60 * 1000;
 type User = { id: number; is_bot?: boolean };
@@ -51,6 +52,13 @@ export interface Update {
       duration: number;
       file_size?: number;
       mime_type?: string;
+    };
+    document?: {
+      file_id: string;
+      file_unique_id: string;
+      file_name?: string;
+      mime_type?: string;
+      file_size?: number;
     };
     chat_shared?: { request_id: number; chat_id: number; title?: string };
   };
@@ -307,6 +315,111 @@ export class TelegramApi {
       throw error instanceof AppError ? error : networkFailure(error);
     }
   }
+  async downloadDocument(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const limit = 1024 * 1024;
+    const file = await this.call<{ file_path?: string; file_size?: number }>(
+      'getFile',
+      { file_id: fileId },
+      signal,
+    );
+    if (
+      !file.file_path ||
+      !/^[A-Za-z0-9_./-]+$/.test(file.file_path) ||
+      file.file_path.split('/').some((part) => part === '..' || part === '.') ||
+      file.file_path.startsWith('/')
+    )
+      throw new AppError('document_file_invalid', 'Telegram returned an invalid document path');
+    if (file.file_size && file.file_size > limit)
+      throw new AppError('document_too_large', 'Telegram documents can be at most 1 MiB');
+    try {
+      const response = await this.fetcher(
+        `https://api.telegram.org/file/bot${this.token}/${file.file_path}`,
+        {
+          redirect: 'manual',
+          signal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(60000)])
+            : AbortSignal.timeout(60000),
+        },
+      );
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        throw new AppError('document_download_failed', 'Could not download the Telegram document');
+      }
+      if (Number(response.headers.get('content-length')) > limit) {
+        await response.body.cancel();
+        throw new AppError('document_too_large', 'Telegram documents can be at most 1 MiB');
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.length;
+        if (size > limit)
+          throw new AppError('document_too_large', 'Telegram documents can be at most 1 MiB');
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    } catch (error) {
+      throw error instanceof AppError ? error : networkFailure(error);
+    }
+  }
+  async sendDocument(
+    destination: number | { chatId: number; threadId?: number },
+    filename: string,
+    bytes: Uint8Array,
+    caption?: string,
+  ) {
+    if (
+      !/^[A-Za-z0-9_.-]{1,100}$/.test(filename) ||
+      bytes.byteLength > 1024 * 1024 ||
+      /[\r\n]/.test(caption ?? '')
+    )
+      throw new AppError('invalid_document', 'Choose a safe document up to 1 MiB', 400);
+    const chatId = typeof destination === 'number' ? destination : destination.chatId;
+    const body = new FormData();
+    body.set('chat_id', String(chatId));
+    if (typeof destination !== 'number' && destination.threadId !== undefined)
+      body.set('message_thread_id', String(destination.threadId));
+    if (caption) body.set('caption', caption);
+    body.set('document', new Blob([Buffer.from(bytes)], { type: 'application/json' }), filename);
+    try {
+      const response = await this.fetcher(
+        `https://api.telegram.org/bot${this.token}/sendDocument`,
+        {
+          method: 'POST',
+          body,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(60000),
+        },
+      );
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel();
+        throw new AppError(
+          'telegram_redirect',
+          'Telegram redirected a bot API request. Check the host network or proxy; the token was not forwarded.',
+          502,
+        );
+      }
+      let value: { ok?: boolean; result?: unknown; description?: string };
+      try {
+        value = (await response.json()) as typeof value;
+      } catch {
+        throw new AppError(
+          'telegram_invalid_response',
+          `Telegram returned a non-JSON response (HTTP ${response.status}). Check the host network or proxy.`,
+          502,
+        );
+      }
+      if (!response.ok || value.ok !== true)
+        throw new AppError(
+          'telegram_error',
+          redact(value.description ?? `Telegram HTTP ${response.status}`),
+          502,
+        );
+      return value.result;
+    } catch (error) {
+      throw error instanceof AppError ? error : networkFailure(error);
+    }
+  }
   async send(
     destination: number | { chatId: number; threadId?: number },
     content: string | TelegramCard,
@@ -469,6 +582,7 @@ export class Telegram {
     if (
       this.workspace &&
       (update.message?.voice ||
+        update.message?.document ||
         (update.message?.text && !update.message.text.trim().startsWith('/')))
     ) {
       // Persist voice and conversation input before acknowledging the update.
@@ -489,7 +603,11 @@ export class Telegram {
       return;
     }
     let pair = this.paired();
-    const code = message?.text?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
+    const normalizedText = message?.text
+      ? normalizeTelegramCommand(message.text, this.username)
+      : undefined;
+    if (message?.text?.trim().startsWith('/') && normalizedText === undefined) return;
+    const code = normalizedText?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
     const expected = store.setting<{ hash: string; expiresAt: string }>('telegram.pairCode');
     if (code && expected && expected.expiresAt > now() && hash(code) === expected.hash) {
       pair = { chatId: chat.id, userId: from.id, username: this.username };
@@ -519,11 +637,12 @@ export class Telegram {
         });
         return;
       }
-      const text = message?.text?.trim();
+      const text = normalizedText;
       if (!text) return;
       const language = text.match(/^\/language(?:\s+(en|ru))?$/i);
       if (language) {
         if (language[1]) setLocale(store, language[1].toLowerCase() as Locale);
+        await this.workspace?.syncCommands();
         await this.api.send(chat.id, languageCard(this.locale()));
         return;
       }
@@ -600,6 +719,7 @@ export class Telegram {
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
       if (language[1] !== 'show') setLocale(this.engine.store, language[1] as Locale);
+      await this.workspace?.syncCommands();
       await this.api.send(chatId, languageCard(this.locale()));
       return true;
     }

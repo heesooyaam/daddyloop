@@ -106,6 +106,45 @@ it('checks the viewed revision after acquiring the task lock before a human appr
     await f.close();
   }
 });
+it('routes web task actions through the shared revision-bound service with the waiver reason', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: 'Manual check',
+      requirements: 'Review the offline result',
+      createdByAction: 'fixture',
+    });
+    const action = vi.spyOn(f.daddy, 'taskAction').mockResolvedValue(task);
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/task-action`,
+      payload: {
+        taskId: task.id,
+        action: 'waive-checks',
+        expectedHead: task.revision!.head,
+        expectedGeneration: task.generation,
+        reason: 'Offline checks passed on the saved revision',
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(action).toHaveBeenCalledWith(
+      group.id,
+      task.id,
+      'waive-checks',
+      { head: task.revision!.head, generation: task.generation },
+      'Offline checks passed on the saved revision',
+    );
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
 it('authenticates workspace/session controls, deduplicates messages and closes public worker chat', async () => {
   const f = daddyFixture(),
     server = await buildApp({

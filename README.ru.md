@@ -66,7 +66,7 @@ daddy new --workspace App "Исправь повторные списания. �
 
 Бот работает на сервере. Ему не нужны включённый ноутбук, SSH-туннель или открытая вкладка. Голосовые распознаются локально, на русском и английском.
 
-[Подробно про Telegram](docs/telegram/ru.md) · [Голосовые](docs/voice/ru.md)
+[Подробно про Telegram](docs/telegram/ru.md) · [Покрытие сайта и Telegram](docs/control-surfaces/ru.md) · [Голосовые](docs/voice/ru.md)
 
 ## Открой сайт с ноутбука
 

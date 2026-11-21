@@ -539,6 +539,92 @@ export const daddyRu: Record<string, string> = {
   'More work for daddy? Send the ticket or tell me what needs doing. I’ll add it to this crew’s list.':
     'Ещё дело для папочки? Присылай тикет или расскажи, что нужно. Добавлю в работу этой бригаде.',
   'Tell daddy. I’ll deal with the crew.': 'Скажи папочке. С бригадой я разберусь.',
+  'Choose one session by its exact name or unique ID prefix.':
+    'Укажи точное имя сессии или однозначное начало её ID.',
+  'Choose a session with /session <name or ID>.': 'Выбери сессию командой /session <имя или ID>.',
+  'Choose one task by its exact name or unique ID prefix.':
+    'Укажи точное название задачи или однозначное начало её ID.',
+  'This task action expired. Open the task again.':
+    'Срок действия этой кнопки истёк. Открой задачу заново.',
+  'This action is not available for the current task state.':
+    'Для текущего состояния задачи это действие недоступно.',
+  'Open a task with /task before confirming an action.':
+    'Перед подтверждением открой задачу командой /task.',
+  'Exact revision': 'Точная ревизия',
+  Generation: 'Поколение',
+  'CI checks': 'CI-проверки',
+  'Not created yet': 'Ещё не создана',
+  'Reason for allowing this revision without passing CI':
+    'Причина разрешить эту ревизию без успешного CI',
+  'This exception applies only to the exact revision and generation shown above.':
+    'Исключение действует только для указанной выше ревизии и поколения.',
+  'Allow without passing CI': 'Разрешить без успешного CI',
+  'Instruction files are accepted only in the paired private chat.':
+    'Файлы инструкций принимаются только в привязанной личке с ботом.',
+  'In the private chat send /session {id}, then repeat the command for {title}.':
+    'В личке отправь /session {id}, затем повтори команду для сессии «{title}».',
+  'Send a UTF-8 JSON instruction set up to 1 MiB. The request expires in 10 minutes.':
+    'Пришли набор инструкций в UTF-8 JSON размером до 1 МиБ. Запрос действует 10 минут.',
+  'Send one UTF-8 Markdown or text skill file up to 64 KiB. The request expires in 10 minutes.':
+    'Пришли один файл навыка Markdown или text в UTF-8 размером до 64 КиБ. Запрос действует 10 минут.',
+  'Start an instruction or skill import command before sending a file.':
+    'Перед отправкой файла запусти импорт инструкций или навыка.',
+  'The session changed. Start the file import again.':
+    'Сессия изменилась. Запусти импорт файла заново.',
+  'Choose a JSON instruction set up to 1 MiB.': 'Выбери набор инструкций JSON размером до 1 МиБ.',
+  'Choose a Markdown or text skill file up to 64 KiB.':
+    'Выбери файл навыка Markdown или text размером до 64 КиБ.',
+  'Choose a valid UTF-8 JSON instruction set.': 'Выбери корректный набор инструкций JSON в UTF-8.',
+  'Choose a UTF-8 Markdown or text file.': 'Выбери файл Markdown или text в UTF-8.',
+  'Instruction set imported.': 'Набор инструкций импортирован.',
+  'Skill imported.': 'Навык импортирован.',
+  'File import cancelled.': 'Импорт файла отменён.',
+  'Instruction exports are available only in the paired private chat.':
+    'Экспорт инструкций доступен только в привязанной личке с ботом.',
+  'Instructions for {title}': 'Инструкции для {title}',
+  'This preset action expired. Open the preset again.':
+    'Срок действия этой кнопки истёк. Открой пресет заново.',
+  'Enable this preset in the session first.': 'Сначала подключи этот пресет к сессии.',
+  'Choose which saved prompt and skill components apply to this session.':
+    'Выбери, какие сохранённые промпты и навыки действуют в этой сессии.',
+  'This preset action was already completed.': 'Это действие с пресетом уже выполнено.',
+  'Preset library changes are available only in the private chat.':
+    'Библиотека пресетов изменяется только в личке с ботом.',
+  'Preset deleted.': 'Пресет удалён.',
+  'This preset selection changed. Open it again.':
+    'Выбор частей пресета изменился. Открой его заново.',
+  'Preset updated from this session.': 'Пресет обновлён из этой сессии.',
+  'Preset saved from this session.': 'Пресет сохранён из этой сессии.',
+  version: 'версия',
+  'Existing sessions keep their saved copy. This removes the library version.':
+    'Существующие сессии сохранят свой снимок. Удалится только версия из библиотеки.',
+  'Preset disabled.': 'Пресет отключён.',
+  'Preset renamed.': 'Пресет переименован.',
+  'Preset description updated.': 'Описание пресета обновлено.',
+  'Preset library changes run in the paired private Telegram chat.':
+    'Библиотека пресетов изменяется в привязанной личке Telegram.',
+  'Choose one workspace by its exact name or unique ID prefix.':
+    'Укажи точное имя воркспейса или однозначное начало его ID.',
+  'Repository paths and defaults are available in the private bot chat.':
+    'Пути репозиториев и готовые настройки доступны в личке с ботом.',
+  'Choose a workspace to inspect or edit its saved name, source, scope, base branch and copy mode.':
+    'Выбери воркспейс, чтобы посмотреть или изменить сохранённые имя, источник, scope, базовую ветку и режим копий.',
+  Source: 'Источник',
+  Scope: 'Scope',
+  'Base branch': 'Базовая ветка',
+  'Working copies': 'Рабочие копии',
+  'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use root or default to clear scope or base.':
+    'Измени одно сохранённое значение командой /workspace <ID> name|path|scope|base|provider|copies <значение>. root и default очищают scope и базовую ветку.',
+  'Send a value to save.': 'Пришли значение для сохранения.',
+  'Choose session or pool copy mode.': 'Выбери режим копий session или pool.',
+  'Local instruction paths are accepted only in the paired private chat.':
+    'Локальные пути инструкций принимаются только в привязанной личке.',
+  'Pasted instruction text is accepted only in the paired private chat.':
+    'Текст инструкций принимается только в привязанной личке.',
+  'Instruction text and skills are managed only in the paired private chat.':
+    'Текст инструкций и навыки настраиваются только в привязанной личке.',
+  'Session instructions updated. Full text is available in the private chat.':
+    'Инструкции сессии обновлены. Полный текст доступен в личке.',
   'Open a session topic, or send /new here to create one.':
     'Открой тему сессии или отправь здесь /new, чтобы создать новую.',
   'The topic may already exist. Open it and send /attach {id} to reconnect this session.':

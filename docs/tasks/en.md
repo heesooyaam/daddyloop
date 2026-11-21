@@ -28,4 +28,6 @@ Completed native reviews publish automatically by default. Workers receive the p
 
 Use the main daddy chat for instructions. Task reports are read-only and can expose explicit actions such as publishing a manual review, submitting a saved implementation or approving a plan. These actions check the exact revision and generation again before proceeding.
 
+The website and Telegram call the same service action. Telegram opens a task with `/tasks` or `/task`, shows its full revision and generation, and then asks for a separate confirmation. `/waive <reason>` is the only Telegram path for allowing an exact reviewed revision without passing CI. Repeated, moved or stale confirmations do not repeat the action.
+
 `/pause` pauses the session; `/resume` resumes it. Closing the CLI/browser only disconnects the client. Stopping the service is different: interrupted work is recorded and must be resumed after inspection. See [operations](../operations/en.md).

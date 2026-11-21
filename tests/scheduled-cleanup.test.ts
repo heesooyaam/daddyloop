@@ -213,7 +213,7 @@ it('cleans under pressure without a session and reports the measured result to T
           });
         });
       const { text } = JSON.parse(String(options?.body)) as { text: string };
-      sent.push(text);
+      if (text) sent.push(text);
       return Response.json({ ok: true, result: { message_id: sent.length } });
     },
   );

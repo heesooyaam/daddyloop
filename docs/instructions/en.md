@@ -72,10 +72,13 @@ Inside the task’s conversation or Telegram topic:
 /instructions worker Keep technical details in reports.
 /skill daddy JuliusBrussee/caveman
 /skill worker https://github.com/owner/repo/tree/main/skills/testing
+/skill worker file
+/instructions import
+/instructions export
 /instructions daddy --clear
 ```
 
-Create an empty session with `/new`, configure it, then send the task if the first turn needs these instructions. `/instructions` lists both roles; `--clear` removes that role’s additional text and skills. The website and full CLI also support file imports and exporting sets.
+Create an empty session with `/new`, configure it, then send the task if the first turn needs these instructions. `/instructions` lists both roles; `--clear` removes that role’s additional text and skills. In the paired private chat, `file` accepts one Markdown/text document from the phone, `local <path>` reads a server file, and `text <name> :: <text>` saves pasted instructions. JSON import and export use bounded private documents and are never posted to a group.
 
 ## Changes, engines and backups
 
@@ -106,6 +109,6 @@ daddy instructions SESSION_ID --preset-off "Brief reports"
 daddy presets delete "Brief reports"
 ```
 
-`save` updates an existing name or creates a new entry. Conflicting edits are rejected by revision. A preset created from a session contains its active combined instructions. In Telegram and the interactive CLI, `/presets` lists the library and `/preset <name>` enables a preset for the current session. Use the website for individual component switches. Clearing a role through `/instructions worker --clear` or the CLI also disables that role’s selected preset components.
+`save` updates an existing name or creates a new entry. Conflicting edits are rejected by revision. A preset created from a session contains its active combined instructions. In Telegram and the interactive CLI, `/presets` lists the library and `/preset <name>` enables a preset for the current session. Telegram also supports `save`, `update`, `delete`, `rename`, `describe` and `parts`; library writes stay in the paired private chat. Clearing a role through `/instructions worker --clear` or the CLI also disables that role’s selected preset components.
 
 Portable backups include both the complete preset library and each session’s selected versions, component switches and texts. Exporting a session’s JSON set also includes its preset snapshots, so that set can be used on another installation without recreating the library first.
