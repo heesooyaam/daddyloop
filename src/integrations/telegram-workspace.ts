@@ -88,6 +88,7 @@ type PresetControl = {
   revision: number;
   groupId?: string;
   part?: string;
+  enabled?: boolean;
   expiresAt: string;
 };
 export class TelegramWorkspace {
@@ -502,8 +503,13 @@ export class TelegramWorkspace {
   }
   private authorize(destination: Destination, groupId: string) {
     const pair = this.pair();
-    if (destination.chatId === pair?.chatId || this.groupAt(destination) === groupId)
+    if (destination.chatId === pair?.chatId) return this.daddy.group(groupId);
+    const topicGroup = this.groupAt(destination);
+    if (topicGroup) {
+      if (topicGroup !== groupId)
+        throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
       return this.daddy.group(groupId);
+    }
     if (
       this.room()?.chatId === destination.chatId &&
       this.store.setting<string>(this.selectedSessionKey(destination)) === groupId
@@ -736,6 +742,7 @@ export class TelegramWorkspace {
               presetId: applied.preset.id,
               revision: applied.preset.revision,
               part: part.key,
+              enabled: applied.omit.includes(part.key),
             }),
           },
         ]),
@@ -748,7 +755,13 @@ export class TelegramWorkspace {
     if (!entry) return false;
     const { id, control } = entry;
     if (entry.consumed) {
-      await this.api.send(destination, this.t('This preset action was already completed.'));
+      if (control.kind === 'part' && control.groupId)
+        await this.presetPartsCard(
+          this.authorize(destination, control.groupId),
+          control.presetId,
+          destination,
+        );
+      else await this.api.send(destination, this.t('This preset action was already completed.'));
       return true;
     }
     const library = new InstructionPresets(this.store);
@@ -762,14 +775,19 @@ export class TelegramWorkspace {
       return true;
     }
     const group = this.authorize(destination, control.groupId!);
+    if (typeof control.enabled !== 'boolean')
+      throw new Error(this.t('This preset action expired. Open the preset again.'));
     const instructions = structuredClone(group.instructions ?? { daddy: {}, worker: {} });
     const applied = instructions.presets?.find((item) => item.preset.id === control.presetId);
     if (!applied || applied.preset.revision !== control.revision)
       throw new Error(this.t('This preset selection changed. Open it again.'));
-    applied.omit = applied.omit.includes(control.part!)
-      ? applied.omit.filter((part) => part !== control.part)
-      : [...applied.omit, control.part!];
-    await this.daddy.settings(group.id, { instructions });
+    const omitted = new Set(applied.omit);
+    if (control.enabled) omitted.delete(control.part!);
+    else omitted.add(control.part!);
+    applied.omit = [...omitted];
+    await this.daddy.settings(group.id, { instructions }, () => {
+      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+    });
     await this.presetPartsCard(this.daddy.group(group.id), control.presetId, destination);
     return true;
   }
@@ -872,7 +890,12 @@ export class TelegramWorkspace {
     const pair = this.pair();
     if (!pair) throw new Error('Pair the bot first');
     if (destination.chatId === pair.chatId) return this.daddy.group(groupId);
-    if (this.groupAt(destination) === groupId) return this.daddy.group(groupId);
+    const topicGroup = this.groupAt(destination);
+    if (topicGroup) {
+      if (topicGroup !== groupId)
+        throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
+      return this.daddy.group(groupId);
+    }
     if (
       this.room()?.chatId === destination.chatId &&
       this.store.setting<string>(this.selectedSessionKey(destination)) === groupId
@@ -2057,14 +2080,18 @@ export class TelegramWorkspace {
     }
     const instructions = data.match(/^dad:instructions:([a-f0-9-]{36})$/);
     if (instructions) {
-      this.authorize(destination, instructions[1]);
+      const group = this.authorize(destination, instructions[1]);
+      if (destination.chatId !== this.pair()?.chatId) {
+        await this.privateSessionStep(
+          destination,
+          group,
+          this.t('Instruction text and skills are managed only in the paired private chat.'),
+        );
+        return true;
+      }
       await this.api.send(
         destination,
-        new TelegramText().add(
-          instructionLines(this.daddy.group(instructions[1]).instructions, this.locale()).join(
-            '\n',
-          ),
-        ),
+        new TelegramText().add(instructionLines(group.instructions, this.locale()).join('\n')),
       );
       return true;
     }
@@ -2344,10 +2371,13 @@ export class TelegramWorkspace {
           groupId: groups[0].id,
           ownerId: pair.userId,
         };
-        this.saveTopic(topic);
-        this.store.db
-          .prepare("UPDATE operations SET status='done',result=? WHERE id=? AND status='pending'")
-          .run(JSON.stringify(topic), `telegram:topic:${this.key(this.room()!, groups[0].id)}`);
+        this.store.transaction(() => {
+          this.saveTopic(topic);
+          this.store.setSetting(this.selectedSessionKey(destination), null);
+          this.store.db
+            .prepare("UPDATE operations SET status='done',result=? WHERE id=? AND status='pending'")
+            .run(JSON.stringify(topic), `telegram:topic:${this.key(this.room()!, groups[0].id)}`);
+        });
         await this.show(groups[0].id, destination);
         return true;
       }

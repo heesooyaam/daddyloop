@@ -211,6 +211,74 @@ it('requires an explicit session outside a topic and installs separate private/g
   }
 });
 
+it('rejects an old selected session and confirmation after the topic is attached elsewhere', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' }),
+    task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: first.id,
+      groupGeneration: first.generation,
+      title: 'First task',
+      requirements: 'Keep topic routing exact',
+      createdByAction: 'fixture',
+    });
+  task.state = 'ready_for_review';
+  task.policy.autoPush = false;
+  task.pendingAuthorHead = task.revision!.head;
+  f.store.saveTask(task);
+  const submit = vi.spyOn(f.tickets, 'submit').mockResolvedValue(task);
+  let id = 700;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: -10042, type: 'supergroup' },
+      message_thread_id: 77,
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: 77,
+      },
+    },
+  });
+  try {
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    const open = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(click(open));
+    const prepare = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Submit for review').callback_data;
+    await bot.handle(click(prepare));
+    const confirm = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+
+    await bot.handle(message(`/attach ${second.id.slice(0, 8)}`));
+    expect(f.store.setting('telegram.selectedSession:7:-10042:77')).toBeNull();
+    await bot.handle(click(`dad:instructions:${first.id}`));
+    expect(telegram.sent.at(-1)!.card.text).toContain('topic belonging to this daddy session');
+    await bot.handle(click(confirm));
+    expect(submit).not.toHaveBeenCalled();
+    expect(telegram.sent.at(-1)!.card.text).toContain('topic belonging to this daddy session');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['awaiting_plan_approval', 'plan', '/approve', 'approve-plan', undefined],
   ['awaiting_publication', 'code', '/publish', 'publish', undefined],

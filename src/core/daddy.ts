@@ -371,6 +371,7 @@ export class Daddy {
   async settings(
     id: string,
     input: { workerLimit?: number; profiles?: AgentProfiles; instructions?: SessionInstructions },
+    commit?: () => void,
   ) {
     if (input.profiles)
       await Promise.all([
@@ -422,10 +423,13 @@ export class Daddy {
     if (input.workerLimit !== undefined) {
       group.requestedWorkerLimit = input.workerLimit;
     }
-    this.store.saveGroup(group);
-    this.store.event(id, 'daddy.settings', {
-      workerLimit: group.workerLimit,
-      requestedWorkerLimit: group.requestedWorkerLimit,
+    this.store.transaction(() => {
+      this.store.saveGroup(group);
+      this.store.event(id, 'daddy.settings', {
+        workerLimit: group.workerLimit,
+        requestedWorkerLimit: group.requestedWorkerLimit,
+      });
+      commit?.();
     });
     return this.board(id);
   }

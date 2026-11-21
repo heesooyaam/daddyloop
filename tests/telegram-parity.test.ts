@@ -7,6 +7,10 @@ import { daddyFixture } from './daddy-fixture.js';
 function apiFixture() {
   const sent: { destination: any; card: any }[] = [];
   let document = new Uint8Array();
+  const send = vi.fn(async (destination, card) => {
+    sent.push({ destination, card });
+    return { message_id: sent.length };
+  });
   const sendDocument = vi.fn(
     async (
       _destination: number | { chatId: number; threadId?: number },
@@ -17,10 +21,7 @@ function apiFixture() {
   );
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
-    send: vi.fn(async (destination, card) => {
-      sent.push({ destination, card });
-      return { message_id: sent.length };
-    }),
+    send,
     call: vi.fn(async (method: string) =>
       method === 'createForumTopic' ? { message_thread_id: 51 } : true,
     ),
@@ -30,6 +31,7 @@ function apiFixture() {
   return {
     api,
     sent,
+    send,
     sendDocument,
     document(value: string) {
       document = Buffer.from(value);
@@ -170,12 +172,93 @@ it('manages preset snapshots and per-session components from Telegram', async ()
     const toggle = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle(click(toggle));
     expect(f.daddy.group(group.id).instructions?.presets?.[0].omit).toContain('daddy:prompt');
+    const toggleId = String(toggle).slice('dad:preset:'.length);
+    expect(
+      f.store.db.prepare('SELECT consumed FROM bot_actions WHERE id=?').get(toggleId)?.consumed,
+    ).toBe(1);
+    await bot.handle(click(toggle));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].omit).toContain('daddy:prompt');
+
+    const enable = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    telegram.send.mockRejectedValueOnce(new Error('response lost after settings were saved'));
+    await bot.handle(click(enable));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].omit).not.toContain('daddy:prompt');
+    const restarted = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+    await restarted.handle(click(enable));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].omit).not.toContain('daddy:prompt');
+    await restarted.stop();
 
     await bot.handle(message('/preset delete Mobile style'));
     const remove = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle(click(remove));
     expect(library.list()).toHaveLength(0);
     expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Mobile style');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('keeps saved instruction text private through preset and settings callback buttons', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Work' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const preset = new InstructionPresets(f.store).save({
+    name: 'Private preset',
+    instructions: {
+      daddy: { prompt: 'PRIVATE_PRESET_PROMPT' },
+      worker: {},
+    },
+  });
+  await f.daddy.settings(group.id, {
+    instructions: {
+      daddy: {},
+      worker: {},
+      presets: [{ preset, enabled: true, omit: [] }],
+    },
+  });
+  const topic = await bot.ensureTopic(group);
+  let id = 180;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: -10042, type: 'supergroup' },
+      message_thread_id: topic!.threadId,
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: topic!.threadId,
+      },
+    },
+  });
+  try {
+    await bot.handle(message('/preset parts Private preset'));
+    const back = telegram.sent.at(-1)!.card.buttons.at(-1)[0].callback_data;
+    await bot.handle(click(back));
+    expect(telegram.sent.at(-1)!.card.text).toContain('paired private chat');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_PRESET_PROMPT');
+
+    await bot.handle(click(`dad:settings:${group.id}`));
+    const instructions = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.callback_data === `dad:instructions:${group.id}`).callback_data;
+    await bot.handle(click(instructions));
+    expect(telegram.sent.at(-1)!.card.text).toContain('paired private chat');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_PRESET_PROMPT');
   } finally {
     await bot.stop();
     await f.close();
