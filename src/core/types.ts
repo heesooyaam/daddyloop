@@ -45,9 +45,22 @@ export interface AgentProfile {
   model?: string;
   effort?: ReasoningEffort;
 }
+export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
+  return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
+}
 export interface AgentProfiles {
   worker: AgentProfile;
   daddy: AgentProfile;
+}
+export interface WorkerRequest {
+  slot?: number;
+  profile?: AgentProfile;
+}
+export interface WorkerSlot {
+  number: number;
+  taskId?: string;
+  /** Model to use for the next task. */
+  profile?: AgentProfile;
 }
 export interface TicketSource {
   kind: 'github_issue' | 'tracker' | 'local';
@@ -79,8 +92,10 @@ export interface ReviewGroup {
   orchestrated?: boolean;
   workerLimit?: number;
   requestedWorkerLimit?: number;
-  /** Occupied slots survive author turns, review, pauses and restarts. */
+  /** The occupied task list from stores created before numbered slots. */
   workerTasks?: string[];
+  /** Occupied slots survive author turns, review, pauses and restarts. */
+  workerSlots?: WorkerSlot[];
   /** Snapshot: later edits to workspace defaults affect new sessions only. */
   workspace?: Workspace;
   worker?: AgentProfile;
@@ -197,6 +212,7 @@ export interface Task {
   dependsOn?: string[];
   createdByAction?: string;
   agents?: AgentProfiles;
+  workerRequest?: WorkerRequest;
   ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
   policy: Policy;
@@ -301,6 +317,7 @@ export interface Job {
   finishedAt?: string;
   createdAt: string;
   actionId?: string;
+  firstAttemptId?: string;
   notBefore?: string;
 }
 export interface AgentResult {

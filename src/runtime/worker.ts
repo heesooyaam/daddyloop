@@ -1,6 +1,6 @@
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus } from '../core/types.js';
-import { AppError, now, sameRevision, prRef, isTicket } from '../core/types.js';
+import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
@@ -9,11 +9,17 @@ import { buildContext } from './context.js';
 import { workspaceScope } from '../core/workspace-registry.js';
 import { realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { assignWorker, canAssignWorker, reconcileWorkerPools } from '../core/worker-pool.js';
+import {
+  reconcileWorkerPools,
+  saveWorkerSlots,
+  selectWorker,
+  workerSlots,
+} from '../core/worker-pool.js';
 
 export class Worker {
   private active = new Map<string, AbortController>();
   private runningJobs = new Map<string, Job>();
+  private finalizing = new Set<string>();
   private pendingRuns = new Set<Promise<void>>();
   private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
@@ -36,6 +42,9 @@ export class Worker {
   }
   releaseGroup(id: string) {
     this.reservedGroups.delete(id);
+  }
+  isFinalizing(jobId: string) {
+    return this.finalizing.has(jobId);
   }
   private track(taskId: string, run: Promise<void>) {
     this.taskRuns.set(run, taskId);
@@ -274,9 +283,17 @@ export class Worker {
                 )
                   return false;
                 if (candidate.role === 'reviewer') return !this.reservedGroups.has(group.id);
-                if (group.orchestrated && !canAssignWorker(store, group, candidate.taskId))
-                  return false;
                 const task = store.getTask(candidate.taskId);
+                if (
+                  group.orchestrated &&
+                  !selectWorker(
+                    workerSlots(store, group),
+                    group,
+                    task,
+                    group.worker ?? this.engine.defaultAgents().worker,
+                  )
+                )
+                  return false;
                 return (
                   candidate.kind === 'chat' ||
                   !(task.dependsOn ?? []).some((id) => store.getTask(id).state !== 'complete')
@@ -292,7 +309,38 @@ export class Worker {
           (claimed) => {
             if (claimed.role === 'author' && claimed.groupId) {
               const group = store.getGroup(claimed.groupId);
-              if (group.orchestrated) assignWorker(store, group, claimed.taskId);
+              if (!group.orchestrated) return;
+              const task = store.getTask(claimed.taskId);
+              const slots = workerSlots(store, group);
+              const slot = selectWorker(
+                slots,
+                group,
+                task,
+                group.worker ?? this.engine.defaultAgents().worker,
+              );
+              if (!slot) throw new AppError('worker_unavailable', 'No eligible worker is free');
+              if (slot.taskId) return;
+              slot.taskId = task.id;
+              if (task.workerRequest) {
+                const requestedSlot = task.workerRequest.slot;
+                task.workerRequest.slot = undefined;
+                if (task.workerRequest.profile) slot.profile = task.workerRequest.profile;
+                const profile = slot.profile;
+                if (profile && !sameAgentProfile(claimed.profile, profile)) {
+                  claimed.profile = profile;
+                  this.engine.applyAuthorProfile(task, profile);
+                  for (const job of store.activeJobs(task.id))
+                    if (
+                      job.id !== claimed.id &&
+                      job.role === 'author' &&
+                      job.status === 'queued' &&
+                      job.generation === task.generation
+                    )
+                      store.saveJob({ ...job, profile });
+                }
+                if (requestedSlot || profile) store.saveTask(task);
+              }
+              saveWorkerSlots(store, group, slots);
             }
           },
         );
@@ -454,6 +502,8 @@ export class Worker {
           ),
         onTool: (name, args, callId) => this.engine.broker.call(job, name, args, callId),
       });
+      // Finish recording any saved commit before considering a forced model switch.
+      if (job.role === 'author') this.finalizing.add(job.id);
       task = store.getTask(job.taskId);
       if (
         !abort.signal.aborted &&
@@ -534,6 +584,7 @@ export class Worker {
       store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
       this.active.delete(job.taskId);
       this.runningJobs.delete(job.taskId);
+      this.finalizing.delete(job.id);
     }
   }
   async stop() {

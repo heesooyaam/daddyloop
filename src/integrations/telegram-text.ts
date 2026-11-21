@@ -6,7 +6,7 @@ import stringWidth from 'string-width';
 
 type Style = 'bold' | 'italic' | 'strikethrough';
 export interface TextEntity {
-  type: Style | 'code' | 'pre' | 'text_link' | 'blockquote';
+  type: Style | 'code' | 'pre' | 'text_link' | 'blockquote' | 'bot_command';
   offset: number;
   length: number;
   url?: string;

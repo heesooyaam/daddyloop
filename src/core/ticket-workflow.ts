@@ -12,6 +12,7 @@ import {
   type PRRef,
   type Task,
   type Workspace,
+  type WorkerRequest,
   type TicketRef,
 } from './types.js';
 import { TicketReader } from '../modules/repositories/tickets.js';
@@ -20,6 +21,7 @@ import { Workspaces } from '../runtime/workspaces.js';
 import { allRepositories } from '../modules/repositories/index.js';
 import type { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { redact } from './security.js';
+import { taskReference } from './task-activity.js';
 
 export class TicketWorkflow {
   readonly reader: TicketReader;
@@ -89,6 +91,8 @@ export class TicketWorkflow {
     requirements: string;
     createdByAction: string;
     dependsOn?: string[];
+    workerRequest?: WorkerRequest;
+    startImplementation?: boolean;
   }) {
     const id = randomUUID(),
       workspace = input.workspace;
@@ -100,7 +104,7 @@ export class TicketWorkflow {
       host: workspace.host,
       repo: workspace.repo,
       number: 0,
-      key: `DADDY-${id.slice(0, 8)}`,
+      key: taskReference({ id }),
       url,
     };
     const repository = await this.workspaces.describeTicket(
@@ -119,6 +123,8 @@ export class TicketWorkflow {
       workspaceIsolation: workspace.copyMode,
       createdByAction: input.createdByAction,
       dependsOn: input.dependsOn,
+      workerRequest: input.workerRequest,
+      startImplementation: input.startImplementation,
       requirements: input.requirements,
       source: {
         kind: 'local',

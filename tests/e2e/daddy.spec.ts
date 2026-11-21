@@ -115,6 +115,49 @@ test('supports the phone task board, pool controls and workspace directory choos
   await expect(page.getByLabel('Server directory')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test('queues a task for a numbered worker and updates that worker’s model from the phone', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Shared task controls', Date.now());
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await page.getByLabel('Maximum workers').selectOption('2');
+  await page.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const queue = page.getByRole('dialog', { name: 'Queue task' });
+  await queue.getByLabel('Task description').fill('Repair the filter cache');
+  await queue.getByLabel('Assign to worker').selectOption('2');
+  await queue.getByText('Choose a model', { exact: true }).click();
+  await queue.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra');
+  await queue.getByLabel('Reasoning effort', { exact: true }).selectOption('medium');
+  const submitted = page.waitForResponse(
+    (response) => response.url().endsWith('/tasks') && response.request().method() === 'POST',
+  );
+  await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const task = await (await submitted).json();
+  const report = page.getByRole('dialog', { name: 'Work item' });
+  await expect(report.getByRole('heading', { name: 'Repair the filter cache' })).toBeVisible();
+  await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
+  await report.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  const workers = page.getByRole('dialog', { name: 'Workers' });
+  const worker = workers.getByRole('button', { name: 'Configure worker 2' });
+  await expect(worker).toContainText('Repair the filter cache');
+  await expect(worker).toContainText('gpt-6-astra · medium');
+  await worker.click();
+  await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('max');
+  await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
+  const saved = page.waitForRequest(
+    (request) => request.url().endsWith('/workers/2') && request.method() === 'POST',
+  );
+  await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+  expect((await saved).postDataJSON()).toMatchObject({ forceTaskId: task.id });
+  await expect(worker).toContainText('gpt-5.6-sol · max');
+  await expect(worker).toContainText('Repair the filter cache');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({
   page,
 }) => {

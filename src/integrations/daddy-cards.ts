@@ -2,7 +2,8 @@ import { TelegramText, type TelegramCard } from './telegram-text.js';
 import { translator, type Locale } from '../i18n/index.js';
 import type { Daddy } from '../core/daddy.js';
 import type { Workspace, ReviewGroup } from '../core/types.js';
-import { taskStatus } from './telegram-progress.js';
+import { taskReference } from '../core/task-activity.js';
+import { queueButtons } from './telegram-tasks.js';
 
 export function daddyHome(locale: Locale, groups: ReviewGroup[], currentId?: string): TelegramCard {
   const t = translator(locale);
@@ -112,18 +113,15 @@ export function daddyBoard(
   if (board.group.daddyState === 'paused') text.add('\n\n' + t('Paused'), 'bold');
   for (const task of board.tasks.slice(0, 6))
     text
-      .add('\n\n' + (task.state === 'complete' ? '✅ ' : task.running ? '⚙️ ' : '• ') + task.title)
-      .add('\n' + t(taskStatus(task.state, task.queued && !task.running)));
+      .add('\n\n' + (task.state === 'complete' ? '✅ ' : task.running ? '⚙️ ' : '• '))
+      .add(taskReference(task), 'code')
+      .add('  ' + task.title)
+      .add('\n' + t(task.statusLabel));
   if (board.tasks.length > 6)
     text.add('\n' + t('{count} more tasks in the session', { count: board.tasks.length - 6 }));
   if (board.group.daddyState !== 'paused')
     text.add(
-      '\n\n' +
-        t(
-          board.messages.some((message) => message.sender === 'user')
-            ? 'Send a message here to continue this task.'
-            : 'Send a task description or an issue link.',
-        ),
+      '\n\n' + t('Use /task DESCRIPTION to queue a task. Send a regular message to talk to daddy.'),
     );
   return {
     ...text,
@@ -136,6 +134,7 @@ export function daddyBoard(
           callback_data: `dad:${board.group.daddyState === 'paused' ? 'resume' : 'pause'}:${board.group.id}`,
         },
       ],
+      queueButtons(board.group.id, locale),
       [
         { text: t('Settings'), callback_data: `dad:settings:${board.group.id}` },
         { text: t('Sessions'), callback_data: 'dad:home' },

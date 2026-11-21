@@ -12,6 +12,14 @@ daddy talk SESSION_ID "Also take https://github.com/acme/app/issues/43"
 
 New messages in an existing session go to the same daddy. He imports requirements, creates work items, assigns workers and checks the result. To make an independent session, use `/new` or ask him explicitly to create a new session. In a connected Telegram forum it gets a separate topic.
 
+## Queue a task and choose a worker
+
+Open **Queue task** on the website or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.
+
+When queuing, you can select a numbered worker, a model and a reasoning level. Without a worker number, the service chooses a free worker. If you ask for a model, it tries a matching free worker first. If none match, the first free worker gets that profile.
+
+Open **Workers** on the website or use `/workers` in Telegram to see the numbered workers and their tasks. Use the worker’s settings to select a model for its next task. **Apply to current task** restarts an active author step in the same working copy. In Telegram, use `/worker NUMBER MODEL EFFORT` and add `--force` to apply it to the current task. [Telegram commands](../telegram/en.md#tasks-and-workers)
+
 ## Pool size
 
 ```bash

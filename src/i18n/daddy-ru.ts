@@ -507,6 +507,48 @@ export const daddyRu: Record<string, string> = {
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
+  'Task queue': 'Очередь задач',
+  'No unfinished tasks.': 'Открытых задач нет.',
+  'Task queued': 'Задача в очереди',
+  'Waiting for review': 'Ждёт ревью',
+  'Unfinished tasks · {count}': 'Открытые задачи · {count}',
+  'Worker {number}': 'Воркер {number}',
+  Free: 'Свободен',
+  'Next task · {profile}': 'Для следующей задачи · {profile}',
+  'Worker {number} model saved · {profile}': 'Модель воркера {number} сохранена · {profile}',
+  'Worker {number} will resume the task · {profile}':
+    'Воркер {number} продолжит задачу · {profile}',
+  'Choose a worker from this session': 'Выбери воркера этой сессии',
+  'This worker has changed tasks. Open its settings again.':
+    'Воркер уже сменил задачу. Открой его настройки заново.',
+  'Queue task': 'Поставить в очередь',
+  'Task description': 'Описание задачи',
+  'Assign to worker': 'Назначить воркеру',
+  'Any free worker': 'Любой свободный воркер',
+  'Use the worker model': 'Модель воркера',
+  'Configure worker {number}': 'Настроить воркера {number}',
+  'Save model': 'Сохранить модель',
+  'Apply to current task': 'Применить к текущей задаче',
+  'An active worker step restarts in the same working copy.':
+    'Активный шаг воркера перезапустится в той же рабочей копии.',
+  'Repository for this task': 'Репозиторий для этой задачи',
+  'Change folder for this task': 'Изменить папку для этой задачи',
+  'Only this task uses this folder.': 'Эту папку использует только текущая задача.',
+  'Settings for this task': 'Настройки для этой задачи',
+  'Choose the repository and folder for this task.': 'Выбери репозиторий и папку для этой задачи.',
+  'A task is waiting for a worker that would be removed by this change':
+    'Одной из задач назначен воркер, которого уберёт эта настройка. Дождись её запуска.',
+  'Task not found in this session': 'В этой сессии такой задачи нет',
+  'This ID matches multiple tasks. Open a task from /queue.':
+    'Этот ID совпал у нескольких задач. Открой нужную из /queue или укажи полный ID.',
+  'Use /task DESCRIPTION to queue a task. Send a regular message to talk to daddy.':
+    'Поставить задачу в очередь можно командой /task ОПИСАНИЕ. Обычные сообщения идут в разговор с daddy.',
+  'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.':
+    'Отправь /task ОПИСАНИЕ для постановки задачи или /task DADDY-ID для проверки статуса. Чтобы выбрать воркера и модель, отправь /task --worker НОМЕР --model МОДЕЛЬ --effort УРОВЕНЬ -- ОПИСАНИЕ.',
+  'Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.':
+    'Отправь /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force]. Воркеры доступны в /workers, модели в /models.',
+  'Change a model with /worker NUMBER MODEL [EFFORT].':
+    'Смени модель командой /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ].',
   'Workspaces are folders on the server. daddy creates separate working copies for workers.':
     'Воркспейсы — это папки на сервере. daddy создаёт отдельные рабочие копии для воркеров.',
   'Find workspaces on the server': 'Найти воркспейсы на сервере',
@@ -522,8 +564,8 @@ export const daddyRu: Record<string, string> = {
     'Выбери максимум одновременно работающих воркеров. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
   Back: 'Назад',
   'Telegram group connected': 'Группа подключена',
-  'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.':
-    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Telegram сможет добавить бота с правом управления темами. У каждой сессии daddy будет своя тема.',
+  'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.':
+    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Боту нужны права на управление темами и закрепление сообщений.',
   'Choose a group with topics': 'Выбрать группу с темами',
   'Group selection expired. Send /workspace again.':
     'Выбор группы истёк. Отправь /workspace ещё раз.',
