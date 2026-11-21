@@ -251,7 +251,8 @@ export async function buildApp(options: ServerOptions) {
     15000,
     config.maxConcurrentAgents,
   );
-  worker.autoSubmit = (id) => tickets.submit(id);
+  worker.autoSubmit = (id) =>
+    store.getTask(id).ref.kind === 'ticket' ? tickets.submit(id) : tickets.pushFixes(id);
   if (config.cache.auto)
     worker.autoCleanup = async () => {
       await runProcesses.recover(true);
@@ -644,7 +645,6 @@ export async function buildApp(options: ServerOptions) {
         'Prevent callbacks from an old session from changing the current session. Preserve the single event loop design and cover replacement in a regression test.',
       repoPath: dataDir,
       title: 'Guard against stale session callbacks',
-      policy: { publication: 'human' },
     });
     reply.code(201);
     return task;

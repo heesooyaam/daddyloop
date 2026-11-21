@@ -495,6 +495,8 @@ export const daddyRu: Record<string, string> = {
   'Submitting the changes': 'Отправляет изменения',
   'Review ready to publish': 'Ревью ждёт публикации',
   'Waiting for changes to be pushed': 'Ждёт отправки изменений',
+  'Sending fixes': 'Отправляет исправления',
+  'Publishing review': 'Публикует ревью',
   'Waiting for plan approval': 'План ждёт подтверждения',
   'Action needed': 'Требуется внимание',
   'Agent run failed': 'Запуск агента завершился с ошибкой',

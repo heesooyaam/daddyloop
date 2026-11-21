@@ -24,8 +24,8 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 ## Review and control
 
-Completed native reviews publish automatically by default. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Required CI and human plan approval still gate completion. There is no automatic merge.
+The service publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Required CI and human plan approval still gate completion. The user decides when to merge.
 
-Use the main daddy chat for instructions. Task reports are read-only and can expose explicit actions such as publishing a manual review, submitting a saved implementation or approving a plan. These actions check the exact revision and generation again before proceeding.
+Use the main daddy chat for instructions. Task reports show progress and offer plan approval when required. Plan approval checks the exact revision and generation again.
 
 `/pause` pauses the session; `/resume` resumes it. Closing the CLI/browser only disconnects the client. Stopping the service is different: interrupted work is recorded and must be resumed after inspection. See [operations](../operations/en.md).

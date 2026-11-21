@@ -16,20 +16,16 @@ export type State =
   | 'paused'
   | 'complete';
 export interface Policy {
-  publication: 'human' | 'auto';
   planApproval: 'human' | 'auto';
   maxRounds: number;
   maxNoProgress: number;
   requireChecks: boolean;
-  autoPush: boolean;
 }
 export const defaultPolicy: Policy = {
-  publication: 'auto',
   planApproval: 'human',
   maxRounds: 3,
   maxNoProgress: 2,
   requireChecks: true,
-  autoPush: true,
 };
 export interface PRRef {
   kind?: 'pull_request';
@@ -97,7 +93,6 @@ export interface ReviewGroup {
   daddyToolSignature?: string;
   parentGroupId?: string;
   createdByAction?: string;
-  defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
   workspacePreparation?: {
     state: 'pending' | 'preparing' | 'ready' | 'error';
     path?: string;

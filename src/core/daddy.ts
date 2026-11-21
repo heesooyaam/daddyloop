@@ -88,8 +88,6 @@ export class Daddy {
     workerLimit?: number;
     message?: string;
     requestId?: string;
-    publication?: 'auto' | 'human';
-    autoPush?: boolean;
   }) {
     const fingerprint = createHash('sha256')
       .update(
@@ -142,7 +140,6 @@ export class Daddy {
       createdByAction: input.createdByAction,
       workerLimit: input.workerLimit ?? 1,
       workerTasks: [],
-      defaultPolicy: { publication: input.publication ?? 'auto', autoPush: input.autoPush ?? true },
       daddyState: 'active',
       generation: 1,
       createdAt: now(),
@@ -567,10 +564,7 @@ export class Daddy {
     if (!task?.groupId) return;
     const group = this.store.getGroup(task.groupId);
     if (!group.orchestrated || group.daddyState !== 'active') return;
-    if (
-      event.type === 'task.state' &&
-      !['complete', 'awaiting_plan_approval', 'awaiting_push'].includes(task.state)
-    )
+    if (event.type === 'task.state' && !['complete', 'awaiting_plan_approval'].includes(task.state))
       return;
     if (
       event.type === 'ticket.imported' &&
@@ -1014,7 +1008,6 @@ export class Daddy {
           daddyState: group.daddyState,
           worker: group.worker,
           daddy: group.daddy,
-          defaultPolicy: group.defaultPolicy,
         },
         tasks: board.tasks.map(({ summary, reason, ...task }) => task),
         recentMessages: messages.slice(-6),
@@ -1154,8 +1147,6 @@ export class Daddy {
               daddy: group.daddy,
               worker: group.worker ?? this.engine.defaultAgents().worker,
             },
-            publication: group.defaultPolicy?.publication,
-            autoPush: group.defaultPolicy?.autoPush,
           });
           return { sessionId: session.id, title: session.title, workspace: workspace.name };
         }
@@ -1309,11 +1300,6 @@ export class Daddy {
         else if (name === 'resume_task' && ['paused', 'needs_input'].includes(task.state))
           await this.engine.action(task.id, 'resume');
         else if (name === 'submit_task') {
-          if (!task.policy.autoPush)
-            throw new AppError(
-              'manual_submission',
-              'The user selected manual submission. Use the explicit Submit action.',
-            );
           await this.tickets.submit(task.id);
         } else if (name === 'retry_review') {
           if (this.store.busy(task.id))

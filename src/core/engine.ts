@@ -102,7 +102,7 @@ export class Engine {
       repoPath: input.repoPath,
       state: 'queued',
       reason: 'Ready for independent review',
-      policy: { ...defaultPolicy, ...group?.defaultPolicy, ...input.policy },
+      policy: { ...defaultPolicy, ...input.policy },
       generation: 1,
       contextVersion: 1,
       round: 0,
@@ -554,7 +554,7 @@ export class Engine {
           task.pendingAuthorHead &&
           task.pendingAuthorHead !== task.revision?.head
         )
-          this.state(task, 'awaiting_push', 'Author finished; waiting for a new PR revision');
+          this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
         else {
           const changed = !sameRevision(pr, task.revision);
           task.pendingAuthorHead = undefined;
@@ -828,8 +828,6 @@ export class Engine {
     requirements?: string;
     parentTaskId?: string;
     agents?: AgentProfiles;
-    publication?: 'auto' | 'human';
-    autoPush?: boolean;
     groupId?: string;
     groupGeneration?: number;
     workspaceId?: string;
@@ -931,12 +929,7 @@ export class Engine {
           worker: input.agents?.worker ?? group.worker ?? this.defaultAgents().worker,
           daddy: group.daddy,
         },
-        policy: {
-          ...defaultPolicy,
-          publication:
-            input.publication ?? group.defaultPolicy?.publication ?? defaultPolicy.publication,
-          autoPush: input.autoPush ?? group.defaultPolicy?.autoPush ?? defaultPolicy.autoPush,
-        },
+        policy: { ...defaultPolicy },
         state: 'discussing',
         reason: group.orchestrated
           ? 'Waiting for daddy to assign this task.'

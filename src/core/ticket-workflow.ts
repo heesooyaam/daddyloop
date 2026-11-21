@@ -5,6 +5,8 @@ import {
   assertTaskVersion,
   type ExpectedTask,
   isTicket,
+  prRef,
+  sameRevision,
   now,
   type AgentProfiles,
   type PRRef,
@@ -37,8 +39,6 @@ export class TicketWorkflow {
     base?: string;
     requirements?: string;
     agents?: AgentProfiles;
-    publication?: 'auto' | 'human';
-    autoPush?: boolean;
     groupId?: string;
     groupGeneration?: number;
     workspaceId?: string;
@@ -72,8 +72,6 @@ export class TicketWorkflow {
       parentTaskId: input.parentTaskId,
       requirements: input.requirements,
       agents: input.agents,
-      publication: input.publication,
-      autoPush: input.autoPush,
       groupId: input.groupId,
       groupGeneration: input.groupGeneration,
       workspaceId: input.workspaceId,
@@ -133,6 +131,34 @@ export class TicketWorkflow {
       },
     });
   }
+  async pushFixes(id: string) {
+    const submitted = await this.engine.lock(id, async () => {
+      const store = this.engine.store;
+      const task = store.getTask(id);
+      if (task.state !== 'awaiting_push' || !task.pr || !task.revision || store.busy(id)) return;
+      const ref = prRef(task);
+      const pending = task.pendingAuthorHead;
+      if (!pending || pending === task.revision.head) return;
+      const current = await this.engine.provider(ref).getPR(ref);
+      if (
+        current.state !== 'open' ||
+        current.branch !== task.pr.branch ||
+        current.cloneUrl !== task.pr.cloneUrl ||
+        (current.head !== pending && !sameRevision(current, task.revision))
+      )
+        throw new AppError(
+          'stale_revision',
+          'The PR changed before the saved fixes could be sent. The local commit was preserved.',
+        );
+      if (current.head !== pending) {
+        await this.workspaces.pushSavedFix(task, pending);
+        store.event(id, 'author.submitted', { head: pending, pushed: true });
+      }
+      return true;
+    });
+    if (submitted) await this.engine.reconcile(id);
+  }
+
   async submit(id: string, expected?: ExpectedTask): Promise<Task> {
     const result = await this.engine.lock(id, async () => {
       const task = this.engine.store.getTask(id);

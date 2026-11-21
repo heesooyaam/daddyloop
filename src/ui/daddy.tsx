@@ -52,9 +52,9 @@ const stateCopy: Record<string, string> = {
   submitting: 'Creating PR',
   queued: 'Queued for review',
   reviewing: 'daddy is reviewing',
-  awaiting_publication: 'Review ready',
+  awaiting_publication: 'Publishing review',
   fixing: 'Addressing feedback',
-  awaiting_push: 'Waiting for submission',
+  awaiting_push: 'Sending fixes',
   awaiting_checks: 'Waiting for CI',
   awaiting_plan_approval: 'Plan approval',
   needs_input: 'daddy is checking',
@@ -1421,25 +1421,6 @@ function TaskReport({
               onClick={() => void action('approve-plan')}
             >
               {t('Approve plan')}
-            </button>
-          )}
-          {value.task.state === 'awaiting_publication' &&
-            value.task.policy.publication === 'human' && (
-              <button
-                disabled={busy}
-                className="daddy-button primary"
-                onClick={() => void action('publish')}
-              >
-                {t('Publish review')}
-              </button>
-            )}
-          {value.task.state === 'ready_for_review' && !value.task.policy.autoPush && (
-            <button
-              disabled={busy}
-              className="daddy-button primary"
-              onClick={() => void action('submit')}
-            >
-              {t('Submit for review')}
             </button>
           )}
           <h4>{t('Original requirements')}</h4>

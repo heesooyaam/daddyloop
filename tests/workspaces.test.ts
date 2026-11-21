@@ -24,16 +24,14 @@ it('keeps source, author and reviewer checkouts separate and preserves unpushed 
     task.repoPath = repo;
     task.revision = { head: sha, base: sha, start: sha };
     task.pr = { ...task.pr!, ...task.revision };
-    task.policy.autoPush = false;
     const ws = new Workspaces(data);
     const author = await ws.prepare(task, 'author');
     const reviewer = await ws.prepare(task, 'reviewer');
     expect(author).not.toBe(reviewer);
     expect(await git(['rev-parse', 'HEAD'], reviewer)).toBe(sha);
     writeFileSync(join(author, 'session.ts'), 'const generation = 2;\n');
-    const submitted = await ws.submit(task, 'Fix');
-    expect(submitted.head).not.toBe(sha);
-    expect(submitted.pushed).toBe(false);
+    const saved = await ws.commitFix(task, 'Fix');
+    expect(saved).not.toBe(sha);
     writeFileSync(join(author, 'notes.txt'), 'keep this uncommitted work');
     expect(await ws.prepare(task, 'author')).toBe(author);
     expect(readFileSync(join(author, 'notes.txt'), 'utf8')).toContain('keep this');

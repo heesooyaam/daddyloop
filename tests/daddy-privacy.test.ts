@@ -26,7 +26,6 @@ it('keeps unpublished native review and reviewer chat out of the coordination co
       repoPath: f.dir,
       requirements: 'Review the current code',
       groupId: group.id,
-      policy: { publication: 'human' },
     });
     await f.engine.review(task.id);
     f.store.cancelJobs(task.id);
