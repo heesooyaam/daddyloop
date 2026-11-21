@@ -113,6 +113,35 @@ it('wakes buffered delivery on a new reply and keeps messages in conversation or
   }
 });
 
+it('keeps buffered conversation order after a restart with an unchanged clock', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    f.call
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('still offline'));
+    await f.queue.send({ chatId: 7 }, text('First message'), { key: 'first' });
+    await f.queue.send({ chatId: 7 }, text('Second message'), { key: 'second' });
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1999);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+    f.advance(1);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual([
+      'First message',
+      'First message',
+      'First message',
+      'Second message',
+    ]);
+    expect(restored.status().pending).toBe(0);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('honors Telegram retry_after even when new agent messages arrive', async () => {
   const f = fixture();
   try {
@@ -137,7 +166,7 @@ it('honors Telegram retry_after even when new agent messages arrive', async () =
   }
 });
 
-it('updates one turn card and never replaces a final answer with replayed progress', async () => {
+it('updates one replaceable card and never replaces final content with replayed progress', async () => {
   const f = fixture();
   try {
     await f.queue.send({ chatId: -10042, threadId: 4 }, text('Checking'), {
@@ -167,6 +196,117 @@ it('updates one turn card and never replaces a final answer with replayed progre
       'editMessageText',
     ]);
     expect(f.call.mock.calls[2][1]).toMatchObject({ message_id: 1, text: 'Done' });
+  } finally {
+    await f.close();
+  }
+});
+
+it('pins an existing replaceable status card once and keeps editing that message', async () => {
+  const f = fixture();
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    await f.queue.send(destination, text('Preparing'), {
+      key: 'status',
+      replace: true,
+      final: true,
+    });
+    await f.queue.send(destination, text('Preparing'), {
+      key: 'status',
+      replace: true,
+      pin: true,
+      final: true,
+    });
+    await f.queue.send(destination, text('Working'), {
+      key: 'status',
+      replace: true,
+      pin: true,
+      final: true,
+    });
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+    ]);
+    expect(f.call.mock.calls[1][1]).toEqual({
+      chat_id: -10042,
+      message_id: 1,
+      disable_notification: true,
+    });
+    expect(f.call.mock.calls[2][1]).toMatchObject({ message_id: 1, text: 'Working' });
+    expect(f.call.mock.calls.some(([method]) => method.startsWith('unpin'))).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+it('keeps a status update queued while the initial pin request is in flight', async () => {
+  const f = fixture();
+  try {
+    let finishPin!: () => void;
+    const pin = new Promise<void>((resolve) => {
+      finishPin = resolve;
+    });
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage') await pin;
+      return { message_id: 23 };
+    });
+    const destination = { chatId: -10042, threadId: 4 };
+    const options = { key: 'status', replace: true, pin: true, final: true };
+    const initial = f.queue.send(destination, text('Preparing'), options);
+    await vi.waitFor(() =>
+      expect(f.call.mock.calls.some(([method]) => method === 'pinChatMessage')).toBe(true),
+    );
+    await expect(f.queue.send(destination, text('Working'), options)).resolves.toMatchObject({
+      status: 'queued',
+    });
+    finishPin();
+    await initial;
+    await f.queue.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+    ]);
+    expect(f.call.mock.calls.at(-1)?.[1]).toMatchObject({ message_id: 23, text: 'Working' });
+    expect(f.queue.status().pending).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+it('keeps status delivery successful when Telegram refuses pinning', async () => {
+  const f = fixture();
+  try {
+    let canPin = false;
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage' && !canPin)
+        throw new Error('Bad Request: not enough rights to pin a message');
+      return { message_id: 17 };
+    });
+    const options = { key: 'status', replace: true, pin: true, final: true };
+    await expect(
+      f.queue.send({ chatId: -10042, threadId: 4 }, text('Working'), options),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(f.queue.status().pending).toBe(0);
+    expect(f.store.setting<string>('telegram.error')).toContain(
+      'Give the bot permission to pin messages',
+    );
+    await f.queue.send({ chatId: -10042, threadId: 4 }, text('Still working'), options);
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+    ]);
+    canPin = true;
+    f.advance(60 * 60 * 1000);
+    await f.queue.send({ chatId: -10042, threadId: 4 }, text('Still working'), options);
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+      'pinChatMessage',
+    ]);
+    expect(f.store.setting('telegram.error')).toBeNull();
   } finally {
     await f.close();
   }

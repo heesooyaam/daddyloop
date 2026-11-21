@@ -34,11 +34,20 @@ it('updates the initial private-chat card after /new as well', async () => {
     await click(`dad:new:${f.workspace.id}`, 2);
     await click(sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data, 3);
     const group = f.daddy.sessions()[0];
-    const initial = sent.find(
+    const initial = sent.filter(
       (item) => item.method === 'sendMessage' && item.body.text.includes(group.title),
-    )!;
-    const messageId = sent.indexOf(initial) + 1;
-    expect(initial.body.text).toContain('Preparing');
+    );
+    const status = initial.find((item) => item.body.text.includes('Server status'))!;
+    const board = initial.find((item) => !item.body.text.includes('Server status'))!;
+    const statusId = sent.indexOf(status) + 1;
+    const boardId = sent.indexOf(board) + 1;
+    expect(status.body.text).toContain('Preparing');
+    expect(board.body.text).toContain('Preparing');
+    expect(sent.find((item) => item.method === 'pinChatMessage')?.body).toMatchObject({
+      chat_id: 7,
+      message_id: statusId,
+      disable_notification: true,
+    });
     group.workspacePreparation = { state: 'ready' };
     f.store.saveGroup(group);
     workspace.onEvent({
@@ -49,16 +58,13 @@ it('updates the initial private-chat card after /new as well', async () => {
       at: group.updatedAt,
     });
     await vi.waitFor(() =>
-      expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(1),
+      expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(2),
     );
-    expect(sent.at(-1)!.body).toMatchObject({
-      chat_id: 7,
-      message_id: messageId,
-      text: expect.stringContaining('ready'),
-    });
-    expect(
-      sent.filter((item) => item.method === 'sendMessage' && item.body.text.includes(group.title)),
-    ).toHaveLength(1);
+    const edits = sent.filter((item) => item.method === 'editMessageText');
+    expect(edits.map((item) => item.body.message_id)).toEqual([statusId, boardId]);
+    expect(edits[0].body.text).not.toContain('Preparing');
+    expect(edits[1].body.text).toContain('ready');
+    expect(initial).toHaveLength(2);
   } finally {
     await workspace.stop();
     await api.delivery.stop();
@@ -67,7 +73,7 @@ it('updates the initial private-chat card after /new as well', async () => {
 });
 
 it.each(['online', 'failed-edit', 'missed-event'])(
-  'edits the session card after preparation and replay: %s',
+  'edits the session and pinned status cards after preparation and replay: %s',
   async (mode) => {
     const failEdit = mode === 'failed-edit';
     const f = daddyFixture(true);
@@ -103,13 +109,19 @@ it.each(['online', 'failed-edit', 'missed-event'])(
         at: group.updatedAt,
       });
       await vi.waitFor(() =>
-        expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(1),
+        expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(2),
       );
-      expect(sent.find((item) => item.method === 'sendMessage')!.body).toMatchObject({
-        chat_id: -10042,
-        message_thread_id: 17,
-        text: expect.stringContaining('Preparing'),
-      });
+      const initial = sent.filter((item) => item.method === 'sendMessage');
+      expect(
+        initial.every(
+          (item) =>
+            item.body.chat_id === -10042 &&
+            item.body.message_thread_id === 17 &&
+            item.body.text.includes('Preparing'),
+        ),
+      ).toBe(true);
+      expect(initial.filter((item) => item.body.text.includes('Server status'))).toHaveLength(1);
+      expect(sent.filter((item) => item.method === 'pinChatMessage')).toHaveLength(1);
       group.workspacePreparation = { state: 'ready' };
       group.updatedAt = new Date(Date.now() + 1000).toISOString();
       f.store.saveGroup(group);
@@ -124,12 +136,12 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       if (mode !== 'missed-event') {
         workspace.onEvent(ready);
         await vi.waitFor(() =>
-          expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(1),
+          expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(2),
         );
       }
       await workspace.stop();
       await api.delivery.stop();
-      if (failEdit) expect(api.delivery.status().pending).toBe(1);
+      if (failEdit) expect(api.delivery.status().pending).toBe(2);
       unavailable = false;
       clock += 600000;
       api.delivery = delivery();
@@ -139,14 +151,15 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       workspace.replay();
       if (mode !== 'missed-event') workspace.onEvent(ready);
       await vi.waitFor(() =>
-        expect(send).toHaveBeenCalledTimes(beforeReplay + (mode === 'missed-event' ? 1 : 2)),
+        expect(send).toHaveBeenCalledTimes(beforeReplay + (mode === 'missed-event' ? 2 : 4)),
       );
       await workspace.stop();
       await api.delivery.flush();
       expect(api.delivery.status().pending).toBe(0);
-      expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(1);
+      expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(2);
+      expect(sent.filter((item) => item.method === 'pinChatMessage')).toHaveLength(1);
       const edits = sent.filter((item) => item.method === 'editMessageText');
-      expect(edits).toHaveLength(failEdit ? 2 : 1);
+      expect(edits).toHaveLength(failEdit ? 4 : 2);
       expect(edits.at(-1)!.body).toMatchObject({
         chat_id: -10042,
         message_id: 101,

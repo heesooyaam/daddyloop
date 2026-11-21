@@ -327,6 +327,7 @@ export class TelegramWorkspace {
       can_edit_stories: false,
       can_delete_stories: false,
       can_manage_topics: true,
+      can_pin_messages: true,
     };
     await this.api.call('sendMessage', {
       chat_id: pair.chatId,
@@ -428,6 +429,7 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.currentDaddy', group.id);
       this.store.setSetting(this.creationKey(destination), null);
     }
+    await this.progress.ensure(group.id);
     await this.api.send(
       destination,
       daddyBoard(
@@ -562,6 +564,7 @@ export class TelegramWorkspace {
       });
       return;
     }
+    await this.progress.ensure(group.id);
     await this.sessionBoard(group.id, destination, topic ? this.link(topic) : undefined);
   }
   private repoKey(destination: Destination, groupId: string) {
@@ -1682,6 +1685,7 @@ export class TelegramWorkspace {
                 message_thread_id: topic.threadId,
               });
           } else {
+            await this.progress.ensure(group.id);
             await this.sessionBoard(
               group.id,
               typeof destination === 'number' ? { chatId: destination } : destination,
@@ -1761,6 +1765,7 @@ export class TelegramWorkspace {
           this.clearDeferred(group.id);
           await this.announceChild(group, topic);
           if (!topic || !room) return;
+          await this.progress.ensure(group.id);
           if (this.room()?.chatId !== topic.chatId || this.pair()?.userId !== topic.ownerId) return;
           const id = `telegram:daddy-intro:${room.chatId}:${group.id}`;
           // Replay refreshes the current board too: preparation may have completed
@@ -1836,8 +1841,8 @@ export class TelegramWorkspace {
         if (message.sender === 'user') text.add(message.text);
         else text.markdown(message.text);
         const result = await this.api.send(destination, text, undefined, {
-          key: message.sender === 'agent' && message.runId ? `turn:${message.runId}` : id,
-          replace: message.sender === 'agent' && !!message.runId,
+          key: message.sender === 'agent' ? `message:${message.id}` : id,
+          replace: message.sender === 'agent',
           order: message.at,
           final: message.phase !== 'progress',
           notificationId: id,
@@ -1863,14 +1868,7 @@ export class TelegramWorkspace {
         at: now(),
       });
     const messages = this.store.messages(group.id);
-    const completedRuns = new Set(
-      messages.filter((message) => message.phase === 'final').map((message) => message.runId),
-    );
-    for (const message of messages.filter(
-      (message) =>
-        ['user', 'agent'].includes(message.sender) &&
-        !(message.phase === 'progress' && completedRuns.has(message.runId)),
-    ))
+    for (const message of messages.filter((message) => ['user', 'agent'].includes(message.sender)))
       this.onEvent({
         id: retry ? -1 : 0,
         taskId: group.id,

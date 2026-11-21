@@ -321,6 +321,7 @@ export class TelegramApi {
       const navigation = this.navigation.getStore();
       const target = typeof destination === 'number' ? { chatId: destination } : destination;
       const cleanup =
+        !delivery?.preserveNavigation &&
         navigation?.active &&
         target.chatId === navigation.chatId &&
         target.threadId === navigation.threadId

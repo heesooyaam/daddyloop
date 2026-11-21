@@ -8,11 +8,19 @@ export interface DeliveryOptions {
   operation?: 'renameTopic';
   key?: string;
   replace?: boolean;
+  pin?: boolean;
+  preserveNavigation?: boolean;
   order?: string;
   final?: boolean;
   notificationId?: string;
   deletePrevious?: { chatId: number; messageId: number };
 }
+type DeliveryPin = {
+  messageId: number;
+  status: 'pinned' | 'failed';
+  nextAttemptAt?: number;
+  error?: string;
+};
 type Delivery = {
   id: string;
   bot: string;
@@ -27,18 +35,20 @@ type Delivery = {
   nextAttemptAt: number;
   error?: string;
   messages: { id: number; fingerprint: string }[];
+  pin?: DeliveryPin;
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
   onCleanupError?: (error: unknown) => void;
 };
 const prefix = 'telegram.delivery:';
+const pinRetryMs = 60 * 60 * 1000;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
 }
 
-/** Durable, ordered delivery. Text for a running turn is replaced, not appended to a backlog. */
+/** Durable, ordered delivery. Callers choose whether a stable key is replaceable. */
 export class TelegramDelivery {
   private pending = new Map<string, Delivery>();
   private running?: Promise<void>;
@@ -46,6 +56,7 @@ export class TelegramDelivery {
   private timer?: NodeJS.Timeout;
   private stopped = false;
   private rateLimitUntil = 0;
+  private lastCreatedAt = 0;
   constructor(
     private store: Store,
     private api: Transport,
@@ -53,11 +64,12 @@ export class TelegramDelivery {
     private clock = Date.now,
   ) {
     for (const row of store.db
-      .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' ORDER BY rowid")
       .all()) {
       const value = JSON.parse(String(row.value)) as Delivery;
       if (!value || value.bot !== bot || !['queued', 'sending'].includes(value.status)) continue;
       value.status = 'queued';
+      this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       this.pending.set(String(row.key), value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
@@ -75,6 +87,10 @@ export class TelegramDelivery {
     this.store.setSetting(key, value);
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
+  }
+  private createdAt() {
+    this.lastCreatedAt = Math.max(this.clock(), this.lastCreatedAt + 1);
+    return this.lastCreatedAt;
   }
   private valid(value: Delivery) {
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
@@ -98,6 +114,11 @@ export class TelegramDelivery {
     const key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
     let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
     if (value) {
+      const needsPin =
+        !!options.pin &&
+        (!value.options.pin ||
+          !value.pin ||
+          (value.pin.status === 'failed' && (value.pin.nextAttemptAt ?? 0) <= this.clock()));
       if (
         (value.options.final && !options.final) ||
         (options.order && value.options.order && options.order < value.options.order)
@@ -105,7 +126,10 @@ export class TelegramDelivery {
         return { status: 'superseded', deliveryId: value.id };
       if (!options.replace)
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
-      if (digest([value.content, value.options.final]) === digest([content, options.final]))
+      if (
+        !needsPin &&
+        digest([value.content, value.options.final]) === digest([content, options.final])
+      )
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
         value.options.notificationId &&
@@ -118,6 +142,7 @@ export class TelegramDelivery {
       value.content = structuredClone(content);
       value.options = {
         ...options,
+        pin: value.options.pin || options.pin || undefined,
         deletePrevious: value.options.deletePrevious ?? options.deletePrevious,
       };
       value.revision++;
@@ -132,7 +157,7 @@ export class TelegramDelivery {
         content: structuredClone(content),
         options,
         revision: 1,
-        createdAt: this.clock(),
+        createdAt: this.createdAt(),
         status: 'queued',
         attempts: 0,
         nextAttemptAt: this.clock(),
@@ -167,6 +192,53 @@ export class TelegramDelivery {
         : null,
       error: values.find((value) => value.error)?.error ?? null,
     };
+  }
+  private async pinMessage(value: Delivery, signal: AbortSignal) {
+    if (!value.options.pin) return;
+    const messageId = value.messages[0]?.id;
+    if (!messageId) return;
+    if (value.pin?.messageId === messageId) {
+      if (value.pin.status === 'pinned') return;
+      if ((value.pin.nextAttemptAt ?? 0) > this.clock()) return;
+    }
+    const previousError = value.pin?.error;
+    try {
+      await this.api.call(
+        'pinChatMessage',
+        {
+          chat_id: value.destination.chatId,
+          message_id: messageId,
+          disable_notification: true,
+        },
+        signal,
+      );
+      value.pin = { messageId, status: 'pinned' };
+      if (previousError && this.store.setting('telegram.error') === previousError)
+        this.store.setSetting('telegram.error', null);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (/message.*already.*pinned|chat[_ ]not[_ ]modified/i.test(String(error))) {
+        value.pin = { messageId, status: 'pinned' };
+        if (previousError && this.store.setting('telegram.error') === previousError)
+          this.store.setSetting('telegram.error', null);
+        return;
+      }
+      const location = `${value.destination.chatId}${
+        value.destination.threadId === undefined ? '' : `, topic ${value.destination.threadId}`
+      }`;
+      const diagnostic = `Could not pin the Telegram status message in chat ${location}. Give the bot permission to pin messages; the session will continue without the pin.`;
+      value.pin = {
+        messageId,
+        status: 'failed',
+        nextAttemptAt: this.clock() + pinRetryMs,
+        error: diagnostic,
+      };
+      this.store.setSetting('telegram.error', diagnostic);
+      this.store.event('_system', 'telegram.status_pin_failed', {
+        destination: value.destination,
+        error: redact(String(error)),
+      });
+    }
   }
   async flush(limit = 10) {
     if (this.running || this.stopped) return this.running;
@@ -291,6 +363,12 @@ export class TelegramDelivery {
         this.save(key, value);
       }
       if (value.revision === revision && this.valid(value)) {
+        await this.pinMessage(value, this.controller.signal);
+        if (value.revision !== revision || !this.valid(value)) {
+          value.status = 'queued';
+          this.save(key, value);
+          return;
+        }
         value.status = 'sent';
         value.error = undefined;
         value.attempts = 0;

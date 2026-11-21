@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
+import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
@@ -137,7 +138,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
       .keyboard[0][0].request_chat;
     expect(request).toMatchObject({
       chat_is_forum: true,
-      bot_administrator_rights: { can_manage_topics: true },
+      bot_administrator_rights: { can_manage_topics: true, can_pin_messages: true },
     });
     await bot.handle({
       update_id: id++,
@@ -504,6 +505,98 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
   }
 });
 
+it('replays every saved agent message into the topic in order and only once', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any>; messageId?: number }[] = [];
+  let nextMessageId = 100;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    const result =
+      method === 'createForumTopic'
+        ? { message_thread_id: 31 }
+        : method === 'sendMessage'
+          ? { message_id: ++nextMessageId }
+          : true;
+    calls.push({
+      method,
+      body,
+      ...(method === 'sendMessage' ? { messageId: nextMessageId } : {}),
+    });
+    return Response.json({ ok: true, result });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Saved history' });
+  const setup = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  await setup.ensureTopic(group);
+  await setup.stop();
+  f.store.daddyMessage(group.id, 'agent', 'First progress event.', 'run-one', undefined, {
+    phase: 'progress',
+  });
+  f.store.daddyMessage(group.id, 'agent', 'Second progress event.', 'run-one', undefined, {
+    phase: 'progress',
+  });
+  f.store.daddyMessage(group.id, 'agent', 'First final answer.', 'run-one', undefined, {
+    phase: 'final',
+  });
+  const agentMessages = () =>
+    calls.filter(
+      (call) => call.method === 'sendMessage' && call.body.text?.startsWith('👨‍💻 [daddy]'),
+    );
+  let delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  api.delivery = delivery;
+  let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    workspace.replay();
+    await vi.waitFor(() => expect(agentMessages()).toHaveLength(3));
+    expect(agentMessages().map((call) => call.body.text)).toEqual([
+      expect.stringContaining('First progress event.'),
+      expect.stringContaining('Second progress event.'),
+      expect.stringContaining('First final answer.'),
+    ]);
+    expect(agentMessages().map((call) => call.body.message_thread_id)).toEqual([31, 31, 31]);
+    const firstIds = new Set(agentMessages().map((call) => call.messageId));
+    expect(firstIds.size).toBe(3);
+    expect(
+      calls.some((call) => call.method === 'editMessageText' && firstIds.has(call.body.message_id)),
+    ).toBe(false);
+
+    await workspace.stop();
+    await delivery.stop();
+    delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    api.delivery = delivery;
+    workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    workspace.replay();
+    const next = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Answer from the next run.',
+      'run-two',
+      undefined,
+      { phase: 'final' },
+    );
+    workspace.onEvent({
+      id: 1,
+      taskId: group.id,
+      type: 'daddy.message',
+      data: { messageId: next.id },
+      at: next.at,
+    });
+    await vi.waitFor(() => expect(agentMessages()).toHaveLength(4));
+    expect(agentMessages().at(-1)?.body.text).toContain('Answer from the next run.');
+    expect(
+      agentMessages()
+        .slice(0, 3)
+        .map((call) => call.messageId),
+    ).toEqual([...firstIds]);
+  } finally {
+    await workspace.stop();
+    await delivery.stop();
+    await f.close();
+  }
+});
+
 it('mirrors a CLI-created session and live assistant messages to one topic without tool logs or Telegram echoes', async () => {
   const f = daddyFixture();
   const sent: { destination: any; card: any; options?: any }[] = [];
@@ -580,15 +673,21 @@ it('mirrors a CLI-created session and live assistant messages to one topic witho
     const count = sent.length;
     bot.replay();
     await new Promise((resolve) => setImmediate(resolve));
-    expect(sent.slice(count)).toEqual([
-      expect.objectContaining({
-        card: expect.objectContaining({ text: expect.stringContaining(group.title) }),
-        options: expect.objectContaining({
-          key: `telegram:daddy-intro:-10042:${group.id}`,
-          replace: true,
+    const replayed = sent.slice(count);
+    expect(replayed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          card: expect.objectContaining({ text: expect.stringContaining(group.title) }),
+          options: expect.objectContaining({
+            key: `telegram:daddy-intro:-10042:${group.id}`,
+            replace: true,
+          }),
         }),
-      }),
-    ]);
+        expect.objectContaining({
+          options: expect.objectContaining({ pin: true, replace: true }),
+        }),
+      ]),
+    );
     expect(api.call).toHaveBeenCalledTimes(1);
     expect(f.daddy.board(group.id).messages.map((message) => message.text)).toContain(
       'Question from the phone',

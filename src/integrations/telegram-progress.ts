@@ -169,12 +169,16 @@ function render(
 }
 
 type StatusRoute = TelegramDestination & { ownerId: number };
-type LiveCard = { id: string; route: StatusRoute };
+type LiveCard = {
+  id: string;
+  route: StatusRoute;
+  signature?: string;
+  updatedAt?: number;
+};
 
 export class TelegramProgress {
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
-  private sent = new Map<string, { at: number; signature: string }>();
 
   constructor(
     private store: Store,
@@ -215,7 +219,12 @@ export class TelegramProgress {
     this.timer.unref();
   }
 
-  private async refresh() {
+  async ensure(groupId: string) {
+    await this.pending;
+    await this.refresh(groupId);
+  }
+
+  private async refresh(forcedGroupId?: string) {
     const jobs = this.store.activeJobs();
     const coordination = this.store.activeDaddyJobs();
     const cards = new Map(
@@ -227,18 +236,17 @@ export class TelegramProgress {
           JSON.parse(String(row.value)) as LiveCard,
         ]),
     );
-    const groups = new Set([
-      ...cards.keys(),
-      ...[...jobs, ...coordination].map((job) => job.groupId),
-    ]);
+    const groups = forcedGroupId
+      ? new Set([forcedGroupId])
+      : new Set([...cards.keys(), ...[...jobs, ...coordination].map((job) => job.groupId)]);
     for (const groupId of groups) {
-      if (!this.timer) return;
+      if (!this.timer && !forcedGroupId) return;
       if (!groupId) continue;
       const key = this.prefix + groupId;
       let card = cards.get(groupId);
       const group = this.store.getGroup(groupId);
       if (!group.orchestrated || group.deletedAt) {
-        if (card) this.clearCard(key, card.id);
+        if (card) this.clearCard(key);
         continue;
       }
       const route = this.destination(groupId, card?.route);
@@ -249,16 +257,20 @@ export class TelegramProgress {
           card.route.chatId !== route.chatId ||
           card.route.threadId !== route.threadId)
       ) {
-        this.clearCard(key, card.id);
+        this.clearCard(key);
         card = undefined;
       }
       const status = snapshot(this.store, group, jobs, coordination);
-      if (!card && !status.active) continue;
+      if (!card && !status.active && forcedGroupId !== groupId) continue;
       const locale = this.locale();
       const signature = JSON.stringify([locale, group.title, status]);
-      const last = card && this.sent.get(card.id);
       const now = Date.now();
-      if (last && last.signature === signature && now - last.at < 60000) continue;
+      if (
+        !forcedGroupId &&
+        card?.signature === signature &&
+        (!status.active || now - (card.updatedAt ?? 0) < 60000)
+      )
+        continue;
       if (!card) {
         card = { id: randomUUID(), route };
         this.store.setSetting(key, card);
@@ -266,16 +278,18 @@ export class TelegramProgress {
       await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
         key: `progress:${card.id}`,
         replace: true,
-        final: !status.active,
+        pin: true,
+        preserveNavigation: true,
+        final: true,
       });
-      if (status.active) this.sent.set(card.id, { at: now, signature });
-      else this.clearCard(key, card.id);
+      card.signature = signature;
+      card.updatedAt = now;
+      this.store.setSetting(key, card);
     }
   }
 
-  private clearCard(key: string, id: string) {
+  private clearCard(key: string) {
     this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
-    this.sent.delete(id);
   }
 
   async stop() {
