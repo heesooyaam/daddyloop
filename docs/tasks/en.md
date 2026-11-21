@@ -24,7 +24,7 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 ## Review and control
 
-The service publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Required CI and human plan approval still gate completion. The user decides when to merge.
+The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Required CI and human plan approval still gate completion. The user decides when to merge.
 
 Use the main daddy chat for instructions. Task reports show progress and offer plan approval when required. Plan approval checks the exact revision and generation again.
 

@@ -24,7 +24,7 @@ class GitHubSubmission implements SubmissionBackend {
         body,
         head: task.ticketRepository!.branch,
         base: task.ticketRepository!.baseBranch,
-        draft: true,
+        draft: false,
       });
     return {
       provider: 'github',
