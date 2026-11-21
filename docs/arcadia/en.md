@@ -4,12 +4,20 @@
 
 Choose `arcadia` during installation. Arc, Arcanum CLI and the corporate lease helper must be installed and authenticated on the server.
 
-For an existing installation, pause work first and rerun the installer with the complete current module list plus `arcadia`. For example, for an installation that otherwise has only Codex and GitHub:
+For an existing managed installation, pause work first and rerun the installer with the complete current module list plus `arcadia`. For example, for an installation that otherwise has only Codex and GitHub:
 
 ```bash
 curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
   | bash -s -- --yes --modules codex,github,arcadia
 ```
+
+If `daddy` is a user-owned wrapper that runs a source checkout, do not replace that command with the installer. Update the checkout to a verified version first, then enable the complete module set without reinstalling or restarting the service:
+
+```bash
+daddy init --yes --no-service --modules codex,github,arcadia
+```
+
+After installing the dependencies and running `daddy arcadia setup`, obtain separate approval for `daddy restart`. The running service reads the new module set only after that restart.
 
 Install the supported Arcanum CLI from the internal npm registry. The similarly named script in the `arcanum` skill is not a replacement for this binary:
 
@@ -29,13 +37,13 @@ For Arcanum, daddyloop checks `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia
 
 ```bash
 daddy arcadia setup --workspace ~/arcadia2
-daddy workspaces add ~/arcadia --name Work --base trunk --copies session
+daddy workspaces add ~/arcadia2 --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
 
 `setup` checks the helper, the mounted source, Arc and a read-only Arcanum request before enabling the integration. A missing dependency stops setup with a specific error.
 
-Already have Work? Update its defaults with `daddy workspaces set Work ~/arcadia --copies session`. Existing sessions keep their settings.
+Already have Work? Update its defaults with `daddy workspaces set Work ~/arcadia2 --copies session`. Existing sessions keep their settings.
 
 ## Agent instructions
 

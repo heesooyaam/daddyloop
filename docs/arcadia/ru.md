@@ -4,12 +4,20 @@
 
 При установке выбери `arcadia`. На сервере должны быть установлены и авторизованы Arc, Arcanum CLI и корпоративный helper для аренды копий.
 
-Для существующей установки сначала приостанови работу и повтори установку с полным текущим списком модулей и `arcadia`. Например, для установки только с Codex и GitHub:
+Для существующей управляемой установки сначала приостанови работу и повтори установку с полным текущим списком модулей и `arcadia`. Например, для установки только с Codex и GitHub:
 
 ```bash
 curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
   | bash -s -- --yes --modules codex,github,arcadia
 ```
+
+Если `daddy` запускается пользовательским скриптом из исходников, не заменяй этот скрипт установщиком. Сначала обнови исходники до проверенной версии, затем включи полный набор модулей без переустановки и перезапуска службы:
+
+```bash
+daddy init --yes --no-service --modules codex,github,arcadia
+```
+
+После установки зависимостей и `daddy arcadia setup` отдельно согласуй `daddy restart`. Работающая служба прочитает новый набор модулей только после этого перезапуска.
 
 Поставь штатный Arcanum CLI из внутреннего npm-реестра. Одноимённый скрипт из навыка `arcanum` не заменяет этот бинарь:
 
@@ -29,13 +37,13 @@ bash ~/.agents/skills/store/scripts/store.sh install arcadia-mounts --agent code
 
 ```bash
 daddy arcadia setup --workspace ~/arcadia2
-daddy workspaces add ~/arcadia --name Work --base trunk --copies session
+daddy workspaces add ~/arcadia2 --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
 
 `setup` проверяет helper, подключённый источник, Arc и запрос Arcanum только на чтение до включения интеграции. Отсутствующая зависимость останавливает настройку с конкретной ошибкой.
 
-Work уже есть? Обнови дефолты: `daddy workspaces set Work ~/arcadia --copies session`. Существующие сессии сохранят свои настройки.
+Work уже есть? Обнови дефолты: `daddy workspaces set Work ~/arcadia2 --copies session`. Существующие сессии сохранят свои настройки.
 
 ## Инструкции агентов
 
