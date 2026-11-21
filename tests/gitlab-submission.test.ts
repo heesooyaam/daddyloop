@@ -92,7 +92,7 @@ it.each([false, true])(
         remove_source_branch: false,
       });
       expect(body?.description).toContain(`<!-- daddyloop:ticket:${task.id} -->`);
-      expect(body?.title).toMatch(/^Draft:/);
+      expect(body?.title).toBe(`${task.source!.key}: ${task.title}`);
     } finally {
       store.close();
     }

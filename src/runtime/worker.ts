@@ -15,6 +15,7 @@ export class Worker {
   private active = new Map<string, AbortController>();
   private runningJobs = new Map<string, Job>();
   private pendingRuns = new Set<Promise<void>>();
+  private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
   private ticking = false;
@@ -168,7 +169,8 @@ export class Worker {
         this.lastCleanup = Date.now();
         await this.autoCleanup();
       }
-      if (Date.now() - this.lastPoll > this.pollMs) {
+      const poll = Date.now() - this.lastPoll > this.pollMs;
+      if (poll) {
         this.lastPoll = Date.now();
         for (const task of store.tasks())
           if (
@@ -195,11 +197,15 @@ export class Worker {
       if (this.autoSubmit && resources.ok)
         for (const task of store.tasks()) {
           if (
-            isTicket(task) &&
-            task.state === 'ready_for_review' &&
-            task.policy.autoPush &&
-            !store.busy(task.id)
+            ((isTicket(task) && task.state === 'ready_for_review') ||
+              (poll &&
+                !isTicket(task) &&
+                task.state === 'awaiting_push' &&
+                task.pendingAuthorHead)) &&
+            !store.busy(task.id) &&
+            !this.submitting.has(task.id)
           ) {
+            this.submitting.add(task.id);
             const submission = this.autoSubmit(task.id).then(
               () => {},
               (error) => {
@@ -208,7 +214,10 @@ export class Worker {
             );
             this.pendingRuns.add(submission);
             this.track(task.id, submission);
-            void submission.finally(() => this.pendingRuns.delete(submission));
+            void submission.finally(() => {
+              this.pendingRuns.delete(submission);
+              this.submitting.delete(task.id);
+            });
           }
         }
       for (const task of store.tasks())
@@ -229,11 +238,7 @@ export class Worker {
         }
       if (this.stopped) return;
       for (const task of store.tasks())
-        if (
-          task.state === 'awaiting_publication' &&
-          task.policy.publication === 'auto' &&
-          !store.busy(task.id)
-        ) {
+        if (task.state === 'awaiting_publication' && !store.busy(task.id)) {
           try {
             await this.engine.publish(task.id);
             if (this.stopped) return;
@@ -482,17 +487,17 @@ export class Worker {
       ) {
         if (demo) await new DemoProvider(store).advance(prRef(task));
         else {
-          const submission = await this.workspaces.submit(
+          const head = await this.workspaces.commitFix(
             task,
             `Address review feedback (round ${task.round})`,
             abort.signal,
           );
           const latest = store.getTask(task.id);
           if (latest.generation === job.generation && !abort.signal.aborted) {
-            latest.pendingAuthorHead = submission.head;
+            latest.pendingAuthorHead = head;
             store.saveTask(latest);
           }
-          store.event(task.id, 'author.submitted', submission, job.id);
+          store.event(task.id, 'author.fixes_saved', { head }, job.id);
         }
       }
       if (!abort.signal.aborted) await this.engine.completeJob(job, result);

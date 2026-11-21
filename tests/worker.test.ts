@@ -3,7 +3,7 @@ import { fixture } from './helpers.js';
 import { Worker } from '../src/runtime/worker.js';
 import { Workspaces } from '../src/runtime/workspaces.js';
 import { DemoRuntime } from '../src/runtime/demo.js';
-import { defaultPolicy } from '../src/core/types.js';
+import { TicketWorkflow } from '../src/core/ticket-workflow.js';
 const healthy = () => ({
   memoryAvailableGiB: 30,
   memoryTotalGiB: 90,
@@ -12,7 +12,7 @@ const healthy = () => ({
   ok: true,
   reasons: [],
 });
-it('runs the complete author/reviewer cycle and stops at each human publication gate', async () => {
+it('persists each completed draft before publishing it and running the next stage', async () => {
   const f = await fixture();
   const worker = new Worker(
     f.engine,
@@ -48,10 +48,10 @@ it('runs the complete author/reviewer cycle and stops at each human publication 
     f.store.close();
   }
 });
-it('runs automatic publication without requiring a manual handoff', async () => {
-  const f = await fixture({
-    policy: { ...defaultPolicy, publication: 'auto' },
-  });
+it('publishes automatically even when an older task stored a manual policy', async () => {
+  const f = await fixture();
+  Object.assign(f.task.policy, { publication: 'human', autoPush: false });
+  f.store.saveTask(f.task);
   const worker = new Worker(
     f.engine,
     new Workspaces('/tmp'),
@@ -68,6 +68,34 @@ it('runs automatic publication without requiring a manual handoff', async () => 
       );
     }
     expect(f.store.getTask(f.task.id).state).toBe('complete');
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
+it('sends an older task’s saved corrections and reconciles the new PR head', async () => {
+  const f = await fixture();
+  const workspaces = new Workspaces('/tmp');
+  const runtime = new DemoRuntime();
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  const workflow = new TicketWorkflow(f.engine, workspaces);
+  worker.autoSubmit = (id) => workflow.pushFixes(id);
+  try {
+    const task = f.store.getTask(f.task.id);
+    const pending = 'f'.repeat(40);
+    task.state = 'awaiting_push';
+    task.pendingAuthorHead = pending;
+    Object.assign(task.policy, { autoPush: false });
+    f.store.saveTask(task);
+    let current = task.pr!;
+    vi.spyOn(f.provider, 'getPR').mockImplementation(async () => current);
+    const push = vi.spyOn(workspaces, 'pushSavedFix').mockImplementation(async () => {
+      current = { ...current, head: pending };
+    });
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(task.id).revision?.head).toBe(pending));
+    expect(push).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: task.id }), pending);
   } finally {
     await worker.stop();
     f.store.close();

@@ -14,9 +14,9 @@ const statusLabels: Record<State, string> = {
   submitting: 'Submitting the changes',
   queued: 'Waiting for a worker',
   reviewing: 'Reviewing the changes',
-  awaiting_publication: 'Review ready to publish',
+  awaiting_publication: 'Publishing review',
   fixing: 'Addressing review feedback',
-  awaiting_push: 'Waiting for changes to be pushed',
+  awaiting_push: 'Sending fixes',
   awaiting_checks: 'Waiting for CI',
   awaiting_plan_approval: 'Waiting for plan approval',
   needs_input: 'Action needed',
@@ -35,6 +35,9 @@ const activeStates = new Set<State>([
   'reviewing',
   'fixing',
   'awaiting_checks',
+  'ready_for_review',
+  'awaiting_publication',
+  'awaiting_push',
 ]);
 
 function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: DaddyJob[]) {
@@ -67,12 +70,7 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
       })),
   ];
   const preparing = ['pending', 'preparing'].includes(group.workspacePreparation?.state ?? '');
-  const activeTask = tasks.find(
-    (task) =>
-      activeStates.has(task.state) ||
-      (task.state === 'ready_for_review' && task.policy.autoPush) ||
-      (task.state === 'awaiting_publication' && task.policy.publication === 'auto'),
-  );
+  const activeTask = tasks.find((task) => activeStates.has(task.state));
   const active =
     !group.deletion &&
     !['paused', 'archived'].includes(group.daddyState ?? '') &&
