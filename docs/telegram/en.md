@@ -20,6 +20,8 @@ The bot token belongs to this service installation. A dedicated bot must not sim
 
 In the private chat, choose **New task** or open a conversation from the list. The bot shows which conversation receives your next message. In a group topic, send a task description or an issue link. **Settings** in the private chat opens repositories, group setup, notifications and updates.
 
+The bot adds 👀 to an accepted message after saving the request. In a topic, the reaction depends on the group's settings. The status card shows the current stage.
+
 The bot posts a status card to the session topic or to the selected private conversation when there is no group. The card updates when the phase changes and roughly once a minute during work. It shows the queue, current phase, elapsed time and the latest agent activity. The server timestamp updates while the agent is quiet. If the server goes offline, the card shows the last update time. Send `/status` for the current status.
 
 ## A topic per daddy session

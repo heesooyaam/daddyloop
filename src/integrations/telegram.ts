@@ -465,22 +465,22 @@ export class Telegram {
   };
   async handle(update: Update) {
     const store = this.engine.store;
+    const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
     if (
       this.workspace &&
-      (update.message?.voice ||
-        (update.message?.text && !update.message.text.trim().startsWith('/')))
+      (message?.voice || (message?.text && !message.text.trim().startsWith('/')))
     ) {
       // Persist voice and conversation input before acknowledging the update.
-      await this.workspace.handle(update);
+      const handled = await this.workspace.handle(update);
       store.db
         .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
         .run(update.update_id, now());
+      if (handled) void this.reactToAcceptedMessage(message).catch(() => {});
       return;
     }
     store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
-    const message = update.message,
-      callback = update.callback_query;
+    const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
     if (!chat || !from || from.is_bot) return;
@@ -736,6 +736,26 @@ export class Telegram {
         }
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
+  }
+  private async reactToAcceptedMessage(message: NonNullable<Update['message']>) {
+    const messageId = message.message_id;
+    if (!messageId || !Number.isSafeInteger(messageId) || messageId < 1) return;
+    const store = this.engine.store;
+    const receipt = `telegram:${message.chat.id}:${messageId}`;
+    const accepted =
+      store.setting(`daddy.receipt:${receipt}`) ||
+      store.db.prepare('SELECT 1 FROM voice_jobs WHERE id=?').get(hash(receipt));
+    if (!accepted) return;
+    // Reaction delivery must not hold up the input queue or change its receipt.
+    await this.api.call(
+      'setMessageReaction',
+      {
+        chat_id: message.chat.id,
+        message_id: messageId,
+        reaction: [{ type: 'emoji', emoji: '👀' }],
+      },
+      AbortSignal.timeout(4000),
+    );
   }
   private cleanupNotice(report: CleanupReport) {
     const store = this.engine.store;

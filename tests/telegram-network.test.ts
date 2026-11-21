@@ -133,6 +133,57 @@ function polling(updates: Update[]) {
   return { api, offsets };
 }
 
+it('reacts once to persisted task input without waiting for the Telegram reaction response', async () => {
+  const f = daddyFixture();
+  const reactions: unknown[] = [];
+  let rejected!: () => void;
+  const reactionResponse = new Promise<void>((resolve) => {
+    rejected = resolve;
+  });
+  const api = new TelegramApi(token, async (url, options) => {
+    const body = JSON.parse(String(options?.body));
+    if (String(url).endsWith('/setMessageReaction')) {
+      expect(f.store.setting(`daddy.receipt:telegram:7:${body.message_id}`)).toBeTruthy();
+      reactions.push(body);
+      await reactionResponse;
+      return Response.json({ ok: false, description: 'Reaction unavailable' }, { status: 400 });
+    }
+    return Response.json({ ok: true, result: { message_id: 1 } });
+  });
+  const bot = new Telegram(f.engine, api, 'fixture_bot');
+  const updates = new UpdateMonitor(f.store, { agents: [] });
+  try {
+    bot.configure({ daddy: f.daddy, catalogue, updates });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    await bot.handle(incoming(19, 'Unrouted draft'));
+    f.store.setSetting('telegram.currentDaddy', group.id);
+    f.store.setSetting('telegram.newSession:7:7:0', null);
+    await bot.handle(incoming(20, 'First task'));
+    await bot.handle(incoming(20, 'First task'));
+    await bot.handle(incoming(21, 'Second task'));
+    await bot.handle(incoming(22, '/status'));
+    expect(f.store.messages(group.id).map((message) => message.text)).toEqual([
+      'First task',
+      'Second task',
+    ]);
+    expect(reactions).toEqual(
+      [20, 21].map((message_id) => ({
+        chat_id: 7,
+        message_id,
+        reaction: [{ type: 'emoji', emoji: '👀' }],
+      })),
+    );
+    rejected();
+    expect(bot.status().error).toBeNull();
+  } finally {
+    rejected();
+    await bot.stop();
+    await updates.stop();
+    await f.close();
+  }
+});
+
 it('retries an unconfirmed message after SQLite is locked and preserves order', async () => {
   const f = daddyFixture(true);
   const locker = new DatabaseSync(join(f.dir, 'state.sqlite'));
