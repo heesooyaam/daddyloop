@@ -47,7 +47,9 @@ sequenceDiagram
     S-->>A: Task and run IDs
 ```
 
-The website and CLI send text over HTTP. For Telegram, the service receives a message through the Bot API and calls the same `Daddy.chat()`. “Accepted” means the request is saved. The model's answer arrives later; the web client fetches updates about every two seconds.
+The website and CLI send text over HTTP. Regular Telegram messages call the same `Daddy.chat()`. “Accepted” means the request is saved. The model's answer arrives later. The web client fetches updates about every two seconds.
+
+Telegram’s `/task` command saves a local task and its first author run together. The bot returns the task ID from that transaction, and a redelivered command finds the same task. The dispatcher can start the run as soon as a worker is available.
 
 The coordinator receives the goal, task board and recent messages. It uses tools to read older conversation or task details. For example, `create_task` creates “Fix search” and `dispatch` assigns implementation. The service first checks the selected workspace, the task's session and its dependencies.
 
@@ -82,7 +84,7 @@ sequenceDiagram
 
 For a Git URL, the hosting module validates the address and supplies authentication through `GitRepositoryTransport`. `Workspaces` asks Git for the default branch and commit, fetches that commit into a task-owned Git database, then creates a worktree. The next task gets a separate database and branch; retries reuse the existing copy. A local Git source is read without fetching into it. [The source-to-copy diagram](../workspaces/en.md#one-source-separate-workers) shows the separation.
 
-**Settings.** The agent profile and instructions are saved with the queued run. Changing the default model later leaves that waiting run's settings intact. `AgentRegistry` selects the adapter by `profile.engine`; individual model names do not control scheduler behavior.
+**Settings.** The agent profile and instructions are saved with the queued run. The first dispatch in a session applies any explicit task or worker profile and saves the selected profile with the run. Changing the session default leaves saved profiles intact. `AgentRegistry` selects the adapter by `profile.engine`.
 
 **Result.** The agent returns a status, report and the commit it worked against. `Engine` checks these against the task and repository. A “done” message is insufficient: an unfinished review, for example, leaves the task open.
 
@@ -199,6 +201,8 @@ Two other limits apply. Reviews within one session run in order; its coordinator
 **Shrinking the pool waits for tasks to finish.** Changing its size from three to one preserves slots for assigned tasks. Those slots stay occupied through review, fixes and checks, even while paused. New tasks wait for room in the smaller pool. A dependency “A before B” also holds B, but does not transfer changes from A's branch into it.
 
 Code: [job selection and duplicate prevention](../../src/core/store.ts), [worker pool](../../src/core/worker-pool.ts), [shared reviewer](../../src/runtime/worker.ts).
+
+Workers keep their numbers while tasks occupy them. A request for a specific worker waits for that worker. A requested model and reasoning level use the first free worker with the same profile, or set that profile on the first free worker. A forced profile change cancels the active author attempt, advances the task generation and queues the same step in the existing working copy. The scheduler waits for that attempt to stop before starting its replacement.
 
 ## 6. How cancellation blocks old results
 

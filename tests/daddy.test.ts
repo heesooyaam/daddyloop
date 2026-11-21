@@ -128,6 +128,7 @@ it('drains whole tasks through review and fixes before retiring worker slots', a
       target: 1,
       pending: false,
       occupied: 1,
+      slots: [{ number: 1 }, { number: 2, taskId: b }],
     });
     expect(pending).toHaveLength(0);
     const completedB = f.store.getTask(b);

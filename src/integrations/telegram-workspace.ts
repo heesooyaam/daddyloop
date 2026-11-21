@@ -33,6 +33,19 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
+import { workerSlots } from '../core/worker-pool.js';
+import {
+  parseTaskInput,
+  parseWorkerInput,
+  profileText,
+  queueCard,
+  queuedTaskCard,
+  taskActivity,
+  taskCard,
+  taskCommands,
+  taskReferenceId,
+  workersCard,
+} from './telegram-tasks.js';
 type Pair = { chatId: number; userId: number };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
@@ -327,12 +340,13 @@ export class TelegramWorkspace {
       can_edit_stories: false,
       can_delete_stories: false,
       can_manage_topics: true,
+      can_pin_messages: true,
     };
     await this.api.call('sendMessage', {
       chat_id: pair.chatId,
       text:
         this.t(
-          'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.',
+          'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.',
         ) +
         '\n\n@' +
         this.username,
@@ -442,6 +456,117 @@ export class TelegramWorkspace {
     await this.api.send(destination, {
       ...this.progress.card(group),
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
+    });
+  }
+  private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
+    const group = this.authorize(destination, groupId);
+    const tasks = taskActivity(this.store.tasks(groupId).reverse(), this.store.activeJobs());
+    const locale = this.locale();
+    await this.api.send(
+      destination,
+      view === 'queue'
+        ? queueCard(locale, groupId, tasks)
+        : workersCard(
+            locale,
+            groupId,
+            workerSlots(this.store, group),
+            tasks,
+            group.worker ?? this.daddy.engine.defaultAgents().worker,
+          ),
+    );
+  }
+  private async showTask(groupId: string, taskId: string, destination: Destination) {
+    const group = this.authorize(destination, groupId);
+    const task = this.daddy.task(groupId, taskId);
+    const [activity] = taskActivity([task], this.store.activeJobs(taskId));
+    const slot = workerSlots(this.store, group).find((item) => item.taskId === taskId);
+    await this.api.send(destination, taskCard(this.locale(), activity!, slot));
+  }
+  private async taskCommand(
+    command: string,
+    args: string,
+    groupId: string,
+    destination: Destination,
+    receipt: string,
+  ) {
+    const group = this.authorize(destination, groupId);
+    const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
+    if (command === 'queue' || command === 'workers') {
+      await this.showTasks(groupId, destination, command);
+      return;
+    }
+    if (command === 'worker') {
+      const input = parseWorkerInput(args);
+      if (!input) {
+        await this.api.send(
+          destination,
+          this.t('Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.'),
+        );
+        return;
+      }
+      const slot = workerSlots(this.store, group).find((item) => item.number === input.number);
+      if (!slot)
+        throw new AppError(
+          'unknown_worker',
+          'Choose a worker from this session with /workers',
+          422,
+        );
+      const profile = {
+        engine: input.engine ?? slot.profile?.engine ?? defaults.engine,
+        model: input.model,
+        effort: input.effort,
+      };
+      const result = await this.daddy.configureWorker(groupId, input.number, profile, input.force);
+      await this.api.send(
+        destination,
+        this.t(
+          result.restarted
+            ? 'Worker {number} will resume the task · {profile}'
+            : 'Worker {number} model saved · {profile}',
+          { number: input.number, profile: profileText(profile) },
+        ),
+        undefined,
+        { key: receipt },
+      );
+      return;
+    }
+    const reference = taskReferenceId(args);
+    if (reference) {
+      const tasks = this.store.tasks(groupId).filter((task) => task.id.startsWith(reference));
+      if (tasks.length > 1)
+        throw new AppError(
+          'ambiguous_task',
+          'This ID matches multiple tasks. Open a task from /queue.',
+          409,
+        );
+      if (!tasks[0]) throw new AppError('not_found', 'Task not found in this session', 404);
+      await this.showTask(groupId, tasks[0].id, destination);
+      return;
+    }
+    const request = parseTaskInput(args, defaults.engine);
+    if (!request) {
+      await this.api.send(
+        destination,
+        this.t(
+          'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
+        ),
+      );
+      return;
+    }
+    const nextKey = this.repoKey(destination, groupId);
+    const next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(nextKey);
+    if (next && next.expiresAt <= now()) {
+      this.store.setSetting(nextKey, null);
+      throw new Error(this.t('This selection expired. Choose the repository again.'));
+    }
+    const task = await this.daddy.createTask(groupId, {
+      ...request,
+      requestId: receipt,
+      workspace: next?.workspace,
+    });
+    if (next) this.store.setSetting(nextKey, null);
+    await this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
+      key: receipt,
     });
   }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
@@ -895,6 +1020,18 @@ export class TelegramWorkspace {
       return true;
     }
     if (await this.repositoryCallback(data, destination)) return true;
+    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})$/);
+    if (queue) {
+      await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
+      return true;
+    }
+    const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
+    if (task) {
+      const { groupId } = this.store.getTask(task[1]!);
+      if (!groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
+      await this.showTask(groupId, task[1]!, destination);
+      return true;
+    }
     const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);
     if (repo) {
       this.authorize(destination, repo[1]);
@@ -1247,8 +1384,11 @@ export class TelegramWorkspace {
           .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
         return true;
       }
-      const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
-      if (!text) return false;
+      const rawText = message?.text?.trim();
+      if (!rawText) return false;
+      const addressedTo = /^\/\w+@(\w+)(?=\s|$)/.exec(rawText)?.[1];
+      if (addressedTo && addressedTo.toLowerCase() !== this.username.toLowerCase()) return false;
+      const text = rawText.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
       const registrationKey = this.registrationKey(destination);
       const registration = this.store.setting<{
         provider: string;
@@ -1366,6 +1506,18 @@ export class TelegramWorkspace {
       const groupId = privateChat
         ? this.store.setting<string>('telegram.currentDaddy')
         : this.groupAt(destination);
+      const task = taskCommands.exec(text);
+      if (task) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        await this.taskCommand(
+          task[1]!,
+          task[2] ?? '',
+          groupId,
+          destination,
+          `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+        );
+        return true;
+      }
       const rename = text.match(/^\/rename(?:\s+([\s\S]+))?$/);
       if (rename) {
         if (!groupId) throw new Error(this.t('Open the session you want to rename.'));

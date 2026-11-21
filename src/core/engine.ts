@@ -24,10 +24,11 @@ import {
   type Job,
   type AgentResult,
   type Workspace,
+  type WorkerRequest,
 } from './types.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
-import { inheritedProfiles } from './agents.js';
+import { inheritedProfiles, sameAgentProfile } from './agents.js';
 
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
@@ -129,6 +130,7 @@ export class Engine {
         ...input.agents,
         ...(group ? { daddy: group.daddy } : {}),
       },
+      workerRequest: group?.orchestrated ? { profile: input.agents?.worker } : undefined,
     };
     if (input.planTaskId) {
       const plan = this.store.getTask(input.planTaskId);
@@ -800,6 +802,72 @@ export class Engine {
     this.store.setSetting('agents.defaults', profiles);
     return profiles;
   }
+  applyAuthorProfile(task: Task, profile: AgentProfile) {
+    const agents = this.effectiveAgents(task);
+    if (agents.worker.engine !== profile.engine) {
+      this.store.event(task.id, 'agent.engine_changed', {
+        previous: agents.worker.engine,
+        current: profile.engine,
+        thread: task.authorThreadId,
+      });
+      task.authorThreadId = undefined;
+    }
+    task.agents = { ...agents, worker: profile };
+  }
+
+  /** Called under the task lock and in the same transaction as the slot update. */
+  reconfigureAuthor(task: Task, profile: AgentProfile, isFinalizing: (id: string) => boolean) {
+    const jobs = this.store.activeJobs(task.id).filter((job) => job.generation === task.generation);
+    const previous = jobs.find(
+      (job) =>
+        job.role === 'author' &&
+        job.status === 'running' &&
+        !isFinalizing(job.id) &&
+        !sameAgentProfile(job.profile, profile),
+    );
+    if (previous) task.generation++;
+    this.applyAuthorProfile(task, profile);
+    if (task.workerRequest?.profile) task.workerRequest.profile = profile;
+    this.store.saveTask(task);
+
+    for (const job of jobs) {
+      if (job.status !== 'queued') continue;
+      job.generation = task.generation;
+      if (job.role === 'author') job.profile = profile;
+      this.store.saveJob(job);
+    }
+    if (!previous) return false;
+
+    this.store.saveJob({ ...previous, status: 'cancelled', finishedAt: now() });
+    const resumed: Job = {
+      ...previous,
+      id: randomUUID(),
+      firstAttemptId: previous.firstAttemptId ?? previous.id,
+      generation: task.generation,
+      profile,
+      status: 'queued',
+      startedAt: undefined,
+      finishedAt: undefined,
+      threadId: undefined,
+      turnId: undefined,
+      notBefore: undefined,
+      error: undefined,
+      createdAt: now(),
+    };
+    this.store.saveJob(resumed);
+    this.store.event(
+      task.id,
+      'job.queued',
+      {
+        role: resumed.role,
+        kind: resumed.kind,
+        replaces: previous.id,
+      },
+      resumed.id,
+    );
+    return true;
+  }
+
   async setTaskAgent(id: string, role: 'author' | 'reviewer', profile: AgentProfile) {
     const existing = this.store.getTask(id);
     return this.lock(
@@ -841,20 +909,21 @@ export class Engine {
               'task_busy',
               'Wait for this task to become idle before changing its model',
             );
-          const old = this.effectiveAgents(task)[role === 'author' ? 'worker' : 'daddy'];
-          if (old.engine !== profile.engine) {
-            const field = role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
-            this.store.event(id, 'agent.engine_changed', {
-              previous: old.engine,
-              current: profile.engine,
-              thread: task[field],
-            });
-            task[field] = undefined;
+          if (role === 'author') {
+            this.applyAuthorProfile(task, profile);
+            if (task.workerRequest) task.workerRequest.profile = profile;
+          } else {
+            const agents = this.effectiveAgents(task);
+            if (agents.daddy.engine !== profile.engine) {
+              this.store.event(id, 'agent.engine_changed', {
+                previous: agents.daddy.engine,
+                current: profile.engine,
+                thread: task.reviewerThreadId,
+              });
+              task.reviewerThreadId = undefined;
+            }
+            task.agents = { ...agents, daddy: profile };
           }
-          task.agents = {
-            ...this.effectiveAgents(task),
-            [role === 'author' ? 'worker' : 'daddy']: profile,
-          };
           task.contextVersion++;
           task.generation++;
           this.store.saveTask(task);
@@ -883,6 +952,8 @@ export class Engine {
     workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
     dependsOn?: string[];
+    workerRequest?: WorkerRequest;
+    startImplementation?: boolean;
     id?: string;
   }) {
     if (
@@ -946,6 +1017,18 @@ export class Engine {
         };
       if (group.deletedAt || group.deletion)
         throw new AppError('session_deleting', 'This session is being deleted');
+      if (input.startImplementation) {
+        if (group.daddyState === 'paused' || group.daddyState === 'archived')
+          throw new AppError('daddy_paused', 'Resume daddy before sending another message');
+        const slot = input.workerRequest?.slot;
+        const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
+        if (slot !== undefined && (!Number.isInteger(slot) || slot < 1 || slot > capacity))
+          throw new AppError(
+            'unknown_worker',
+            'Choose a worker from this session with /workers',
+            422,
+          );
+      }
       if (
         (parent || input.groupId) &&
         input.agents?.daddy &&
@@ -974,9 +1057,16 @@ export class Engine {
         createdByAction: input.createdByAction,
         dependsOn: input.dependsOn,
         agents: {
-          worker: input.agents?.worker ?? group.worker ?? this.defaultAgents().worker,
+          worker:
+            input.workerRequest?.profile ??
+            input.agents?.worker ??
+            group.worker ??
+            this.defaultAgents().worker,
           daddy: group.daddy,
         },
+        workerRequest: group.orchestrated
+          ? (input.workerRequest ?? { profile: input.agents?.worker })
+          : undefined,
         policy: { ...defaultPolicy },
         state: 'discussing',
         reason: group.orchestrated
@@ -1005,8 +1095,10 @@ export class Engine {
           source: input.source.url,
           groupId: group.id,
           parentTaskId: parent?.id,
+          dispatched: input.startImplementation,
         });
-        if (!group.orchestrated)
+        if (input.startImplementation) this.queueImplementation(task, input.createdByAction);
+        else if (!group.orchestrated)
           this.store.enqueue(
             task,
             'author',
@@ -1036,22 +1128,25 @@ export class Engine {
           'task_busy',
           'Resume or wait for the current discussion before implementing',
         );
-      task.resumeState = 'implementing';
-      this.state(
-        task,
-        'implementing',
-        'The author is implementing this ticket in its managed workspace',
-      );
-      this.store.enqueue(
-        task,
-        'author',
-        'implement',
-        instruction ??
-          'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
-        actionId,
-      );
+      this.store.transaction(() => this.queueImplementation(task, actionId, instruction));
       return task;
     });
+  }
+  private queueImplementation(task: Task, actionId?: string, instruction?: string) {
+    task.resumeState = 'implementing';
+    this.state(
+      task,
+      'implementing',
+      'The author is implementing this ticket in its managed workspace',
+    );
+    this.store.enqueue(
+      task,
+      'author',
+      'implement',
+      instruction ??
+        'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
+      actionId,
+    );
   }
   async retryTicket(id: string) {
     const task = this.store.getTask(id);

@@ -30,6 +30,39 @@ function fixture() {
 }
 const text = (value: string) => new TelegramText().add(value);
 
+it('keeps status edits delivering while a durable pin retries', async () => {
+  const f = fixture();
+  const target = { chatId: -10042, threadId: 4 };
+  const options = { key: 'status', replace: true, pin: true };
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.send(target, text('Waiting'), options);
+    f.call.mockRejectedValueOnce(new Error('Bad Request: not enough rights'));
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
+    await f.queue.send(target, text('Working'), options);
+    expect(f.call.mock.calls.at(-1)).toMatchObject([
+      'editMessageText',
+      { message_id: 1, text: 'Working' },
+      expect.anything(),
+    ]);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+      'pinChatMessage',
+    ]);
+    expect(restored.status().pending).toBe(0);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('retries a rate-limited receipt reaction after restart and deduplicates repeated updates', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;

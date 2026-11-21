@@ -473,9 +473,12 @@ export class Telegram {
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
     if (
       this.workspace &&
-      (message?.voice || (message?.text && !message.text.trim().startsWith('/')))
+      (message?.voice ||
+        (message?.text &&
+          (!message.text.trim().startsWith('/') ||
+            /^\/(task|worker)(?:@\w+)?(?:\s|$)/.test(message.text.trim()))))
     ) {
-      // Persist voice and conversation input before acknowledging the update.
+      // Persist voice, conversation input and task commands before acknowledging the update.
       const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
       store.db

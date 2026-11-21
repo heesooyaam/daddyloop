@@ -17,6 +17,7 @@ import {
   type AgentProfiles,
   type AgentProfile,
   type Job,
+  type WorkerRequest,
 } from './types.js';
 import type { Engine } from './engine.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
@@ -28,7 +29,7 @@ import { daddySchemas, daddyTools } from './daddy-tools.js';
 import { redact } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
-import { workerPool } from './worker-pool.js';
+import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import {
   sessionInstructionsSchema,
@@ -239,6 +240,85 @@ export class Daddy {
       throw new AppError('wrong_session', 'This task belongs to another daddy session', 403);
     return task;
   }
+  async createTask(
+    id: string,
+    input: {
+      requirements: string;
+      requestId: string;
+      workspace?: Workspace;
+      workerRequest?: WorkerRequest;
+    },
+  ) {
+    return this.engine.lock(`create-task:${id}`, async () => {
+      const group = this.group(id);
+      const tasks = this.store.tasks(id);
+      const existing = tasks.find((task) => task.createdByAction === input.requestId);
+      if (existing) return existing;
+      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+      if (group.daddyState === 'paused' || group.daddyState === 'archived')
+        throw new AppError('daddy_paused', 'Resume daddy before sending another message');
+      if (tasks.length >= 100)
+        throw new AppError('session_full', 'Start another daddy session after 100 tasks');
+      const requirements = input.requirements.trim();
+      if (!requirements || requirements.length > 20000)
+        throw new AppError('invalid_message', 'Send a message between 1 and 20000 characters', 400);
+      if (input.workerRequest?.profile) await this.catalogue.validate(input.workerRequest.profile);
+      return this.tickets.local({
+        workspace: input.workspace ?? group.workspace!,
+        groupId: id,
+        groupGeneration: group.generation,
+        title: titleFromGoal(requirements),
+        requirements,
+        createdByAction: input.requestId,
+        workerRequest: input.workerRequest,
+        startImplementation: true,
+      });
+    });
+  }
+
+  async configureWorker(id: string, number: number, profile: AgentProfile, force = false) {
+    await this.catalogue.validate(profile);
+    const readSlot = () => {
+      const group = this.group(id);
+      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+      const slots = workerSlots(this.store, group);
+      const slot = slots.find((item) => item.number === number);
+      if (!slot)
+        throw new AppError(
+          'unknown_worker',
+          'Choose a worker from this session with /workers',
+          422,
+        );
+      return { group, slots, slot };
+    };
+    const update = (lockedTaskId?: string) => {
+      const { group, slots, slot } = readSlot();
+      if (force && slot.taskId !== lockedTaskId) return;
+      const restarted = this.store.transaction(() => {
+        slot.profile = profile;
+        saveWorkerSlots(this.store, group, slots);
+        const restarted = lockedTaskId
+          ? this.engine.reconfigureAuthor(this.store.getTask(lockedTaskId), profile, (jobId) =>
+              this.worker.isFinalizing(jobId),
+            )
+          : false;
+        this.store.event(id, 'daddy.worker_configured', {
+          worker: number,
+          profile,
+          taskId: lockedTaskId,
+          restarted,
+        });
+        return restarted;
+      });
+      if (restarted && lockedTaskId) this.engine.onCancel(lockedTaskId);
+      return { restarted };
+    };
+    for (;;) {
+      const taskId = force ? readSlot().slot.taskId : undefined;
+      const result = taskId ? await this.engine.lock(taskId, async () => update(taskId)) : update();
+      if (result) return result;
+    }
+  }
   chat(
     id: string,
     text: string,
@@ -397,6 +477,18 @@ export class Daddy {
       if (reviewerChanged) group.generation++;
     }
     if (input.workerLimit !== undefined) {
+      if (
+        this.store
+          .tasks(id)
+          .some(
+            (task) =>
+              task.state !== 'complete' && (task.workerRequest?.slot ?? 0) > input.workerLimit!,
+          )
+      )
+        throw new AppError(
+          'worker_requested',
+          'A task is waiting for a worker that would be removed by this change',
+        );
       group.requestedWorkerLimit = input.workerLimit;
     }
     this.store.saveGroup(group);
@@ -568,8 +660,8 @@ export class Daddy {
       return;
     if (
       event.type === 'ticket.imported' &&
-      this.running.has(group.id) &&
-      task.createdByAction?.startsWith('daddy:')
+      ((event.data as { dispatched?: boolean }).dispatched ||
+        (this.running.has(group.id) && task.createdByAction?.startsWith('daddy:')))
     )
       return;
     this.enqueue(

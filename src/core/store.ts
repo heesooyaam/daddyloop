@@ -24,6 +24,12 @@ function readTask(data: string): Task {
   return task;
 }
 
+// A replacement run keeps the queue position of the original, including across restarts.
+const jobOrder = `ORDER BY coalesce(
+  (SELECT rowid FROM jobs AS first_attempt WHERE id=json_extract(jobs.data,'$.firstAttemptId')),
+  jobs.rowid
+)`;
+
 export class Store {
   readonly db: DatabaseSync;
   readonly changes = new EventEmitter();
@@ -214,11 +220,12 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
-  activeJobs(): Job[] {
-    return this.db
-      .prepare("SELECT data FROM jobs WHERE status IN ('queued','running') ORDER BY rowid")
-      .all()
-      .map((row) => JSON.parse(row.data as string));
+  activeJobs(taskId?: string): Job[] {
+    const active = "SELECT data FROM jobs WHERE status IN ('queued','running')";
+    const rows = taskId
+      ? this.db.prepare(`${active} AND task_id=? ${jobOrder}`).all(taskId)
+      : this.db.prepare(`${active} ${jobOrder}`).all();
+    return rows.map((row) => JSON.parse(row.data as string));
   }
   claim(
     eligible: (job: Job) => boolean = () => true,
@@ -227,7 +234,7 @@ export class Store {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
-          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ORDER BY rowid`,
+          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder}`,
         )
         .all();
       for (const row of rows) {
