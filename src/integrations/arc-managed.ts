@@ -93,6 +93,9 @@ export class ManagedArcMounts {
       if (ManagedArcMounts.locks.get(this.root) === next) ManagedArcMounts.locks.delete(this.root);
     }
   }
+  private helperCommand(args: string[], options: Parameters<typeof command>[2] = {}) {
+    return this.run('bash', [this.helper(), ...args], options);
+  }
   directory(sessionId: string, taskId: string, role: Role) {
     identity.parse(sessionId);
     identity.parse(taskId);
@@ -175,7 +178,7 @@ export class ManagedArcMounts {
   }
   private async config(records: ManagedArcRecord[], file: string) {
     const base = configSchema.parse(
-      JSON.parse((await this.run(this.helper(), ['--json', 'config'])).stdout),
+      JSON.parse((await this.helperCommand(['--json', 'config'])).stdout),
     ).data;
     for (const shared of [base.object_store, base.lease_root]) {
       const path = existsSync(shared) ? realpathSync(shared) : resolve(shared);
@@ -234,7 +237,7 @@ export class ManagedArcMounts {
     if (!records.length) return [];
     const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
     const value = JSON.parse(
-      (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+      (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
     );
     if (value.status !== 'success' || !Array.isArray(value.data?.mounts))
       throw new Error('The Arc lease helper returned an invalid session inventory');
@@ -256,7 +259,7 @@ export class ManagedArcMounts {
         this.resourceCheck();
         if (existsSync(directory)) throw new Error('The target Arc copy directory already exists');
         const base = configSchema.parse(
-          JSON.parse((await this.run(this.helper(), ['--json', 'config'])).stdout),
+          JSON.parse((await this.helperCommand(['--json', 'config'])).stdout),
         ).data;
         record = {
           version: 1,
@@ -307,7 +310,7 @@ export class ManagedArcMounts {
       )
         throw new Error('Arc mounted the copy with unexpected storage paths; it was preserved');
       const inventory = JSON.parse(
-        (await this.run(this.helper(), ['--json', '--config', file, 'status'], { signal })).stdout,
+        (await this.helperCommand(['--json', '--config', file, 'status'], { signal })).stdout,
       );
       const existing = inventory.data?.mounts?.find(
         (mount: { path: string }) => mount.path === record!.mount,
@@ -317,8 +320,7 @@ export class ManagedArcMounts {
       if (existing?.lease_owner_id !== record.ownerId) {
         const claimed = JSON.parse(
           (
-            await this.run(
-              this.helper(),
+            await this.helperCommand(
               [
                 '--json',
                 '--config',
@@ -374,7 +376,7 @@ export class ManagedArcMounts {
     if (!record || record.ownerId !== lease.ownerId)
       throw new Error('Arc session copy ownership changed');
     const file = await this.recordConfig(record);
-    await this.run(this.helper(), [
+    await this.helperCommand([
       '--json',
       '--config',
       file,
@@ -401,7 +403,7 @@ export class ManagedArcMounts {
         throw new Error('The session mount was replaced with another Arc store');
       const file = await this.recordConfig(record);
       const status = JSON.parse(
-        (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+        (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
       );
       const owned = status.data?.mounts?.find(
         (mount: { path: string }) => mount.path === record.mount,
@@ -431,7 +433,7 @@ export class ManagedArcMounts {
         if (native.store !== saved.store || native['object-store'] !== saved.objectStore)
           throw new Error('Refusing to remove an Arc mount whose store changed');
         const status = JSON.parse(
-          (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+          (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
         );
         const owned = status.data?.mounts?.find(
           (mount: { path: string }) => mount.path === saved.mount,
@@ -451,7 +453,7 @@ export class ManagedArcMounts {
       }
       if ((await this.nativeMounts()).some((mount) => mount.mount === saved.mount))
         throw new Error('Arc still reports the session copy; local files were preserved');
-      await this.run(this.helper(), [
+      await this.helperCommand([
         '--json',
         '--config',
         file,

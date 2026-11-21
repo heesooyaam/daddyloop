@@ -2,15 +2,46 @@
 
 # Arcadia и Tracker
 
-При установке выбери `arcadia`. На сервере уже должны быть установлены и авторизованы Arc, Arcanum и корпоративный helper для аренды копий.
+При установке выбери `arcadia`. На сервере должны быть установлены и авторизованы Arc, Arcanum CLI и корпоративный helper для аренды копий.
+
+Для существующей установки сначала приостанови работу и повтори установку с полным текущим списком модулей и `arcadia`. Например, для установки только с Codex и GitHub:
 
 ```bash
-daddy arcadia setup
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
+  | bash -s -- --yes --modules codex,github,arcadia
+```
+
+Поставь штатный Arcanum CLI из внутреннего npm-реестра. Одноимённый скрипт из навыка `arcanum` не заменяет этот бинарь:
+
+```bash
+npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
+```
+
+Helper входит в корпоративный навык `arcadia-mounts`. Установи [SkillStore](https://skillstore.yandex-team.ru/install/instruction.md), затем сам навык в каталог навыков Codex:
+
+```bash
+bash ~/.agents/skills/store/scripts/store.sh install arcadia-mounts --agent codex
+```
+
+`daddy arcadia setup` находит helper в `PATH` и в стандартных каталогах навыков. Также можно передать его точный путь через `--lease-helper`. Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
+
+Для Arcanum daddyloop использует, по порядку, `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia` или штатный `~/.arc/token`. Настройка проверяет чтение Arcanum, но не копирует и не меняет учётные данные.
+
+```bash
+daddy arcadia setup --workspace ~/arcadia2
 daddy workspaces add ~/arcadia --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
 
+`setup` проверяет helper, подключённый источник, Arc и запрос Arcanum только на чтение до включения интеграции. Отсутствующая зависимость останавливает настройку с конкретной ошибкой.
+
 Work уже есть? Обнови дефолты: `daddy workspaces set Work ~/arcadia --copies session`. Существующие сессии сохранят свои настройки.
+
+## Инструкции агентов
+
+Codex читает глобальный `~/.codex/AGENTS.md` и подходящие `AGENTS.md` от корня репозитория до стартовой подпапки. Если правила лежат ниже корня Arcadia, сохрани эту подпапку как `scope` воркспейса или сессии. Личные файлы с другой машины автоматически не переносятся.
+
+Навыки сессии выбираются отдельно для daddy и воркеров. Навык Arc для работы с VCS можно дать обеим ролям. `arcadia-mounts` нужен сервису как установленный helper; агентам не нужно арендовать ещё одну копию поверх уже выданной. Навыки не включают модуль репозитория и не устанавливают свои скрипты — см. [инструкции и навыки](../instructions/ru.md).
 
 ## Автоматические копии
 

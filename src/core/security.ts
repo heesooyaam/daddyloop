@@ -47,14 +47,19 @@ export function credential(provider: ProviderName, host: string): string {
         'Arcadia credentials are limited to the configured Arcanum host',
         422,
       );
-    const path = join(homedir(), '.tokens/arcadia'),
-      token =
-        process.env.ARC_TOKEN ||
-        process.env.ARC_OAUTH_TOKEN ||
-        (existsSync(path) ? readFileSync(path, 'utf8').trim() : '');
-    if (!token)
-      throw new AppError('credentials_missing', 'Configure ARC_TOKEN or ~/.tokens/arcadia', 422);
-    return rememberSecret(token);
+    const files = [join(homedir(), '.tokens/arcadia'), join(homedir(), '.arc/token')],
+      token = (process.env.ARC_TOKEN || process.env.ARC_OAUTH_TOKEN)?.trim();
+    if (token) return rememberSecret(token);
+    for (const path of files)
+      if (existsSync(path)) {
+        const value = readFileSync(path, 'utf8').trim();
+        if (value) return rememberSecret(value);
+      }
+    throw new AppError(
+      'credentials_missing',
+      'Configure ARC_TOKEN, ~/.tokens/arcadia, or the standard ~/.arc/token',
+      422,
+    );
   }
   const key = provider.toUpperCase();
   const customFile = process.env[`DADDYLOOP_${key}_TOKEN_FILE`];

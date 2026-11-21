@@ -49,6 +49,8 @@ export function managedFixture() {
       }
       throw new Error('Unexpected Arc command: ' + args.join(' '));
     }
+    expect(executable).toBe('bash');
+    expect(args[0]).toBe('/fake/arcadia-mount-lease');
     if (args.includes('config'))
       return json({
         status: 'success',

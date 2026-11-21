@@ -22,6 +22,26 @@ class FakeArc extends ArcBridge {
     return { success: true } as T;
   }
 }
+class DoctorArc extends ArcBridge {
+  events: string[] = [];
+  override async api<T>(args: string[]): Promise<T> {
+    this.events.push('arcanum:' + args.join(' '));
+    return [] as T;
+  }
+  override async withMount<T>(fn: (mount: string) => Promise<T>) {
+    this.events.push('mount');
+    return fn('/managed-arcadia');
+  }
+  override async native(args: string[], mount: string) {
+    this.events.push('arc:' + args.join(' '));
+    expect(mount).toBe('/managed-arcadia');
+    return JSON.stringify({
+      user_login: 'tester',
+      hash: 'a'.repeat(40),
+      branch: 'trunk',
+    });
+  }
+}
 const ref = parsePR('https://a.yandex-team.ru/review/11111111');
 const review: ReviewHandle = {
   id: '-7',
@@ -68,4 +88,13 @@ it('uses the pinned diff ID and retains the sign when deleting an inline draft',
   const bridge = new FakeArc();
   await new ArcadiaProvider(bridge).deleteComment(ref, review, 'diff:-9');
   expect(bridge.calls[0]).toEqual(['diff', 'delete-comment', '-9', '--diff-id', '99']);
+});
+it('checks read-only Arcanum access before allocating an Arc metadata copy', async () => {
+  const bridge = new DoctorArc();
+  await expect(bridge.doctor()).resolves.toMatchObject({ user_login: 'tester' });
+  expect(bridge.events).toEqual([
+    'arcanum:repo list --fields repos(id)',
+    'mount',
+    'arc:info --json',
+  ]);
 });

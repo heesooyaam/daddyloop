@@ -2,15 +2,46 @@
 
 # Arcadia and Tracker
 
-Choose `arcadia` during installation. Arc, Arcanum and the corporate lease helper must already be available and authenticated on the server.
+Choose `arcadia` during installation. Arc, Arcanum CLI and the corporate lease helper must be installed and authenticated on the server.
+
+For an existing installation, pause work first and rerun the installer with the complete current module list plus `arcadia`. For example, for an installation that otherwise has only Codex and GitHub:
 
 ```bash
-daddy arcadia setup
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
+  | bash -s -- --yes --modules codex,github,arcadia
+```
+
+Install the supported Arcanum CLI from the internal npm registry. The similarly named script in the `arcanum` skill is not a replacement for this binary:
+
+```bash
+npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
+```
+
+The helper is part of the corporate `arcadia-mounts` skill. Install [SkillStore](https://skillstore.yandex-team.ru/install/instruction.md), then install the skill into the Codex skill directory:
+
+```bash
+bash ~/.agents/skills/store/scripts/store.sh install arcadia-mounts --agent codex
+```
+
+`daddy arcadia setup` finds the helper on `PATH` and in the standard skill directories. You can also pass its exact path with `--lease-helper`. daddyloop invokes the helper through Bash, so it does not need an executable bit.
+
+For Arcanum, daddyloop checks `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia`, and the standard `~/.arc/token`, in that order. Setup verifies Arcanum read access without copying or changing credentials.
+
+```bash
+daddy arcadia setup --workspace ~/arcadia2
 daddy workspaces add ~/arcadia --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
 
+`setup` checks the helper, the mounted source, Arc and a read-only Arcanum request before enabling the integration. A missing dependency stops setup with a specific error.
+
 Already have Work? Update its defaults with `daddy workspaces set Work ~/arcadia --copies session`. Existing sessions keep their settings.
+
+## Agent instructions
+
+Codex reads the global `~/.codex/AGENTS.md` and applicable `AGENTS.md` files from the repository root to the starting subdirectory. If Arcadia rules live below the root, save that directory as the workspace or session `scope`. Personal files from another machine are not transferred automatically.
+
+Session skills are selected separately for daddy and workers. You can give the Arc VCS skill to both roles. The service needs `arcadia-mounts` as an installed helper; agents do not need to lease another checkout on top of the one already assigned to them. Skills neither enable the repository module nor install their scripts; see [instructions and skills](../instructions/en.md).
 
 ## Automatic copies
 
