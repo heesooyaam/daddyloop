@@ -19,6 +19,7 @@ type DeliveryPin = {
   messageId: number;
   status: 'pinned' | 'failed';
   nextAttemptAt?: number;
+  attempts?: number;
   error?: string;
 };
 type Delivery = {
@@ -52,6 +53,9 @@ export function deliveryStatus(result: unknown) {
 export class TelegramDelivery {
   private pending = new Map<string, Delivery>();
   private pinRetries = new Map<string, Delivery>();
+  // Older releases used one turn:<runId> delivery for every agent message in a turn.
+  // Keep a one-time lookup so replay can move that durable state to message:<messageId>.
+  private legacyByNotification = new Map<string, { key: string; value: Delivery }>();
   private running?: Promise<void>;
   private controller?: AbortController;
   private timer?: NodeJS.Timeout;
@@ -77,6 +81,15 @@ export class TelegramDelivery {
       }
       if (value.status === 'sent' && value.pin?.status === 'failed')
         this.pinRetries.set(key, value);
+      if (
+        value.status !== 'cancelled' &&
+        value.options?.key?.startsWith('turn:') &&
+        value.options.notificationId
+      )
+        this.legacyByNotification.set(digest([value.destination, value.options.notificationId]), {
+          key,
+          value,
+        });
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -91,6 +104,9 @@ export class TelegramDelivery {
   }
   private save(key: string, value: Delivery) {
     this.store.setSetting(key, value);
+    this.remember(key, value);
+  }
+  private remember(key: string, value: Delivery) {
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
     if (value.status === 'sent' && value.pin?.status === 'failed') this.pinRetries.set(key, value);
@@ -110,6 +126,27 @@ export class TelegramDelivery {
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
   }
+  private migrateByNotification(
+    key: string,
+    destination: TelegramDestination,
+    notificationId: string,
+    deliveryKey?: string,
+  ) {
+    const legacyKey = digest([destination, notificationId]);
+    const row = this.legacyByNotification.get(legacyKey);
+    if (!row || row.key === key) return;
+    if (row.value.status === 'sending') row.value.status = 'queued';
+    row.value.options.key = deliveryKey;
+    this.store.transaction(() => {
+      this.store.setSetting(key, row.value);
+      this.store.db.prepare('DELETE FROM settings WHERE key=?').run(row.key);
+    });
+    this.pending.delete(row.key);
+    this.pinRetries.delete(row.key);
+    this.legacyByNotification.delete(legacyKey);
+    this.remember(key, row.value);
+    return row.value;
+  }
   async send(
     destination: TelegramDestination,
     content: TelegramCard | FormattedText,
@@ -122,6 +159,8 @@ export class TelegramDelivery {
     const key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
     let value =
       this.pending.get(key) ?? this.pinRetries.get(key) ?? this.store.setting<Delivery>(key);
+    if (!value && options.notificationId)
+      value = this.migrateByNotification(key, destination, options.notificationId, options.key);
     if (value) {
       const needsPin =
         !!options.pin &&
@@ -202,6 +241,17 @@ export class TelegramDelivery {
       error: values.find((value) => value.error)?.error ?? null,
     };
   }
+  private clearPinError(error?: string) {
+    if (error && this.store.setting('telegram.error') === error)
+      this.store.setSetting('telegram.error', null);
+  }
+  private applyRateLimit(error: unknown) {
+    const retryAfter = Number((error as { retryAfter?: number }).retryAfter);
+    if (!Number.isFinite(retryAfter) || retryAfter <= 0) return;
+    this.rateLimitUntil = Math.min(8.64e15, this.clock() + retryAfter * 1000);
+    this.store.setSetting(`telegram.deliveryLimit:${this.bot}`, this.rateLimitUntil);
+    return this.rateLimitUntil;
+  }
   private async pinMessage(value: Delivery, signal: AbortSignal) {
     if (!value.options.pin) return;
     const messageId = value.messages[0]?.id;
@@ -222,27 +272,42 @@ export class TelegramDelivery {
         signal,
       );
       value.pin = { messageId, status: 'pinned' };
-      if (previousError && this.store.setting('telegram.error') === previousError)
-        this.store.setSetting('telegram.error', null);
+      this.clearPinError(previousError);
     } catch (error) {
       if (signal.aborted) throw error;
       if (/message.*already.*pinned|chat[_ ]not[_ ]modified/i.test(String(error))) {
         value.pin = { messageId, status: 'pinned' };
-        if (previousError && this.store.setting('telegram.error') === previousError)
-          this.store.setSetting('telegram.error', null);
+        this.clearPinError(previousError);
         return;
       }
+      const sameMessage = value.pin?.messageId === messageId;
+      const attempts = (sameMessage ? (value.pin?.attempts ?? 0) : 0) + 1;
+      const rateLimitUntil = this.applyRateLimit(error);
+      const permissionDenied =
+        !rateLimitUntil &&
+        /not enough rights|chat[_ ]admin[_ ]required|administrator rights|right to pin|can_pin_messages|pin messages/i.test(
+          String(error),
+        );
       const location = `${value.destination.chatId}${
         value.destination.threadId === undefined ? '' : `, topic ${value.destination.threadId}`
       }`;
-      const diagnostic = `Could not pin the Telegram status message in chat ${location}. Give the bot permission to pin messages; the session will continue without the pin.`;
+      const diagnostic = permissionDenied
+        ? `Could not pin the Telegram status message in chat ${location}. Give the bot permission to pin messages; the session will continue without the pin.`
+        : undefined;
+      if (!diagnostic) this.clearPinError(previousError);
       value.pin = {
         messageId,
         status: 'failed',
-        nextAttemptAt: this.clock() + pinRetryMs,
-        error: diagnostic,
+        nextAttemptAt:
+          rateLimitUntil ??
+          this.clock() +
+            (permissionDenied
+              ? pinRetryMs
+              : Math.min(300000, 1000 * 2 ** Math.min(attempts - 1, 9))),
+        attempts,
+        ...(diagnostic ? { error: diagnostic } : {}),
       };
-      this.store.setSetting('telegram.error', diagnostic);
+      if (diagnostic) this.store.setSetting('telegram.error', diagnostic);
       this.store.event('_system', 'telegram.status_pin_failed', {
         destination: value.destination,
         error: redact(String(error)),
@@ -276,8 +341,7 @@ export class TelegramDelivery {
       const error = value.pin?.error;
       value.options.pin = undefined;
       value.pin = undefined;
-      if (error && this.store.setting('telegram.error') === error)
-        this.store.setSetting('telegram.error', null);
+      this.clearPinError(error);
       this.save(key, value);
       return;
     }
@@ -447,11 +511,7 @@ export class TelegramDelivery {
       value.status = 'queued';
       value.attempts++;
       value.error = redact(String(error));
-      const retryAfter = Number((error as { retryAfter?: number }).retryAfter);
-      if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        this.rateLimitUntil = Math.min(8.64e15, this.clock() + retryAfter * 1000);
-        this.store.setSetting(`telegram.deliveryLimit:${this.bot}`, this.rateLimitUntil);
-      }
+      this.applyRateLimit(error);
       value.nextAttemptAt = Math.max(
         this.rateLimitUntil,
         this.clock() + Math.min(300000, 1000 * 2 ** Math.min(value.attempts - 1, 9)),

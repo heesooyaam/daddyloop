@@ -95,6 +95,51 @@ it('persists refused messages and retries with exponential backoff after restart
   }
 });
 
+it('migrates a queued legacy turn delivery with its acknowledged chunks', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const content = 'A'.repeat(4096) + 'B'.repeat(4096) + 'C'.repeat(808);
+    const notificationId = 'telegram:dialog:-10042:4:message-id:final';
+    f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
+    await f.queue.send(destination, text(content), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId,
+    });
+    expect(f.call).toHaveBeenCalledTimes(2);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await restored.send(destination, text(content), {
+      key: 'message:message-id',
+      replace: true,
+      final: true,
+      notificationId,
+    });
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(4);
+    expect(f.call.mock.calls[2][1].text).toBe(f.call.mock.calls[1][1].text);
+    expect(f.call.mock.calls.slice(2).map(([, body]) => body.text)).not.toContain(
+      f.call.mock.calls[0][1].text,
+    );
+    const deliveries = f.store.db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .all()
+      .map((row) => JSON.parse(String(row.value)))
+      .filter((value) => value.options.notificationId === notificationId);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].messages).toHaveLength(3);
+    expect(deliveries[0].status).toBe('sent');
+    expect(deliveries[0].options.key).toBe('message:message-id');
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('wakes buffered delivery on a new reply and keeps messages in conversation order', async () => {
   const f = fixture();
   try {
@@ -308,6 +353,80 @@ it('retries a denied idle status pin without another send or edit', async () => 
   } finally {
     await f.close();
     vi.useRealTimers();
+  }
+});
+
+it('applies pin retry_after to all delivery traffic without reporting a permissions error', async () => {
+  const f = fixture();
+  try {
+    let pinAttempts = 0;
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage' && pinAttempts++ === 0)
+        throw Object.assign(new Error('Too many requests'), {
+          code: 'telegram_error',
+          retryAfter: 60,
+        });
+      return { message_id: f.call.mock.calls.length };
+    });
+    const destination = { chatId: -10042, threadId: 4 };
+    await expect(
+      f.queue.send(destination, text('Idle status'), {
+        key: 'status',
+        replace: true,
+        pin: true,
+        final: true,
+      }),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(f.store.setting('telegram.deliveryLimit:test_bot')).toBe(f.clock() + 60000);
+    expect(f.store.setting('telegram.error')).toBeUndefined();
+    await f.queue.send(destination, text('Agent answer'), { key: 'answer' });
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual(['sendMessage', 'pinChatMessage']);
+    f.advance(59999);
+    await f.queue.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+    f.advance(1);
+    await f.queue.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'sendMessage',
+      'pinChatMessage',
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
+it('retries a transient pin failure without reporting a permissions error', async () => {
+  const f = fixture();
+  try {
+    let pinAttempts = 0;
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage' && pinAttempts++ === 0)
+        throw Object.assign(new Error('connection reset'), { code: 'telegram_unreachable' });
+      return { message_id: 51 };
+    });
+    await expect(
+      f.queue.send({ chatId: -10042, threadId: 4 }, text('Idle status'), {
+        key: 'status',
+        replace: true,
+        pin: true,
+        final: true,
+      }),
+    ).resolves.toMatchObject({ status: 'sent' });
+    expect(f.store.setting('telegram.error')).toBeUndefined();
+    f.advance(999);
+    await f.queue.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+    f.advance(1);
+    await f.queue.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'pinChatMessage',
+    ]);
+  } finally {
+    await f.close();
   }
 });
 
