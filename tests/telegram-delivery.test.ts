@@ -274,7 +274,8 @@ it('keeps a status update queued while the initial pin request is in flight', as
   }
 });
 
-it('keeps status delivery successful when Telegram refuses pinning', async () => {
+it('retries a denied idle status pin without another send or edit', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   const f = fixture();
   try {
     let canPin = false;
@@ -291,23 +292,81 @@ it('keeps status delivery successful when Telegram refuses pinning', async () =>
     expect(f.store.setting<string>('telegram.error')).toContain(
       'Give the bot permission to pin messages',
     );
-    await f.queue.send({ chatId: -10042, threadId: 4 }, text('Still working'), options);
-    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
-      'sendMessage',
-      'pinChatMessage',
-      'editMessageText',
-    ]);
+    f.queue.start();
     canPin = true;
-    f.advance(60 * 60 * 1000);
-    await f.queue.send({ chatId: -10042, threadId: 4 }, text('Still working'), options);
+    f.advance(60 * 60 * 1000 - 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(f.call).toHaveBeenCalledTimes(2);
+    f.advance(1);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(f.call.mock.calls.map(([method]) => method)).toEqual([
       'sendMessage',
       'pinChatMessage',
-      'editMessageText',
       'pinChatMessage',
     ]);
     expect(f.store.setting('telegram.error')).toBeNull();
   } finally {
+    await f.close();
+    vi.useRealTimers();
+  }
+});
+
+it('does not hold conversation messages behind a delayed status pin', async () => {
+  const f = fixture();
+  try {
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage') throw new Error('not enough rights to pin a message');
+      return { message_id: f.call.mock.calls.length };
+    });
+    const destination = { chatId: -10042, threadId: 4 };
+    await f.queue.send(destination, text('Idle status'), {
+      key: 'status',
+      replace: true,
+      pin: true,
+      final: true,
+    });
+    await f.queue.send(destination, text('Agent answer'), { key: 'answer' });
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', 'Idle status'],
+      ['pinChatMessage', undefined],
+      ['sendMessage', 'Agent answer'],
+    ]);
+    expect(f.queue.status().pending).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+it('restores an idle status pin retry after restart', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    let canPin = false;
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'pinChatMessage' && !canPin)
+        throw new Error('not enough rights to pin a message');
+      return { message_id: 31 };
+    });
+    await f.queue.send({ chatId: -10042, threadId: 4 }, text('Idle status'), {
+      key: 'status',
+      replace: true,
+      pin: true,
+      final: true,
+    });
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    canPin = true;
+    f.advance(60 * 60 * 1000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'pinChatMessage',
+    ]);
+    expect(f.store.setting('telegram.error')).toBeNull();
+    expect(restored.status().pending).toBe(0);
+  } finally {
+    await restored?.stop();
     await f.close();
   }
 });

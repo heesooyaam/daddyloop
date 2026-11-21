@@ -51,6 +51,7 @@ export function deliveryStatus(result: unknown) {
 /** Durable, ordered delivery. Callers choose whether a stable key is replaceable. */
 export class TelegramDelivery {
   private pending = new Map<string, Delivery>();
+  private pinRetries = new Map<string, Delivery>();
   private running?: Promise<void>;
   private controller?: AbortController;
   private timer?: NodeJS.Timeout;
@@ -67,10 +68,15 @@ export class TelegramDelivery {
       .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' ORDER BY rowid")
       .all()) {
       const value = JSON.parse(String(row.value)) as Delivery;
-      if (!value || value.bot !== bot || !['queued', 'sending'].includes(value.status)) continue;
-      value.status = 'queued';
-      this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
-      this.pending.set(String(row.key), value);
+      if (!value || value.bot !== bot) continue;
+      const key = String(row.key);
+      if (['queued', 'sending'].includes(value.status)) {
+        value.status = 'queued';
+        this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
+        this.pending.set(key, value);
+      }
+      if (value.status === 'sent' && value.pin?.status === 'failed')
+        this.pinRetries.set(key, value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -87,6 +93,8 @@ export class TelegramDelivery {
     this.store.setSetting(key, value);
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
+    if (value.status === 'sent' && value.pin?.status === 'failed') this.pinRetries.set(key, value);
+    else this.pinRetries.delete(key);
   }
   private createdAt() {
     this.lastCreatedAt = Math.max(this.clock(), this.lastCreatedAt + 1);
@@ -112,7 +120,8 @@ export class TelegramDelivery {
       ...(destination.threadId === undefined ? {} : { threadId: destination.threadId }),
     };
     const key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
-    let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
+    let value =
+      this.pending.get(key) ?? this.pinRetries.get(key) ?? this.store.setting<Delivery>(key);
     if (value) {
       const needsPin =
         !!options.pin &&
@@ -240,6 +249,46 @@ export class TelegramDelivery {
       });
     }
   }
+  private async retryPins(limit: number) {
+    const attempted = new Set<string>();
+    for (let i = 0; i < limit && !this.stopped; i++) {
+      if (this.clock() < this.rateLimitUntil) break;
+      const ready = [...this.pinRetries.entries()]
+        .filter(
+          ([key, value]) =>
+            !attempted.has(key) &&
+            value.status === 'sent' &&
+            value.pin?.status === 'failed' &&
+            (value.pin.nextAttemptAt ?? 0) <= this.clock(),
+        )
+        .sort(
+          (a, b) =>
+            (a[1].pin?.nextAttemptAt ?? 0) - (b[1].pin?.nextAttemptAt ?? 0) ||
+            a[1].createdAt - b[1].createdAt,
+        )[0];
+      if (!ready) break;
+      attempted.add(ready[0]);
+      await this.retryPin(...ready);
+    }
+  }
+  private async retryPin(key: string, value: Delivery) {
+    if (!this.valid(value)) {
+      const error = value.pin?.error;
+      value.options.pin = undefined;
+      value.pin = undefined;
+      if (error && this.store.setting('telegram.error') === error)
+        this.store.setSetting('telegram.error', null);
+      this.save(key, value);
+      return;
+    }
+    this.controller = new AbortController();
+    try {
+      await this.pinMessage(value, this.controller.signal);
+      this.save(key, value);
+    } finally {
+      this.controller = undefined;
+    }
+  }
   async flush(limit = 10) {
     if (this.running || this.stopped) return this.running;
     this.running = (async () => {
@@ -260,6 +309,7 @@ export class TelegramDelivery {
         attempted.add(ready[0]);
         await this.attempt(...ready);
       }
+      await this.retryPins(limit);
     })().catch((error) => this.store.setSetting('telegram.deliveryError', redact(String(error))));
     try {
       await this.running;
