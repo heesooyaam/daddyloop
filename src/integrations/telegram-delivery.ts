@@ -56,6 +56,7 @@ export class TelegramDelivery {
   // Older releases used one turn:<runId> delivery for every agent message in a turn.
   // Keep a one-time lookup so replay can move that durable state to message:<messageId>.
   private legacyByNotification = new Map<string, { key: string; value: Delivery }>();
+  private redirectedKeys = new Map<string, string>();
   private running?: Promise<void>;
   private controller?: AbortController;
   private timer?: NodeJS.Timeout;
@@ -103,6 +104,12 @@ export class TelegramDelivery {
     void this.flush();
   }
   private save(key: string, value: Delivery) {
+    const redirected = this.redirectedKeys.get(key);
+    if (redirected) {
+      this.pending.delete(key);
+      this.pinRetries.delete(key);
+      key = redirected;
+    }
     this.store.setSetting(key, value);
     this.remember(key, value);
   }
@@ -144,6 +151,7 @@ export class TelegramDelivery {
     this.pending.delete(row.key);
     this.pinRetries.delete(row.key);
     this.legacyByNotification.delete(legacyKey);
+    this.redirectedKeys.set(row.key, key);
     this.remember(key, row.value);
     return row.value;
   }

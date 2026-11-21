@@ -140,6 +140,61 @@ it('migrates a queued legacy turn delivery with its acknowledged chunks', async 
   }
 });
 
+it('redirects an in-flight legacy attempt to the migrated delivery', async () => {
+  const f = fixture();
+  let active: TelegramDelivery | undefined;
+  let restored: TelegramDelivery | undefined;
+  let finishSend = () => {};
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const notificationId = 'telegram:dialog:-10042:4:message-id:final';
+    const oldOptions = {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId,
+    };
+    await f.queue.stop();
+    await f.queue.send(destination, text('Saved answer'), oldOptions);
+    const send = new Promise<void>((resolve) => {
+      finishSend = resolve;
+    });
+    f.call.mockImplementation(async (method: string) => {
+      if (method === 'sendMessage') await send;
+      return { message_id: 73 };
+    });
+    active = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    const flushing = active.flush(1);
+    await vi.waitFor(() => expect(f.call).toHaveBeenCalledTimes(1));
+    await active.send(destination, text('Saved answer'), {
+      ...oldOptions,
+      key: 'message:message-id',
+    });
+    finishSend();
+    await flushing;
+    const deliveries = f.store.db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .all()
+      .map((row) => JSON.parse(String(row.value)))
+      .filter((value) => value.options.notificationId === notificationId);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({
+      status: 'sent',
+      options: { key: 'message:message-id' },
+      messages: [{ id: 73 }],
+    });
+    await active.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(1);
+  } finally {
+    finishSend();
+    await active?.stop();
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('wakes buffered delivery on a new reply and keeps messages in conversation order', async () => {
   const f = fixture();
   try {
