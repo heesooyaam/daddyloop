@@ -165,6 +165,7 @@ export class TelegramApi {
           ok: boolean;
           result?: T;
           description?: string;
+          error_code?: number;
           parameters?: { retry_after?: number };
         };
         try {
@@ -190,7 +191,10 @@ export class TelegramApi {
               redact(value.description ?? `Telegram HTTP ${response.status}`),
               502,
             ),
-            { retryAfter: value.parameters?.retry_after },
+            {
+              retryAfter: value.parameters?.retry_after,
+              telegramStatus: value.error_code ?? response.status,
+            },
           );
         const navigation = this.navigation.getStore();
         const outgoing = body as { chat_id?: number; message_thread_id?: number };
@@ -473,10 +477,10 @@ export class Telegram {
     ) {
       // Persist voice and conversation input before acknowledging the update.
       const handled = await this.workspace.handle(update);
+      if (handled) this.queueAcceptedReaction(message);
       store.db
         .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
         .run(update.update_id, now());
-      if (handled) void this.reactToAcceptedMessage(message).catch(() => {});
       return;
     }
     store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
@@ -737,25 +741,20 @@ export class Telegram {
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
   }
-  private async reactToAcceptedMessage(message: NonNullable<Update['message']>) {
+  private queueAcceptedReaction(message: NonNullable<Update['message']>) {
     const messageId = message.message_id;
     if (!messageId || !Number.isSafeInteger(messageId) || messageId < 1) return;
+    if (!message.from || message.from.id !== this.paired()?.userId) return;
     const store = this.engine.store;
     const receipt = `telegram:${message.chat.id}:${messageId}`;
     const accepted =
       store.setting(`daddy.receipt:${receipt}`) ||
       store.db.prepare('SELECT 1 FROM voice_jobs WHERE id=?').get(hash(receipt));
-    if (!accepted) return;
-    // Reaction delivery must not hold up the input queue or change its receipt.
-    await this.api.call(
-      'setMessageReaction',
-      {
-        chat_id: message.chat.id,
-        message_id: messageId,
-        reaction: [{ type: 'emoji', emoji: '👀' }],
-      },
-      AbortSignal.timeout(4000),
-    );
+    if (accepted)
+      this.api.delivery?.enqueueReaction(
+        { chatId: message.chat.id, threadId: message.message_thread_id },
+        messageId,
+      );
   }
   private cleanupNotice(report: CleanupReport) {
     const store = this.engine.store;

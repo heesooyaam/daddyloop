@@ -160,6 +160,8 @@ it('reacts once to persisted task input without waiting for the Telegram reactio
     f.store.setSetting('telegram.currentDaddy', group.id);
     f.store.setSetting('telegram.newSession:7:7:0', null);
     await bot.handle(incoming(20, 'First task'));
+    const sending = api.delivery!.flush();
+    await vi.waitFor(() => expect(reactions).toHaveLength(1));
     await bot.handle(incoming(20, 'First task'));
     await bot.handle(incoming(21, 'Second task'));
     await bot.handle(incoming(22, '/status'));
@@ -167,6 +169,8 @@ it('reacts once to persisted task input without waiting for the Telegram reactio
       'First task',
       'Second task',
     ]);
+    rejected();
+    await sending;
     expect(reactions).toEqual(
       [20, 21].map((message_id) => ({
         chat_id: 7,
@@ -174,8 +178,7 @@ it('reacts once to persisted task input without waiting for the Telegram reactio
         reaction: [{ type: 'emoji', emoji: '👀' }],
       })),
     );
-    rejected();
-    expect(bot.status().error).toBeNull();
+    expect(bot.status().delivery).toMatchObject({ pending: 0, error: null });
   } finally {
     rejected();
     await bot.stop();
