@@ -17,13 +17,11 @@ export type State =
   | 'complete';
 export interface Policy {
   planApproval: 'human' | 'auto';
-  maxRounds: number;
   maxNoProgress: number;
   requireChecks: boolean;
 }
 export const defaultPolicy: Policy = {
   planApproval: 'human',
-  maxRounds: 3,
   maxNoProgress: 2,
   requireChecks: true,
 };
