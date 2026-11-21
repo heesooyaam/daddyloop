@@ -1,6 +1,11 @@
-import { sameAgentProfile } from './agents.js';
 import type { Store } from './store.js';
-import type { AgentProfile, ReviewGroup, Task, WorkerSlot } from './types.js';
+import {
+  sameAgentProfile,
+  type AgentProfile,
+  type ReviewGroup,
+  type Task,
+  type WorkerSlot,
+} from './types.js';
 
 export function workerSlots(store: Store, group: ReviewGroup): WorkerSlot[] {
   const target = group.requestedWorkerLimit ?? group.workerLimit ?? 1;

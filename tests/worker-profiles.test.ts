@@ -108,7 +108,13 @@ it('forces only the active author attempt to restart and preserves its queue ord
     expect(first.signal.aborted).toBe(false);
     expect(f.store.getTask(task.id).agents?.worker).toEqual(profiles.worker);
 
-    expect(await f.daddy.configureWorker(group.id, 1, next, true)).toEqual({ restarted: true });
+    await expect(
+      f.daddy.configureWorker(group.id, 1, next, { force: true, expectedTaskId: 'old-task' }),
+    ).rejects.toMatchObject({ code: 'stale_worker' });
+    expect(first.signal.aborted).toBe(false);
+    expect(
+      await f.daddy.configureWorker(group.id, 1, next, { force: true, expectedTaskId: task.id }),
+    ).toEqual({ restarted: true });
     expect(first.signal.aborted).toBe(true);
     expect(f.store.getTask(task.id)).toMatchObject({
       generation: task.generation + 1,
@@ -160,7 +166,7 @@ it('keeps a result that is already being saved when the model is switched', asyn
     });
     await f.worker.tick();
     await vi.waitFor(() => expect(f.checkouts.commitTicket).toHaveBeenCalledOnce());
-    expect(await f.daddy.configureWorker(group.id, 1, profiles.daddy, true)).toEqual({
+    expect(await f.daddy.configureWorker(group.id, 1, profiles.daddy, { force: true })).toEqual({
       restarted: false,
     });
     saveCommit('b'.repeat(40));

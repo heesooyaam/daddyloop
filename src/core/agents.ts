@@ -1,11 +1,5 @@
 import { z } from 'zod';
 import { defaultAgentId } from '../modules/catalogue.js';
-import type { AgentProfile } from './types.js';
-
-export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
-  return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
-}
-
 export const profileSchema = z
   .object({
     engine: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),

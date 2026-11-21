@@ -45,6 +45,9 @@ export interface AgentProfile {
   model?: string;
   effort?: ReasoningEffort;
 }
+export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
+  return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
+}
 export interface AgentProfiles {
   worker: AgentProfile;
   daddy: AgentProfile;

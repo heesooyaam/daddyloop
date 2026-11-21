@@ -13,7 +13,7 @@ export function WorkspaceFields({
   workspace,
   value,
   onChange,
-  compact = false,
+  target = 'session',
   sessionId,
   onEditingChange,
 }: {
@@ -21,11 +21,12 @@ export function WorkspaceFields({
   workspace: Workspace;
   value?: RepositorySelection;
   onChange: (value?: RepositorySelection) => void;
-  compact?: boolean;
+  target?: 'session' | 'message' | 'task';
   sessionId?: string;
   onEditingChange?: (editing: boolean) => void;
 }) {
   const { t } = useLocale();
+  const compact = target !== 'session';
   const [editing, setEditing] = useState(false),
     [picking, setPicking] = useState(false);
   const [draft, setDraft] = useState<RepositorySelection>({});
@@ -112,9 +113,11 @@ export function WorkspaceFields({
             <span>
               {t(
                 value
-                  ? compact
-                    ? 'Repository for the next message'
-                    : 'Repository for this session'
+                  ? {
+                      session: 'Repository for this session',
+                      message: 'Repository for the next message',
+                      task: 'Repository for this task',
+                    }[target]
                   : 'Workspace source',
               )}
             </span>
@@ -130,7 +133,11 @@ export function WorkspaceFields({
               className="daddy-button quiet"
               onClick={begin}
               aria-label={t(
-                compact ? 'Change folder for the next message' : 'Change folder for this session',
+                {
+                  session: 'Change folder for this session',
+                  message: 'Change folder for the next message',
+                  task: 'Change folder for this task',
+                }[target],
               )}
               aria-expanded={false}
             >
@@ -143,9 +150,11 @@ export function WorkspaceFields({
         <div className="daddy-repository-override">
           <span>
             {t(
-              compact
-                ? 'Only the next message uses this folder.'
-                : 'Only this session uses these settings.',
+              {
+                session: 'Only this session uses these settings.',
+                message: 'Only the next message uses this folder.',
+                task: 'Only this task uses this folder.',
+              }[target],
             )}
           </span>
           <button type="button" className="daddy-text-button" onClick={() => onChange(undefined)}>
@@ -188,13 +197,23 @@ export function WorkspaceFields({
             }}
           >
             <legend>
-              {t(compact ? 'Settings for the next message' : 'Settings for this session')}
+              {t(
+                {
+                  session: 'Settings for this session',
+                  message: 'Settings for the next message',
+                  task: 'Settings for this task',
+                }[target],
+              )}
             </legend>
             <p className="daddy-muted">
               {t(
-                compact
-                  ? 'Choose where daddy should handle your next message. Following messages use the session folder again.'
-                  : 'Choose another source for this session. The saved workspace stays as it is.',
+                {
+                  session:
+                    'Choose another source for this session. The saved workspace stays as it is.',
+                  message:
+                    'Choose where daddy should handle your next message. Following messages use the session folder again.',
+                  task: 'Choose the repository and folder for this task.',
+                }[target],
               )}
             </p>
             <label style={picking ? { display: 'none' } : undefined}>

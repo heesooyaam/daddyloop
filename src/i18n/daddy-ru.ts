@@ -518,7 +518,24 @@ export const daddyRu: Record<string, string> = {
   'Worker {number} model saved · {profile}': 'Модель воркера {number} сохранена · {profile}',
   'Worker {number} will resume the task · {profile}':
     'Воркер {number} продолжит задачу · {profile}',
-  'Choose a worker from this session with /workers': 'Выбери воркера этой сессии через /workers',
+  'Choose a worker from this session': 'Выбери воркера этой сессии',
+  'This worker has changed tasks. Open its settings again.':
+    'Воркер уже сменил задачу. Открой его настройки заново.',
+  'Queue task': 'Поставить в очередь',
+  'Task description': 'Описание задачи',
+  'Assign to worker': 'Назначить воркеру',
+  'Any free worker': 'Любой свободный воркер',
+  'Use the worker model': 'Модель воркера',
+  'Configure worker {number}': 'Настроить воркера {number}',
+  'Save model': 'Сохранить модель',
+  'Apply to current task': 'Применить к текущей задаче',
+  'An active worker step restarts in the same working copy.':
+    'Активный шаг воркера перезапустится в той же рабочей копии.',
+  'Repository for this task': 'Репозиторий для этой задачи',
+  'Change folder for this task': 'Изменить папку для этой задачи',
+  'Only this task uses this folder.': 'Эту папку использует только текущая задача.',
+  'Settings for this task': 'Настройки для этой задачи',
+  'Choose the repository and folder for this task.': 'Выбери репозиторий и папку для этой задачи.',
   'A task is waiting for a worker that would be removed by this change':
     'Одной из задач назначен воркер, которого уберёт эта настройка. Дождись её запуска.',
   'Task not found in this session': 'В этой сессии такой задачи нет',

@@ -30,6 +30,7 @@ import { redact } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
 import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
+import { activityStatus, taskActivity } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import {
   sessionInstructionsSchema,
@@ -204,28 +205,41 @@ export class Daddy {
     const group = this.group(id);
     const jobs = this.store.activeJobs();
     const tasks = this.store.tasks(id);
+    const activity = taskActivity(tasks, jobs);
+    const activeByTask = new Map(activity.map((item) => [item.task.id, item]));
     return {
       group,
       canDelete: !!this.sessionWorkspaces?.supports(group),
       workspace: group.workspace!,
-      tasks: tasks.map((task) => ({
-        id: task.id,
-        title: task.title,
-        state: task.state,
-        reason: task.reason,
-        workspaceId: task.workspaceId,
-        repoPath: task.repoPath,
-        scope: task.scope,
-        dependsOn: task.dependsOn ?? [],
-        source: task.source,
-        ref: task.ref,
-        summary: task.summary,
-        policy: task.policy,
-        head: task.revision?.head,
-        worker: this.engine.effectiveAgents(task).worker,
-        running: jobs.some((job) => job.taskId === task.id && job.status === 'running'),
-        queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
-      })),
+      workerDefault: group.worker ?? this.engine.defaultAgents().worker,
+      taskQueue: activity
+        .filter(({ task, job }) => job?.status === 'queued' && task.state !== 'complete')
+        .map(({ task }) => task.id),
+      tasks: tasks.map((task) => {
+        const item = activeByTask.get(task.id)!;
+        return {
+          id: task.id,
+          title: task.title,
+          state: task.state,
+          statusLabel: activityStatus(item),
+          reason: task.reason,
+          workspaceId: task.workspaceId,
+          repoPath: task.repoPath,
+          scope: task.scope,
+          dependsOn: task.dependsOn ?? [],
+          source: task.source,
+          ref: task.ref,
+          summary: task.summary,
+          policy: task.policy,
+          head: task.revision?.head,
+          worker:
+            (item.job?.role === 'author' ? item.job.profile : undefined) ??
+            this.engine.effectiveAgents(task).worker,
+          workerRequest: task.workerRequest,
+          running: item.job?.status === 'running',
+          queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
+        };
+      }),
       ...this.sessionActivity(group, jobs),
       messages: this.store.messages(id),
       jobs: this.store
@@ -276,18 +290,24 @@ export class Daddy {
     });
   }
 
-  async configureWorker(id: string, number: number, profile: AgentProfile, force = false) {
+  async configureWorker(
+    id: string,
+    number: number,
+    profile: AgentProfile,
+    { force = false, expectedTaskId }: { force?: boolean; expectedTaskId?: string } = {},
+  ) {
     await this.catalogue.validate(profile);
     const readSlot = () => {
       const group = this.group(id);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       const slots = workerSlots(this.store, group);
       const slot = slots.find((item) => item.number === number);
-      if (!slot)
+      if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      if (expectedTaskId && slot.taskId !== expectedTaskId)
         throw new AppError(
-          'unknown_worker',
-          'Choose a worker from this session with /workers',
-          422,
+          'stale_worker',
+          'This worker has changed tasks. Open its settings again.',
+          409,
         );
       return { group, slots, slot };
     };

@@ -7,7 +7,7 @@ import { translator, type Locale } from '../i18n/index.js';
 import type { TelegramApi } from './telegram.js';
 import type { TelegramDestination } from './telegram-delivery.js';
 import { TelegramText } from './telegram-text.js';
-import { activityStatus, taskActivity, taskReference, taskStatus } from './telegram-tasks.js';
+import { activityStatus, taskActivity, taskReference, taskStatus } from '../core/task-activity.js';
 
 const activeStates = new Set<State>([
   'implementing',

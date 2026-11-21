@@ -1,12 +1,11 @@
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus } from '../core/types.js';
-import { AppError, now, sameRevision, prRef, isTicket } from '../core/types.js';
+import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
 import { buildContext } from './context.js';
-import { sameAgentProfile } from '../core/agents.js';
 import { workspaceScope } from '../core/workspace-registry.js';
 import { realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';

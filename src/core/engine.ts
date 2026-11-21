@@ -16,6 +16,7 @@ import {
   defaultPolicy,
   now,
   sameRevision,
+  sameAgentProfile,
   revisionOf,
   type Task,
   type PRRef,
@@ -28,7 +29,7 @@ import {
 } from './types.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
-import { inheritedProfiles, sameAgentProfile } from './agents.js';
+import { inheritedProfiles } from './agents.js';
 
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
@@ -1023,11 +1024,7 @@ export class Engine {
         const slot = input.workerRequest?.slot;
         const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
         if (slot !== undefined && (!Number.isInteger(slot) || slot < 1 || slot > capacity))
-          throw new AppError(
-            'unknown_worker',
-            'Choose a worker from this session with /workers',
-            422,
-          );
+          throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       }
       if (
         (parent || input.groupId) &&

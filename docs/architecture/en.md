@@ -49,7 +49,7 @@ sequenceDiagram
 
 The website and CLI send text over HTTP. Regular Telegram messages call the same `Daddy.chat()`. “Accepted” means the request is saved. The model's answer arrives later. The web client fetches updates about every two seconds.
 
-Telegram’s `/task` command saves a local task and its first author run together. The bot returns the task ID from that transaction, and a redelivered command finds the same task. The dispatcher can start the run as soon as a worker is available.
+**Queue task** on the website and `/task` in Telegram call the same service operation. It saves the task and its first author run together. A retry with the same request ID finds the same task. The dispatcher can start the run as soon as a worker is available. Both interfaces show the same task IDs and worker assignments.
 
 The coordinator receives the goal, task board and recent messages. It uses tools to read older conversation or task details. For example, `create_task` creates “Fix search” and `dispatch` assigns implementation. The service first checks the selected workspace, the task's session and its dependencies.
 

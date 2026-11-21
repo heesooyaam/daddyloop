@@ -34,13 +34,12 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { workerSlots } from '../core/worker-pool.js';
+import { profileText, taskActivity } from '../core/task-activity.js';
 import {
   parseTaskInput,
   parseWorkerInput,
-  profileText,
   queueCard,
   queuedTaskCard,
-  taskActivity,
   taskCard,
   taskCommands,
   taskReferenceId,
@@ -505,18 +504,15 @@ export class TelegramWorkspace {
         return;
       }
       const slot = workerSlots(this.store, group).find((item) => item.number === input.number);
-      if (!slot)
-        throw new AppError(
-          'unknown_worker',
-          'Choose a worker from this session with /workers',
-          422,
-        );
+      if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       const profile = {
         engine: input.engine ?? slot.profile?.engine ?? defaults.engine,
         model: input.model,
         effort: input.effort,
       };
-      const result = await this.daddy.configureWorker(groupId, input.number, profile, input.force);
+      const result = await this.daddy.configureWorker(groupId, input.number, profile, {
+        force: input.force,
+      });
       await this.api.send(
         destination,
         this.t(

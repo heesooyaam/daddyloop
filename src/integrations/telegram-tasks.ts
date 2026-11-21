@@ -1,13 +1,23 @@
 import { parseArgs } from 'node:util';
-import { sameAgentProfile } from '../core/agents.js';
 import { redact } from '../core/security.js';
 import { clipTitle } from '../core/session-title.js';
-import type { AgentProfile, Job, State, Task, WorkerRequest, WorkerSlot } from '../core/types.js';
+import {
+  sameAgentProfile,
+  type AgentProfile,
+  type Task,
+  type WorkerRequest,
+  type WorkerSlot,
+} from '../core/types.js';
+import {
+  activityStatus,
+  profileText,
+  taskReference,
+  type TaskActivity,
+} from '../core/task-activity.js';
 import { translator, type Locale } from '../i18n/index.js';
 import { safeLink, TelegramText, type TelegramCard } from './telegram-text.js';
 
 export const taskCommands = /^\/(task|queue|workers|worker)(?:\s+([\s\S]+))?$/;
-export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 export const taskReferenceId = (text: string) =>
   /^(?:DADDY-([a-f0-9]{8})|([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}))$/i
     .exec(text)
@@ -59,51 +69,6 @@ export function parseWorkerInput(args: string) {
   } catch {
     return;
   }
-}
-
-const statusLabels: Record<State, string> = {
-  discussing: 'Waiting for assignment',
-  implementing: 'Implementing the task',
-  ready_for_review: 'Ready for review',
-  submitting: 'Submitting the changes',
-  queued: 'Waiting for a worker',
-  reviewing: 'Reviewing the changes',
-  awaiting_publication: 'Publishing review',
-  fixing: 'Addressing review feedback',
-  awaiting_push: 'Sending fixes',
-  awaiting_checks: 'Waiting for CI',
-  awaiting_plan_approval: 'Waiting for plan approval',
-  needs_input: 'Action needed',
-  paused: 'Paused',
-  complete: 'Complete',
-};
-
-export function taskStatus(state: State, queued: boolean) {
-  return queued && state !== 'paused' ? 'Waiting for a worker' : statusLabels[state];
-}
-
-type TaskActivity = { task: Task; job?: Job };
-
-export function taskActivity(tasks: Task[], jobs: Job[]): TaskActivity[] {
-  const byId = new Map<string, TaskActivity>(tasks.map((task) => [task.id, { task }]));
-  const ordered = new Set<TaskActivity>();
-  for (const job of jobs) {
-    const item = byId.get(job.taskId);
-    if (item?.task.generation !== job.generation) continue;
-    if (!item.job || job.status === 'running') item.job = job;
-    ordered.add(item);
-  }
-  return [...new Set([...ordered, ...byId.values()])];
-}
-
-export function activityStatus({ task, job }: TaskActivity) {
-  return job?.status === 'queued' && job.role === 'reviewer' && task.state !== 'paused'
-    ? 'Waiting for review'
-    : taskStatus(task.state, job?.status === 'queued');
-}
-
-export function profileText(profile: AgentProfile) {
-  return [profile.engine, profile.model, profile.effort].filter(Boolean).join(' · ');
 }
 
 function taskButton(task: Task) {

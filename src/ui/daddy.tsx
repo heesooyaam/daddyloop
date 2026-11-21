@@ -26,7 +26,6 @@ import {
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
 import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
-import type { ModelOption } from '../core/agents.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
@@ -42,25 +41,12 @@ import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageStrip, UsagePanel } from './usage.js';
 import { usageSummary } from '../client/usage.js';
+import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
+import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
+import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const stateCopy: Record<string, string> = {
-  discussing: 'Waiting for daddy',
-  implementing: 'Worker on it',
-  ready_for_review: 'Ready for review',
-  submitting: 'Creating PR',
-  queued: 'Queued for review',
-  reviewing: 'daddy is reviewing',
-  awaiting_publication: 'Publishing review',
-  fixing: 'Addressing feedback',
-  awaiting_push: 'Sending fixes',
-  awaiting_checks: 'Waiting for CI',
-  awaiting_plan_approval: 'Plan approval',
-  needs_input: 'daddy is checking',
-  paused: 'Paused',
-  complete: 'Complete',
-};
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -91,13 +77,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'limits'
       | 'presets'
       | 'delete'
+      | 'queue-task'
+      | 'workers'
       | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null),
-    composer = useRef<HTMLTextAreaElement>(null);
+    end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -129,6 +116,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
+  const workItems = board?.tasks.toSorted(
+    (a, b) =>
+      (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  );
   return (
     <div className="daddy-app">
       <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
@@ -430,10 +423,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     onEditingChange={setRepositoryEditing}
                     value={state.overrides[state.selected]}
                     onChange={(value) => model.repository(value)}
-                    compact
+                    target="message"
                   />
                   <textarea
-                    ref={composer}
                     aria-label={t('Message daddy')}
                     placeholder={t(
                       paused
@@ -520,20 +512,29 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     board.workers,
                   )}
                 </p>
-                <p className="daddy-pool-hint">
-                  {t(
-                    'Pool changes apply in the background. Busy workers finish their tasks, including review fixes.',
-                  )}
-                </p>
+                <div className="daddy-board-controls">
+                  <button className="daddy-button outline" onClick={() => setModal('workers')}>
+                    <Users size={15} />
+                    {t('Workers')}
+                  </button>
+                  <button
+                    className="daddy-button primary"
+                    onClick={() => setModal('queue-task')}
+                    disabled={paused || !!board.group.deletion}
+                  >
+                    <Plus size={15} />
+                    {t('Queue task')}
+                  </button>
+                </div>
                 <div className="daddy-section-label">
-                  {t('Tasks')}
+                  {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
                   <span>
                     {board.tasks.filter((task) => task.state === 'complete').length}/
                     {board.tasks.length}
                   </span>
                 </div>
                 <div className="daddy-work-items">
-                  {board.tasks.map((task) => (
+                  {workItems?.map((task) => (
                     <button
                       key={task.id}
                       className={'daddy-work-item ' + task.state}
@@ -548,11 +549,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           ) : (
                             <span className="daddy-work-dot" />
                           )}
-                          {t(stateCopy[task.state] ?? task.state)}
+                          {t(task.statusLabel)}
                         </span>
                         <MoreHorizontal size={17} />
                       </div>
                       <strong>{task.title}</strong>
+                      <code className="daddy-work-id">{taskReference(task)}</code>
                       <footer>
                         <span>
                           {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
@@ -573,17 +575,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     {t('The crew is ready. Give daddy something to handle.')}
                   </p>
                 )}
-                <button
-                  className="daddy-button outline"
-                  onClick={() => {
-                    setPane('chat');
-                    composer.current?.focus();
-                    model.draft(state.drafts[state.selected] || '');
-                  }}
-                >
-                  <Plus size={16} />
-                  {t('Add tasks through daddy')}
-                </button>
                 <div className="daddy-board-bottom">
                   <span className="daddy-avatar small">d.</span>
                   <span>
@@ -692,6 +683,30 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               await model.action('settings', { profiles, instructions });
               if (!model.snapshot().error) setModal(null);
             }}
+          />
+        </Dialog>
+      )}
+      {modal === 'queue-task' && board && (
+        <Dialog title={t('Queue task')} onClose={() => setModal(null)}>
+          <QueueTaskForm
+            key={board.group.id}
+            api={api}
+            board={board}
+            onQueued={(taskId) => {
+              setModal(null);
+              setInspect(taskId);
+              void model.refresh();
+            }}
+          />
+        </Dialog>
+      )}
+      {modal === 'workers' && board && (
+        <Dialog title={t('Workers')} onClose={() => setModal(null)}>
+          <WorkerControls
+            key={board.group.id}
+            api={api}
+            board={board}
+            onChange={() => model.refresh()}
           />
         </Dialog>
       )}
@@ -1200,28 +1215,10 @@ function SessionSettings({
       board.group.instructions,
     ),
     [importingInstructions, setImportingInstructions] = useState(false),
-    [models, setModels] = useState<ModelOption[]>([]),
-    [engines, setEngines] = useState<{ id: string; name: string }[]>([]),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const originalProfiles = useRef(profiles);
-  const load = async (refresh = false) => {
-    try {
-      const result = await api<{
-        models: ModelOption[];
-        engines: { id: string; name: string }[];
-        error?: string;
-      }>('/agents' + (refresh ? '?refresh=1' : ''));
-      setModels(result.models);
-      setEngines(result.engines);
-      setError(result.error ?? '');
-    } catch (error) {
-      setError((error as Error).message);
-    }
-  };
-  useEffect(() => {
-    void load();
-  }, []);
+  const { catalogue, load } = useAgentCatalogue(api);
   return (
     <form
       className="daddy-form"
@@ -1240,78 +1237,17 @@ function SessionSettings({
       }}
     >
       {(['daddy', 'worker'] as const).map((role) => {
-        const profile = profiles[role],
-          choices = models.filter((model) => model.engine === profile.engine),
-          model = choices.find((model) => model.id === profile.model);
+        const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
           <fieldset key={role}>
-            <legend>{role === 'daddy' ? 'daddy' : t('New workers')}</legend>
-            <label>
-              {t('Agent module')}
-              <select
-                aria-label={
-                  (role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Agent module')
-                }
-                value={profile.engine}
-                onChange={(event) =>
-                  setProfiles({ ...profiles, [role]: { engine: event.target.value } })
-                }
-              >
-                {!engines.some((engine) => engine.id === profile.engine) && (
-                  <option value={profile.engine}>{profile.engine}</option>
-                )}
-                {engines.map((engine) => (
-                  <option key={engine.id} value={engine.id}>
-                    {engine.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t('Model')}
-              <select
-                aria-label={(role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Model')}
-                value={profile.model ?? ''}
-                onChange={(event) => {
-                  const model = choices.find((model) => model.id === event.target.value);
-                  setProfiles({
-                    ...profiles,
-                    [role]: {
-                      engine: profile.engine,
-                      ...(model ? { model: model.id, effort: model.defaultEffort } : {}),
-                    },
-                  });
-                }}
-              >
-                <option value="">{t('Engine configuration')}</option>
-                {profile.model && !model && <option value={profile.model}>{profile.model}</option>}
-                {choices.map((model) => (
-                  <option value={model.id} key={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t('Reasoning effort')}
-              <select
-                value={profile.effort ?? ''}
-                disabled={!profile.model}
-                onChange={(event) =>
-                  setProfiles({
-                    ...profiles,
-                    [role]: { ...profile, effort: event.target.value || undefined },
-                  })
-                }
-              >
-                <option value="">{t('Default')}</option>
-                {model?.efforts.map((effort) => (
-                  <option value={effort} key={effort}>
-                    {effort}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <legend>{label}</legend>
+            <AgentProfileFields
+              label={label}
+              profile={profiles[role]}
+              catalogue={catalogue}
+              onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
+              selectDefaultEffort
+            />
           </fieldset>
         );
       })}
@@ -1330,9 +1266,9 @@ function SessionSettings({
           'Worker defaults apply to new tasks. Changing daddy’s model requires his session to be idle.',
         )}
       </p>
-      {error && (
+      {(error || catalogue.error) && (
         <p className="daddy-field-error" role="alert">
-          {t(error)}
+          {t(error || catalogue.error!)}
         </p>
       )}
       <button className="daddy-button primary" disabled={busy || importingInstructions}>
@@ -1356,6 +1292,13 @@ function TaskReport({
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const live = board?.tasks.find((task) => task.id === id);
+  const slot = board?.workers.slots.find((worker) => worker.taskId === id);
+  const request = live?.workerRequest ?? value?.task.workerRequest;
+  const worker = slot?.number ?? request?.slot;
+  const profile = slot ? live?.worker : request?.profile;
+  const ref = live?.ref ?? value?.task.ref;
+  const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
     let active = true;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
@@ -1398,17 +1341,17 @@ function TaskReport({
       {value ? (
         <>
           <h3>{value.task.title}</h3>
-          <span className="daddy-status-pill">
-            {t(stateCopy[value.task.state] ?? value.task.state)}
-          </span>
-          <p>{value.task.reason}</p>
-          {value.task.ref.kind !== 'ticket' && safeUrl(value.task.ref.url) && (
-            <a
-              className="daddy-button outline"
-              href={value.task.ref.url}
-              target="_blank"
-              rel="noreferrer"
-            >
+          <div className="daddy-task-meta">
+            <code>{taskReference(value.task)}</code>
+            <span className="daddy-status-pill">
+              {t(live?.statusLabel ?? taskStatus(value.task.state))}
+            </span>
+            {worker !== undefined && <span>{t('Worker {number}', { number: worker })}</span>}
+            {profile && <span>{profileText(profile)}</span>}
+          </div>
+          <p>{t(live?.reason ?? value.task.reason)}</p>
+          {prUrl && (
+            <a className="daddy-button outline" href={prUrl} target="_blank" rel="noreferrer">
               <GitPullRequest size={16} />
               {t('Open native review')}
               <ArrowUpRight size={15} />

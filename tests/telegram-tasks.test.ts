@@ -1,12 +1,18 @@
 import { expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import Fastify from 'fastify';
 import { daddyFixture } from './daddy-fixture.js';
 import { catalogue } from './planning-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { setLocale } from '../src/core/preferences.js';
+import { registerDaddy } from '../src/server/daddy.js';
+import { taskReference } from '../src/core/task-activity.js';
 
-it('queues a task in the linked topic once and shows that task and the worker pool', async () => {
+it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
   const f = daddyFixture();
+  const app = Fastify();
+  registerDaddy(app, f.daddy);
   const sent: { method: string; body: Record<string, unknown> }[] = [];
   const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, request) => {
     sent.push({ method: String(url).split('/').at(-1)!, body: JSON.parse(String(request?.body)) });
@@ -18,6 +24,7 @@ it('queues a task in the linked topic once and shows that task and the worker po
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
   const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
+  const session = `/api/daddy/sessions/${group.id}`;
   let updateId = 0;
   const message = (text: string, user = 7, topic = 17): Update => ({
     update_id: ++updateId,
@@ -76,7 +83,34 @@ it('queues a task in the linked topic once and shows that task and the worker po
     await bot.handle(message('/worker 1 gpt-6-astra max'));
     await bot.handle(message('/workers'));
     expect(lastText()).toContain('Worker 1 · codex · gpt-6-astra · max\nFree');
+
+    const web = (await app.inject(session)).json();
+    expect(web.taskQueue).toEqual([task!.id]);
+    expect(web.tasks[0]).toMatchObject({ id: task!.id, statusLabel: 'Waiting for a worker' });
+    expect(web.workers.slots[0]).toMatchObject({
+      profile: { model: 'gpt-6-astra', effort: 'max' },
+    });
+
+    const input = { requirements: 'Task from web', requestId: randomUUID() };
+    const enqueue = () => app.inject({ method: 'POST', url: session + '/tasks', payload: input });
+    const queuedFromWeb = await enqueue();
+    expect(queuedFromWeb.statusCode).toBe(201);
+    const webTask = queuedFromWeb.json();
+    expect((await enqueue()).json()).toEqual(webTask);
+    expect((await app.inject(session)).json().taskQueue).toEqual([task!.id, webTask.id]);
+    await bot.handle(message('/queue'));
+    expect(lastText()).toContain(taskReference(webTask) + '  Task from web');
+
+    const configured = await app.inject({
+      method: 'POST',
+      url: session + '/workers/1',
+      payload: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
+    });
+    expect(configured.statusCode).toBe(200);
+    await bot.handle(message('/workers'));
+    expect(lastText()).toContain('Worker 1 · codex · gpt-5.6-sol · medium\nFree');
   } finally {
+    await app.close();
     await bot.stop();
     await f.close();
   }

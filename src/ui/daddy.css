@@ -684,11 +684,39 @@
   display: block;
   margin-top: 7px;
 }
-.daddy-board > .daddy-button {
-  margin-top: 8px;
-  font-size: 10px;
+.daddy-board-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.daddy-board-controls > .daddy-button {
+  flex: 1 auto;
+  font-size: 11px;
   min-height: 35px;
-  flex-shrink: 0;
+}
+.daddy-work-id {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+.daddy-worker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.daddy-worker-list small {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.daddy-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
 }
 .daddy-board-bottom {
   display: flex;

@@ -21,6 +21,7 @@ import { Workspaces } from '../runtime/workspaces.js';
 import { allRepositories } from '../modules/repositories/index.js';
 import type { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { redact } from './security.js';
+import { taskReference } from './task-activity.js';
 
 export class TicketWorkflow {
   readonly reader: TicketReader;
@@ -103,7 +104,7 @@ export class TicketWorkflow {
       host: workspace.host,
       repo: workspace.repo,
       number: 0,
-      key: `DADDY-${id.slice(0, 8)}`,
+      key: taskReference({ id }),
       url,
     };
     const repository = await this.workspaces.describeTicket(
