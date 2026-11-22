@@ -47,6 +47,8 @@ const staleDraftReason =
   'GitHub still has a draft from the previous review. Inspect it on GitHub and clear the pending review before resuming.';
 const gitLabDraftReason =
   'GitLab still has draft or partially published notes from the previous review. Inspect them on GitLab and resolve the pending notes before retrying.';
+const arcanumDraftReason =
+  'Arcanum review notes still need inspection. Publish or discard the remaining drafts before retrying.';
 const fixConfirmationGraceMs = 60_000;
 const reviewCompletionStates: State[] = [
   'awaiting_publication',
@@ -91,14 +93,14 @@ function savedFixTargetChange(expected: string | undefined, pr: PullRequest): st
 }
 
 function hasSharedDraftSlot(task: Task): boolean {
-  return task.ref.provider === 'github' || task.ref.provider === 'gitlab';
+  return ['github', 'gitlab', 'arcadia'].includes(task.ref.provider);
 }
 
 function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
   if (snapshot.status === 'published') task.feedback = snapshot;
-  // A missing GitLab summary can leave published findings, but no pending notes.
+  // These providers return missing with findings only when the remaining findings are published.
   else if (
-    task.ref.provider === 'gitlab' &&
+    ['gitlab', 'arcadia'].includes(task.ref.provider) &&
     snapshot.status === 'missing' &&
     snapshot.comments.length
   )
@@ -318,6 +320,21 @@ export class Engine {
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       const pending = this.requireSubmittedFix(task, pr);
+      const legacySave =
+        retry && !pending && task.reviewFinished && task.review
+          ? this.savedFixEvent(task, pr.head)
+          : undefined;
+      const confirmedLegacyRetry =
+        legacySave &&
+        typeof legacySave.saved_revision !== 'string' &&
+        this.legacyFixConfirmed(
+          task,
+          pr,
+          pr.head,
+          Number(legacySave.id),
+          parseRecordedRevision(legacySave.revision),
+          typeof legacySave.target_branch === 'string' ? legacySave.target_branch : undefined,
+        );
       if (pending && (!sameRevision(task.revision, pr) || !samePullRequestBranches(task.pr, pr))) {
         const check = this.savedFixStatus(task, pr, pending);
         const reason =
@@ -370,6 +387,13 @@ export class Engine {
         task.resumeState = undefined;
       }
       this.store.transaction(() => {
+        if (confirmedLegacyRetry)
+          this.store.event(task.id, 'author.fix_confirmed_for_review', {
+            savedEventId: legacySave.id,
+            revision: task.revision,
+            branch: pr.branch,
+            targetBranch: pr.targetBranch,
+          });
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
@@ -387,12 +411,10 @@ export class Engine {
   private async inspectPreviousDraft(task: Task, review: ReviewHandle) {
     const ref = prRef(task);
     const snapshot = await this.provider(ref).getReview(ref, review);
-    const gitLab = ref.provider === 'gitlab';
-    if (
-      (snapshot.status === 'draft' && hasSharedDraftSlot(task)) ||
-      (gitLab && snapshot.status === 'partial')
-    )
-      return gitLab ? gitLabDraftReason : staleDraftReason;
+    const pendingNotes = snapshot.status === 'draft' || snapshot.status === 'partial';
+    if (pendingNotes && ref.provider === 'gitlab') return gitLabDraftReason;
+    if (pendingNotes && ref.provider === 'arcadia') return arcanumDraftReason;
+    if (snapshot.status === 'draft' && ref.provider === 'github') return staleDraftReason;
     retainPublishedFeedback(task, snapshot);
   }
 
@@ -973,13 +995,38 @@ export class Engine {
     if (
       pr?.state !== 'open' ||
       pr.head !== head ||
-      (original ? savedFixBaseChange(original, pr) : !finishedReview) ||
-      (!finishedReview && (!targetBranch || targetBranch !== pr.targetBranch)) ||
+      (original && savedFixBaseChange(original, pr)) ||
       !sameRevision(task.revision, pr) ||
       (task.review && !sameRevision(task.review.revision, pr)) ||
       (task.review?.targetBranch && task.review.targetBranch !== pr.targetBranch) ||
       (task.snapshot && !sameRevision(task.snapshot.revision, pr))
     )
+      return false;
+    if (
+      this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND id>? AND type='author.fix_confirmed_for_review'
+           AND json_extract(data, '$.savedEventId')=?
+           AND json_extract(data, '$.revision.head')=?
+           AND json_extract(data, '$.revision.base')=?
+           AND json_extract(data, '$.revision.start')=?
+           AND json_extract(data, '$.revision.revisionId') IS ?
+           AND json_extract(data, '$.branch')=? AND json_extract(data, '$.targetBranch')=? LIMIT 1`,
+        )
+        .get(
+          task.id,
+          after,
+          after,
+          head,
+          pr.base,
+          pr.start,
+          pr.revisionId ?? null,
+          pr.branch,
+          pr.targetBranch,
+        )
+    )
+      return true;
+    if (!finishedReview && (!original || !targetBranch || targetBranch !== pr.targetBranch))
       return false;
     return !!this.store.db
       .prepare(

@@ -803,6 +803,91 @@ it('stops a queued legacy reviewer when the target changes after polling', async
   }
 });
 
+it.each([
+  ['main', 'draft'],
+  ['release', 'draft'],
+  ['release', 'published'],
+  ['main', 'rolled back'],
+  ['main', 'changed base'],
+] as const)(
+  'binds an explicit legacy fix retry to the observed PR (%s, %s)',
+  async (branch, status) => {
+    const f = await fixture();
+    const checked: string[] = [];
+    const workspaces = new Workspaces('/tmp');
+    vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const restarted = new Engine(f.store, () => f.provider);
+    const runtime = {
+      run: vi.fn(async ({ task }: AgentInput) => {
+        checked.push(task.revision!.head);
+        return f.result({ checkedHead: task.revision!.head });
+      }),
+    };
+    const worker = new Worker(restarted, workspaces, runtime, runtime, healthy, 0);
+    try {
+      const finding = await queueFix(f);
+      runtime.run.mockImplementation(async ({ task }) => {
+        checked.push(task.revision!.head);
+        return f.result({ checkedHead: task.revision!.head, verifiedCommentIds: [finding] });
+      });
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider: 'github' as const };
+      const head = 'fc7653947a156709d819016a0aaa0c7d0a0b8908';
+      f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const pr = { ...task.pr!, head, targetBranch: branch };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      const review = await f.provider.createReview(ref, revision, 'legacy-fix-review');
+      if (status === 'published') await f.provider.publish(ref, review);
+      f.store.saveTask({
+        ...task,
+        ref,
+        pr,
+        revision,
+        generation,
+        review,
+        pendingAuthorHead: head,
+        state: 'awaiting_publication',
+        reviewFinished: true,
+        snapshot: await f.provider.getReview(ref, review),
+      });
+      f.store.setSetting('demo-pr:1', pr);
+      expect(await f.engine.publish(task.id)).toMatchObject({ state: 'needs_input' });
+      if (status !== 'published') {
+        const snapshot = await f.provider.getReview(ref, review);
+        f.store.setSetting(`demo-review:${review.id}`, { ...snapshot, status: 'missing' });
+      }
+      if (status === 'rolled back' || status === 'changed base') {
+        f.store.setSetting(
+          'demo-pr:1',
+          status === 'rolled back'
+            ? { ...pr, head: task.revision!.head }
+            : { ...pr, base: 'e'.repeat(40) },
+        );
+        const create = vi.spyOn(f.provider, 'createReview');
+        await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+        expect(create).not.toHaveBeenCalled();
+        return;
+      }
+      expect(await f.engine.review(task.id, true)).toMatchObject({
+        state: 'reviewing',
+        review: { targetBranch: branch },
+      });
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      expect(checked).toEqual([head]);
+      expect(f.store.getTask(task.id).state).toBe('awaiting_publication');
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
 it.each([false, true])(
   'recovers a fix whose first legacy observation cleared its pointer (rolled back: %s)',
   async (rolledBack) => {

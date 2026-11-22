@@ -177,7 +177,10 @@ export class ArcadiaProvider implements ReviewProvider {
       (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
     );
     const partial =
-      unknown || (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
+      unknown ||
+      (summary
+        ? notes.some((n) => !!n.is_draft !== !!summary.is_draft)
+        : notes.some((n) => n.is_draft !== false));
     return {
       status: partial ? 'partial' : !summary ? 'missing' : summary.is_draft ? 'draft' : 'published',
       body: summary?.content ?? '',
