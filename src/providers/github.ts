@@ -7,7 +7,7 @@ import type {
   ReviewComment,
   Location,
 } from '../core/types.js';
-import { AppError } from '../core/types.js';
+import { AppError, ProviderWriteNotAttempted } from '../core/types.js';
 import { type ReviewProvider, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 
@@ -162,7 +162,15 @@ export class GitHubProvider implements ReviewProvider {
     };
   }
   async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const existing = await this.findReview(ref, marker);
+    const existing = await this.findReview(ref, marker).catch((error: unknown) => {
+      if (error instanceof AppError)
+        throw new ProviderWriteNotAttempted(error.code, error.message, error.statusCode);
+      throw new ProviderWriteNotAttempted(
+        'provider_shape',
+        'Could not read existing GitHub reviews before creating a draft.',
+        502,
+      );
+    });
     if (existing) return { ...existing, revision };
     // GitHub itself enforces one pending review per authenticated account. Never adopt
     // or delete the user's unrelated review when that constraint rejects this call.

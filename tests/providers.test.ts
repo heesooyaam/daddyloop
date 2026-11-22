@@ -35,6 +35,8 @@ function transport(
 describe('GitHub draft review contract', () => {
   it.each([
     'regular',
+    'unavailable before creation',
+    'lost response on current revision',
     'lost response',
     'lost response and new base',
     'lost response before reconcile',
@@ -49,6 +51,7 @@ describe('GitHub draft review contract', () => {
     let head = revision.head;
     let attempts = 0;
     let summaryEdits = 0;
+    let reviewsAvailable = scenario !== 'unavailable before creation';
     let draft:
       | {
           id: number;
@@ -74,7 +77,8 @@ describe('GitHub draft review contract', () => {
       if (path.includes('/check-runs?')) return { check_runs: [] };
       if (path.includes('/status?')) return { statuses: [] };
       if (path === '/user') return { id: 7 };
-      if (path.startsWith(`${pull}/reviews?`)) return draft ? [draft] : [];
+      if (path.startsWith(`${pull}/reviews?`))
+        return reviewsAvailable ? (draft ? [draft] : []) : new Response('{}', { status: 503 });
       if (path.includes('/comments?')) return [];
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
         return draft ?? new Response('{}', { status: 404 });
@@ -94,7 +98,8 @@ describe('GitHub draft review contract', () => {
           user: { id: 7 },
           state: 'PENDING',
         };
-        if (attempts === 1 && scenario !== 'regular') throw new Error('Lost create response');
+        if (attempts === 1 && scenario !== 'regular' && scenario !== 'unavailable before creation')
+          throw new Error('Lost create response');
         return draft;
       }
       throw new Error(`Unexpected fixture request ${method} ${path}`);
@@ -107,6 +112,21 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      if (scenario === 'unavailable before creation') {
+        await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_503' });
+        expect(attempts).toBe(0);
+        expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+          [],
+        );
+        reviewsAvailable = true;
+        base = 'e'.repeat(40);
+        const restarted = new Engine(store, () => provider);
+        const next = await restarted.review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
+        expect(store.busy(task.id)).toBe(true);
+        expect(attempts).toBe(1);
+        return;
+      }
       if (scenario !== 'regular') {
         if (scenario === 'legacy intent with revision history')
           store.event(task.id, 'revision.changed', {
@@ -114,6 +134,19 @@ describe('GitHub draft review contract', () => {
             generation: task.generation,
           });
         await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+        if (scenario === 'lost response on current revision') {
+          expect(
+            store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
+          ).toHaveLength(1);
+          const restarted = new Engine(store, () => provider);
+          const next = await restarted.review(task.id, true);
+          expect(next).toMatchObject({
+            state: 'reviewing',
+            review: { id: '1', targetBranch: 'main' },
+          });
+          expect(attempts).toBe(1);
+          return;
+        }
         const legacy = scenario.startsWith('legacy intent');
         if (legacy) {
           store.db
