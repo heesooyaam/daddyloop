@@ -391,7 +391,7 @@ export class Worker {
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
       if (job.kind === 'review' && startingPR) {
         this.engine.requireSubmittedFix(task, startingPR);
-        const targetChange = reviewTargetChange(task.review, startingPR);
+        const targetChange = reviewTargetChange(task.review, startingPR, task.pr?.targetBranch);
         if (targetChange) throw new AppError('review_target_changed', targetChange);
       }
       const feedbackTarget = task.review?.targetBranch;

@@ -5,6 +5,7 @@ import {
   prRef,
   sameRevision,
   reviewTargetChange,
+  missingReviewTargetReason,
   type Task,
   type Job,
   type PRRef,
@@ -261,7 +262,10 @@ export class Broker {
     const snapshot = await provider.getReview(ref, review);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
-    if (review.targetBranch || previousTarget) assertCurrentRevision(await provider.getPR(ref));
+    const current = await provider.getPR(ref);
+    assertCurrentRevision(current);
+    if (!review.targetBranch)
+      throw new AppError('review_target_unverified', missingReviewTargetReason(current));
     await this.outbox.perform(
       task.id,
       `${review.marker}:publish`,

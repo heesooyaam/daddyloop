@@ -17,6 +17,7 @@ import {
   now,
   sameRevision,
   reviewTargetChange,
+  missingReviewTargetReason,
   sameAgentProfile,
   revisionOf,
   type Task,
@@ -335,15 +336,18 @@ export class Engine {
         }
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
-      const targetChange = reviewTargetChange(task.review, pr, task.pr?.targetBranch);
-      if (targetChange && task.review && hasSharedDraftSlot(task)) {
+      const retryWithoutTarget = retry && task.review && !task.review.targetBranch;
+      const targetIssue =
+        reviewTargetChange(task.review, pr, task.pr?.targetBranch) ??
+        (retryWithoutTarget ? missingReviewTargetReason(pr) : undefined);
+      if (targetIssue && task.review && (hasSharedDraftSlot(task) || retryWithoutTarget)) {
         const reason = await this.inspectPreviousDraft(task, task.review);
         if (reason) {
-          this.state(task, 'needs_input', `${targetChange} ${reason}`);
+          this.state(task, 'needs_input', `${targetIssue} ${reason}`);
           return task;
         }
       }
-      const changed = !sameRevision(task.revision, pr) || !!targetChange;
+      const changed = !sameRevision(task.revision, pr) || !!targetIssue;
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
@@ -384,7 +388,10 @@ export class Engine {
     const ref = prRef(task);
     const snapshot = await this.provider(ref).getReview(ref, review);
     const gitLab = ref.provider === 'gitlab';
-    if (snapshot.status === 'draft' || (gitLab && snapshot.status === 'partial'))
+    if (
+      (snapshot.status === 'draft' && hasSharedDraftSlot(task)) ||
+      (gitLab && snapshot.status === 'partial')
+    )
       return gitLab ? gitLabDraftReason : staleDraftReason;
     retainPublishedFeedback(task, snapshot);
   }
@@ -537,6 +544,7 @@ export class Engine {
         );
         return task;
       }
+      if (this.stopUnverifiedReviewTarget(task, pr)) return task;
       this.store.event(id, 'review.published', {
         reviewId: task.review.id,
         snapshot,
@@ -669,10 +677,7 @@ export class Engine {
       return true;
     }
     if (target) return this.stopReviewOnTargetChange(task, pr);
-    this.holdTaskForInput(
-      task,
-      `The review has no recorded target branch. Use Retry review to start a new review on ${pr.targetBranch}.`,
-    );
+    this.holdTaskForInput(task, missingReviewTargetReason(pr));
     return true;
   }
 
@@ -1193,7 +1198,11 @@ export class Engine {
       try {
         await this.broker.publish(task, pr);
       } catch (error) {
-        if (!(error instanceof AppError) || error.code !== 'review_target_changed') throw error;
+        if (
+          !(error instanceof AppError) ||
+          !['review_target_changed', 'review_target_unverified'].includes(error.code)
+        )
+          throw error;
         this.state(task, 'needs_input', error.message);
         return task;
       }

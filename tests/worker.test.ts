@@ -8,7 +8,7 @@ import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import type { AgentInput } from '../src/runtime/agent.js';
-import { prRef, revisionOf, type ResourceStatus } from '../src/core/types.js';
+import { prRef, revisionOf, type ResourceStatus, type ReviewHandle } from '../src/core/types.js';
 import { allRepositories } from '../src/modules/repositories/index.js';
 import { RepositoryRegistry } from '../src/modules/repositories/registry.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -549,7 +549,7 @@ it.each([
         generation,
         head: pr.head,
       });
-      const review =
+      const review: ReviewHandle | undefined =
         rolledBack || firstObservationChanged
           ? undefined
           : await f.provider.createReview(
@@ -557,6 +557,7 @@ it.each([
               wrongDraftBase ? { ...revision, base: 'e'.repeat(40) } : revision,
               'legacy-review-on-H2',
             );
+      if (review && scenario === 'manually reviewed') review.targetBranch = original.targetBranch;
       f.store.saveTask({
         ...task,
         pr,
@@ -623,6 +624,9 @@ it.each(['head', 'base', 'targetBranch', 'cached targetBranch'] as const)(
       const generation = author.generation + 1;
       f.store.event(task.id, 'revision.changed', { revision, generation });
       const review = await f.provider.createReview(prRef(task), revision, 'legacy-review-on-H2');
+      await f.provider.publish(prRef(task), review);
+      const snapshot = await f.provider.getReview(prRef(task), review);
+      f.store.event(task.id, 'review.published', { reviewId: review.id, snapshot });
       f.store.saveTask({
         ...task,
         pr,
@@ -630,13 +634,11 @@ it.each(['head', 'base', 'targetBranch', 'cached targetBranch'] as const)(
         generation,
         pendingAuthorHead: head,
         authorBaseHead: task.revision!.head,
-        state: 'awaiting_publication',
+        state: 'awaiting_checks',
         review,
         reviewFinished: true,
-        snapshot: await f.provider.getReview(prRef(task), review),
+        snapshot,
       });
-      f.store.setSetting('demo-pr:1', pr);
-      expect(await f.engine.publish(task.id)).toMatchObject({ state: 'awaiting_checks', revision });
 
       const retargeted = changed === 'targetBranch' || changed === 'cached targetBranch';
       const next = retargeted
@@ -715,6 +717,91 @@ it.each(['after polling', 'after reading the draft'] as const)(
     }
   },
 );
+
+it.each(['draft', 'published'] as const)(
+  'holds the legacy round in awaiting_publication with a cached retarget and a %s review',
+  async (status) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn() };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await f.engine.review(f.task.id);
+      await f.run();
+      const task = f.store.getTask(f.task.id);
+      expect(task.state).toBe('awaiting_publication');
+      const review = task.review!;
+      delete review.targetBranch;
+      const ref = { ...prRef(task), provider: 'github' as const };
+      if (status === 'published') await f.provider.publish(ref, review);
+      const snapshot = await f.provider.getReview(ref, review);
+      const pr = { ...task.pr!, targetBranch: 'release', checks: 'passing' as const };
+      f.store.saveTask({ ...task, ref, review, pr });
+      f.store.setSetting('demo-pr:1', pr);
+      const publish = vi.spyOn(f.provider, 'publish');
+
+      await worker.tick();
+
+      const blocked = f.store.getTask(task.id);
+      expect(blocked).toMatchObject({ state: 'needs_input', revision: task.revision, review });
+      for (const detail of ['no recorded target branch', 'Retry review', 'release'])
+        expect(blocked.reason).toContain(detail);
+      expect(publish).not.toHaveBeenCalled();
+      expect(runtime.run).not.toHaveBeenCalled();
+      expect(await f.provider.getReview(ref, review)).toEqual(snapshot);
+      expect(f.store.events(task.id).some(({ type }) => type === 'review.published')).toBe(false);
+
+      if (status === 'draft') {
+        expect(await f.engine.review(task.id, true)).toMatchObject({
+          state: 'needs_input',
+          review,
+          reason: expect.stringContaining('GitHub still has a draft'),
+        });
+        expect(await f.provider.getReview(ref, review)).toEqual(snapshot);
+        f.store.setSetting(`demo-review:${review.id}`, { ...snapshot, status: 'missing' });
+      }
+      const next = await f.engine.review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+      expect(next.review?.id).not.toBe(review.id);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it('stops a queued legacy reviewer when the target changes after polling', async () => {
+  const f = await fixture();
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const workspaces = new Workspaces('/tmp');
+  const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  try {
+    const task = await f.engine.review(f.task.id);
+    const review = task.review!;
+    delete review.targetBranch;
+    const ref = prRef(task);
+    const snapshot = await f.provider.getReview(ref, review);
+    f.store.saveTask({ ...task, ref: { ...ref, provider: 'github' }, review });
+    const pr = task.pr!;
+    vi.spyOn(f.provider, 'getPR')
+      .mockResolvedValue({ ...pr, targetBranch: 'release' })
+      .mockResolvedValueOnce(pr);
+
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+
+    const blocked = f.store.getTask(task.id);
+    expect(blocked).toMatchObject({ state: 'needs_input', revision: task.revision, review });
+    for (const detail of [pr.targetBranch, 'release', 'Retry review'])
+      expect(blocked.reason).toContain(detail);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect(await f.provider.getReview(ref, review)).toEqual(snapshot);
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
 
 it.each([false, true])(
   'recovers a fix whose first legacy observation cleared its pointer (rolled back: %s)',

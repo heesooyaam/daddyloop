@@ -409,3 +409,7 @@ export function reviewTargetChange(
   if (previousTarget && previousTarget !== pr.targetBranch)
     return `The PR target branch changed from ${previousTarget} to ${pr.targetBranch}. Use Retry review to start a review on the current branch.`;
 }
+
+export function missingReviewTargetReason(pr: PullRequest): string {
+  return `The review has no recorded target branch. Use Retry review to start a new review on ${pr.targetBranch}.`;
+}
