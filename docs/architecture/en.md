@@ -155,7 +155,9 @@ Code: [AgentRegistry](../../src/modules/agents/registry.ts), [Broker](../../src/
 
 ## 4. How the review loop closes
 
-After implementation, the service saves a commit and creates a PR through `TicketWorkflow`. You can also attach an existing PR directly. Both follow the same loop:
+Work such as filing issues can produce a report with links and other evidence. When the task branch is still at its starting base, the service saves the report and queues an independent check by daddy. The task completes after the reviewer verifies the result against the original requirements. The run generation and pinned revision guard the result. daddy can then use the report to queue follow-up work.
+
+When the task branch has saved changes relative to that base, the service sends them to a PR through `TicketWorkflow`. This includes commits preserved from an earlier run. You can also attach an existing PR directly. Both paths use the same review loop.
 
 ```mermaid
 flowchart TB

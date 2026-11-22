@@ -185,6 +185,18 @@ export class Engine {
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
         throw new AppError('task_paused', 'Resume this task before starting a review');
+      if (isTicket(task)) {
+        if (
+          !sameRevision(task.workerReport?.revision, task.revision) ||
+          !(task.state === 'queued' || (retry && task.state === 'needs_input'))
+        )
+          throw new AppError(
+            'report_not_ready',
+            'Wait for a worker report on the current task revision before reviewing',
+          );
+        this.store.transaction(() => this.queueReportReview(task));
+        return task;
+      }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       const changed = !sameRevision(task.revision, pr);
@@ -234,6 +246,17 @@ export class Engine {
       revision: task.revision,
       generation: task.generation,
     });
+  }
+  private queueReportReview(task: Task) {
+    task.reviewFinished = false;
+    task.resumeState = 'reviewing';
+    this.state(task, 'reviewing', 'The worker report is ready for review');
+    this.store.enqueue(
+      task,
+      'reviewer',
+      'review',
+      'Verify the worker report and its evidence against the original requirements. Report any missing work.',
+    );
   }
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
@@ -460,48 +483,70 @@ export class Engine {
         return;
       }
       if (isTicket(task)) {
-        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
-        if (result.status !== 'completed' || result.checkedHead !== task.revision?.head) {
-          task.resumeState = task.state;
-          this.state(
-            task,
-            'needs_input',
-            result.question || result.summary || 'The ticket turn was incomplete',
-          );
-        } else if (job.kind === 'implement') {
-          if (!task.pendingAuthorHead || task.pendingAuthorHead === task.revision?.head)
+        this.store.transaction(() => {
+          this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+          const reportReview = job.kind === 'review';
+          if (
+            reportReview &&
+            (!sameRevision(task.workerReport?.revision, task.revision) ||
+              result.checkedHead !== task.revision?.head)
+          ) {
+            task.resumeState = 'reviewing';
             this.state(
               task,
               'needs_input',
-              'The author produced no new committed changes. Discuss the result before implementing again.',
+              'The review used a different worker report or revision',
             );
-          else {
-            task.revision = { ...task.revision!, head: task.pendingAuthorHead };
-            task.resumeState = 'ready_for_review';
+          } else if (result.status !== 'completed' || result.checkedHead !== task.revision?.head) {
+            task.resumeState = task.state;
             this.state(
               task,
-              'ready_for_review',
-              'Implementation saved locally. Submit it to a native PR for the shared reviewer.',
+              'needs_input',
+              result.question || result.summary || 'The ticket turn was incomplete',
+            );
+          } else if (reportReview) {
+            task.resumeState = undefined;
+            task.reviewFinished = true;
+            this.state(task, 'complete', 'daddy verified the worker report');
+          } else if (job.kind === 'implement') {
+            const head = task.pendingAuthorHead;
+            const base = task.ticketRepository?.baseHead ?? task.revision?.base;
+            // A resumed run can start on a saved commit that still needs submission.
+            if (head && head !== base) {
+              task.revision = { ...task.revision!, head };
+              task.resumeState = 'ready_for_review';
+              this.store.event(task.id, 'author.implementation_saved', { head }, job.id);
+              this.state(
+                task,
+                'ready_for_review',
+                'Implementation saved locally. Submit it to a native PR for the shared reviewer.',
+              );
+            } else {
+              task.pendingAuthorHead = undefined;
+              task.workerReport = { runId: job.id, revision: task.revision! };
+              task.reviewerThreadId = undefined;
+              task.summary = result.summary;
+              this.queueReportReview(task);
+            }
+          } else {
+            const pendingSubmission = !!this.store.db
+              .prepare('SELECT 1 FROM operations WHERE id=?')
+              .get('ticket-submit:' + task.id);
+            this.state(
+              task,
+              pendingSubmission
+                ? 'needs_input'
+                : task.pendingAuthorHead
+                  ? 'ready_for_review'
+                  : 'discussing',
+              pendingSubmission
+                ? 'Submit again to reconcile the existing PR creation before changing implementation.'
+                : task.pendingAuthorHead
+                  ? 'Saved implementation is ready to submit for review.'
+                  : 'Continue the conversation, or start implementation when the requirements are clear.',
             );
           }
-        } else {
-          const pendingSubmission = !!this.store.db
-            .prepare('SELECT 1 FROM operations WHERE id=?')
-            .get('ticket-submit:' + task.id);
-          this.state(
-            task,
-            pendingSubmission
-              ? 'needs_input'
-              : task.pendingAuthorHead
-                ? 'ready_for_review'
-                : 'discussing',
-            pendingSubmission
-              ? 'Submit again to reconcile the existing PR creation before changing implementation.'
-              : task.pendingAuthorHead
-                ? 'Saved implementation is ready to submit for review.'
-                : 'Continue the conversation, or start implementation when the requirements are clear.',
-          );
-        }
+        });
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
@@ -653,6 +698,10 @@ export class Engine {
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
         if (isTicket(task)) {
+          if (task.workerReport && ['queued', 'reviewing'].includes(task.resumeState ?? '')) {
+            this.store.transaction(() => this.queueReportReview(task));
+            return task;
+          }
           const implementing = task.resumeState === 'implementing';
           this.state(
             task,
@@ -668,7 +717,7 @@ export class Engine {
               task,
               'author',
               'implement',
-              'Continue the interrupted implementation. Preserve the existing working copy and test the result.',
+              'Continue the interrupted task. Preserve the existing working copy and verify the requested outcome.',
             );
           return task;
         }
@@ -727,9 +776,18 @@ export class Engine {
       } else {
         if (task.state !== 'complete')
           throw new AppError('not_complete', 'Only completed tasks can be reopened');
-        this.invalidate(task, task.pr);
-        task.round = 0;
-        this.state(task, 'queued', reason || 'Reopened by the user');
+        if (isTicket(task)) {
+          task.generation++;
+          this.store.cancelJobs(id);
+          this.onCancel(id);
+          task.workerReport = undefined;
+          task.reviewFinished = false;
+          this.state(task, 'discussing', reason || 'Reopened by the user');
+        } else {
+          this.invalidate(task, task.pr);
+          task.round = 0;
+          this.state(task, 'queued', reason || 'Reopened by the user');
+        }
       }
       this.store.event(id, `human.${action}`, { reason });
       return task;
@@ -1130,24 +1188,25 @@ export class Engine {
     });
   }
   private queueImplementation(task: Task, actionId?: string, instruction?: string) {
+    if (task.workerReport) {
+      task.workerReport = undefined;
+      task.reviewFinished = false;
+      task.summary = '';
+    }
     task.resumeState = 'implementing';
-    this.state(
-      task,
-      'implementing',
-      'The author is implementing this ticket in its managed workspace',
-    );
+    this.state(task, 'implementing', 'The worker is carrying out the task');
     this.store.enqueue(
       task,
       'author',
       'implement',
       instruction ??
-        'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
+        'Carry out the task according to the original requirements and discussion. Verify the outcome and report what was accomplished. The service saves any code changes and handles submission. Do not commit, push or create a PR yourself.',
       actionId,
     );
   }
   async retryTicket(id: string) {
     const task = this.store.getTask(id);
-    if (!isTicket(task)) return this.review(id, true);
+    if (!isTicket(task) || task.workerReport) return this.review(id, true);
     if (this.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get('ticket-submit:' + id))
       throw new AppError(
         'submission_pending',

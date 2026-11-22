@@ -363,11 +363,12 @@ export class Worker {
     const store = this.engine.store;
     try {
       let task = store.getTask(job.taskId);
+      const reportReview = job.kind === 'review' && isTicket(task);
       const group = task.groupId ? store.getGroup(task.groupId) : undefined;
       if (job.role === 'reviewer' && group) {
         if (job.groupGeneration !== group.generation)
           throw new Error('The shared reviewer configuration changed before this job started');
-        task.reviewerThreadId = group.reviewerThreadId;
+        if (!reportReview) task.reviewerThreadId = group.reviewerThreadId;
       }
       if (!job.profile)
         throw new AppError(
@@ -469,16 +470,19 @@ export class Worker {
         readPaths: demo ? [] : this.workspaces.readPaths?.(task),
         prompt: buildContext(store, task, job),
         signal: abort.signal,
+        tools: reportReview ? [] : undefined,
         onSession: (threadId, turnId) => {
           const current = store.getTask(job.taskId);
           if (current.generation !== job.generation || abort.signal.aborted) return;
           if (job.role === 'reviewer' && current.groupId) {
             const shared = store.getGroup(current.groupId);
             if (shared.generation !== job.groupGeneration) return;
-            if (shared.reviewerThreadId && shared.reviewerThreadId !== threadId)
-              throw new Error('The shared reviewer returned a different thread identity');
-            shared.reviewerThreadId = threadId;
-            store.saveGroup(shared);
+            if (!reportReview) {
+              if (shared.reviewerThreadId && shared.reviewerThreadId !== threadId)
+                throw new Error('The shared reviewer returned a different thread identity');
+              shared.reviewerThreadId = threadId;
+              store.saveGroup(shared);
+            }
           }
           if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
@@ -525,7 +529,6 @@ export class Worker {
           latest.pendingAuthorHead = head;
           store.saveTask(latest);
         }
-        store.event(task.id, 'author.implementation_saved', { head }, job.id);
       }
       if (
         !abort.signal.aborted &&

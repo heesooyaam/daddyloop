@@ -926,6 +926,14 @@ Object.assign(ru, {
   'The ticket turn was incomplete': 'Работа над тикетом не завершена',
   'The author produced no new committed changes. Discuss the result before implementing again.':
     'Автор не создал новых изменений. Обсуди результат перед повторной реализацией.',
+  'The worker report is ready for review': 'Отчёт воркера готов к проверке',
+  'daddy verified the worker report': 'daddy проверил отчёт воркера',
+  'The review used a different worker report or revision':
+    'Ревью относится к другому отчёту воркера или другой ревизии',
+  'Wait for a worker report on the current task revision before reviewing':
+    'Дождись отчёта воркера для текущей ревизии задачи',
+  'The saved worker report could not be loaded': 'Не удалось загрузить сохранённый отчёт воркера',
+  'Reviewing the worker report': 'daddy проверяет отчёт воркера',
   'Implementation saved locally. Submit it to a native PR for the shared reviewer.':
     'Реализация сохранена локально. Отправь её в PR для общего ревьюера.',
   'Submit again to reconcile the existing PR creation before changing implementation.':
@@ -973,6 +981,7 @@ Object.assign(ru, {
     'Тикет импортирован. Автор изучает его перед реализацией.',
   'The author is implementing this ticket in its managed workspace':
     'Автор реализует тикет в своей рабочей копии',
+  'The worker is carrying out the task': 'Воркер выполняет задачу',
   'Retrying the ticket conversation': 'Повторяем обсуждение тикета',
   'PR connected. The shared reviewer will check this revision.':
     'PR подключён. Общий ревьюер проверит эту ревизию.',
