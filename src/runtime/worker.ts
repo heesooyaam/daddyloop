@@ -458,7 +458,12 @@ export class Worker {
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
         task.feedback = actual;
         store.saveTask(task);
-        store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+        store.event(
+          task.id,
+          'author.feedback_snapshot',
+          { ...actual, targetBranch: startingPR?.targetBranch },
+          job.id,
+        );
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {

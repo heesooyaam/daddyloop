@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ class MountFixture extends ArcBridge {
   status = '';
   failCheckout = false;
   control = true;
+  pushedHead?: string;
   override async mounts() {
     return [
       { path: '/fake/arc-source', claimable: true, object_store_ok: true },
@@ -40,6 +41,7 @@ class MountFixture extends ArcBridge {
     if (args[0] === 'status') return this.status;
     if (args[0] === 'info') return JSON.stringify({ hash: this.hash, branch: this.branch });
     if (args[0] === 'merge-base') return args[2];
+    if (args[0] === 'push') this.pushedHead = this.hash;
     if (args[0] === 'checkout') {
       if (this.failCheckout) throw new Error('Simulated process interruption');
       if (args[1] === '-b') {
@@ -53,6 +55,60 @@ class MountFixture extends ArcBridge {
     return '';
   }
 }
+
+it.each(['head', 'branch', 'lease'] as const)(
+  'stops the saved fix push if the author %s changes during the second PR read',
+  async (changed) => {
+    const f = await fixture({ repoPath: '/fake/arc-source' });
+    const dir = mkdtempSync(join(tmpdir(), 'daddyloop-arc-push-'));
+    try {
+      const bridge = new MountFixture();
+      const workspaces = new ArcWorkspaces(dir, bridge);
+      const task = f.task;
+      task.pr!.branch = 'users/worker/fix';
+      await workspaces.prepare(task, 'author');
+      const { branch, owner } = bridge;
+      const head = 'c'.repeat(40);
+      bridge.hash = head;
+      task.state = 'awaiting_push';
+      task.pendingAuthorHead = head;
+      task.pendingAuthorFix = { revision: task.revision!, generation: task.generation };
+      f.store.saveTask(task);
+      vi.spyOn(f.provider, 'getPR')
+        .mockImplementation(async () => ({ ...task.pr!, head: bridge.pushedHead ?? task.pr!.head }))
+        .mockImplementationOnce(async () => task.pr!)
+        .mockImplementationOnce(async () => {
+          if (changed === 'head') bridge.hash = 'd'.repeat(40);
+          if (changed === 'branch') bridge.branch += '-other';
+          if (changed === 'lease') bridge.owner = 'another-owner';
+          return task.pr!;
+        });
+      const submit = () =>
+        f.engine.submitSavedFix(task.id, (current, saved) =>
+          workspaces.prepareSavedFixPush(current, saved),
+        );
+      await submit();
+      expect(bridge.pushedHead).toBeUndefined();
+      const blocked = f.store.getTask(task.id);
+      expect(blocked).toMatchObject({
+        state: 'needs_input',
+        pendingAuthorHead: head,
+        reason: expect.stringContaining(head),
+      });
+      expect(blocked.pendingAuthorFix?.pushStarted).toBeUndefined();
+      expect(blocked.pendingAuthorFix?.confirmUntil).toBeUndefined();
+      Object.assign(bridge, { hash: head, branch, owner });
+      await f.engine.action(task.id, 'resume');
+      await submit();
+      expect(bridge.pushedHead).toBe(head);
+      expect(f.store.getTask(task.id)).toMatchObject({ state: 'queued', revision: { head } });
+    } finally {
+      f.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
 it('retains the named author branch when its pushed head becomes the next review revision', async () => {
   const f = await fixture({
     repoPath: '/fake/arc-source',

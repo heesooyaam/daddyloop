@@ -270,16 +270,20 @@ export class ArcWorkspaces {
     } else task.reviewerWorktree = saved.mount;
     return saved.mount;
   }
-  private async checkedAuthor(task: Task, signal?: AbortSignal) {
-    const saved = task.arcWorkspaces?.author as Saved | undefined;
-    if (!saved || !task.revision) throw new Error('Arc author workspace is not initialized');
+  private async authorInfo(saved: Saved, signal?: AbortSignal) {
     const owned = (await this.bridge.mounts()).some(
       (m) => m.path === saved.mount && m.lease_owner_id === saved.ownerId && m.object_store_ok,
     );
     if (!owned) throw new Error('Arc author lease is no longer owned by this task');
-    const before = JSON.parse(
-      await this.bridge.native(['info', '--json'], saved.mount, signal),
-    ) as { hash: string; branch: string };
+    return JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal)) as {
+      hash: string;
+      branch: string;
+    };
+  }
+  private async checkedAuthor(task: Task, signal?: AbortSignal) {
+    const saved = task.arcWorkspaces?.author as Saved | undefined;
+    if (!saved || !task.revision) throw new Error('Arc author workspace is not initialized');
+    const before = await this.authorInfo(saved, signal);
     if (
       !before.branch?.startsWith(`daddyloop/${task.id}`) ||
       (await this.bridge.native(
@@ -291,7 +295,7 @@ export class ArcWorkspaces {
       throw new Error(
         'The Arc author branch changed outside daddyloop; no commit or push was performed',
       );
-    return { saved, head: before.hash };
+    return { saved, head: before.hash, branch: before.branch };
   }
   async commit(task: Task, message: string, signal?: AbortSignal) {
     const { saved } = await this.checkedAuthor(task, signal);
@@ -331,6 +335,16 @@ export class ArcWorkspaces {
     if (!branch?.startsWith('users/') || /\s/.test(branch))
       throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
     return async () => {
+      try {
+        const current = await this.authorInfo(author.saved, signal);
+        if (current.hash !== head || current.branch !== author.branch)
+          throw new Error('The Arc author branch or head changed before sending the saved fix');
+      } catch (error) {
+        throw new AppError(
+          'push_not_started',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       await this.bridge.native(['push', '-u', branch], author.saved.mount, signal);
     };
   }

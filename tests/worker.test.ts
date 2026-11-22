@@ -46,6 +46,13 @@ async function recordLegacyLostFix(f: Awaited<ReturnType<typeof fixture>>, compl
   const id = f.task.id;
   const fix = f.store.claim()!;
   const saved = 'f'.repeat(40);
+  const starting = f.store.getTask(id);
+  f.store.event(
+    id,
+    'author.feedback_snapshot',
+    { ...starting.feedback, targetBranch: starting.pr?.targetBranch },
+    fix.id,
+  );
   f.store.event(id, 'author.fixes_saved', { head: saved }, fix.id);
   await f.engine.completeJob(fix, f.result());
   if (completed) f.store.saveJob({ ...fix, status: 'completed' });
@@ -359,6 +366,12 @@ it('recovers the lost saved fix on Resume and leaves both earlier reviews intact
     f.store.saveTask(fixing);
     writeFileSync(join(cwd, 'file.txt'), 'Fixed\n');
     const saved = await workspaces.commitFix(fixing, 'Fix review finding');
+    f.store.event(
+      task.id,
+      'author.feedback_snapshot',
+      { ...fixing.feedback, targetBranch: pr.targetBranch },
+      author.id,
+    );
     f.store.event(task.id, 'author.fixes_saved', { head: saved }, author.id);
     await f.engine.completeJob(author, f.result());
     author.status = 'completed';
@@ -629,63 +642,127 @@ it('resumes a paused legacy task after the saved commit was pushed manually', as
   }
 });
 
-it('recovers a manually pushed fix on its original base after a legacy task recorded a temporary base', async () => {
-  const f = await fixture();
-  try {
-    await queueFix(f);
-    const author = f.store.claim()!;
-    const task = f.store.getTask(f.task.id);
-    const head = 'f'.repeat(40);
-    f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
-    f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
-    f.store.saveJob({ ...author, status: 'completed' });
-    const temporary = { ...task.pr!, base: 'e'.repeat(40) };
-    const revision = revisionOf(temporary);
-    const generation = author.generation + 1;
-    f.store.event(task.id, 'revision.changed', { revision, generation });
-    f.store.event(task.id, 'task.state', {
-      state: 'queued',
-      reason: 'Author pushed changes; independent verification is next',
-      generation,
-      head: temporary.head,
-    });
-    f.store.saveTask({
-      ...task,
-      state: 'needs_input',
-      pr: temporary,
-      revision,
-      generation,
-      review: undefined,
-      snapshot: undefined,
-    });
-    const current = { ...task.pr!, head };
-    f.store.setSetting('demo-pr:1', { ...current, targetBranch: 'other-target' });
-    expect(await f.engine.action(task.id, 'resume')).toMatchObject({
-      state: 'needs_input',
-      revision,
-    });
-    f.store.setSetting('demo-pr:1', current);
-    expect(await f.engine.reconcile(task.id)).toMatchObject({
-      state: 'needs_input',
-      reason: expect.stringContaining('contains the saved fix on the original base'),
-      revision,
-    });
-    expect(await f.engine.action(task.id, 'resume')).toMatchObject({
-      state: 'queued',
-      revision: revisionOf(current),
-      pendingAuthorFix: { revision: task.revision, sent: false },
-    });
-    expect(
-      f.store.events(task.id).find((event) => event.type === 'author.submitted')?.data,
-    ).toEqual({ head, pushed: false });
-    expect(await f.engine.review(task.id)).toMatchObject({
-      state: 'reviewing',
-      revision: revisionOf(current),
-    });
-  } finally {
-    f.store.close();
-  }
-});
+it.each(['ticket', 'author run', 'unknown'] as const)(
+  'recovers on the original PR target and base (branch evidence: %s)',
+  async (branchEvidence) => {
+    const f = await fixture();
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      const targetBranch = task.pr!.targetBranch;
+      f.store.event(
+        task.id,
+        'author.feedback_snapshot',
+        {
+          ...task.feedback,
+          targetBranch: branchEvidence === 'author run' ? targetBranch : undefined,
+        },
+        author.id,
+      );
+      if (branchEvidence !== 'unknown') {
+        task.ticketRepository = {
+          baseHead: task.revision!.base,
+          baseBranch: branchEvidence === 'ticket' ? targetBranch : 'original-creation-target',
+          branch: task.pr!.branch,
+        };
+      }
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const temporary = { ...task.pr!, base: 'e'.repeat(40), targetBranch: 'release' };
+      const revision = revisionOf(temporary);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'Author pushed changes; independent verification is next',
+        generation,
+        head: temporary.head,
+      });
+      f.store.saveTask({
+        ...task,
+        state: 'needs_input',
+        pr: temporary,
+        revision,
+        generation,
+        review: undefined,
+        snapshot: undefined,
+      });
+      const current = { ...task.pr!, head };
+      f.store.setSetting('demo-pr:1', { ...current, targetBranch: temporary.targetBranch });
+      expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+        state: 'needs_input',
+        revision,
+      });
+      f.store.setSetting('demo-pr:1', current);
+      if (branchEvidence === 'unknown') {
+        expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+          state: 'needs_input',
+          revision,
+          reason: expect.stringMatching(/original PR target branch.*saved fix/i),
+        });
+        expect(f.store.busy(task.id)).toBe(false);
+        return;
+      }
+      expect(await f.engine.reconcile(task.id)).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('contains the saved fix on the original base'),
+        revision,
+      });
+      expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+        state: 'queued',
+        revision: revisionOf(current),
+        pendingAuthorFix: { revision: task.revision, sent: false },
+      });
+      expect(
+        f.store.events(task.id).find((event) => event.type === 'author.submitted')?.data,
+      ).toEqual({ head, pushed: false });
+      expect(await f.engine.review(task.id)).toMatchObject({
+        state: 'reviewing',
+        revision: revisionOf(current),
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([true, false])(
+  'makes a stranded legacy fix in awaiting_push resumable (provider available: %s)',
+  async (providerAvailable) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn() };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    const push = vi.fn(async () => {});
+    worker.autoSubmit = (id) => f.engine.submitSavedFix(id, async () => push);
+    try {
+      const { task, saved } = await recordLegacyLostFix(f);
+      f.store.saveTask({
+        ...task,
+        state: 'awaiting_push',
+        reason: 'Resumed by the user; current provider state will be reconciled',
+      });
+      if (!providerAvailable)
+        vi.spyOn(f.provider, 'getPR').mockRejectedValue(new Error('Provider unavailable'));
+      await worker.tick();
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        revision: task.revision,
+        reason: expect.stringContaining(saved),
+      });
+      expect(push).not.toHaveBeenCalled();
+      expect(runtime.run).not.toHaveBeenCalled();
+      expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+        state: 'awaiting_push',
+        pendingAuthorHead: saved,
+      });
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
 
 it('continues to block review of a lost fix after pause advances the generation', async () => {
   const f = await fixture();

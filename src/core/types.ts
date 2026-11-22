@@ -238,6 +238,7 @@ export interface Task {
   pendingAuthorFix?: {
     revision: Revision;
     generation: number;
+    targetBranch?: string;
     pushStarted?: boolean;
     sent?: boolean;
     confirmUntil?: number;
