@@ -42,6 +42,8 @@ const noAuthorChanges =
 const authorPushedChanges = 'Author pushed changes; independent verification is next';
 const staleDraftReason =
   'GitHub still has a draft from the previous review. Inspect it on GitHub and clear the pending review before resuming.';
+const gitLabDraftReason =
+  'GitLab still has draft or partially published notes from the previous review. Inspect them on GitLab and resolve the pending notes before retrying.';
 const fixConfirmationGraceMs = 60_000;
 const reviewCompletionStates: State[] = [
   'awaiting_publication',
@@ -83,6 +85,14 @@ function savedFixBaseChange(original: Revision, pr: PullRequest): string | undef
 function savedFixTargetChange(expected: string | undefined, pr: PullRequest): string | undefined {
   if (pr.state === 'open' && expected && pr.targetBranch !== expected)
     return `The PR target branch changed. Expected ${expected}. Observed ${pr.targetBranch}.`;
+}
+
+function observedReviewTargetChange(task: Task, pr: PullRequest): string | undefined {
+  if (task.review?.targetBranch) return reviewTargetChange(task.review, pr);
+  // The previous PR snapshot can show a change, but cannot prove a legacy review's target.
+  const previous = task.pr?.targetBranch;
+  if (task.review && pr.state === 'open' && previous && previous !== pr.targetBranch)
+    return `The PR target branch changed from ${previous} to ${pr.targetBranch}. Use Retry review to start a review on the current branch.`;
 }
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
@@ -314,13 +324,16 @@ export class Engine {
           this.blockSavedFix(task, pending, staleDraftReason);
           return task;
         }
+        if (snapshot.status === 'published') task.feedback = snapshot;
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
-      const targetChange = reviewTargetChange(task.review, pr);
-      if (targetChange && task.ref.provider === 'github' && task.review) {
+      const targetChange = observedReviewTargetChange(task, pr);
+      const gitLab = task.ref.provider === 'gitlab';
+      if (targetChange && task.review && (gitLab || task.ref.provider === 'github')) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
-        if (snapshot.status === 'draft') {
-          this.state(task, 'needs_input', `${targetChange} ${staleDraftReason}`);
+        if (snapshot.status === 'draft' || (gitLab && snapshot.status === 'partial')) {
+          const reason = gitLab ? gitLabDraftReason : staleDraftReason;
+          this.state(task, 'needs_input', `${targetChange} ${reason}`);
           return task;
         }
         if (snapshot.status === 'published') task.feedback = snapshot;
@@ -618,7 +631,7 @@ export class Engine {
   }
 
   private stopReviewOnTargetChange(task: Task, pr: PullRequest): boolean {
-    const targetChange = reviewTargetChange(task.review, pr);
+    const targetChange = observedReviewTargetChange(task, pr);
     if (!targetChange) return false;
     this.holdTaskForInput(task, targetChange);
     return true;
@@ -1067,9 +1080,13 @@ export class Engine {
       const check = this.savedFixRemoteStatus(task, current, lost.head, original, targetBranch);
       if (check.status === 'confirmed') {
         const staleDraft = ref.provider === 'github' ? task.review : undefined;
-        if (staleDraft && (await provider.getReview(ref, staleDraft)).status === 'draft') {
-          this.holdLostFix(task, lost.head, staleDraftReason);
-          return;
+        if (staleDraft) {
+          const snapshot = await provider.getReview(ref, staleDraft);
+          if (snapshot.status === 'draft') {
+            this.holdLostFix(task, lost.head, staleDraftReason);
+            return;
+          }
+          if (snapshot.status === 'published') task.feedback = snapshot;
         }
         task.pendingAuthorHead = lost.head;
         task.pendingAuthorFix = {

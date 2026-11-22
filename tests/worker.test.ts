@@ -605,8 +605,8 @@ it.each([
   },
 );
 
-it.each(['head', 'base'] as const)(
-  'releases a published legacy fix when the next PR %s changes',
+it.each(['head', 'base', 'targetBranch'] as const)(
+  'checks a published legacy fix when the next PR %s changes',
   async (changed) => {
     const f = await fixture();
     try {
@@ -638,16 +638,38 @@ it.each(['head', 'base'] as const)(
       f.store.setSetting('demo-pr:1', pr);
       expect(await f.engine.publish(task.id)).toMatchObject({ state: 'awaiting_checks', revision });
 
-      const next = { ...pr, [changed]: 'e'.repeat(40) };
+      const next =
+        changed === 'targetBranch'
+          ? { ...pr, targetBranch: 'release', checks: 'passing' as const }
+          : { ...pr, [changed]: 'e'.repeat(40) };
       f.store.setSetting('demo-pr:1', next);
       const restarted = new Engine(f.store, () => f.provider);
-      expect(await restarted.reconcile(task.id)).toMatchObject({
-        state: 'queued',
-        revision: revisionOf(next),
-      });
+      if (changed === 'targetBranch') {
+        const runtime = { run: vi.fn() };
+        const worker = new Worker(restarted, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+        try {
+          await worker.tick();
+          expect(runtime.run).not.toHaveBeenCalled();
+          const blocked = f.store.getTask(task.id);
+          expect(blocked).toMatchObject({
+            state: 'needs_input',
+            review,
+            pr: { targetBranch: pr.targetBranch },
+          });
+          for (const value of [pr.targetBranch, next.targetBranch, 'Retry review'])
+            expect(blocked.reason).toContain(value);
+        } finally {
+          await worker.stop();
+        }
+      } else {
+        expect(await restarted.reconcile(task.id)).toMatchObject({
+          state: 'queued',
+          revision: revisionOf(next),
+        });
+      }
       expect(await restarted.review(task.id, true)).toMatchObject({
         state: 'reviewing',
-        review: { revision: revisionOf(next) },
+        review: { revision: revisionOf(next), targetBranch: next.targetBranch },
       });
     } finally {
       f.store.close();
@@ -1590,6 +1612,81 @@ it('resumes a paused legacy task after the saved commit was pushed manually', as
     f.store.close();
   }
 });
+
+it.each([
+  ['resume', 'published'],
+  ['resume', 'missing'],
+  ['retry', 'published'],
+  ['retry', 'missing'],
+] as const)(
+  'preserves published feedback while recovering a confirmed fix (%s, stale draft %s)',
+  async (path, status) => {
+    const f = await fixture();
+    try {
+      const { task, saved } = await recordLegacyLostFix(f, false);
+      const prior = task.feedback!;
+      task.ref.provider = 'github';
+      const ref = prRef(task);
+      const stale = await f.provider.createReview(ref, task.revision!, 'stale-draft-on-H1');
+      const finding = await f.provider.createComment(
+        ref,
+        stale,
+        'A second finding',
+        `${stale.marker}:comment:R2`,
+      );
+      task.review = stale;
+      task.state = 'needs_input';
+      if (path === 'retry') {
+        task.state = 'awaiting_push';
+        task.pendingAuthorHead = saved;
+        task.pendingAuthorFix = {
+          revision: task.revision!,
+          generation: task.generation,
+          staleDraft: stale,
+        };
+      }
+      f.store.saveTask(task);
+      f.store.setSetting('demo-pr:1', { ...task.pr!, head: saved });
+      const prepare = vi.fn(async () => async () => {});
+      if (path === 'retry') await f.engine.submitSavedFix(task.id, prepare);
+      const blocked =
+        path === 'resume'
+          ? await f.engine.action(task.id, 'resume')
+          : await f.engine.review(task.id);
+      expect(blocked).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('GitHub still has a draft'),
+      });
+      expect(prepare).not.toHaveBeenCalled();
+
+      if (status === 'published') await f.provider.publish(ref, stale);
+      else
+        f.store.setSetting(`demo-review:${stale.id}`, {
+          ...(await f.provider.getReview(ref, stale)),
+          status: 'missing',
+        });
+      const expected = status === 'published' ? await f.provider.getReview(ref, stale) : prior;
+      const queued = await f.engine.action(task.id, 'resume');
+      expect(queued.state).toBe('queued');
+      if (path === 'resume') expect(queued.feedback).toEqual(expected);
+      const next = await f.engine.review(task.id);
+      expect(next).toMatchObject({
+        state: 'reviewing',
+        revision: { head: saved },
+        feedback: expected,
+      });
+      expect(next.feedback?.comments.map(({ id }) => id)).toEqual([
+        status === 'published' ? finding.id : prior.comments[0].id,
+      ]);
+      await f.run({ verifiedCommentIds: [prior.comments[0].id] });
+      expect(f.store.getTask(task.id).state).toBe(
+        status === 'published' ? 'needs_input' : 'awaiting_publication',
+      );
+    } finally {
+      f.store.close();
+    }
+  },
+);
 
 it.each(['ticket', 'author run', 'unknown'] as const)(
   'recovers on the original PR target and base (branch evidence: %s)',

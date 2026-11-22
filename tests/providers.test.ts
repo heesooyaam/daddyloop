@@ -218,6 +218,108 @@ describe('GitHub draft review contract', () => {
 });
 describe('GitLab draft notes contract', () => {
   const ref = parsePR('https://gitlab.example.com/team/subgroup/service/-/merge_requests/9');
+  it.each(['draft', 'partial', 'published'] as const)(
+    'handles the old GitLab review before retrying on another target (%s)',
+    async (status) => {
+      const store = new Store(':memory:');
+      const mr = `/api/v4/projects/${encodeURIComponent(ref.repo)}/merge_requests/${ref.number}`;
+      let branch = 'main';
+      let creates = 0;
+      type Note = { id: number; note: string; author_id: number };
+      let drafts: Note[] = [];
+      const notes: Note[] = [{ id: 103, note: 'First round finding', author_id: 7 }];
+      const http = transport((path, method, body) => {
+        if (path === mr)
+          return {
+            title: 'Changes',
+            state: 'opened',
+            source_branch: 'fix',
+            target_branch: branch,
+            source_project_id: 3,
+            diff_refs: {
+              head_sha: revision.head,
+              base_sha: revision.base,
+              start_sha: revision.start,
+            },
+          };
+        if (path === '/api/v4/projects/3')
+          return { http_url_to_repo: 'https://gitlab.example.com/team/subgroup/service.git' };
+        if (path === '/api/v4/user') return { id: 7 };
+        if (path.startsWith(`${mr}/draft_notes?`)) return drafts;
+        if (path.startsWith(`${mr}/notes?`)) return notes;
+        if (method === 'POST' && path === `${mr}/draft_notes`) {
+          const draft = { id: 104 + 10 * creates++, note: String(body.note), author_id: 7 };
+          drafts.push(draft);
+          return draft;
+        }
+        throw new Error(`Unexpected fixture request ${method} ${path}`);
+      });
+      const provider = new GitLabProvider(ref.host, 'fake', http);
+      const engine = new Engine(store, () => provider);
+      const publishDrafts = () => {
+        notes.push(...drafts);
+        drafts = [];
+      };
+      try {
+        const task = await engine.create({
+          ref,
+          repoPath: '/tmp',
+          requirements: 'Check the target branch',
+        });
+        const queued = await engine.review(task.id);
+        const old = queued.review!;
+        const prior = {
+          status: 'published' as const,
+          body: '',
+          revision,
+          url: ref.url,
+          comments: [{ id: '103', body: 'First round finding', url: ref.url }],
+        };
+        store.saveTask({ ...queued, feedback: prior });
+        const finding = {
+          id: 107,
+          note: `Second round finding\n\n${tag(`${old.marker}:comment:R2`)}`,
+          author_id: 7,
+        };
+        if (status === 'partial') notes.push(finding);
+        else drafts.push(finding);
+        if (status === 'published') publishDrafts();
+        branch = 'release';
+        await engine.reconcile(task.id);
+
+        const operations = store.db.prepare('SELECT id, status FROM operations').all();
+        if (status !== 'published') {
+          const blocked = await engine.review(task.id, true);
+          expect(blocked).toMatchObject({ state: 'needs_input', review: old });
+          for (const value of ['main', 'release', 'GitLab'])
+            expect(blocked.reason).toContain(value);
+          expect(creates).toBe(1);
+          expect(store.db.prepare('SELECT id, status FROM operations').all()).toEqual(operations);
+          if (status === 'draft') drafts = [];
+          else publishDrafts();
+        }
+        const next = await engine.review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual([
+          status === 'draft' ? '103' : '107',
+        ]);
+        expect(creates).toBe(2);
+        const reviewer = store.claim()!;
+        await engine.completeJob(reviewer, {
+          status: 'completed',
+          summary: 'Reviewed the new target',
+          checkedHead: revision.head,
+          verifiedCommentIds: ['103'],
+        });
+        expect(store.getTask(task.id).state).toBe(
+          status === 'draft' ? 'awaiting_publication' : 'needs_input',
+        );
+      } finally {
+        store.close();
+      }
+    },
+  );
+
   const review: ReviewHandle = {
     id: '5',
     marker: 'daddyloop:t:1',
