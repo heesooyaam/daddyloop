@@ -357,12 +357,6 @@
   letter-spacing: -2px;
   padding-right: 2px;
 }
-.daddy-avatar.small {
-  width: 27px;
-  height: 27px;
-  font-size: 20px;
-  border-radius: 8px;
-}
 .daddy-chat-intro strong {
   font-size: 12px;
   font-weight: 650;
@@ -564,40 +558,50 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 26px 22px 20px;
+  padding: 8px 22px 2px;
   border-left: 1px solid var(--line);
   min-height: 0;
   background: var(--panel);
 }
-.daddy-board-header {
+.daddy-board-controls {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 18px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.daddy-board-header h2 {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.4px;
-  margin: 5px 0;
+.daddy-board-controls > .daddy-button {
+  flex: 1 auto;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 .daddy-pool-count {
-  font:
-    30px ui-monospace,
-    monospace;
-  color: var(--accent-ink);
-  letter-spacing: -2px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.daddy-pool-count small {
-  font-size: 16px;
-  color: var(--accent-ink);
-  letter-spacing: -1px;
+.daddy-board-heading {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.daddy-board-heading h2 {
+  color: var(--ink);
+  font-size: 13px;
+  margin: 0;
 }
 .daddy-pool-control {
   display: flex;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
 }
 .daddy-pool-control select {
@@ -612,18 +616,18 @@
   min-width: 48px;
 }
 .daddy-pool-hint {
-  font-size: 10px;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--muted);
-  margin: 10px 0 28px;
-}
-.daddy-board > .daddy-section-label {
-  margin-left: 0;
-  margin-right: 0;
+  margin: 6px 0 12px;
 }
 .daddy-work-items {
-  overflow: auto;
+  flex: 1;
   min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  margin-inline: -4px;
   scrollbar-width: thin;
 }
 .daddy-work-item {
@@ -647,21 +651,55 @@
   color: var(--muted);
   margin-bottom: 9px;
 }
+.daddy-work-items .daddy-work-item {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+}
+.daddy-work-items .daddy-work-item:hover {
+  background: var(--accent);
+}
+.daddy-work-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.daddy-work-heading strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.daddy-work-heading svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
 .daddy-work-state {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 9px;
+  gap: 5px;
+  font-size: 12px;
   color: var(--muted);
+}
+.daddy-work-state > * {
+  flex-shrink: 0;
 }
 .daddy-work-item.complete .daddy-work-state {
   color: var(--success);
 }
 .daddy-work-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
+  margin-inline: 4px;
   border-radius: 50%;
-  background: var(--panel);
+  background: currentColor;
 }
 .daddy-work-item > strong {
   font-size: 11px;
@@ -670,13 +708,23 @@
   display: block;
   overflow-wrap: anywhere;
 }
-.daddy-work-item footer {
+.daddy-work-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 9px;
-  margin-top: 10px;
+  font-size: 11px;
+}
+.daddy-work-meta > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.daddy-work-meta > svg {
+  flex-shrink: 0;
 }
 .daddy-work-item > small {
   font-size: 9px;
@@ -684,22 +732,9 @@
   display: block;
   margin-top: 7px;
 }
-.daddy-board-controls {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
-.daddy-board-controls > .daddy-button {
-  flex: 1 auto;
+.daddy-work-items .daddy-work-item > small {
   font-size: 11px;
-  min-height: 35px;
-}
-.daddy-work-id {
-  display: block;
-  color: var(--muted);
-  font-size: 10px;
-  margin-top: 4px;
+  margin: 0;
 }
 .daddy-worker-list {
   list-style: none;
@@ -717,22 +752,6 @@
   gap: 8px;
   font-size: 11px;
   color: var(--muted);
-}
-.daddy-board-bottom {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: auto;
-  padding-top: 23px;
-  color: var(--muted);
-  font-size: 9px;
-}
-.daddy-board-bottom small {
-  display: block;
-  font-size: 8px;
-  color: var(--muted);
-  margin-top: 5px;
-  overflow-wrap: anywhere;
 }
 .daddy-welcome {
   flex: 1;
@@ -1019,6 +1038,7 @@
   font-size: 19px;
   line-height: 1.45;
   margin: 0 0 11px;
+  overflow-wrap: anywhere;
 }
 .daddy-status-pill {
   display: inline-block;
@@ -1241,10 +1261,7 @@
   .daddy-board {
     width: 100%;
     border: 0;
-    padding: 24px 20px;
-  }
-  .daddy-board .daddy-work-items {
-    flex: 1;
+    padding-inline: 15px;
   }
   .mobile-hidden {
     display: none;

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 async function login(page: Page) {
@@ -21,6 +22,10 @@ async function create(page: Page, title: string, issue: number) {
     timeout: 20000,
   });
 }
+async function openWorkers(page: Page) {
+  await page.getByRole('button', { name: /^Workers \d/ }).click();
+  return page.getByRole('dialog', { name: 'Workers' });
+}
 test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,
 }) => {
@@ -29,8 +34,12 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await login(page);
   const issue = Date.now();
   await create(page, 'One daddy, several tasks', issue);
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('1');
-  await page.getByLabel('Maximum workers').selectOption('2');
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await expect(limit).toHaveValue('1');
+  await limit.selectOption('2');
+  await expect(limit).toHaveValue('2');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
   await page
     .getByLabel('Message daddy')
     .fill(`https://github.com/fixture/planning/issues/${issue + 1}`);
@@ -40,14 +49,15 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await expect(page.getByText('Read-only worker reports', { exact: true })).toBeVisible();
   await expect(page.getByRole('dialog').locator('textarea')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('2');
-  await expect(
-    page.locator('.daddy-pool-hint').filter({ hasText: 'Occupied by tasks: 2' }),
-  ).toBeVisible();
-  await page.getByLabel('Maximum workers').selectOption('1');
+  await openWorkers(page);
+  await expect(limit).toHaveValue('2');
+  await expect(workers.getByRole('status')).toContainText('Occupied by tasks: 2');
+  await limit.selectOption('1');
   await expect(
     page.getByText('Pool: 2 → 1. Changes apply in the background.', { exact: true }),
   ).toBeVisible();
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Workers \d\/2 → 1$/ })).toBeVisible();
   expect(errors).toEqual([]);
 });
 test('uses a one-request repository from a phone and resets the composer without changing workspace defaults', async ({
@@ -103,9 +113,11 @@ test('supports the phone task board, pool controls and workspace directory choos
   await create(page, 'Phone session', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await expect(page.getByLabel('Maximum workers')).toBeVisible();
-  await page.getByLabel('Maximum workers').selectOption('3');
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('3');
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await limit.selectOption('3');
+  await expect(limit).toHaveValue('3');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await page.getByRole('button', { name: /Workspaces/ }).click();
@@ -122,8 +134,12 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await create(page, 'Shared task controls', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await page.getByLabel('Maximum workers').selectOption('2');
-  await page.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await limit.selectOption('2');
+  await expect(limit).toHaveValue('2');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
   const queue = page.getByRole('dialog', { name: 'Queue task' });
   await queue.getByLabel('Task description').fill('Repair the filter cache');
   await queue.getByLabel('Assign to worker').selectOption('2');
@@ -140,8 +156,7 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
   await report.getByRole('button', { name: 'Close', exact: true }).click();
 
-  await page.getByRole('button', { name: 'Workers', exact: true }).click();
-  const workers = page.getByRole('dialog', { name: 'Workers' });
+  await openWorkers(page);
   const worker = workers.getByRole('button', { name: 'Configure worker 2' });
   await expect(worker).toContainText('Repair the filter cache');
   await expect(worker).toContainText('gpt-6-astra · medium');
@@ -158,6 +173,65 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(worker).toContainText('Repair the filter cache');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test('shows a full card on short screens and keeps actions available in a dense task list', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Dense task board', Date.now());
+  const sessionId = new URL(page.url()).hash.slice('#session/'.length);
+  const longTitle =
+    'Rebuild the response cache for imported records with missing workspace metadata';
+  for (let index = 1; index <= 10; index++) {
+    const response = await page.request.post(`/api/daddy/sessions/${sessionId}/tasks`, {
+      headers: { 'X-daddyloop-Request': '1' },
+      data: { requirements: `${index}. ${longTitle}`, requestId: randomUUID() },
+    });
+    expect(response.status()).toBe(201);
+  }
+
+  const list = page.locator('.daddy-work-items');
+  const cards = list.getByRole('button');
+  const fullTitle = `1. ${longTitle}`;
+  const longCard = cards.filter({ hasText: fullTitle });
+  const queue = page.getByRole('button', { name: 'Queue a task', exact: true });
+  for (const viewport of [
+    { width: 1024, height: 480 },
+    { width: 390, height: 540 },
+  ]) {
+    await page.setViewportSize(viewport);
+    if (viewport.width === 390) {
+      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+    }
+    await expect(cards).toHaveCount(11);
+    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(cards.first()).toBeInViewport({ ratio: 1 });
+    await expect(cards.first().locator('.daddy-work-state')).not.toBeEmpty();
+    await expect(cards.last()).not.toBeInViewport();
+
+    await list.hover();
+    await page.mouse.wheel(0, 1400);
+    await expect(cards.last()).toBeInViewport({ ratio: 1 });
+    await expect(queue).toBeInViewport({ ratio: 1 });
+    expect(await list.evaluate((element) => element.scrollWidth === element.clientWidth)).toBe(
+      true,
+    );
+
+    await queue.click();
+    const dialog = page.getByRole('dialog', { name: 'Queue task' });
+    await expect(dialog.getByLabel('Task description')).toBeFocused();
+    await page.keyboard.press('Escape');
+
+    await longCard.scrollIntoViewIfNeeded();
+    await expect(longCard).toHaveAttribute('title', fullTitle);
+    await expect(longCard.locator('strong')).toBeInViewport({ ratio: 1 });
+    await expect(longCard.locator('.daddy-work-state')).toBeInViewport({ ratio: 1 });
+    await longCard.locator('.daddy-work-heading svg').click();
+    const report = page.getByRole('dialog', { name: 'Work item' });
+    await expect(report.getByRole('heading', { name: fullTitle, exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await list.evaluate((element) => (element.scrollTop = 0));
+  }
+});
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({
   page,
 }) => {
@@ -167,6 +241,13 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await page.getByLabel('Language', { exact: true }).selectOption('ru');
   await expect(page.getByRole('button', { name: 'Новая сессия', exact: true })).toBeVisible();
   await expect(page.getByText(`Ticket fixture ${issue}`, { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1024, height: 480 });
+  await expect(page.getByRole('button', { name: 'В очередь', exact: true })).toBeInViewport({
+    ratio: 1,
+  });
+  await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
+    ratio: 1,
+  });
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');

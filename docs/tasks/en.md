@@ -14,7 +14,7 @@ New messages in an existing session go to the same daddy. He imports requirement
 
 ## Queue a task and choose a worker
 
-Open **Queue task** on the website or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.
+Click **Queue a task** in the web task panel or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.
 
 A worker can file issues or investigate a failure and return a report. daddy checks the report before the task completes. You can read the reviewed report on the website or through `/task DADDY-ID`. Saved code changes go through the usual PR review.
 

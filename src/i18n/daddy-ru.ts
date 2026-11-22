@@ -522,6 +522,7 @@ export const daddyRu: Record<string, string> = {
   'This worker has changed tasks. Open its settings again.':
     'Воркер уже сменил задачу. Открой его настройки заново.',
   'Queue task': 'Поставить в очередь',
+  'Queue a task': 'В очередь',
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',

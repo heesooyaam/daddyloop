@@ -283,7 +283,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             setModal('limits');
           }}
         />
-        {state.error && (
+        {state.error && (modal !== 'workers' || !board) && (
           <div className="daddy-error" role="alert">
             {t(state.error)}
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
@@ -476,114 +476,88 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   )}
                 </div>
               </section>
-              <aside className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}>
-                <div className="daddy-board-header">
-                  <div>
-                    <span className="daddy-eyebrow">{t('Your team')}</span>
-                    <h2>{t('Worker pool')}</h2>
-                  </div>
-                  <span className="daddy-pool-count">
-                    {board.workers.active}
-                    <small>/{board.workers.limit}</small>
-                  </span>
-                </div>
-                <label className="daddy-pool-control">
-                  {t('Maximum workers')}
-                  <select
-                    aria-label={t('Maximum workers')}
-                    value={board.workers.target}
-                    disabled={state.busy}
-                    onChange={(event) =>
-                      void model.action('settings', { workerLimit: Number(event.target.value) })
-                    }
-                  >
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((number) => (
-                      <option key={number} value={number}>
-                        {number}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="daddy-pool-hint" role="status">
-                  {t(
-                    board.workers.pending
-                      ? 'Pool: {limit} → {target}. Changes apply in the background.'
-                      : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-                    board.workers,
-                  )}
-                </p>
+              <aside
+                className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}
+                aria-labelledby="daddy-task-heading"
+              >
                 <div className="daddy-board-controls">
-                  <button className="daddy-button outline" onClick={() => setModal('workers')}>
-                    <Users size={15} />
+                  <button
+                    className="daddy-button outline"
+                    aria-haspopup="dialog"
+                    onClick={() => setModal('workers')}
+                  >
                     {t('Workers')}
+                    <span className="daddy-pool-count">
+                      {board.workers.active}/{board.workers.limit}
+                      {board.workers.pending && ` → ${board.workers.target}`}
+                    </span>
                   </button>
                   <button
                     className="daddy-button primary"
+                    aria-haspopup="dialog"
                     onClick={() => setModal('queue-task')}
                     disabled={paused || !!board.group.deletion}
                   >
                     <Plus size={15} />
-                    {t('Queue task')}
+                    {t('Queue a task')}
                   </button>
                 </div>
-                <div className="daddy-section-label">
-                  {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                <div className="daddy-board-heading">
+                  <h2 id="daddy-task-heading">
+                    {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                  </h2>
                   <span>
                     {board.tasks.filter((task) => task.state === 'complete').length}/
                     {board.tasks.length}
                   </span>
                 </div>
                 <div className="daddy-work-items">
-                  {workItems?.map((task) => (
-                    <button
-                      key={task.id}
-                      className={'daddy-work-item ' + task.state}
-                      onClick={() => setInspect(task.id)}
-                    >
-                      <div>
+                  {workItems?.map((task) => {
+                    const workspaceName =
+                      state.workspaces.find((workspace) => workspace.id === task.workspaceId)
+                        ?.name ?? board.workspace?.name;
+                    return (
+                      <button
+                        key={task.id}
+                        className={'daddy-work-item ' + task.state}
+                        title={task.title}
+                        aria-haspopup="dialog"
+                        onClick={() => setInspect(task.id)}
+                      >
+                        <span className="daddy-work-heading">
+                          <strong>{task.title}</strong>
+                          <MoreHorizontal size={17} aria-hidden="true" />
+                        </span>
                         <span className="daddy-work-state">
                           {task.state === 'complete' ? (
-                            <CircleCheck size={15} />
+                            <CircleCheck size={14} aria-hidden="true" />
                           ) : task.running ? (
-                            <LoaderCircle className="spin" size={15} />
+                            <LoaderCircle className="spin" size={14} aria-hidden="true" />
                           ) : (
-                            <span className="daddy-work-dot" />
+                            <span className="daddy-work-dot" aria-hidden="true" />
                           )}
                           {t(task.statusLabel)}
                         </span>
-                        <MoreHorizontal size={17} />
-                      </div>
-                      <strong>{task.title}</strong>
-                      <code className="daddy-work-id">{taskReference(task)}</code>
-                      <footer>
-                        <span>
-                          {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
-                            ?.name ?? board.workspace?.name}
+                        <span className="daddy-work-meta">
+                          <code>{taskReference(task)}</code>
+                          <span title={workspaceName}>{workspaceName}</span>
+                          {task.ref.kind !== 'ticket' && (
+                            <GitPullRequest size={14} aria-hidden="true" />
+                          )}
                         </span>
-                        {task.ref.kind !== 'ticket' && <GitPullRequest size={14} />}
-                      </footer>
-                      {task.dependsOn.length > 0 && (
-                        <small>
-                          {t('Prerequisites: {count}', { count: task.dependsOn.length })}
-                        </small>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                {!board.tasks.length && (
-                  <p className="daddy-empty-small">
-                    {t('The crew is ready. Give daddy something to handle.')}
-                  </p>
-                )}
-                <div className="daddy-board-bottom">
-                  <span className="daddy-avatar small">d.</span>
-                  <span>
-                    {t('One daddy. Shared context.')}
-                    <small>
-                      {board.group.daddy.model ?? t('Engine configuration')}{' '}
-                      {board.group.daddy.effort && '· ' + board.group.daddy.effort}
-                    </small>
-                  </span>
+                        {task.dependsOn.length > 0 && (
+                          <small>
+                            {t('Prerequisites: {count}', { count: task.dependsOn.length })}
+                          </small>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {!board.tasks.length && (
+                    <p className="daddy-empty-small">
+                      {t('The crew is ready. Give daddy something to handle.')}
+                    </p>
+                  )}
                 </div>
               </aside>
             </div>
@@ -702,10 +676,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'workers' && board && (
         <Dialog title={t('Workers')} onClose={() => setModal(null)}>
+          {state.error && (
+            <p className="daddy-field-error" role="alert">
+              {t(state.error)}
+            </p>
+          )}
           <WorkerControls
             key={board.group.id}
             api={api}
             board={board}
+            busy={state.busy}
+            onLimitChange={(workerLimit) => void model.action('settings', { workerLimit })}
             onChange={() => model.refresh()}
           />
         </Dialog>
