@@ -28,6 +28,28 @@ async function openWorkers(page: Page) {
   await page.getByRole('button', { name: /^Workers \d/ }).click();
   return page.getByRole('dialog', { name: 'Workers' });
 }
+async function mockTwoProviders(page: Page) {
+  await page.route('**/api/usage', async (route) => {
+    const response = await route.fetch();
+    const { agents }: UsageView = await response.json();
+    const codex = agents[0]!;
+    await route.fulfill({
+      response,
+      json: {
+        agents: [
+          codex,
+          {
+            ...codex,
+            engine: 'claude',
+            name: 'Claude',
+            buckets: codex.buckets.map((bucket) => ({ ...bucket, id: 'claude', name: 'Claude' })),
+            resets: { availableCount: null, canUse: false, credits: [] },
+          },
+        ],
+      } satisfies UsageView,
+    });
+  });
+}
 test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,
 }) => {
@@ -212,26 +234,7 @@ test('shows a full card on short screens and keeps actions available in a dense 
       } satisfies DaddyBoard,
     });
   });
-  await page.route('**/api/usage', async (route) => {
-    const response = await route.fetch();
-    const { agents }: UsageView = await response.json();
-    const codex = agents[0]!;
-    await route.fulfill({
-      response,
-      json: {
-        agents: [
-          codex,
-          {
-            ...codex,
-            engine: 'claude',
-            name: 'Claude',
-            buckets: codex.buckets.map((bucket) => ({ ...bucket, id: 'claude', name: 'Claude' })),
-            resets: { availableCount: null, canUse: false, credits: [] },
-          },
-        ],
-      } satisfies UsageView,
-    });
-  });
+  await mockTwoProviders(page);
 
   const list = page.locator('.daddy-work-items');
   const cards = list.getByRole('button');
@@ -298,6 +301,46 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await expect(report.getByRole('heading', { name: fullTitle, exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await list.evaluate((element) => (element.scrollTop = 0));
+  }
+});
+test('shows message send errors without scrolling on short screens', async ({ page }) => {
+  const message = 'The server is temporarily unavailable';
+  await mockTwoProviders(page);
+  await page.route('**/api/daddy/sessions/*/chat', (route) =>
+    route.fulfill({ status: 503, json: { error: { code: 'unavailable', message } } }),
+  );
+  await login(page);
+  await create(page, 'Send failure on a short screen', Date.now());
+  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+
+  const overview = page.getByRole('region', { name: 'Session overview' });
+  const composer = page.getByLabel('Message daddy');
+  const alert = page.getByRole('alert').filter({ hasText: message });
+  for (const viewport of [
+    { width: 390, height: 540 },
+    { width: 1024, height: 480 },
+  ]) {
+    await page.setViewportSize(viewport);
+    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    const draft = `Keep this draft at ${viewport.width} pixels`;
+    await composer.fill(draft);
+    const rejected = page.waitForResponse(
+      (response) => response.url().endsWith('/chat') && response.status() === 503,
+    );
+    await composer.press('Enter');
+    await rejected;
+
+    await expect(alert).toBeInViewport({ ratio: 1 });
+    await expect(alert.getByRole('button', { name: 'Retry' })).toBeInViewport({ ratio: 1 });
+    await expect(composer).toHaveValue(draft);
+    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+
+    if (viewport.width === 390) {
+      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+    }
+    await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
+      ratio: 1,
+    });
   }
 });
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({

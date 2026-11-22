@@ -275,6 +275,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
           )}
         </header>
+        {state.error && (modal !== 'workers' || !board) && (
+          <div className="daddy-error" role="alert">
+            {t(state.error)}
+            <button onClick={() => void model.refresh()}>{t('Retry')}</button>
+          </div>
+        )}
         <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
           <UsageStrip
             usage={state.usage}
@@ -284,12 +290,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               setModal('limits');
             }}
           />
-          {state.error && (modal !== 'workers' || !board) && (
-            <div className="daddy-error" role="alert">
-              {t(state.error)}
-              <button onClick={() => void model.refresh()}>{t('Retry')}</button>
-            </div>
-          )}
           {board?.group.resourceWait && (
             <div className="daddy-error daddy-resource-wait" role="status">
               <strong>{t('Waiting for server resources')}</strong>

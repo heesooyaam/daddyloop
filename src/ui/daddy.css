@@ -823,6 +823,9 @@
   border-bottom: 1px solid var(--danger);
   overflow-wrap: anywhere;
 }
+.daddy-main > .daddy-error {
+  flex-shrink: 0;
+}
 .daddy-error button {
   margin-left: auto;
   border: 0;
