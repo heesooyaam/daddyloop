@@ -156,7 +156,12 @@ export function taskCard(locale: Locale, item: TaskActivity, slot?: WorkerSlot):
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
-  return { ...text, buttons: [queueButtons(task.groupId!, locale)] };
+  const buttons = [queueButtons(task.groupId!, locale)];
+  if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
+    buttons.unshift([
+      { text: t('Verify merge'), callback_data: `dad:merge:${task.id}:${task.generation}` },
+    ]);
+  return { ...text, buttons };
 }
 
 export function queuedTaskCard(locale: Locale, task: Task): TelegramCard {

@@ -13,6 +13,7 @@ import {
   type TicketSource,
   type TicketRef,
   type PRTask,
+  type PullRequest,
   defaultPolicy,
   now,
   sameRevision,
@@ -198,6 +199,7 @@ export class Engine {
         return task;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       const changed = !sameRevision(task.revision, pr);
       if (changed) this.invalidate(task, pr);
@@ -242,6 +244,7 @@ export class Engine {
     task.reviewFinished = false;
     task.pr = pr;
     task.revision = pr ? revisionOf(pr) : undefined;
+    task.verifiedMerge = undefined;
     this.store.event(task.id, 'revision.changed', {
       revision: task.revision,
       generation: task.generation,
@@ -261,11 +264,60 @@ export class Engine {
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
+  private queueMergeVerification(task: Task, pr: PullRequest) {
+    if (task.state !== 'needs_input' || this.store.busy(task.id))
+      throw new AppError('task_busy', 'Choose an idle task that needs attention');
+    if (pr.state !== 'merged' || pr.head !== task.revision?.head)
+      throw new AppError(
+        'merge_unconfirmed',
+        'The provider must confirm the merge of this task head',
+      );
+    if (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head)
+      throw new AppError(
+        'unsubmitted_changes',
+        'Inspect the saved worker changes before verifying this merge',
+      );
+    this.store.transaction(() => {
+      if (!sameRevision(task.revision, pr)) {
+        task.approvedAt = undefined;
+        task.checksWaivedAt = undefined;
+      }
+      task.generation++;
+      task.revision = revisionOf(pr);
+      task.pr = pr;
+      task.verifiedMerge = undefined;
+      task.reviewerThreadId = undefined;
+      this.state(task, 'reviewing', 'Checking the merged result');
+      this.store.enqueue(
+        task,
+        'reviewer',
+        'verify_merge',
+        'Verify the delivered PR diff and the original task outcome, including requested deployment checks. Use read-only evidence. Check prior published findings and return their verified IDs. Report incomplete if any required result cannot be verified.',
+      );
+    });
+    return task;
+  }
   private async reconcileLocked(id: string): Promise<Task> {
     const task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
+    if (pr.state === 'merged') {
+      if (
+        task.state === 'complete' ||
+        this.store.activeJobs(id).some((job) => job.kind === 'verify_merge')
+      )
+        return task;
+      if (
+        sameRevision(task.verifiedMerge, pr) &&
+        task.verifiedMerge?.mergeCommit === pr.mergeCommit &&
+        ['awaiting_checks', 'awaiting_plan_approval'].includes(task.state)
+      ) {
+        task.pr = pr;
+        await this.finish(task);
+        return task;
+      }
+    }
     if (pr.state !== 'open') {
       this.onCancel(id);
       this.store.cancelJobs(id);
@@ -356,6 +408,21 @@ export class Engine {
     else this.store.saveTask(task);
     return this.store.getTask(id);
   }
+  private hasUnverifiedFindings(task: Task, verified: Set<string>, feedback = task.feedback) {
+    const decisions = this.store.decisions(task.id);
+    const exempt = new Set(
+      decisions
+        .filter(
+          (d) =>
+            ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
+            (d.outcome === 'verified' && d.head === task.revision?.head),
+        )
+        .map((d) => d.commentId),
+    );
+    const unresolved =
+      feedback?.comments.filter((c) => !verified.has(c.id) && !exempt.has(c.id)) ?? [];
+    return unresolved.length > 0;
+  }
   private async finish(task: Task) {
     if (task.policy.requireChecks && !task.checksWaivedAt && task.pr?.checks !== 'passing') {
       this.state(
@@ -378,7 +445,9 @@ export class Engine {
       this.state(
         task,
         'complete',
-        'Current revision reviewed; publication, findings and checks are accounted for',
+        task.verifiedMerge
+          ? 'daddy verified the merged result'
+          : 'Current revision reviewed; publication, findings and checks are accounted for',
       );
     }
   }
@@ -550,6 +619,36 @@ export class Engine {
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (job.kind === 'verify_merge') {
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+        if (
+          pr.state !== 'merged' ||
+          !sameRevision(task.revision, pr) ||
+          pr.mergeCommit !== task.pr?.mergeCommit ||
+          result.checkedHead !== pr.head
+        ) {
+          this.state(task, 'needs_input', 'The merged revision changed during verification');
+        } else if (result.status !== 'completed') {
+          this.state(task, 'needs_input', result.question || result.summary);
+        } else if (
+          result.disputedCommentIds?.length ||
+          this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds)) ||
+          (task.snapshot?.status === 'published' &&
+            this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds), task.snapshot))
+        ) {
+          this.state(
+            task,
+            'needs_input',
+            'Reviewer has not verified all previously published findings',
+          );
+        } else {
+          task.summary = result.summary;
+          task.pr = pr;
+          task.verifiedMerge = { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
+          await this.finish(task);
+        }
+        return;
+      }
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
         this.invalidate(task, pr);
         this.state(
@@ -584,20 +683,8 @@ export class Engine {
           return;
         }
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review!);
-        const decisions = this.store.decisions(task.id);
         const verified = new Set(result.verifiedCommentIds ?? []);
-        const exempt = new Set(
-          decisions
-            .filter(
-              (d) =>
-                ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
-                (d.outcome === 'verified' && d.head === task.revision?.head),
-            )
-            .map((d) => d.commentId),
-        );
-        const unresolved =
-          task.feedback?.comments.filter((c) => !verified.has(c.id) && !exempt.has(c.id)) ?? [];
-        if (!snapshot.comments.length && unresolved.length) {
+        if (!snapshot.comments.length && this.hasUnverifiedFindings(task, verified)) {
           this.state(
             task,
             'needs_input',
@@ -674,7 +761,7 @@ export class Engine {
   }
   async action(
     id: string,
-    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen',
+    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
     reason = '',
     expected?: ExpectedTask,
   ) {
@@ -686,6 +773,10 @@ export class Engine {
           throw new AppError('session_deleting', 'This session is being deleted');
       }
       assertTaskVersion(task, expected);
+      if (action === 'verify-merge') {
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        return this.queueMergeVerification(task, pr);
+      }
       if (action === 'pause') {
         task.resumeState = task.state;
         task.generation++;
@@ -750,7 +841,11 @@ export class Engine {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (!sameRevision(current, task.revision))
+        if (
+          !sameRevision(current, task.revision) ||
+          (task.verifiedMerge &&
+            (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
+        )
           throw new AppError('stale_plan', 'The plan changed after review');
         task.approvedAt = now();
         this.state(task, 'complete', 'Plan approved for implementation at this exact revision');

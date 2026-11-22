@@ -22,6 +22,8 @@ When queuing, you can select a numbered worker, a model and a reasoning level. W
 
 Open **Workers** on the website or use `/workers` in Telegram to see the numbered workers and their tasks. Use the worker’s settings to select a model for its next task. **Apply to current task** restarts an active author step in the same working copy. In Telegram, use `/worker NUMBER MODEL EFFORT` and add `--force` to apply it to the current task. [Telegram commands](../telegram/en.md#tasks-and-workers)
 
+If a task needs attention after its PR was merged, open its card on the website or with `/task DADDY-ID` in Telegram and choose **Verify merge**. The service checks the head with the provider and queues a read-only review of the delivered result. Successful verification and required checks complete the task and release its worker slot.
+
 ## Pool size
 
 ```bash

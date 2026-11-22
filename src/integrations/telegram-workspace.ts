@@ -1021,6 +1021,20 @@ export class TelegramWorkspace {
       await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
       return true;
     }
+    const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);
+    if (merge) {
+      const item = this.store.getTask(merge[1]!);
+      if (!item.groupId || !item.revision)
+        throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, item.groupId);
+      await this.daddy.engine.action(item.id, 'verify-merge', '', {
+        groupId: item.groupId,
+        head: item.revision.head,
+        generation: Number(merge[2]),
+      });
+      await this.showTask(item.groupId, item.id, destination);
+      return true;
+    }
     const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
     if (task) {
       const { groupId } = this.store.getTask(task[1]!);

@@ -927,6 +927,17 @@ Object.assign(ru, {
   'The author produced no new committed changes. Discuss the result before implementing again.':
     'Автор не создал новых изменений. Обсуди результат перед повторной реализацией.',
   'The worker report is ready for review': 'Отчёт воркера готов к проверке',
+  'Inspect the saved worker changes before verifying this merge':
+    'Проверь сохранённые изменения воркера перед проверкой слияния',
+  'Verify merge': 'Проверить слияние',
+  'Checking the merged result': 'daddy проверяет результат слияния',
+  'daddy verified the merged result': 'daddy проверил результат слияния',
+  'Choose an idle task that needs attention':
+    'Выбери остановившуюся задачу, которая требует внимания',
+  'The provider must confirm the merge of this task head':
+    'Сервис репозитория должен подтвердить слияние этой версии PR',
+  'The merged revision changed during verification':
+    'Версия PR изменилась во время проверки слияния',
   'daddy verified the worker report': 'daddy проверил отчёт воркера',
   'The review used a different worker report or revision':
     'Ревью относится к другому отчёту воркера или другой ревизии',

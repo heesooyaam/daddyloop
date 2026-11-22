@@ -176,7 +176,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const input = z
       .object({
         taskId: id,
-        action: z.enum(['approve-plan', 'waive-checks']),
+        action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
       })

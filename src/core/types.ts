@@ -156,6 +156,7 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  mergeCommit?: string;
   title: string;
   body: string;
   branch: string;
@@ -232,6 +233,7 @@ export interface Task {
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
+  verifiedMerge?: Revision & { mergeCommit?: string };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
@@ -305,7 +307,7 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat' | 'implement';
+  kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
   profile?: AgentProfile;
   groupId?: string;
   groupGeneration?: number;
