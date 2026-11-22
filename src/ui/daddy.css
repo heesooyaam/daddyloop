@@ -1076,6 +1076,16 @@
 .daddy-shade {
   display: none;
 }
+@media (width > 850px) {
+  .daddy-sidebar.collapsed {
+    display: none;
+  }
+}
+@media (width > 650px) {
+  .daddy-board.collapsed {
+    display: none;
+  }
+}
 @media (min-width: 1450px) {
   .daddy-conversation {
     padding-left: 55px;
@@ -1120,6 +1130,9 @@
   }
 }
 @media (max-width: 850px) {
+  .daddy-sessions-toggle {
+    display: none;
+  }
   .daddy-sidebar {
     position: fixed;
     top: 0;
@@ -1127,10 +1140,14 @@
     left: 0;
     z-index: 40;
     width: 260px;
+    visibility: hidden;
     transform: translateX(-100%);
-    transition: transform 0.16s;
+    transition:
+      transform 0.16s,
+      visibility 0.16s;
   }
   .daddy-sidebar.open {
+    visibility: visible;
     transform: translateX(0);
   }
   .daddy-shade {
@@ -1159,6 +1176,9 @@
   }
 }
 @media (max-width: 650px) {
+  .daddy-tasks-toggle {
+    display: none;
+  }
   .daddy-app {
     font-size: 13px;
   }
