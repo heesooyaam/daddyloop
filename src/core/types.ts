@@ -239,6 +239,7 @@ export interface Task {
     revision: Revision;
     generation: number;
     sent?: boolean;
+    confirmUntil?: number;
     staleDraft?: ReviewHandle;
   };
   reviewerWorktree?: string;

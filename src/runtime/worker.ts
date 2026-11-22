@@ -366,6 +366,7 @@ export class Worker {
     try {
       let task = store.getTask(job.taskId);
       const reportReview = job.kind === 'review' && isTicket(task);
+      if (job.kind === 'review' && !reportReview) this.engine.requireSubmittedFix(task);
       const group = task.groupId ? store.getGroup(task.groupId) : undefined;
       if (job.role === 'reviewer' && group) {
         if (job.groupGeneration !== group.generation)
@@ -544,10 +545,10 @@ export class Worker {
       ) {
         if (demo) await new DemoProvider(store).advance(prRef(task));
         else {
+          // Once saving starts, collect the local SHA even if cancellation arrives mid-commit.
           const head = await this.workspaces.commitFix(
             task,
             `Address review feedback (round ${task.round})`,
-            abort.signal,
           );
           savedFix = { head, revision: task.revision };
         }
