@@ -7,7 +7,7 @@ import { TicketWorkflow } from '../src/core/ticket-workflow.js';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
 import type { AgentInput } from '../src/runtime/agent.js';
-import { prRef } from '../src/core/types.js';
+import { prRef, revisionOf } from '../src/core/types.js';
 import { allRepositories } from '../src/modules/repositories/index.js';
 import { RepositoryRegistry } from '../src/modules/repositories/registry.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -70,7 +70,7 @@ it('keeps a saved fix when reconcile overlaps the author commit', async () => {
   const workspaces = new Workspaces('/tmp');
   vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
   const commit = vi.spyOn(workspaces, 'commitFix').mockReturnValue(commitResult.promise);
-  const push = vi.spyOn(workspaces, 'pushSavedFix').mockResolvedValue(undefined);
+  const push = vi.spyOn(workspaces, 'prepareSavedFixPush').mockResolvedValue(async () => {});
   const complete = vi.spyOn(f.engine, 'completeJob');
   const run = vi.fn(async ({ task, job }: AgentInput) =>
     f.result({
@@ -198,9 +198,11 @@ it('sends an older task’s saved corrections and reconciles the new PR head', a
     f.store.saveTask(task);
     let current = task.pr!;
     vi.spyOn(f.provider, 'getPR').mockImplementation(async () => current);
-    const push = vi.spyOn(workspaces, 'pushSavedFix').mockImplementation(async () => {
-      current = { ...current, head: pending };
-    });
+    const push = vi
+      .spyOn(workspaces, 'prepareSavedFixPush')
+      .mockImplementation(async () => async () => {
+        current = { ...current, head: pending };
+      });
     await worker.tick();
     await vi.waitFor(() => expect(f.store.getTask(task.id).revision?.head).toBe(pending));
     expect(push).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: task.id }), pending);
@@ -230,7 +232,7 @@ it.each([
       current = { ...current, head, ...change };
     });
     await f.engine.reconcile(task.id);
-    await f.engine.submitSavedFix(task.id, push);
+    await f.engine.submitSavedFix(task.id, async () => push);
     expect(push).toHaveBeenCalledTimes(afterPush ? 1 : 0);
     expect(f.store.getTask(task.id)).toMatchObject({
       state: 'needs_input',
@@ -257,7 +259,7 @@ it('blocks the next review if the confirmed PR revision changes before review st
     const confirmed = { ...task.pr!, head };
     f.store.setSetting('demo-pr:1', confirmed);
     const push = vi.fn();
-    await f.engine.submitSavedFix(task.id, push);
+    await f.engine.submitSavedFix(task.id, async () => push);
     expect(push).not.toHaveBeenCalled();
     expect(f.store.getTask(task.id).state).toBe('queued');
 
@@ -286,7 +288,7 @@ it('preserves a fix but prevents automatic submission from a stale generation', 
     task.generation++;
     f.store.saveTask(task);
     const push = vi.fn();
-    await f.engine.submitSavedFix(task.id, push);
+    await f.engine.submitSavedFix(task.id, async () => push);
     expect(push).not.toHaveBeenCalled();
     expect(f.store.getTask(task.id)).toMatchObject({
       state: 'needs_input',
@@ -389,6 +391,16 @@ it('recovers the lost saved fix on Resume and leaves both earlier reviews intact
 
     const resumed = await f.engine.action(task.id, 'resume');
     expect(resumed).toMatchObject({ state: 'awaiting_push', pendingAuthorHead: saved });
+    await new TicketWorkflow(f.engine, new Workspaces(dir)).pushFixes(task.id);
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'needs_input',
+      reason: expect.stringContaining('managed author workspace is missing'),
+    });
+    const preflight = f.store.getTask(task.id).pendingAuthorFix;
+    expect(preflight?.pushStarted).toBeUndefined();
+    expect(preflight?.confirmUntil).toBeUndefined();
+    expect(await git(['--git-dir', remote, 'rev-parse', ref], dir)).toBe(originalHead);
+    await f.engine.action(task.id, 'resume');
     await new TicketWorkflow(f.engine, workspaces).pushFixes(task.id);
     expect(await git(['--git-dir', remote, 'rev-parse', ref], dir)).toBe(saved);
     expect(await f.engine.review(task.id)).toMatchObject({
@@ -415,6 +427,111 @@ it('recovers the lost saved fix on Resume and leaves both earlier reviews intact
   }
 });
 
+it.each([true, false])(
+  'notices a lost fix after the old service replaced the starting base (run revision recorded: %s)',
+  async (hasRunRevision) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn() };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      const pr = { ...task.pr!, base: 'e'.repeat(40) };
+      if (hasRunRevision)
+        f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const reason = 'Author pushed changes; independent verification is next';
+      const generation = author.generation + 1;
+      const revision = revisionOf(pr);
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        state: 'queued',
+        reason,
+        review: undefined,
+        snapshot: undefined,
+      });
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', { state: 'queued', reason, generation, head: pr.head });
+      f.store.setSetting('demo-pr:1', pr);
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      expect(runtime.run).not.toHaveBeenCalled();
+      const blocked = f.store.getTask(task.id);
+      expect(blocked.state).toBe('needs_input');
+      expect(blocked.reason).toContain(head);
+      expect(blocked.reason).toContain(pr.base);
+      if (hasRunRevision) expect(blocked.reason).toContain(task.revision!.base);
+      expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'needs_input' });
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it('keeps the starting revision if the base changes during an author discussion', async () => {
+  const f = await fixture();
+  try {
+    const { task, saved } = await recordLegacyLostFix(f);
+    f.store.saveTask({ ...task, state: 'needs_input' });
+    await f.engine.chat(task.id, 'author', 'Discuss the published findings');
+    const base = 'e'.repeat(40);
+    f.store.setSetting('demo-pr:1', { ...task.pr!, base });
+    await f.run();
+    const blocked = f.store.getTask(task.id);
+    expect(blocked).toMatchObject({ state: 'needs_input', revision: task.revision });
+    expect(blocked.reason).toContain(saved);
+    expect(blocked.reason).toContain(base);
+    await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+  } finally {
+    f.store.close();
+  }
+});
+
+it('resumes a paused legacy task after the saved commit was pushed manually', async () => {
+  const f = await fixture();
+  try {
+    const { task, saved } = await recordLegacyLostFix(f);
+    task.ref.provider = 'github';
+    task.review = await f.provider.createReview(prRef(task), task.revision!, 'legacy-round-2');
+    f.store.saveTask({ ...task, state: 'needs_input' });
+    await f.engine.action(task.id, 'pause');
+    const current = { ...task.pr!, head: saved };
+    f.store.setSetting('demo-pr:1', { ...current, base: 'e'.repeat(40) });
+    expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'needs_input' });
+
+    f.store.setSetting('demo-pr:1', current);
+    expect(await f.engine.reconcile(task.id)).toMatchObject({
+      state: 'needs_input',
+      reason: expect.stringContaining('contains the saved fix on the original base'),
+    });
+    expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+      state: 'needs_input',
+      reason: expect.stringContaining('GitHub still has a draft'),
+    });
+    const draft = await f.provider.getReview(prRef(task), task.review);
+    f.store.setSetting(`demo-review:${task.review.id}`, { ...draft, status: 'missing' });
+    expect(await f.engine.action(task.id, 'resume')).toMatchObject({
+      state: 'queued',
+      revision: { head: saved },
+    });
+    const push = vi.fn();
+    await f.engine.submitSavedFix(task.id, async () => push);
+    expect(push).not.toHaveBeenCalled();
+    const next = await f.engine.review(task.id);
+    expect(next).toMatchObject({ state: 'reviewing', revision: { head: saved } });
+    expect(f.store.jobs(task.id).at(-1)?.generation).toBe(next.generation);
+  } finally {
+    f.store.close();
+  }
+});
+
 it('continues to block review of a lost fix after pause advances the generation', async () => {
   const f = await fixture();
   try {
@@ -435,7 +552,7 @@ it('continues to block review of a lost fix after pause advances the generation'
       message: expect.stringContaining(saved),
     });
     const push = vi.fn();
-    await f.engine.submitSavedFix(id, push);
+    await f.engine.submitSavedFix(id, async () => push);
     expect(push).not.toHaveBeenCalled();
     expect(f.store.busy(id)).toBe(false);
   } finally {
@@ -531,7 +648,7 @@ it('blocks a lost fix when the original author job was left cancelled before its
       reason: `The author run did not record completion. Inspect saved fix ${saved} before continuing.`,
     });
     const push = vi.fn();
-    await f.engine.submitSavedFix(task.id, push);
+    await f.engine.submitSavedFix(task.id, async () => push);
     expect(push).not.toHaveBeenCalled();
     expect(f.store.jobs(task.id).at(-1)).toMatchObject({ kind: 'fix', status: 'cancelled' });
   } finally {
@@ -617,29 +734,29 @@ it.each([false, true])(
       // The push succeeded, but getPR still observes the old head.
       const push = vi.fn(async () => {});
       const start = Date.now();
-      await f.engine.submitSavedFix(task.id, push);
+      await f.engine.submitSavedFix(task.id, async () => push);
       const restarted = new Engine(f.store, () => f.provider);
       vi.setSystemTime(start + 30_000);
       await restarted.action(task.id, 'pause');
       await restarted.action(task.id, 'resume');
-      await restarted.submitSavedFix(task.id, push);
+      await restarted.submitSavedFix(task.id, async () => push);
       expect(f.store.getTask(task.id).state).toBe('awaiting_push');
 
       vi.setSystemTime(start + 61_000);
-      await restarted.submitSavedFix(task.id, push);
+      await restarted.submitSavedFix(task.id, async () => push);
       const blocked = f.store.getTask(task.id);
       expect(blocked).toMatchObject({ state: 'needs_input', pendingAuthorHead: head });
       expect(blocked.reason).toContain(head);
       expect(blocked.reason).toContain(task.revision!.head);
       await restarted.action(task.id, 'resume');
-      await restarted.submitSavedFix(task.id, push);
+      await restarted.submitSavedFix(task.id, async () => push);
       expect(f.store.getTask(task.id).state).toBe('needs_input');
       expect(push).toHaveBeenCalledTimes(alreadySent ? 0 : 1);
       expect(f.store.jobs(task.id)).toHaveLength(0);
 
       f.store.setSetting('demo-pr:1', { ...task.pr!, head });
       await restarted.action(task.id, 'resume');
-      await restarted.submitSavedFix(task.id, push);
+      await restarted.submitSavedFix(task.id, async () => push);
       expect(await restarted.review(task.id)).toMatchObject({
         state: 'reviewing',
         revision: { head },
@@ -666,7 +783,7 @@ it.each(['reverted', 'accepted'] as const)(
       task.pendingAuthorFix = { generation: task.generation, revision: task.revision! };
       f.store.saveTask(task);
       const start = Date.now();
-      await f.engine.submitSavedFix(task.id, async () => {
+      await f.engine.submitSavedFix(task.id, async () => async () => {
         f.store.setSetting('demo-pr:1', { ...task.pr!, head });
         // Preserve what the restarted service sees after the push but before its result write.
         crashState.saveTask(f.store.getTask(task.id));
@@ -679,7 +796,7 @@ it.each(['reverted', 'accepted'] as const)(
       const push = vi.fn(async () => {
         f.store.setSetting('demo-pr:1', { ...task.pr!, head });
       });
-      await restarted.submitSavedFix(task.id, push);
+      await restarted.submitSavedFix(task.id, async () => push);
       expect(push).not.toHaveBeenCalled();
       if (remoteResult === 'accepted') {
         expect(crashState.getTask(task.id)).toMatchObject({ state: 'queued', revision: { head } });
@@ -689,7 +806,7 @@ it.each(['reverted', 'accepted'] as const)(
       } else {
         expect(crashState.getTask(task.id).state).toBe('awaiting_push');
         vi.setSystemTime(start + 61_000);
-        await restarted.submitSavedFix(task.id, push);
+        await restarted.submitSavedFix(task.id, async () => push);
         const blocked = crashState.getTask(task.id);
         expect(blocked.state).toBe('needs_input');
         expect(blocked.reason).toContain(head);
@@ -704,6 +821,40 @@ it.each(['reverted', 'accepted'] as const)(
     }
   },
 );
+
+it('blocks a sent fix when provider errors outlast the confirmation deadline', async () => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    const task = f.store.getTask(f.task.id);
+    const head = 'f'.repeat(40);
+    task.state = 'awaiting_push';
+    task.pendingAuthorHead = head;
+    task.pendingAuthorFix = { generation: task.generation, revision: task.revision! };
+    f.store.saveTask(task);
+    const push = vi.fn(async () => {});
+    vi.spyOn(f.provider, 'getPR')
+      .mockResolvedValueOnce(task.pr!)
+      .mockRejectedValue(new Error('Provider unavailable'));
+    const check = () => f.engine.submitSavedFix(task.id, async () => push);
+    const start = Date.now();
+    await expect(check()).rejects.toThrow('Provider unavailable');
+    expect(f.store.getTask(task.id).state).toBe('awaiting_push');
+    vi.setSystemTime(start + 30_000);
+    await expect(check()).rejects.toThrow('Provider unavailable');
+    expect(f.store.getTask(task.id).state).toBe('awaiting_push');
+    vi.setSystemTime(start + 61_000);
+    await check();
+    const blocked = f.store.getTask(task.id);
+    expect(blocked).toMatchObject({ state: 'needs_input', pendingAuthorHead: head });
+    expect(blocked.reason).toContain(head);
+    expect(blocked.reason).toContain('Provider unavailable');
+    expect(push).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+    f.store.close();
+  }
+});
 
 it('holds agent execution when resource thresholds are exceeded', async () => {
   const f = await fixture(),

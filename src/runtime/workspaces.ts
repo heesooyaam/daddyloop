@@ -240,8 +240,8 @@ export class Workspaces {
     }
     return run(['rev-parse', 'HEAD']);
   }
-  async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
-    if (task.ref.provider === 'arcadia') return this.arc.pushSavedFix(task, head, signal);
+  async prepareSavedFixPush(task: Task, head: string, signal?: AbortSignal) {
+    if (task.ref.provider === 'arcadia') return this.arc.prepareSavedFixPush(task, head, signal);
     if (!/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('Invalid task ID');
     if (!task.pr || !task.revision || !/^[a-f0-9]{40,64}$/i.test(head))
       throw new AppError(
@@ -268,11 +268,12 @@ export class Workspaces {
     await run(['merge-base', '--is-ancestor', task.revision.head, head]);
     await run(['check-ref-format', `refs/heads/${task.pr.branch}`]);
     const address = this.pushAddress(task);
+    const env = this.env(task, address);
+    const refspec = `${head}:refs/heads/${task.pr.branch}`;
     // An ordinary push cannot overwrite concurrent remote commits.
-    await run(
-      ['push', '--porcelain', '--', address, `${head}:refs/heads/${task.pr.branch}`],
-      this.env(task, address),
-    );
+    return async () => {
+      await run(['push', '--porcelain', '--', address, refspec], env);
+    };
   }
   async arcPlanDocuments(task: Task, cwd: string) {
     return this.arc.planDocuments(task, cwd);

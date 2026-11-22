@@ -136,7 +136,9 @@ export class TicketWorkflow {
     });
   }
   async pushFixes(id: string) {
-    return this.engine.submitSavedFix(id, (task, head) => this.workspaces.pushSavedFix(task, head));
+    return this.engine.submitSavedFix(id, (task, head) =>
+      this.workspaces.prepareSavedFixPush(task, head),
+    );
   }
 
   async submit(id: string, expected?: ExpectedTask): Promise<Task> {

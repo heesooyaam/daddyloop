@@ -38,6 +38,9 @@ const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
 const noAuthorChanges =
   'Author made no code changes; independent verification of the decisions is next';
+const authorPushedChanges = 'Author pushed changes; independent verification is next';
+const staleDraftReason =
+  'GitHub still has a draft on the previous revision. Inspect it on GitHub and clear the pending review before resuming.';
 const fixConfirmationGraceMs = 60_000;
 const reviewCompletionStates: State[] = [
   'awaiting_publication',
@@ -47,15 +50,28 @@ const reviewCompletionStates: State[] = [
 
 interface LostFix {
   head: string;
+  revision?: Revision;
   generation: number;
   authorCompleted: boolean;
 }
 
-function lostFixRecoveryBlock(fix: LostFix, generation: number) {
+type SavedFixCheck =
+  { status: 'ready' | 'confirmed' | 'waiting' } | { status: 'blocked'; reason: string };
+
+function lostFixRecoveryBlock(fix: LostFix, task: Task) {
+  const observedBase = task.revision?.base ?? 'unknown';
+  if (!fix.revision)
+    return `The original PR revision for saved fix ${fix.head} is unavailable. Observed PR base ${observedBase}.`;
+  if (!sameRevision(fix.revision, task.revision))
+    return `The PR revision changed for saved fix ${fix.head}. Original base ${fix.revision.base}. Observed PR base ${observedBase}.`;
   if (!fix.authorCompleted)
     return `The author run did not record completion. Inspect saved fix ${fix.head} before continuing.`;
-  if (fix.generation !== generation)
+  if (fix.generation !== task.generation)
     return `Saved fix ${fix.head} belongs to an earlier task generation. Resolve it before starting another review.`;
+}
+
+function changedBeforeRecovery(pr: PullRequest) {
+  return `The PR revision or branch changed before recovery. Observed PR head ${pr.head} and base ${pr.base}.`;
 }
 
 function pendingFixHead(task: Task) {
@@ -234,7 +250,7 @@ export class Engine {
     if (unsent)
       throw new AppError(
         'fix_pending',
-        (lost && lostFixRecoveryBlock(lost, task.generation)) ??
+        (lost && lostFixRecoveryBlock(lost, task)) ??
           `Resume the task to submit saved fix ${unsent} before review.`,
       );
   }
@@ -267,11 +283,7 @@ export class Engine {
       if (pending && staleDraft) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), staleDraft);
         if (snapshot.status === 'draft') {
-          this.blockSavedFix(
-            task,
-            pending,
-            'GitHub still has a draft on the previous revision. Inspect it on GitHub and clear the pending review before resuming.',
-          );
+          this.blockSavedFix(task, pending, staleDraftReason);
           return task;
         }
       }
@@ -353,12 +365,22 @@ export class Engine {
     if (lost) {
       if (pr.state !== 'open')
         this.holdLostFix(task, lost.head, `PR is ${pr.state}. Automatic work stopped.`);
-      else if (!sameRevision(task.revision, pr) || !samePullRequestBranches(task.pr, pr))
+      else if (
+        lost.revision &&
+        sameRevision(lost.revision, task.revision) &&
+        this.savedFixRemoteStatus(task, pr, lost.head, lost.revision).status === 'confirmed'
+      )
         this.holdLostFix(
           task,
           lost.head,
-          `The PR revision or branch changed before recovery. Observed PR head ${pr.head} and base ${pr.base}.`,
+          'The PR contains the saved fix on the original base. Resume the task to continue review.',
         );
+      else if (
+        !sameRevision(lost.revision, pr) ||
+        !sameRevision(lost.revision, task.revision) ||
+        !samePullRequestBranches(task.pr, pr)
+      )
+        this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
       else if (reviewCompletionStates.includes(task.state)) this.holdLostFix(task, lost.head);
       return task;
     }
@@ -521,11 +543,7 @@ export class Engine {
     return true;
   }
 
-  private savedFixStatus(
-    task: Task,
-    pr: PullRequest,
-    head: string,
-  ): { status: 'ready' | 'confirmed' | 'waiting' } | { status: 'blocked'; reason: string } {
+  private savedFixStatus(task: Task, pr: PullRequest, head: string): SavedFixCheck {
     const pending = task.pendingAuthorFix;
     const original = pending?.revision ?? task.feedback?.revision ?? task.revision;
     if (
@@ -537,6 +555,15 @@ export class Engine {
         status: 'blocked',
         reason: 'The saved fix belongs to a different task revision or generation.',
       };
+    return this.savedFixRemoteStatus(task, pr, head, original);
+  }
+
+  private savedFixRemoteStatus(
+    task: Task,
+    pr: PullRequest,
+    head: string,
+    original: Revision,
+  ): SavedFixCheck {
     if (!samePullRequestBranches(task.pr, pr))
       return {
         status: 'blocked',
@@ -554,15 +581,51 @@ export class Engine {
       : { status: 'blocked', reason: 'The PR points to a different revision.' };
   }
 
-  async submitSavedFix(id: string, push: (task: Task, head: string) => Promise<void>) {
+  private async readSavedFixPR(task: Task, head: string): Promise<PullRequest | undefined> {
+    const ref = prRef(task);
+    try {
+      return await this.provider(ref).getPR(ref);
+    } catch (error) {
+      const until = task.pendingAuthorFix?.confirmUntil;
+      if (until === undefined || Date.now() < until) throw error;
+      this.blockSavedFix(task, head, `Could not confirm the PR revision. ${redact(String(error))}`);
+    }
+  }
+
+  private queueConfirmedFixReview(task: Task, pr: PullRequest, head: string) {
+    this.store.transaction(() => {
+      const sent = task.pendingAuthorFix?.sent === true;
+      const original = task.pendingAuthorFix?.revision ?? task.revision!;
+      this.invalidate(task, pr, false);
+      task.pendingAuthorFix = {
+        ...task.pendingAuthorFix,
+        revision: original,
+        generation: task.generation,
+        sent,
+      };
+      task.resumeState = undefined;
+      this.store.event(task.id, 'author.submitted', { head, pushed: sent });
+      this.state(task, 'queued', 'New revision is ready for review');
+    });
+  }
+
+  async submitSavedFix(
+    id: string,
+    preparePush: (task: Task, head: string) => Promise<() => Promise<void>>,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (isTicket(task) || task.state !== 'awaiting_push' || this.store.busy(id)) return;
       const head = pendingFixHead(task);
       if (!head || head === task.revision?.head) return;
-      const ref = prRef(task);
-      const provider = this.provider(ref);
-      let pr = await provider.getPR(ref);
+      const pendingFix = task.pendingAuthorFix;
+      if ((pendingFix?.sent || pendingFix?.pushStarted) && pendingFix.confirmUntil === undefined) {
+        pendingFix.confirmUntil = Date.now() + fixConfirmationGraceMs;
+        this.store.saveTask(task);
+      }
+      let pr = await this.readSavedFixPR(task, head);
+      if (!pr) return;
+      const waitingReason = `Waiting for the PR to confirm saved fix ${head}.`;
       let check = this.savedFixStatus(task, pr, head);
       if (
         check.status === 'ready' &&
@@ -574,20 +637,22 @@ export class Engine {
           revision: task.revision!,
           generation: task.generation,
         });
-        // A restart can observe the push without its response. Verify the remote before advancing.
-        pending.pushStarted = true;
-        pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
-        this.store.saveTask(task);
         try {
-          await push(task, head);
+          const push = await preparePush(task, head);
+          // Only a failure after local preparation can leave the send result unknown.
+          pending.pushStarted = true;
+          pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
+          this.store.saveTask(task);
+          await push();
         } catch (error) {
           this.blockSavedFix(task, head, redact(String(error)));
           return;
         }
         pending.sent = true;
         pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
-        this.store.saveTask(task);
-        pr = await provider.getPR(ref);
+        this.state(task, 'awaiting_push', waitingReason);
+        pr = await this.readSavedFixPR(task, head);
+        if (!pr) return;
         check = this.savedFixStatus(task, pr, head);
       }
       if (check.status === 'blocked') {
@@ -612,66 +677,97 @@ export class Engine {
           );
           return;
         }
-        const reason = `Waiting for the PR to confirm saved fix ${head}.`;
-        if (task.reason !== reason) this.state(task, 'awaiting_push', reason);
+        if (task.reason !== waitingReason) this.state(task, 'awaiting_push', waitingReason);
         return;
       }
-      this.store.transaction(() => {
-        const sent = task.pendingAuthorFix?.sent === true;
-        const original = task.revision!;
-        this.invalidate(task, pr, false);
-        task.pendingAuthorFix = {
-          ...task.pendingAuthorFix,
-          revision: original,
-          generation: task.generation,
-          sent,
-        };
-        task.resumeState = undefined;
-        this.store.event(id, 'author.submitted', { head, pushed: sent });
-        this.state(task, 'queued', 'New revision is ready for review');
-      });
+      this.queueConfirmedFixReview(task, pr, head);
     });
   }
 
   private lostFix(task: Task): LostFix | undefined {
-    const original = task.revision;
     if (
-      (!['queued', 'reviewing', 'needs_input', 'paused', 'awaiting_push'].includes(task.state) &&
-        !reviewCompletionStates.includes(task.state)) ||
-      !original ||
-      task.feedback?.status !== 'published' ||
-      !sameRevision(task.feedback.revision, original)
+      !['queued', 'reviewing', 'needs_input', 'paused', 'awaiting_push'].includes(task.state) &&
+      !reviewCompletionStates.includes(task.state)
     )
       return;
-    // Older versions could lose the saved head while recording a no-change transition.
+    // Read the revision pinned to the author run. Older services could replace the task's base.
     const saved = this.store.db
       .prepare(
-        `SELECT id, run_id, json_extract(data, '$.head') AS head FROM events
-         WHERE task_id=? AND type='author.fixes_saved' ORDER BY id DESC LIMIT 1`,
+        `SELECT saved.id, saved.run_id, json_extract(saved.data, '$.head') AS head,
+            COALESCE(json_extract(saved.data, '$.revision'), (
+              SELECT json_extract(feedback.data, '$.revision') FROM events feedback
+              WHERE feedback.task_id=saved.task_id AND feedback.run_id=saved.run_id
+                AND feedback.type='author.feedback_snapshot' AND feedback.id<saved.id
+              ORDER BY feedback.id DESC LIMIT 1
+            )) AS revision
+         FROM events saved
+         WHERE saved.task_id=? AND saved.type='author.fixes_saved' ORDER BY saved.id DESC LIMIT 1`,
       )
       .get(task.id);
-    if (typeof saved?.head !== 'string' || saved.head === original.head) return;
+    if (typeof saved?.head !== 'string') return;
     const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
     if (job?.kind !== 'fix') return;
     const generation = job.generation + 1;
     if (generation > task.generation) return;
     const transition = this.store.db
       .prepare(
-        `SELECT 1 FROM events transition
+        `SELECT transition.id, json_extract(transition.data, '$.head') AS head,
+                json_extract(transition.data, '$.reason') AS reason FROM events transition
          WHERE transition.task_id=? AND transition.id>? AND transition.type='task.state'
          AND json_extract(transition.data, '$.state')='queued'
-         AND json_extract(transition.data, '$.reason')=?
+         AND json_extract(transition.data, '$.reason') IN (?, ?)
          AND json_extract(transition.data, '$.generation')=?
-         AND json_extract(transition.data, '$.head')=?
          AND NOT EXISTS (
            SELECT 1 FROM events submission WHERE submission.task_id=transition.task_id
            AND submission.id>transition.id AND submission.type='author.submitted'
            AND json_extract(submission.data, '$.head')=?
          ) LIMIT 1`,
       )
-      .get(task.id, saved.id!, noAuthorChanges, generation, original.head, saved.head);
-    if (transition)
-      return { head: saved.head, generation, authorCompleted: job.status === 'completed' };
+      .get(task.id, saved.id!, noAuthorChanges, authorPushedChanges, generation, saved.head);
+    if (!transition || transition.head === saved.head) return;
+    let recordedRevision = saved.revision;
+    if (typeof recordedRevision !== 'string' && transition.reason === noAuthorChanges) {
+      // The old no-change transition was written only when the full revision still matched.
+      recordedRevision =
+        this.store.db
+          .prepare(
+            `SELECT json_extract(data, '$.revision') AS revision FROM events
+           WHERE task_id=? AND id>? AND id<? AND type='revision.changed'
+           AND json_extract(data, '$.generation')=? ORDER BY id DESC LIMIT 1`,
+          )
+          .get(task.id, saved.id!, transition.id!, generation)?.revision ?? null;
+    }
+    const revision =
+      typeof recordedRevision === 'string' ? (JSON.parse(recordedRevision) as Revision) : undefined;
+    if (revision?.head === saved.head) return;
+    return { head: saved.head, revision, generation, authorCompleted: job.status === 'completed' };
+  }
+
+  private async resumeBlockedLostFix(task: Task, lost: LostFix, reason: string) {
+    // The old job cannot authorize a send. An observed exact match can authorize review.
+    const original = lost.revision;
+    if (original && sameRevision(original, task.revision)) {
+      const ref = prRef(task);
+      const provider = this.provider(ref);
+      const current = await provider.getPR(ref);
+      const check = this.savedFixRemoteStatus(task, current, lost.head, original);
+      if (check.status === 'confirmed') {
+        const staleDraft = ref.provider === 'github' ? task.review : undefined;
+        if (staleDraft && (await provider.getReview(ref, staleDraft)).status === 'draft') {
+          this.holdLostFix(task, lost.head, staleDraftReason);
+          return;
+        }
+        task.pendingAuthorHead = lost.head;
+        task.pendingAuthorFix = { revision: original, generation: task.generation, staleDraft };
+        this.queueConfirmedFixReview(task, current, lost.head);
+        return;
+      }
+      if (check.status === 'blocked') {
+        this.holdLostFix(task, lost.head, changedBeforeRecovery(current));
+        return;
+      }
+    }
+    this.state(task, 'needs_input', reason);
   }
 
   recoverReviewRoundLimits() {
@@ -848,6 +944,11 @@ export class Engine {
       if (job.kind === 'review' && this.stopLegacyReview(task)) return;
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
+        const lost = this.lostFix(task);
+        if (lost) {
+          this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
+          return;
+        }
         this.invalidate(task, pr);
         this.state(
           task,
@@ -962,11 +1063,7 @@ export class Engine {
           const changed = !sameRevision(pr, task.revision);
           task.pendingAuthorHead = undefined;
           this.invalidate(task, pr, false);
-          this.state(
-            task,
-            'queued',
-            changed ? 'Author pushed changes; independent verification is next' : noAuthorChanges,
-          );
+          this.state(task, 'queued', changed ? authorPushedChanges : noAuthorChanges);
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
@@ -1028,12 +1125,10 @@ export class Engine {
         }
         const pending = pendingFixHead(task);
         const lost = pending ? undefined : this.lostFix(task);
-        const recoveryBlock = lost && lostFixRecoveryBlock(lost, task.generation);
-        if (recoveryBlock) {
-          this.store.transaction(() => {
-            this.state(task, 'needs_input', recoveryBlock);
-            this.store.event(id, 'human.resume', { reason });
-          });
+        const recoveryBlock = lost && lostFixRecoveryBlock(lost, task);
+        if (lost && recoveryBlock) {
+          await this.resumeBlockedLostFix(task, lost, recoveryBlock);
+          this.store.event(id, 'human.resume', { reason });
           return task;
         }
         const saved = pending ?? lost?.head;

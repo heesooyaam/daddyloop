@@ -323,13 +323,16 @@ export class ArcWorkspaces {
     ).hash;
     return head;
   }
-  async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
+  async prepareSavedFixPush(task: Task, head: string, signal?: AbortSignal) {
     const author = await this.checkedAuthor(task, signal);
     if (author.head !== head)
       throw new Error('The Arc author branch changed after the fixes were saved');
-    if (!task.pr?.branch.startsWith('users/') || /\s/.test(task.pr.branch))
+    const branch = task.pr?.branch;
+    if (!branch?.startsWith('users/') || /\s/.test(branch))
       throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
-    await this.bridge.native(['push', '-u', task.pr.branch], author.saved.mount, signal);
+    return async () => {
+      await this.bridge.native(['push', '-u', branch], author.saved.mount, signal);
+    };
   }
   async planDocuments(task: Task, cwd: string) {
     const list = await this.bridge.native(
