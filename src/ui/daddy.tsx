@@ -122,14 +122,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [board?.messages.length, state.selected]);
-  const choose = (id: string) => {
-    if (limitsPage) {
+  const openChat = (id: string) => {
+    if (isLimitsPage()) {
       history.pushState(null, '', `/#session/${id}`);
       setLimitsPage(false);
     }
-    void model.select(id);
     setMenu(false);
     setPane('chat');
+  };
+  const choose = (id: string) => {
+    openChat(id);
+    void model.select(id);
   };
   const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.button !== 0)
@@ -691,11 +694,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onDraft={setNewDraft}
             api={model.api}
             onCreate={async (workspaceId, message, title, repository, instructions) => {
-              await model.create(workspaceId, message, title, repository, instructions);
+              const id = await model.create(workspaceId, message, title, repository, instructions);
+              if (!id) return;
               setNewDraft({});
               setModal(null);
-              setPane('chat');
-              setMenu(false);
+              openChat(id);
             }}
           />
         </Dialog>

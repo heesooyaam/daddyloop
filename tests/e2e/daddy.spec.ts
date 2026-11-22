@@ -180,6 +180,30 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await page.getByLabel('Язык', { exact: true }).selectOption('en');
   await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeVisible();
 });
+test('opens the new chat after starting a session from the limits page', async ({ page }) => {
+  await login(page);
+  await page.getByRole('link', { name: 'Limits', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New daddy session' });
+  await dialog.getByLabel('Session name (optional)').fill('Created from limits');
+  const created = page.waitForResponse(
+    (response) =>
+      response.url().endsWith('/api/daddy/sessions') && response.request().method() === 'POST',
+  );
+  await dialog.getByRole('button', { name: 'Start session', exact: true }).click();
+  const response = await created;
+  expect(response.status()).toBe(201);
+  const { group } = await response.json();
+  await expect(page).toHaveURL(
+    (url) => url.pathname === '/' && url.hash === `#session/${group.id}`,
+  );
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByRole('heading', { name: 'Created from limits', exact: true }),
+  ).toBeVisible();
+  await page.getByLabel('Message daddy').fill('Continue the conversation');
+});
 test('shows quota remaining on a phone and requires confirmation before spending one reset', async ({
   page,
 }) => {

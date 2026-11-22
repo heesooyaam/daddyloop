@@ -208,6 +208,7 @@ export class DaddyClient {
       this.creation = undefined;
       await this.select(board.group.id);
       await this.refresh();
+      return board.group.id;
     } catch (error) {
       if (!this.stopped) this.update({ error: (error as Error).message });
       throw error;
