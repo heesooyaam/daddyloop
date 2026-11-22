@@ -323,6 +323,7 @@ export class Engine {
           this.state(task, 'needs_input', `${targetChange} ${staleDraftReason}`);
           return task;
         }
+        if (snapshot.status === 'published') task.feedback = snapshot;
       }
       const changed = !sameRevision(task.revision, pr) || !!targetChange;
       if (changed) this.invalidate(task, pr);
@@ -620,6 +621,24 @@ export class Engine {
     const targetChange = reviewTargetChange(task.review, pr);
     if (!targetChange) return false;
     this.holdTaskForInput(task, targetChange);
+    return true;
+  }
+
+  private stopUnverifiedManualDecision(task: Task, pr: PullRequest): boolean {
+    const target = task.review?.targetBranch;
+    if (pr.state !== 'open') {
+      const reviewed = target ? ` Review target branch ${target}.` : '';
+      this.holdTaskForInput(
+        task,
+        `The PR is ${pr.state}.${reviewed} Observed target branch ${pr.targetBranch}.`,
+      );
+      return true;
+    }
+    if (target) return this.stopReviewOnTargetChange(task, pr);
+    this.holdTaskForInput(
+      task,
+      `The review has no recorded target branch. Use Retry review to start a new review on ${pr.targetBranch}.`,
+    );
     return true;
   }
 
@@ -1494,7 +1513,7 @@ export class Engine {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (this.stopReviewOnTargetChange(task, current)) return task;
+        if (this.stopUnverifiedManualDecision(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError('stale_plan', 'The plan changed after review');
@@ -1508,7 +1527,7 @@ export class Engine {
             400,
           );
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (this.stopReviewOnTargetChange(task, current)) return task;
+        if (this.stopUnverifiedManualDecision(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError(

@@ -1013,55 +1013,129 @@ it.each(['before reviewer', 'before publication', 'while reading the draft'] as 
   },
 );
 
-it.each(['approve-plan', 'waive-checks'] as const)(
-  'rejects %s after the published fix review target changes',
-  async (action) => {
-    const plan = action === 'approve-plan';
-    const f = await fixture({ kind: plan ? 'plan' : 'code' });
+it.each(['published', 'deleted'] as const)(
+  'uses the latest published feedback on retry after the old GitHub draft was %s',
+  async (status) => {
+    const f = await fixture();
     try {
-      const finding = await queueFix(f);
+      const first = await queueFix(f);
       const author = f.store.claim()!;
       const task = f.store.getTask(f.task.id);
+      task.ref.provider = 'github';
+      f.store.saveTask(task);
       const head = 'f'.repeat(40);
       await f.engine.completeJob(author, f.result(), { head, revision: task.revision! });
       f.store.saveJob({ ...author, status: 'completed' });
-      const pr = { ...task.pr!, head, checks: plan ? 'passing' : 'missing' };
+      const pr = { ...task.pr!, head };
       await f.engine.submitSavedFix(
         task.id,
         async () => async () => f.store.setSetting('demo-pr:1', pr),
       );
-      const review = await f.engine.review(task.id);
-      await f.run({ verifiedCommentIds: [finding] });
-      const published = await f.engine.publish(task.id);
-      expect(published.state).toBe(plan ? 'awaiting_plan_approval' : 'awaiting_checks');
-      const retargeted = { ...pr, targetBranch: 'release' };
-      f.store.setSetting('demo-pr:1', retargeted);
+      const secondReview = await f.engine.review(task.id);
+      const second = (await f.engine.broker.call(f.job(), 'add_comment', {
+        key: 'R2',
+        body: 'Check this finding on the next target',
+      })) as { id: string };
+      await f.run({ verifiedCommentIds: [first] });
+      f.store.setSetting('demo-pr:1', { ...pr, targetBranch: 'release' });
+      const oldReview = secondReview.review!;
+      if (status === 'published') await f.provider.publish(prRef(task), oldReview);
+      else {
+        const draft = await f.provider.getReview(prRef(task), oldReview);
+        f.store.setSetting(`demo-review:${oldReview.id}`, {
+          ...draft,
+          status: 'missing',
+          comments: [],
+        });
+      }
+      const expected =
+        status === 'published' ? await f.provider.getReview(prRef(task), oldReview) : task.feedback;
 
-      const blocked = await f.engine.action(task.id, action, 'Reviewed output manually');
-      expect(blocked).toMatchObject({
-        state: 'needs_input',
-        review: review.review,
-        snapshot: published.snapshot,
-      });
-      expect(blocked.reason).toContain(pr.targetBranch);
-      expect(blocked.reason).toContain(retargeted.targetBranch);
-      expect(blocked.checksWaivedAt).toBeUndefined();
-      expect(blocked.approvedAt).toBeUndefined();
-      expect(
-        f.store
-          .events(task.id)
-          .filter((event) => ['checks.waived', `human.${action}`].includes(event.type)),
-      ).toEqual([]);
-
-      expect(await f.engine.review(task.id, true)).toMatchObject({
-        state: 'reviewing',
-        review: { targetBranch: 'release' },
-      });
+      const next = await f.engine.review(task.id, true);
+      expect(next.review?.targetBranch).toBe('release');
+      expect(next.feedback).toEqual(expected);
+      expect(next.feedback?.comments.map((comment) => comment.id)).toEqual([
+        status === 'published' ? second.id : first,
+      ]);
+      await f.run({ verifiedCommentIds: [first] });
+      if (status === 'published') {
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          reason: 'Reviewer has not verified all previously published findings',
+        });
+      } else {
+        expect(f.store.getTask(task.id).state).toBe('awaiting_publication');
+      }
     } finally {
       f.store.close();
     }
   },
 );
+
+it.each(
+  (['approve-plan', 'waive-checks'] as const).flatMap((action) =>
+    (['open', 'unknown target', 'closed', 'merged'] as const).map(
+      (scenario) => [action, scenario] as const,
+    ),
+  ),
+)('blocks %s after a target change (%s)', async (action, scenario) => {
+  const plan = action === 'approve-plan';
+  const f = await fixture({ kind: plan ? 'plan' : 'code' });
+  try {
+    const finding = await queueFix(f);
+    const author = f.store.claim()!;
+    const task = f.store.getTask(f.task.id);
+    const head = 'f'.repeat(40);
+    await f.engine.completeJob(author, f.result(), { head, revision: task.revision! });
+    f.store.saveJob({ ...author, status: 'completed' });
+    const pr = { ...task.pr!, head, checks: plan ? 'passing' : 'missing' };
+    await f.engine.submitSavedFix(
+      task.id,
+      async () => async () => f.store.setSetting('demo-pr:1', pr),
+    );
+    await f.engine.review(task.id);
+    await f.run({ verifiedCommentIds: [finding] });
+    const published = await f.engine.publish(task.id);
+    expect(published.state).toBe(plan ? 'awaiting_plan_approval' : 'awaiting_checks');
+    const savedReview = published.review!;
+    if (scenario === 'unknown target') {
+      delete savedReview.targetBranch;
+      f.store.saveTask(published);
+    }
+    const retargeted = {
+      ...pr,
+      state: scenario === 'unknown target' ? 'open' : scenario,
+      targetBranch: 'release',
+    };
+    f.store.setSetting('demo-pr:1', retargeted);
+
+    const blocked = await f.engine.action(task.id, action, 'Reviewed output manually');
+    expect(blocked).toMatchObject({
+      state: 'needs_input',
+      review: savedReview,
+      snapshot: published.snapshot,
+    });
+    expect(blocked.reason).toContain(retargeted.targetBranch);
+    if (scenario === 'unknown target') expect(blocked.reason).toContain('Retry review');
+    else expect(blocked.reason).toContain(pr.targetBranch);
+    if (retargeted.state !== 'open') expect(blocked.reason).toContain(retargeted.state);
+    expect(blocked.checksWaivedAt).toBeUndefined();
+    expect(blocked.approvedAt).toBeUndefined();
+    expect(
+      f.store
+        .events(task.id)
+        .filter((event) => ['checks.waived', `human.${action}`].includes(event.type)),
+    ).toEqual([]);
+
+    if (retargeted.state === 'open')
+      expect(await f.engine.review(task.id, true)).toMatchObject({
+        state: 'reviewing',
+        review: { targetBranch: 'release' },
+      });
+  } finally {
+    f.store.close();
+  }
+});
 
 it('requires a new review when legacy published feedback has no recorded target branch', async () => {
   const f = await fixture();
