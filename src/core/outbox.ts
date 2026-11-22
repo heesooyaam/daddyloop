@@ -25,6 +25,7 @@ export class Outbox {
     input: unknown,
     write: () => Promise<T>,
     recover: () => Promise<{ found: true; value: T } | { found: false }>,
+    intent?: Record<string, unknown>,
   ): Promise<T> {
     if (this.active.has(id))
       throw new AppError('operation_busy', 'This operation is already running');
@@ -44,10 +45,12 @@ export class Outbox {
         this.store.event(taskId, 'operation.recovered', { operationId: id });
         return result.value;
       }
-      this.store.db
-        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
-        .run(id, taskId, 'pending', request);
-      this.store.event(taskId, 'operation.started', { operationId: id });
+      this.store.transaction(() => {
+        this.store.db
+          .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+          .run(id, taskId, 'pending', request);
+        this.store.event(taskId, 'operation.started', { operationId: id, ...intent });
+      });
       try {
         const result = await write();
         this.complete(id, result);

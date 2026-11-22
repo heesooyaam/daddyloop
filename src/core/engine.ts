@@ -97,7 +97,17 @@ function hasSharedDraftSlot(task: Task): boolean {
 }
 
 function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
-  if (snapshot.status === 'published') task.feedback = snapshot;
+  if (snapshot.status === 'published') {
+    if (
+      task.feedback &&
+      !task.reviewFinished &&
+      (!snapshot.comments.length || task.snapshot?.status === 'published')
+    ) {
+      const comments = new Map(task.feedback.comments.map((comment) => [comment.id, comment]));
+      for (const comment of snapshot.comments) comments.set(comment.id, comment);
+      task.feedback = { ...snapshot, comments: [...comments.values()] };
+    } else task.feedback = snapshot;
+  }
   // These providers return missing with findings only when the remaining findings are published.
   else if (
     ['gitlab', 'arcadia'].includes(task.ref.provider) &&
@@ -352,22 +362,50 @@ export class Engine {
         (retryWithoutTarget ? missingReviewTargetReason(pr) : undefined);
       const changed = !sameRevision(task.revision, pr) || !!targetIssue;
       const replacingReview = changed || (retry && !!task.review);
-      const attempted =
-        task.ref.provider === 'arcadia' &&
-        ((pending && staleDraft) || (task.review && replacingReview))
+      const attempt =
+        hasSharedDraftSlot(task) && (!task.review || replacingReview)
           ? await this.broker.findAttemptedReview(
               task,
               pr,
               replacingReview ? task.generation + 1 : task.generation,
             )
           : undefined;
-      if (attempted) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), attempted);
-        if (snapshot.status === 'partial') {
-          if (pending) this.blockSavedFix(task, pending, arcanumDraftReason);
-          else this.state(task, 'needs_input', arcanumDraftReason);
-          return task;
+      const attempted = attempt?.review;
+      const draftReason = task.ref.provider === 'gitlab' ? gitLabDraftReason : arcanumDraftReason;
+      if (attempt && attempt.targetBranch !== pr.targetBranch) {
+        const reason = attempt.targetBranch
+          ? `The earlier review was requested for ${attempt.targetBranch}. The PR now targets ${pr.targetBranch}. Inspect the native review before retrying.`
+          : `The earlier review creation has no recorded target branch. Inspect the native review before retrying on ${pr.targetBranch}.`;
+        if (attempted) {
+          const previous = staleDraft ?? task.review;
+          const blocked = previous && (await this.inspectPreviousDraft(task, previous, attempted));
+          if (blocked) {
+            this.state(task, 'needs_input', `${reason} ${blocked}`);
+            return task;
+          }
+          task.review = attempted;
+          task.snapshot = undefined;
+          task.reviewFinished = false;
+          task.generation = attempt.generation;
+          task.round++;
         }
+        this.state(task, 'needs_input', reason);
+        return task;
+      }
+      const recoveredSnapshot =
+        attempted && (await this.provider(prRef(task)).getReview(prRef(task), attempted));
+      if (recoveredSnapshot?.status === 'partial') {
+        if (pending) this.blockSavedFix(task, pending, draftReason);
+        else this.state(task, 'needs_input', draftReason);
+        return task;
+      }
+      if (recoveredSnapshot?.status === 'missing') {
+        this.state(
+          task,
+          'needs_input',
+          'The recovered native review is missing. Inspect it before retrying.',
+        );
+        return task;
       }
       if (pending && staleDraft) {
         const reason = await this.inspectPreviousDraft(task, staleDraft, attempted);
@@ -391,7 +429,7 @@ export class Engine {
           attempted,
         );
         if (attempted && (snapshot.status === 'partial' || snapshot.status === 'draft')) {
-          this.state(task, 'needs_input', arcanumDraftReason);
+          this.state(task, 'needs_input', draftReason);
           return task;
         }
         retainPublishedFeedback(task, snapshot);
@@ -407,6 +445,21 @@ export class Engine {
       task.pr = pr;
       task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
+      if (attempted && recoveredSnapshot?.status === 'published') {
+        task.snapshot = recoveredSnapshot;
+        task.reviewFinished = false;
+        retainPublishedFeedback(task, recoveredSnapshot);
+        if (pending) {
+          task.pendingAuthorFix = undefined;
+          task.resumeState = undefined;
+        }
+        this.state(
+          task,
+          'needs_input',
+          'The recovered review was already published. Use Retry review to verify outstanding findings in a new draft.',
+        );
+        return task;
+      }
       task.reviewFinished = false;
       if (pending) {
         task.pendingAuthorFix = undefined;
@@ -1466,15 +1519,38 @@ export class Engine {
           this.state(task, 'needs_input', 'Reviewer reported a different revision');
           return;
         }
+        if (this.stopReviewOnTargetChange(task, pr)) return;
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review!);
         const decisions = this.store.decisions(task.id);
+        const currentDecisions = new Map(
+          decisions
+            .filter(
+              (d) =>
+                d.generation === task.generation &&
+                sameRevision(d.revision, task.revision) &&
+                d.targetBranch === task.review?.targetBranch,
+            )
+            .map((d) => [d.commentId, d.outcome]),
+        );
+        if (
+          result.disputedCommentIds?.length ||
+          [...currentDecisions.values()].includes('disputed')
+        ) {
+          task.reviewFinished = false;
+          this.state(
+            task,
+            'needs_input',
+            'Reviewer disputes published findings; resolve them before publication',
+          );
+          return;
+        }
         const verified = new Set(result.verifiedCommentIds ?? []);
         const exempt = new Set(
           decisions
             .filter(
               (d) =>
                 ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
-                (d.outcome === 'verified' && d.head === task.revision?.head),
+                currentDecisions.get(d.commentId) === 'verified',
             )
             .map((d) => d.commentId),
         );

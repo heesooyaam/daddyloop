@@ -415,12 +415,15 @@ export class Store {
       .all(id)
       .map((row) => JSON.parse(row.data as string));
   }
-  decision(task: Task, data: Omit<Decision, 'id' | 'taskId' | 'head' | 'at'>) {
+  decision(task: Task, data: Pick<Decision, 'commentId' | 'outcome' | 'reason'>) {
     const item: Decision = {
       ...data,
       id: randomUUID(),
       taskId: task.id,
       head: task.revision?.head ?? '',
+      revision: task.revision,
+      targetBranch: task.review?.targetBranch,
+      generation: task.generation,
       at: now(),
     };
     this.db

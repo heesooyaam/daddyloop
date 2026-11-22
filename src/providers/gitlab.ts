@@ -1,5 +1,6 @@
 import {
   AppError,
+  ProviderWriteNotAttempted,
   type PRRef,
   type PullRequest,
   type Revision,
@@ -137,7 +138,12 @@ export class GitLabProvider implements ReviewProvider {
         }
       : undefined;
   }
-  async createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle> {
+  async createReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    recordBaseline?: (noteId: number) => void,
+  ): Promise<ReviewHandle> {
     const [drafts, notes, user] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
@@ -153,10 +159,12 @@ export class GitLabProvider implements ReviewProvider {
         baselineNoteId: Math.max(0, ...notes.map((n) => n.id)),
       };
     if (drafts.length)
-      throw new AppError(
+      throw new ProviderWriteNotAttempted(
         'existing_drafts',
         'There are existing GitLab draft notes. Publish or discard them before starting this review.',
       );
+    const baselineNoteId = Math.max(0, ...notes.map((n) => n.id));
+    recordBaseline?.(baselineNoteId);
     const item = await this.http.request<Note>('POST', `${path(ref)}/draft_notes`, {
       note: `Review in progress.\n\n${tag(marker)}`,
       commit_id: revision.head,
@@ -166,10 +174,14 @@ export class GitLabProvider implements ReviewProvider {
       marker,
       revision,
       authorId: String(user.id),
-      baselineNoteId: Math.max(0, ...notes.map((n) => n.id)),
+      baselineNoteId,
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    successor?: ReviewHandle,
+  ): Promise<ReviewSnapshot> {
     const [drafts, notes] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
@@ -181,14 +193,25 @@ export class GitLabProvider implements ReviewProvider {
     const draftComments = drafts.filter(isComment);
     const published = notes.filter((n) => isComment(n) && ownAuthor(n));
     const unknown =
-      drafts.some((n) => !isSummary(n) && !isComment(n)) ||
+      drafts.some(
+        (n) =>
+          !isSummary(n) &&
+          !isComment(n) &&
+          !(
+            successor &&
+            ownAuthor(n) &&
+            String(n.id) === successor.id &&
+            body(n).includes(tag(successor.marker))
+          ),
+      ) ||
       notes.some(
         (n) =>
           ownAuthor(n) &&
           !n.system &&
           n.id > (review.baselineNoteId ?? Infinity) &&
           !isSummary(n) &&
-          !isComment(n),
+          !isComment(n) &&
+          !(successor && String(n.id) === successor.id && body(n).includes(tag(successor.marker))),
       );
     const stillDraft = drafts.some(isSummary);
     return {

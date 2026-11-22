@@ -307,6 +307,9 @@ export interface Decision {
   outcome: 'withdrawn' | 'deferred' | 'rejected' | 'accepted' | 'verified' | 'disputed';
   reason: string;
   head: string;
+  revision?: Revision;
+  targetBranch?: string;
+  generation?: number;
   at: string;
 }
 export interface Job {

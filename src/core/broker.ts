@@ -12,6 +12,7 @@ import {
   type PRRef,
   type PullRequest,
   type Revision,
+  type ReviewHandle,
   type ReviewSnapshot,
 } from './types.js';
 import type { Store } from './store.js';
@@ -86,7 +87,7 @@ export class Broker {
     marker: string,
     revision: Revision,
     targetBranch?: string,
-  ) {
+  ): Promise<ReviewHandle | undefined> {
     const existing = await this.provider(ref).findReview(ref, marker);
     if (
       existing &&
@@ -94,13 +95,38 @@ export class Broker {
       (!sameRevision(existing.revision, revision) || existing.targetBranch !== targetBranch)
     )
       return;
+    if (existing && ref.provider === 'github' && existing.revision.head !== revision.head) return;
+    if (existing && ref.provider === 'gitlab') {
+      const baseline = this.store.db
+        .prepare(
+          `SELECT json_extract(data, '$.noteId') AS noteId FROM events
+         WHERE type='review.note_baseline' AND json_extract(data, '$.marker')=? ORDER BY id DESC LIMIT 1`,
+        )
+        .get(marker)?.noteId;
+      if (typeof baseline === 'number') existing.baselineNoteId = baseline;
+    }
     return existing;
+  }
+  private reviewIntent(marker: string) {
+    const branch = this.store.db
+      .prepare(
+        `SELECT json_extract(data, '$.targetBranch') AS branch FROM events
+       WHERE type='operation.started' AND json_extract(data, '$.operationId')=? ORDER BY id DESC LIMIT 1`,
+      )
+      .get(marker)?.branch;
+    return typeof branch === 'string' ? branch : undefined;
   }
   async findAttemptedReview(task: Task, pr: PullRequest, generation: number) {
     const marker = this.reviewMarker(task, generation, task.round + 1);
     const revision = revisionOf(pr);
-    if (this.outbox.hasOperation(marker, revision))
-      return this.findCreatedReview(prRef(task), marker, revision, pr.targetBranch);
+    if (!this.outbox.hasOperation(marker, revision)) return;
+    const targetBranch = this.reviewIntent(marker);
+    const existing = await this.findCreatedReview(prRef(task), marker, revision, pr.targetBranch);
+    return {
+      generation,
+      targetBranch,
+      review: existing && { ...existing, revision, targetBranch },
+    };
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
@@ -109,12 +135,21 @@ export class Broker {
     const provider = this.provider(ref),
       revision = task.revision!,
       targetBranch = task.pr?.targetBranch;
+    if (this.outbox.hasOperation(marker, revision) && this.reviewIntent(marker) !== targetBranch)
+      throw new AppError(
+        'review_target_unverified',
+        'The earlier review creation has a different or unknown target branch. Inspect the native review before retrying.',
+      );
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
       async () => ({
-        ...(await provider.createReview(ref, revision, marker)),
+        ...(await (ref.provider === 'gitlab'
+          ? provider.createReview(ref, revision, marker, (noteId) =>
+              this.store.event(task.id, 'review.note_baseline', { marker, noteId }),
+            )
+          : provider.createReview(ref, revision, marker))),
         targetBranch,
       }),
       async () => {
@@ -123,6 +158,7 @@ export class Broker {
           ? { found: true, value: { ...existing, revision, targetBranch } }
           : { found: false };
       },
+      { targetBranch, revision },
     );
     task.review = review;
     return review;
@@ -154,6 +190,7 @@ export class Broker {
     if (
       current.state !== 'open' ||
       !sameRevision(current, task.revision) ||
+      reviewTargetChange(task.review, current, task.pr?.targetBranch) ||
       this.store.getTask(task.id).generation !== job.generation
     )
       throw new AppError(

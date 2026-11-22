@@ -410,6 +410,15 @@ export class Worker {
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
         );
+      if (job.kind === 'review' && startingPR && task.review) {
+        const ref = prRef(task);
+        const snapshot = await this.engine.provider(ref).getReview(ref, task.review);
+        if (snapshot.status !== 'draft')
+          throw new AppError(
+            'review_not_draft',
+            'The review is no longer a draft. Inspect it before retrying.',
+          );
+      }
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir

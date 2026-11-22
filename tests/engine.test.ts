@@ -5,6 +5,47 @@ import { buildContext } from '../src/runtime/context.js';
 import { defaultPolicy } from '../src/core/types.js';
 
 describe('publication gates and revision safety', () => {
+  it.each(['new target', 'new generation', 'new base', 'current dispute'] as const)(
+    'holds a finding from another verification scope or a current dispute (%s)',
+    async (scenario) => {
+      const f = await fixture();
+      try {
+        await f.engine.review(f.task.id);
+        const task = f.store.getTask(f.task.id);
+        const prior = {
+          ...task,
+          generation: scenario === 'new generation' ? task.generation - 1 : task.generation,
+          revision:
+            scenario === 'new base' ? { ...task.revision!, base: 'e'.repeat(40) } : task.revision,
+          review:
+            scenario === 'new target' ? { ...task.review!, targetBranch: 'other' } : task.review,
+        };
+        f.store.decision(prior, {
+          commentId: 'R1',
+          outcome: 'verified',
+          reason: 'Verified before',
+        });
+        task.feedback = {
+          status: 'published',
+          revision: task.revision!,
+          body: '',
+          comments: [{ id: 'R1', body: 'Verify me', url: task.ref.url }],
+          url: task.ref.url,
+        };
+        f.store.saveTask(task);
+        await f.run(scenario === 'current dispute' ? { disputedCommentIds: ['R1'] } : {});
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          reviewFinished: false,
+        });
+        await expect(f.engine.publish(f.task.id)).rejects.toMatchObject({
+          code: 'publication_unavailable',
+        });
+      } finally {
+        f.store.close();
+      }
+    },
+  );
   it('keeps prematurely published findings in the next review’s verification obligations', async () => {
     const f = await fixture();
     await f.engine.review(f.task.id);

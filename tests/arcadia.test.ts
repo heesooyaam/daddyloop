@@ -85,6 +85,7 @@ it.each([
   'lost response',
   'lost response with another draft',
   'lost response after retargeting',
+  'lost response then manual publication',
 ] as const)('retries Arcanum review creation after %s', async (scenario) => {
   const bridge = new FakeArc();
   bridge.general = [];
@@ -160,13 +161,36 @@ it.each([
       });
       bridge.inlineByDiff.delete('100');
     }
+    if (scenario === 'lost response then manual publication') {
+      bridge.general.at(-1)!.is_draft = false;
+      const stopped = await restarted.review(task.id, true);
+      expect(stopped).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('already published'),
+      });
+      expect(stopped.feedback?.comments.map(({ id }) => id)).toEqual(['pr:104']);
+      expect(store.busy(task.id)).toBe(false);
+    }
     const next = await restarted.review(task.id, true);
     expect(next).toMatchObject({
       state: 'reviewing',
       review: { nodeId: '100', targetBranch: bridge.targetBranch, revision: { head: bridge.head } },
     });
     expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['pr:104']);
-    expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
+    expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(
+      scenario === 'lost response then manual publication' ? 3 : 2,
+    );
+    if (scenario === 'lost response then manual publication') {
+      await restarted.completeJob(store.claim()!, {
+        status: 'completed',
+        summary: 'No new findings',
+        checkedHead: bridge.head,
+      });
+      expect(store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('not verified'),
+      });
+    }
     expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual([]);
   } finally {
     store.close();

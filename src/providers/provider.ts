@@ -13,7 +13,12 @@ import {
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
-  createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
+  createReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    recordBaseline?: (noteId: number) => void,
+  ): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle, successor?: ReviewHandle): Promise<ReviewSnapshot>;
   createComment(
     ref: PRRef,
