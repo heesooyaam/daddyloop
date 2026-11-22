@@ -169,6 +169,86 @@ it('keeps a saved fix when reconcile overlaps the author commit', async () => {
   }
 });
 
+it('recovers a saved fix from an author run cancelled during service shutdown', async () => {
+  const f = await fixture();
+  const snapshotDir = mkdtempSync(join(tmpdir(), 'daddyloop-stopped-fix-'));
+  const snapshotPath = join(snapshotDir, 'state.sqlite');
+  const workspaces = new Workspaces('/tmp');
+  const commitResult = deferred<string>();
+  const commit = vi.spyOn(workspaces, 'commitFix').mockReturnValue(commitResult.promise);
+  vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  const head = 'f'.repeat(40);
+  try {
+    await queueFix(f);
+    const task = f.store.getTask(f.task.id);
+    task.ref.provider = 'github';
+    f.store.saveTask(task);
+    await worker.tick();
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce());
+    const author = f.store.jobs(task.id).find((job) => job.kind === 'fix')!;
+    const stopped = worker.stop();
+    await vi.waitFor(() =>
+      expect(f.store.events(task.id).some((event) => event.type === 'service.interrupted')).toBe(
+        true,
+      ),
+    );
+    commitResult.resolve(head);
+    await stopped;
+    expect(f.store.jobs(task.id).find((job) => job.id === author.id)?.status).toBe('cancelled');
+    expect(f.store.getTask(task.id).pendingAuthorFix).toBeUndefined();
+    expect(f.store.events(task.id)).toContainEqual(
+      expect.objectContaining({
+        type: 'author.fixes_saved',
+        runId: author.id,
+        data: { head, revision: task.revision },
+      }),
+    );
+
+    f.store.db.prepare('VACUUM INTO ?').run(snapshotPath);
+    const snapshot = new Store(snapshotPath);
+    try {
+      const provider = new DemoProvider(snapshot);
+      const restored = new Engine(snapshot, () => provider);
+      restored.recoverInterruptedJobs();
+      await expect(restored.review(task.id, true)).rejects.toMatchObject({
+        code: 'fix_pending',
+        message: expect.stringContaining(head),
+      });
+      expect(snapshot.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        revision: task.revision,
+        reason: expect.stringContaining(head),
+      });
+      expect(snapshot.activeJobs(task.id)).toEqual([]);
+      expect(snapshot.jobs(task.id).find((job) => job.id === author.id)?.status).toBe('cancelled');
+
+      expect(await restored.action(task.id, 'resume')).toMatchObject({ state: 'needs_input' });
+      const prepare = vi.fn(async () => async () => {});
+      await restored.submitSavedFix(task.id, prepare);
+      expect(prepare).not.toHaveBeenCalled();
+
+      snapshot.setSetting('demo-pr:1', { ...task.pr!, head });
+      expect(await restored.action(task.id, 'resume')).toMatchObject({
+        state: 'queued',
+        revision: { head },
+      });
+      expect(await restored.review(task.id)).toMatchObject({
+        state: 'reviewing',
+        review: { revision: { head } },
+      });
+    } finally {
+      snapshot.close();
+    }
+  } finally {
+    commitResult.resolve(head);
+    await worker.stop();
+    f.store.close();
+    rmSync(snapshotDir, { recursive: true, force: true });
+  }
+});
+
 it('persists each completed draft before publishing it and running the next stage', async () => {
   const f = await fixture();
   const worker = new Worker(

@@ -942,6 +942,34 @@ export class Engine {
       return head;
   }
 
+  private stoppedByService(job: Job): boolean {
+    // Service stops record the new task generation just before the task-level interruption event.
+    return !!this.store.db
+      .prepare(
+        `SELECT 1 FROM events stopped JOIN events transition ON transition.id=(
+         SELECT previous.id FROM events previous
+         WHERE previous.task_id=stopped.task_id AND previous.id<stopped.id
+         ORDER BY previous.id DESC LIMIT 1
+       )
+       WHERE stopped.task_id=? AND stopped.type='service.interrupted'
+         AND transition.type='task.state' AND json_extract(transition.data, '$.state')='needs_input'
+         AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
+      )
+      .get(job.taskId, job.generation + 1);
+  }
+
+  private fixRunInterrupted(job: Job, savedEventId: number): boolean {
+    if (job.status === 'cancelled') return this.stoppedByService(job);
+    return (
+      job.status === 'failed' &&
+      !!this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND run_id=? AND id>? AND type='job.interrupted' LIMIT 1`,
+        )
+        .get(job.taskId, job.id, savedEventId)
+    );
+  }
+
   private lostFix(task: Task, pr = task.pr): LostFix | undefined {
     if (
       !['queued', 'reviewing', 'needs_input', 'paused', 'awaiting_push'].includes(task.state) &&
@@ -967,14 +995,7 @@ export class Engine {
          AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
       )
       .get(task.id, saved.id!, noAuthorChanges, authorPushedChanges, generation);
-    const interrupted =
-      !legacy &&
-      job.status === 'failed' &&
-      this.store.db
-        .prepare(
-          `SELECT 1 FROM events WHERE task_id=? AND run_id=? AND id>? AND type='job.interrupted' LIMIT 1`,
-        )
-        .get(task.id, job.id, saved.id!);
+    const interrupted = !legacy && this.fixRunInterrupted(job, Number(saved.id));
     if (!interrupted && (!transition || (!legacy && transition.head === saved.head))) return;
     let recordedRevision = saved.revision;
     if (typeof recordedRevision !== 'string' && transition?.reason === noAuthorChanges) {
@@ -1520,18 +1541,10 @@ export class Engine {
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
         const task = this.store.getTask(job.taskId);
-        const saved =
-          job.role === 'author' && job.kind === 'fix' ? this.savedFixEvent(task) : undefined;
-        const original = parseRecordedRevision(saved?.saved_revision);
+        const head = this.interruptedFixHead(task, job);
         const restartReason =
           'Server restarted during this run. Its external effects must be reconciled before retry.';
-        const reason =
-          saved?.run_id === job.id &&
-          typeof saved.head === 'string' &&
-          original &&
-          saved.head !== original.head
-            ? `${restartReason} Saved fix ${saved.head} is preserved.`
-            : restartReason;
+        const reason = head ? `${restartReason} Saved fix ${head} is preserved.` : restartReason;
         this.store.transaction(() => {
           job.status = 'failed';
           job.error = restartReason;
@@ -1543,8 +1556,29 @@ export class Engine {
           this.state(task, 'needs_input', reason);
           this.store.event(task.id, 'job.interrupted', {}, job.id);
         });
+      } else if (job.status === 'cancelled' && job.role === 'author' && job.kind === 'fix') {
+        const task = this.store.getTask(job.taskId);
+        if (task.state !== 'needs_input' || task.generation !== job.generation + 1) continue;
+        const head = this.interruptedFixHead(task, job);
+        if (head && !task.reason.includes(head) && this.stoppedByService(job))
+          this.state(task, 'needs_input', `${task.reason} Saved fix ${head} is preserved.`);
       }
   }
+
+  private interruptedFixHead(task: Task, job: Job): string | undefined {
+    if (job.role !== 'author' || job.kind !== 'fix') return;
+    const saved = this.savedFixEvent(task);
+    const original = parseRecordedRevision(saved?.saved_revision);
+    if (
+      saved?.run_id === job.id &&
+      typeof saved.head === 'string' &&
+      original &&
+      saved.head !== original.head &&
+      !this.savedFixSubmissionRecorded(task, saved.head, Number(saved.id))
+    )
+      return saved.head;
+  }
+
   async interruptTask(id: string, reason: string, source: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
