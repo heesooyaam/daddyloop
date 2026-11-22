@@ -38,6 +38,24 @@ it('keeps source, author and reviewer checkouts separate and preserves unpushed 
     expect(readFileSync(join(repo, 'session.ts'), 'utf8')).toContain('= 1');
     expect(readFileSync(join(reviewer, 'session.ts'), 'utf8')).toContain('= 1');
     expect(await git(['status', '--porcelain'], repo)).toBe('');
+    await git(
+      [
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@localhost',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Integrated result',
+      ],
+      repo,
+    );
+    const mergeCommit = await git(['rev-parse', 'HEAD'], repo);
+    task.pr = { ...task.pr!, state: 'merged', mergeCommit };
+    await ws.prepare(task, 'reviewer');
+    expect(await git(['rev-parse', 'HEAD'], reviewer)).toBe(sha);
+    expect(await git(['cat-file', '-t', mergeCommit], reviewer)).toBe('commit');
   } finally {
     f.store.close();
     rmSync(dir, { recursive: true, force: true });

@@ -141,7 +141,9 @@ export class Workspaces {
     if (!task.revision || !task.pr)
       throw new AppError('revision_missing', 'Fetch the PR revision before preparing a workspace');
     const { root, bare } = await this.initialize(task, signal);
-    for (const sha of new Set([task.revision.head, task.revision.base, task.revision.start])) {
+    const revisions = new Set([task.revision.head, task.revision.base, task.revision.start]);
+    if (task.pr.state === 'merged' && task.pr.mergeCommit) revisions.add(task.pr.mergeCommit);
+    for (const sha of revisions) {
       if (!/^[a-f0-9]{40,64}$/i.test(sha))
         throw new AppError('invalid_sha', 'Provider returned an invalid commit SHA');
       try {
