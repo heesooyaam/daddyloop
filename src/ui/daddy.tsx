@@ -275,76 +275,78 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
           )}
         </header>
-        <UsageStrip
-          usage={state.usage}
-          connected={state.connected}
-          onDetails={(engine) => {
-            setUsageEngine(engine);
-            setModal('limits');
-          }}
-        />
-        {state.error && (modal !== 'workers' || !board) && (
-          <div className="daddy-error" role="alert">
-            {t(state.error)}
-            <button onClick={() => void model.refresh()}>{t('Retry')}</button>
-          </div>
-        )}
-        {board?.group.resourceWait && (
-          <div className="daddy-error daddy-resource-wait" role="status">
-            <strong>{t('Waiting for server resources')}</strong>
-            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
-            <span>
+        <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
+          <UsageStrip
+            usage={state.usage}
+            connected={state.connected}
+            onDetails={(engine) => {
+              setUsageEngine(engine);
+              setModal('limits');
+            }}
+          />
+          {state.error && (modal !== 'workers' || !board) && (
+            <div className="daddy-error" role="alert">
+              {t(state.error)}
+              <button onClick={() => void model.refresh()}>{t('Retry')}</button>
+            </div>
+          )}
+          {board?.group.resourceWait && (
+            <div className="daddy-error daddy-resource-wait" role="status">
+              <strong>{t('Waiting for server resources')}</strong>
+              <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
+              <span>
+                {t(
+                  'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+                )}
+              </span>
+            </div>
+          )}
+          {board?.group.workspacePreparation && !board.group.deletion && (
+            <div
+              className={
+                board.group.workspacePreparation.state === 'error'
+                  ? 'daddy-error'
+                  : 'daddy-session-progress'
+              }
+              role="status"
+            >
               {t(
-                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+                board.group.workspacePreparation.state === 'ready'
+                  ? 'Session copy ready'
+                  : board.group.workspacePreparation.state === 'error'
+                    ? 'Could not prepare the session copy'
+                    : 'Preparing the session copy',
               )}
-            </span>
-          </div>
-        )}
-        {board?.group.workspacePreparation && !board.group.deletion && (
-          <div
-            className={
-              board.group.workspacePreparation.state === 'error'
-                ? 'daddy-error'
-                : 'daddy-session-progress'
-            }
-            role="status"
-          >
-            {t(
-              board.group.workspacePreparation.state === 'ready'
-                ? 'Session copy ready'
-                : board.group.workspacePreparation.state === 'error'
-                  ? 'Could not prepare the session copy'
-                  : 'Preparing the session copy',
-            )}
-            {board.group.workspacePreparation.path && (
-              <code>{board.group.workspacePreparation.path}</code>
-            )}
-            {board.group.workspacePreparation.error && (
-              <span>{t(board.group.workspacePreparation.error)}</span>
-            )}
-            {board.group.workspacePreparation.state === 'error' && (
-              <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
-            )}
-          </div>
-        )}
-        {board?.group.deletion && (
-          <div
-            className={
-              board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
-            }
-            role="status"
-          >
-            {t(
-              board.group.deletion.state === 'error'
-                ? 'Session deletion stopped; working copies were preserved'
-                : 'Saving results and removing session copies',
-            )}
-            {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
-            {board.group.deletion.state === 'error' && (
-              <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
-            )}
-          </div>
-        )}
+              {board.group.workspacePreparation.path && (
+                <code>{board.group.workspacePreparation.path}</code>
+              )}
+              {board.group.workspacePreparation.error && (
+                <span>{t(board.group.workspacePreparation.error)}</span>
+              )}
+              {board.group.workspacePreparation.state === 'error' && (
+                <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
+              )}
+            </div>
+          )}
+          {board?.group.deletion && (
+            <div
+              className={
+                board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
+              }
+              role="status"
+            >
+              {t(
+                board.group.deletion.state === 'error'
+                  ? 'Session deletion stopped; working copies were preserved'
+                  : 'Saving results and removing session copies',
+              )}
+              {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
+              {board.group.deletion.state === 'error' && (
+                <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
+              )}
+            </div>
+          )}
+        </section>
         {board ? (
           <>
             <div className="daddy-mobile-tabs">

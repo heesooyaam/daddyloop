@@ -268,6 +268,7 @@
 }
 .daddy-topbar {
   display: flex;
+  flex-shrink: 0;
   min-height: 86px;
   padding: 22px 33px 19px;
   border-bottom: 1px solid var(--line);
@@ -311,10 +312,21 @@
 .daddy-icon:hover {
   background: var(--accent);
 }
+.daddy-session-overview {
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+}
+.daddy-session-overview:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 .daddy-workspace {
   display: flex;
   flex: 1;
-  min-height: 0;
+  /* Leave room for the task actions and a full card before the overview scrolls. */
+  min-block-size: min(18rem, 60dvh);
   min-width: 0;
 }
 .daddy-conversation {
@@ -1195,6 +1207,7 @@
   }
   .daddy-mobile-tabs {
     display: flex;
+    flex-shrink: 0;
     padding: 0 14px;
     border-bottom: 1px solid var(--line);
   }
@@ -1220,9 +1233,6 @@
     padding: 2px 5px;
     border-radius: 3px;
     background: var(--panel);
-  }
-  .daddy-workspace {
-    min-height: 0;
   }
   .daddy-conversation {
     width: 100%;

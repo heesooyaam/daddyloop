@@ -2,6 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { DaddyBoard } from '../../src/client/daddy.js';
+import type { UsageView } from '../../src/core/usage.js';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -181,19 +183,66 @@ test('shows a full card on short screens and keeps actions available in a dense 
   const sessionId = new URL(page.url()).hash.slice('#session/'.length);
   const longTitle =
     'Rebuild the response cache for imported records with missing workspace metadata';
+  const taskIds: string[] = [];
   for (let index = 1; index <= 10; index++) {
     const response = await page.request.post(`/api/daddy/sessions/${sessionId}/tasks`, {
       headers: { 'X-daddyloop-Request': '1' },
       data: { requirements: `${index}. ${longTitle}`, requestId: randomUUID() },
     });
     expect(response.status()).toBe(201);
+    const { id } = await response.json();
+    taskIds.push(id);
   }
+  const path = `/test-workspaces${'/long-working-copy-directory'.repeat(9)}/session`;
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch();
+    const board: DaddyBoard = await response.json();
+    const prerequisite = board.tasks.find((task) => !taskIds.includes(task.id))!;
+    const tasks = taskIds.map((id) => ({
+      ...board.tasks.find((task) => task.id === id)!,
+      dependsOn: [prerequisite.id],
+    }));
+    await route.fulfill({
+      response,
+      json: {
+        ...board,
+        group: { ...board.group, workspacePreparation: { state: 'ready', path } },
+        tasks: [...tasks.slice(0, -1), prerequisite, tasks.at(-1)!],
+        taskQueue: [],
+      } satisfies DaddyBoard,
+    });
+  });
+  await page.route('**/api/usage', async (route) => {
+    const response = await route.fetch();
+    const { agents }: UsageView = await response.json();
+    const codex = agents[0]!;
+    await route.fulfill({
+      response,
+      json: {
+        agents: [
+          codex,
+          {
+            ...codex,
+            engine: 'claude',
+            name: 'Claude',
+            buckets: codex.buckets.map((bucket) => ({ ...bucket, id: 'claude', name: 'Claude' })),
+            resets: { availableCount: null, canUse: false, credits: [] },
+          },
+        ],
+      } satisfies UsageView,
+    });
+  });
 
   const list = page.locator('.daddy-work-items');
   const cards = list.getByRole('button');
   const fullTitle = `1. ${longTitle}`;
-  const longCard = cards.filter({ hasText: fullTitle });
   const queue = page.getByRole('button', { name: 'Queue a task', exact: true });
+  const copyPath = page
+    .getByRole('status')
+    .filter({ hasText: 'Session copy ready' })
+    .locator('code');
+  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+  await expect(copyPath).toHaveText(path);
   for (const viewport of [
     { width: 1024, height: 480 },
     { width: 390, height: 540 },
@@ -203,10 +252,26 @@ test('shows a full card on short screens and keeps actions available in a dense 
       await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
     }
     await expect(cards).toHaveCount(11);
+    await expect(cards.first()).toHaveAttribute('title', fullTitle);
+    await expect(cards.first()).toContainText('Prerequisites: 1');
+    await expect(cards.last()).toHaveAttribute('title', `10. ${longTitle}`);
+    await expect(cards.last()).toContainText('Prerequisites: 1');
+    expect(
+      await copyPath.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return range.getClientRects().length;
+      }),
+    ).toBeGreaterThan(1);
     await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
     await expect(cards.first()).toBeInViewport({ ratio: 1 });
     await expect(cards.first().locator('.daddy-work-state')).not.toBeEmpty();
     await expect(cards.last()).not.toBeInViewport();
+
+    await page.getByRole('region', { name: 'Session overview' }).focus();
+    await page.keyboard.press('End');
+    await expect(copyPath).toBeInViewport({ ratio: 1 });
+    await expect(cards.first()).toBeInViewport({ ratio: 1 });
 
     await list.hover();
     await page.mouse.wheel(0, 1400);
@@ -215,14 +280,17 @@ test('shows a full card on short screens and keeps actions available in a dense 
     expect(await list.evaluate((element) => element.scrollWidth === element.clientWidth)).toBe(
       true,
     );
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
 
     await queue.click();
     const dialog = page.getByRole('dialog', { name: 'Queue task' });
     await expect(dialog.getByLabel('Task description')).toBeFocused();
     await page.keyboard.press('Escape');
 
+    const longCard = cards.first();
     await longCard.scrollIntoViewIfNeeded();
-    await expect(longCard).toHaveAttribute('title', fullTitle);
     await expect(longCard.locator('strong')).toBeInViewport({ ratio: 1 });
     await expect(longCard.locator('.daddy-work-state')).toBeInViewport({ ratio: 1 });
     await longCard.locator('.daddy-work-heading svg').click();
