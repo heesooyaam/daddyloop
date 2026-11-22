@@ -679,6 +679,12 @@ export class Daddy {
     if (event.type === 'task.state' && !['complete', 'awaiting_plan_approval'].includes(task.state))
       return;
     if (
+      event.type === 'job.completed' &&
+      task.workerReport &&
+      ['queued', 'reviewing'].includes(task.state)
+    )
+      return;
+    if (
       event.type === 'ticket.imported' &&
       ((event.data as { dispatched?: boolean }).dispatched ||
         (this.running.has(group.id) && task.createdByAction?.startsWith('daddy:')))
@@ -1168,7 +1174,10 @@ export class Daddy {
         },
         messages: this.store
           .messages(task.id)
-          .filter((message) => message.role === 'author')
+          .filter(
+            (message) =>
+              message.role === 'author' || (task.ref.kind === 'ticket' && !!task.workerReport),
+          )
           .slice(-12),
         jobs: this.store
           .jobs(task.id)

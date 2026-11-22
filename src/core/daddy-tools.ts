@@ -64,7 +64,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   create_task:
     'Create a concrete task from the user requirements. Choose a registered workspace and optional dependencies. Does not start a worker.',
   dispatch:
-    'Start implementation of a ready task. Dependencies and per-session worker limits are enforced by the service. Native push/review follows the task policy.',
+    'Start work on a ready task. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
   message_worker:
     'Send scoped instructions or a question to the task worker. Results return to daddy; do not ask the user to contact workers.',
   set_dependencies:
@@ -76,7 +76,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   submit_task:
     'Submit or reconcile a completed implementation when its automatic-push policy allows it. An uncertain native PR creation is reconciled, never repeated blindly.',
   retry_review:
-    'Retry an incomplete pinned native review after inspecting task state. Does not publish, approve or merge anything.',
+    'Retry an incomplete review of a worker report or a pinned native revision after inspecting task state.',
   set_worker_model:
     'Choose a validated model/effort for one idle task worker. Does not change daddy or other workers.',
 };

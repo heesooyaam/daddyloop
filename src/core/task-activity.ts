@@ -40,6 +40,13 @@ export function taskActivity(tasks: Task[], jobs: Job[]): TaskActivity[] {
 }
 
 export function activityStatus({ task, job }: TaskActivity) {
+  if (
+    task.workerReport &&
+    task.state === 'reviewing' &&
+    job?.role === 'reviewer' &&
+    job.status === 'running'
+  )
+    return 'Reviewing the worker report';
   return taskStatus(task.state, job?.status === 'queued', job?.role);
 }
 

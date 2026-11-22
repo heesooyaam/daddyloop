@@ -46,7 +46,7 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
         subject: job.taskId,
         startedAt: job.startedAt,
         engine: job.profile?.engine,
-        label: taskStatus(taskById.get(job.taskId)!.state, false),
+        label: activityStatus({ task: taskById.get(job.taskId)!, job }),
         title: taskById.get(job.taskId)!.title,
       })),
   ];

@@ -152,6 +152,8 @@ export function taskCard(locale: Locale, item: TaskActivity, slot?: WorkerSlot):
   if (worker !== undefined) text.add('\n' + t('Worker {number}', { number: worker }));
   if (profile) text.add('\n' + profileText(profile));
   if (task.reason) text.add('\n\n' + clipTitle(t(redact(task.reason)), 1000));
+  if (task.state === 'complete' && task.ref.kind === 'ticket' && task.summary)
+    text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
   return { ...text, buttons: [queueButtons(task.groupId!, locale)] };

@@ -227,6 +227,7 @@ export interface Task {
   pr?: PullRequest;
   review?: ReviewHandle;
   snapshot?: ReviewSnapshot;
+  workerReport?: { runId: string; revision: Revision };
   summary: string;
   authorThreadId?: string;
   reviewerThreadId?: string;
