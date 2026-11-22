@@ -96,7 +96,11 @@ function hasSharedDraftSlot(task: Task): boolean {
   return ['github', 'gitlab', 'arcadia'].includes(task.ref.provider);
 }
 
-function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
+function retainPublishedFeedback(
+  task: Task,
+  snapshot: ReviewSnapshot,
+  carryPrior = !task.reviewFinished,
+) {
   // These providers return missing with findings only when the remaining findings are published.
   if (
     ['gitlab', 'arcadia'].includes(task.ref.provider) &&
@@ -105,7 +109,7 @@ function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
   )
     snapshot = { ...snapshot, status: 'published' };
   if (snapshot.status !== 'published') return;
-  if (task.feedback && !task.reviewFinished) {
+  if (task.feedback && carryPrior) {
     const comments = new Map(task.feedback.comments.map((comment) => [comment.id, comment]));
     for (const comment of snapshot.comments) comments.set(comment.id, comment);
     task.feedback = { ...snapshot, comments: [...comments.values()] };
@@ -595,7 +599,7 @@ export class Engine {
     if (pending || (task.state === 'fixing' && this.store.busy(id))) return task;
     if (this.stopReviewOnTargetChange(task, pr)) return task;
     if (!sameRevision(task.revision, pr)) {
-      if (this.holdPreviousNativeReview(task)) return task;
+      if (this.preservePreviousNativeReview(task)) return task;
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
       this.invalidate(task, pr);
@@ -747,11 +751,27 @@ export class Engine {
     if (running) this.onCancel(task.id);
   }
 
-  private holdPreviousNativeReview(task: Task): boolean {
-    const completedPublication =
+  private preservePreviousNativeReview(task: Task): boolean {
+    const { review, snapshot } = task;
+    if (!review || !hasSharedDraftSlot(task)) return false;
+    if (
       task.reviewFinished &&
-      (task.snapshot?.status === 'published' || task.state === 'awaiting_push');
-    if (!task.review || !hasSharedDraftSlot(task) || completedPublication) return false;
+      snapshot?.status === 'published' &&
+      sameRevision(snapshot.revision, review.revision)
+    ) {
+      // A discussion can observe publication before reconcile processes it.
+      const processed =
+        task.state !== 'awaiting_publication' &&
+        this.store.db
+          .prepare(
+            `SELECT 1 FROM events WHERE task_id=? AND type='review.published'
+         AND json_extract(data, '$.reviewId')=? LIMIT 1`,
+          )
+          .get(task.id, review.id);
+      if (!processed && snapshot.comments.length) retainPublishedFeedback(task, snapshot, true);
+      return false;
+    }
+    if (task.reviewFinished && task.state === 'awaiting_push') return false;
     this.holdTaskForInput(
       task,
       'PR revision changed. Use Retry review to check the previous native review before starting the next one.',
@@ -1491,7 +1511,7 @@ export class Engine {
           this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
           return;
         }
-        if (this.holdPreviousNativeReview(task)) return;
+        if (this.preservePreviousNativeReview(task)) return;
         this.invalidate(task, pr);
         this.state(
           task,

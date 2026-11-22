@@ -69,6 +69,7 @@ it.each([
   ['completeJob', 'published'],
   ['reconcile first', 'published'],
   ['completeJob first', 'published'],
+  ['reconcile after discussion', 'published'],
 ] as const)(
   'retains the old native review when %s notices the new base (%s)',
   async (first, status) => {
@@ -96,16 +97,34 @@ it.each([
         'A newly published finding',
         `${old.marker}:comment:R2`,
       );
+      const observedInChat = first === 'reconcile after discussion';
+      if (observedInChat) {
+        await f.engine.completeJob(reviewer, f.result({ verifiedCommentIds: [earlier] }));
+        f.store.saveJob({ ...reviewer, status: 'completed' });
+        await f.engine.chat(task.id, 'reviewer', 'Discuss the review');
+      }
       if (status === 'published') await f.provider.publish(ref, old);
+      if (observedInChat) {
+        await f.run();
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'awaiting_publication',
+          reviewFinished: true,
+          snapshot: { status: 'published' },
+          feedback: { comments: [{ id: earlier }] },
+        });
+      }
 
       const moved = { ...fixed, base: 'e'.repeat(40) };
       f.store.setSetting('demo-pr:1', moved);
-      if (first === 'reconcile' || first === 'reconcile first') await f.engine.reconcile(task.id);
-      if (first !== 'reconcile')
+      if (first.startsWith('reconcile')) await f.engine.reconcile(task.id);
+      if (first !== 'reconcile' && !observedInChat)
         await f.engine.completeJob(reviewer, f.result({ verifiedCommentIds: [earlier] }));
       if (first === 'completeJob first') await f.engine.reconcile(task.id);
       const blocked = f.store.getTask(task.id);
-      expect(blocked).toMatchObject({ state: 'needs_input', review: old });
+      if (observedInChat) {
+        expect(blocked.state).toBe('queued');
+        expect(blocked.feedback?.comments.map(({ id }) => id)).toEqual([earlier, added.id]);
+      } else expect(blocked).toMatchObject({ state: 'needs_input', review: old });
       expect(f.store.busy(task.id)).toBe(false);
       const restarted = new Engine(f.store, () => f.provider);
       if (status === 'draft') {

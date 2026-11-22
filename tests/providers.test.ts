@@ -162,6 +162,14 @@ describe('GitHub draft review contract', () => {
           await expect(
             restarted.broker.call(chat, 'set_summary', { body: 'Review of release' }),
           ).rejects.toMatchObject({ code: 'stale_revision' });
+          await expect(
+            restarted.broker.call(chat, 'record_decision', {
+              commentId: '202',
+              outcome: 'withdrawn',
+              reason: 'Appears resolved',
+            }),
+          ).rejects.toMatchObject({ code: 'stale_revision' });
+          expect(store.decisions(task.id)).toEqual([]);
           expect(summaryEdits).toBe(0);
           store.saveJob({ ...chat, status: 'completed' });
         }
@@ -173,7 +181,15 @@ describe('GitHub draft review contract', () => {
         });
         if (scenario === 'legacy intent after reconcile') {
           expect(retried.review?.revision.head).toBe(head);
-          await restarted.broker.call(store.claim()!, 'set_summary', { body: 'Review of release' });
+          const job = store.claim()!;
+          await restarted.broker.call(job, 'set_summary', { body: 'Review of release' });
+          await expect(
+            restarted.broker.call(job, 'record_decision', {
+              commentId: '202',
+              outcome: 'verified',
+              reason: 'Checked on release',
+            }),
+          ).resolves.toMatchObject({ head, targetBranch: 'release', outcome: 'verified' });
           expect(summaryEdits).toBe(1);
         }
         return;

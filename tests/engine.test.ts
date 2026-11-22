@@ -6,7 +6,7 @@ import { defaultPolicy } from '../src/core/types.js';
 
 describe('publication gates and revision safety', () => {
   it.each(['unknown target', 'stale snapshot'] as const)(
-    'leaves a draft readable and blocks editing when it has a %s',
+    'leaves a draft readable and blocks edits and decisions (%s)',
     async (scenario) => {
       const f = await fixture();
       try {
@@ -29,6 +29,16 @@ describe('publication gates and revision safety', () => {
         ).rejects.toMatchObject({
           code: scenario === 'unknown target' ? 'review_target_unverified' : 'stale_revision',
         });
+        await expect(
+          f.engine.broker.call(job, 'record_decision', {
+            commentId: '202',
+            outcome: 'withdrawn',
+            reason: 'Appears resolved',
+          }),
+        ).rejects.toMatchObject({
+          code: scenario === 'unknown target' ? 'review_target_unverified' : 'stale_revision',
+        });
+        expect(f.store.decisions(task.id)).toEqual([]);
         expect(await f.provider.getReview(ref, review)).toEqual(snapshot);
         expect(f.store.db.prepare('SELECT id FROM operations').all()).toEqual(operations);
       } finally {
