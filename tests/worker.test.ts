@@ -62,9 +62,16 @@ async function recordLegacyLostFix(f: Awaited<ReturnType<typeof fixture>>, compl
   return { task, saved };
 }
 
-it.each(['draft', 'published'] as const)(
-  'retains the old native review when reconciliation moves the base (%s)',
-  async (status) => {
+it.each([
+  ['reconcile', 'draft'],
+  ['reconcile', 'published'],
+  ['completeJob', 'draft'],
+  ['completeJob', 'published'],
+  ['reconcile first', 'published'],
+  ['completeJob first', 'published'],
+] as const)(
+  'retains the old native review when %s notices the new base (%s)',
+  async (first, status) => {
     const f = await fixture();
     try {
       const earlier = await queueFix(f);
@@ -82,6 +89,7 @@ it.each(['draft', 'published'] as const)(
       );
       const started = await f.engine.review(task.id);
       const old = started.review!;
+      const reviewer = f.store.claim()!;
       const added = await f.provider.createComment(
         ref,
         old,
@@ -92,7 +100,11 @@ it.each(['draft', 'published'] as const)(
 
       const moved = { ...fixed, base: 'e'.repeat(40) };
       f.store.setSetting('demo-pr:1', moved);
-      const blocked = await f.engine.reconcile(task.id);
+      if (first === 'reconcile' || first === 'reconcile first') await f.engine.reconcile(task.id);
+      if (first !== 'reconcile')
+        await f.engine.completeJob(reviewer, f.result({ verifiedCommentIds: [earlier] }));
+      if (first === 'completeJob first') await f.engine.reconcile(task.id);
+      const blocked = f.store.getTask(task.id);
       expect(blocked).toMatchObject({ state: 'needs_input', review: old });
       expect(f.store.busy(task.id)).toBe(false);
       const restarted = new Engine(f.store, () => f.provider);

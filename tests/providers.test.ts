@@ -46,7 +46,9 @@ describe('GitHub draft review contract', () => {
     const pull = '/repos/acme/service/pulls/12';
     let branch = 'main';
     let base = revision.base;
+    let head = revision.head;
     let attempts = 0;
+    let summaryEdits = 0;
     let draft:
       | {
           id: number;
@@ -63,7 +65,7 @@ describe('GitHub draft review contract', () => {
           state: 'open',
           title: 'Changes',
           head: {
-            sha: revision.head,
+            sha: head,
             ref: 'fix',
             repo: { clone_url: 'https://github.com/acme/service.git' },
           },
@@ -76,6 +78,11 @@ describe('GitHub draft review contract', () => {
       if (path.includes('/comments?')) return [];
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
         return draft ?? new Response('{}', { status: 404 });
+      if (method === 'PUT' && path === `${pull}/reviews/${draft?.id}` && draft) {
+        summaryEdits++;
+        draft.body = body.body;
+        return draft;
+      }
       if (method === 'POST' && path === `${pull}/reviews`) {
         attempts++;
         if (draft) return new Response('{}', { status: 422 });
@@ -83,7 +90,7 @@ describe('GitHub draft review contract', () => {
           id: attempts,
           node_id: `PRR_${attempts}`,
           body: body.body,
-          commit_id: revision.head,
+          commit_id: head,
           user: { id: 7 },
           state: 'PENDING',
         };
@@ -121,6 +128,7 @@ describe('GitHub draft review contract', () => {
           scenario === 'lost response before reconcile' ||
           (legacy && scenario !== 'legacy intent');
         if (movedBase) base = 'e'.repeat(40);
+        if (scenario === 'legacy intent after reconcile') head = 'f'.repeat(40);
         if (scenario === 'lost response before reconcile' || (legacy && movedBase))
           expect(await engine.reconcile(task.id)).toMatchObject({ revision: { base } });
         const restarted = new Engine(store, () => provider);
@@ -142,12 +150,32 @@ describe('GitHub draft review contract', () => {
           });
           expect(attempts).toBe(1);
         }
+        if (scenario === 'legacy intent after reconcile') {
+          expect(held.revision?.head).toBe(head);
+          expect(held.review?.revision.head).toBe(revision.head);
+          await restarted.chat(task.id, 'reviewer', 'Inspect the recovered draft');
+          const chat = store.claim()!;
+          expect(await restarted.broker.call(chat, 'read_review', {})).toMatchObject({
+            status: 'draft',
+            revision: { head: revision.head },
+          });
+          await expect(
+            restarted.broker.call(chat, 'set_summary', { body: 'Review of release' }),
+          ).rejects.toMatchObject({ code: 'stale_revision' });
+          expect(summaryEdits).toBe(0);
+          store.saveJob({ ...chat, status: 'completed' });
+        }
         draft = undefined;
         const retried = await restarted.review(task.id, true);
         expect(retried).toMatchObject({
           state: 'reviewing',
           review: { targetBranch: branch, id: '2', revision: { base } },
         });
+        if (scenario === 'legacy intent after reconcile') {
+          expect(retried.review?.revision.head).toBe(head);
+          await restarted.broker.call(store.claim()!, 'set_summary', { body: 'Review of release' });
+          expect(summaryEdits).toBe(1);
+        }
         return;
       }
       const original = await engine.review(task.id);

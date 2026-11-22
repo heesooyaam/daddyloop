@@ -253,6 +253,13 @@ export class Broker {
         );
       return this.store.decision(task, data, job.id);
     }
+    if (!sameRevision(current, task.review.revision) || !sameRevision(current, snapshot.revision))
+      throw new AppError(
+        'stale_revision',
+        'The draft does not match the current PR revision. Start a new review before editing comments.',
+      );
+    if (!task.review.targetBranch)
+      throw new AppError('review_target_unverified', missingReviewTargetReason(current));
     assertDraft(snapshot);
     const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 24);
     const key = `${task.review.marker}:${job.id}:${tool}:${callId}:${hash}`;

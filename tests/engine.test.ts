@@ -5,6 +5,37 @@ import { buildContext } from '../src/runtime/context.js';
 import { defaultPolicy } from '../src/core/types.js';
 
 describe('publication gates and revision safety', () => {
+  it.each(['unknown target', 'stale snapshot'] as const)(
+    'leaves a draft readable and blocks editing when it has a %s',
+    async (scenario) => {
+      const f = await fixture();
+      try {
+        const task = await f.engine.review(f.task.id);
+        const review = task.review!;
+        const ref = prRef(task);
+        const snapshot = await f.provider.getReview(ref, review);
+        if (scenario === 'unknown target') {
+          delete review.targetBranch;
+          f.store.saveTask(task);
+        } else {
+          snapshot.revision = { ...snapshot.revision, head: 'e'.repeat(40) };
+          f.store.setSetting(`demo-review:${review.id}`, snapshot);
+        }
+        const job = f.store.claim()!;
+        expect(await f.engine.broker.call(job, 'read_review', {})).toEqual(snapshot);
+        const operations = f.store.db.prepare('SELECT id FROM operations').all();
+        await expect(
+          f.engine.broker.call(job, 'set_summary', { body: 'New summary' }),
+        ).rejects.toMatchObject({
+          code: scenario === 'unknown target' ? 'review_target_unverified' : 'stale_revision',
+        });
+        expect(await f.provider.getReview(ref, review)).toEqual(snapshot);
+        expect(f.store.db.prepare('SELECT id FROM operations').all()).toEqual(operations);
+      } finally {
+        f.store.close();
+      }
+    },
+  );
   it.each(['new target', 'new generation', 'new base', 'current dispute'] as const)(
     'holds a finding from another verification scope or a current dispute (%s)',
     async (scenario) => {

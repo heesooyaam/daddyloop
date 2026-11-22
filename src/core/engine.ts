@@ -595,15 +595,9 @@ export class Engine {
     if (pending || (task.state === 'fixing' && this.store.busy(id))) return task;
     if (this.stopReviewOnTargetChange(task, pr)) return task;
     if (!sameRevision(task.revision, pr)) {
+      if (this.holdPreviousNativeReview(task)) return task;
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
-      if (task.review && hasSharedDraftSlot(task) && (hadUnpublished || !task.reviewFinished)) {
-        this.holdTaskForInput(
-          task,
-          'PR revision changed. Use Retry review to check the previous native review before starting the next one.',
-        );
-        return task;
-      }
       this.invalidate(task, pr);
       this.state(
         task,
@@ -751,6 +745,18 @@ export class Engine {
       this.state(task, 'needs_input', reason);
     });
     if (running) this.onCancel(task.id);
+  }
+
+  private holdPreviousNativeReview(task: Task): boolean {
+    const completedPublication =
+      task.reviewFinished &&
+      (task.snapshot?.status === 'published' || task.state === 'awaiting_push');
+    if (!task.review || !hasSharedDraftSlot(task) || completedPublication) return false;
+    this.holdTaskForInput(
+      task,
+      'PR revision changed. Use Retry review to check the previous native review before starting the next one.',
+    );
+    return true;
   }
 
   private stopReviewBeforeSavedFix(task: Task, pr: PullRequest): boolean {
@@ -1485,6 +1491,7 @@ export class Engine {
           this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
           return;
         }
+        if (this.holdPreviousNativeReview(task)) return;
         this.invalidate(task, pr);
         this.state(
           task,
