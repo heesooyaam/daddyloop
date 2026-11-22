@@ -1,6 +1,14 @@
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Revision } from '../core/types.js';
-import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
+import {
+  AppError,
+  now,
+  sameRevision,
+  sameAgentProfile,
+  prRef,
+  isTicket,
+  reviewTargetChange,
+} from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
@@ -381,7 +389,11 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (job.kind === 'review' && !reportReview) this.engine.requireSubmittedFix(task, startingPR);
+      if (job.kind === 'review' && startingPR) {
+        this.engine.requireSubmittedFix(task, startingPR);
+        const targetChange = reviewTargetChange(task.review, startingPR);
+        if (targetChange) throw new AppError('review_target_changed', targetChange);
+      }
       const feedbackTarget = task.review?.targetBranch;
       if (job.kind === 'fix' && startingPR && !feedbackTarget)
         throw new AppError(

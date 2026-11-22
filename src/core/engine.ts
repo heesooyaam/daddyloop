@@ -16,6 +16,7 @@ import {
   defaultPolicy,
   now,
   sameRevision,
+  reviewTargetChange,
   sameAgentProfile,
   revisionOf,
   type Task,
@@ -315,7 +316,7 @@ export class Engine {
         }
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
-      const changed = !sameRevision(task.revision, pr);
+      const changed = !sameRevision(task.revision, pr) || !!reviewTargetChange(task.review, pr);
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
@@ -446,6 +447,11 @@ export class Engine {
     }
     // Fix completion handles open PR revisions.
     if (pending || (task.state === 'fixing' && this.store.busy(id))) return task;
+    const targetChange = reviewTargetChange(task.review, pr);
+    if (targetChange) {
+      this.holdTaskForInput(task, targetChange);
+      return task;
+    }
     if (!sameRevision(task.revision, pr)) {
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
@@ -577,12 +583,16 @@ export class Engine {
     head: string,
     reason = 'The review still points to the revision before the saved fix.',
   ) {
+    this.holdTaskForInput(task, `${reason} Saved fix ${head} is preserved.`);
+  }
+
+  private holdTaskForInput(task: Task, reason: string) {
     const jobs = this.store.activeJobs(task.id);
     const running = jobs.some((job) => job.status === 'running');
     this.store.transaction(() => {
       if (running) task.generation++;
       if (jobs.length) this.store.cancelJobs(task.id);
-      this.state(task, 'needs_input', `${reason} Saved fix ${head} is preserved.`);
+      this.state(task, 'needs_input', reason);
     });
     if (running) this.onCancel(task.id);
   }
@@ -942,8 +952,8 @@ export class Engine {
       return head;
   }
 
-  private stoppedByService(job: Job): boolean {
-    // Service stops record the new task generation just before the task-level interruption event.
+  private cancelledByInterruption(job: Job): boolean {
+    // Both interruption paths record the new generation before their task-level event.
     return !!this.store.db
       .prepare(
         `SELECT 1 FROM events stopped JOIN events transition ON transition.id=(
@@ -951,7 +961,7 @@ export class Engine {
          WHERE previous.task_id=stopped.task_id AND previous.id<stopped.id
          ORDER BY previous.id DESC LIMIT 1
        )
-       WHERE stopped.task_id=? AND stopped.type='service.interrupted'
+       WHERE stopped.task_id=? AND stopped.type IN ('service.interrupted', 'resource.pause')
          AND transition.type='task.state' AND json_extract(transition.data, '$.state')='needs_input'
          AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
       )
@@ -959,7 +969,7 @@ export class Engine {
   }
 
   private fixRunInterrupted(job: Job, savedEventId: number): boolean {
-    if (job.status === 'cancelled') return this.stoppedByService(job);
+    if (job.status === 'cancelled') return this.cancelledByInterruption(job);
     return (
       job.status === 'failed' &&
       !!this.store.db
@@ -1127,7 +1137,13 @@ export class Engine {
         );
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (this.stopReviewBeforeSavedFix(task, pr)) return task;
-      await this.broker.publish(task, pr);
+      try {
+        await this.broker.publish(task, pr);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'review_target_changed') throw error;
+        this.state(task, 'needs_input', error.message);
+        return task;
+      }
       return this.reconcileLocked(id);
     });
   }
@@ -1157,6 +1173,7 @@ export class Engine {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state === 'paused') {
         this.store.event(task.id, 'job.stale_result', { generation: job.generation }, job.id);
+        if (savedFix) this.showInterruptedFix(task, job);
         return;
       }
       if (savedFix && savedFix.head !== savedFix.revision.head) {
@@ -1557,12 +1574,15 @@ export class Engine {
           this.store.event(task.id, 'job.interrupted', {}, job.id);
         });
       } else if (job.status === 'cancelled' && job.role === 'author' && job.kind === 'fix') {
-        const task = this.store.getTask(job.taskId);
-        if (task.state !== 'needs_input' || task.generation !== job.generation + 1) continue;
-        const head = this.interruptedFixHead(task, job);
-        if (head && !task.reason.includes(head) && this.stoppedByService(job))
-          this.state(task, 'needs_input', `${task.reason} Saved fix ${head} is preserved.`);
+        this.showInterruptedFix(this.store.getTask(job.taskId), job);
       }
+  }
+
+  private showInterruptedFix(task: Task, job: Job) {
+    if (task.state !== 'needs_input' || task.generation !== job.generation + 1) return;
+    const head = this.interruptedFixHead(task, job);
+    if (head && !task.reason.includes(head) && this.cancelledByInterruption(job))
+      this.state(task, 'needs_input', `${task.reason} Saved fix ${head} is preserved.`);
   }
 
   private interruptedFixHead(task: Task, job: Job): string | undefined {

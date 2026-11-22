@@ -4,6 +4,7 @@ import {
   AppError,
   prRef,
   sameRevision,
+  reviewTargetChange,
   type Task,
   type Job,
   type PRRef,
@@ -242,29 +243,37 @@ export class Broker {
     return { summaryUpdated: true };
   }
   async publish(task: Task, pr: PullRequest): Promise<ReviewSnapshot> {
-    const provider = this.provider(prRef(task));
-    if (!task.review) throw new AppError('review_missing', 'No review to publish');
-    if (pr.state !== 'open' || !sameRevision(pr, task.review.revision))
-      throw new AppError(
-        'stale_revision',
-        'PR revision changed. This review cannot release feedback for the new revision.',
-      );
-    const snapshot = await provider.getReview(prRef(task), task.review);
+    const review = task.review;
+    if (!review) throw new AppError('review_missing', 'No review to publish');
+    const ref = prRef(task);
+    const provider = this.provider(ref);
+    const assertCurrentRevision = (current: PullRequest) => {
+      const targetChange = reviewTargetChange(review, current);
+      if (targetChange) throw new AppError('review_target_changed', targetChange);
+      if (current.state !== 'open' || !sameRevision(current, review.revision))
+        throw new AppError(
+          'stale_revision',
+          'PR revision changed. This review cannot release feedback for the new revision.',
+        );
+    };
+    assertCurrentRevision(pr);
+    const snapshot = await provider.getReview(ref, review);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
+    if (review.targetBranch) assertCurrentRevision(await provider.getPR(ref));
     await this.outbox.perform(
       task.id,
-      `${task.review.marker}:publish`,
-      { review: task.review.id },
+      `${review.marker}:publish`,
+      { review: review.id },
       async () => {
-        await provider.publish(prRef(task), task.review!);
+        await provider.publish(ref, review);
         return null;
       },
       async () =>
-        (await provider.getReview(prRef(task), task.review!)).status === 'published'
+        (await provider.getReview(ref, review)).status === 'published'
           ? { found: true, value: null }
           : { found: false },
     );
-    return provider.getReview(prRef(task), task.review);
+    return provider.getReview(ref, review);
   }
 }

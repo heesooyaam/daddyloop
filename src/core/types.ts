@@ -393,3 +393,12 @@ export const revisionOf = (value: Revision): Revision => ({
   start: value.start,
   ...(value.revisionId ? { revisionId: value.revisionId } : {}),
 });
+
+export function reviewTargetChange(
+  review: ReviewHandle | undefined,
+  pr: PullRequest,
+): string | undefined {
+  const expected = review?.targetBranch;
+  if (pr.state === 'open' && expected && expected !== pr.targetBranch)
+    return `The PR target branch changed after review was queued. Review target branch ${expected}. Observed target branch ${pr.targetBranch}.`;
+}
