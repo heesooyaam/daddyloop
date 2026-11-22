@@ -366,7 +366,6 @@ export class Worker {
     try {
       let task = store.getTask(job.taskId);
       const reportReview = job.kind === 'review' && isTicket(task);
-      if (job.kind === 'review' && !reportReview) this.engine.requireSubmittedFix(task);
       const group = task.groupId ? store.getGroup(task.groupId) : undefined;
       if (job.role === 'reviewer' && group) {
         if (job.groupGeneration !== group.generation)
@@ -382,7 +381,13 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      const feedbackTarget = task.review?.targetBranch ?? task.pr?.targetBranch;
+      if (job.kind === 'review' && !reportReview) this.engine.requireSubmittedFix(task, startingPR);
+      const feedbackTarget = task.review?.targetBranch;
+      if (job.kind === 'fix' && startingPR && !feedbackTarget)
+        throw new AppError(
+          'stale_revision',
+          `The published feedback has no recorded target branch. Use Retry review to start a new review on ${startingPR.targetBranch}.`,
+        );
       if (job.kind === 'fix' && startingPR && startingPR.targetBranch !== feedbackTarget)
         throw new AppError(
           'stale_revision',

@@ -344,6 +344,111 @@ it('keeps a legacy pending fix ahead of queued review after the PR base changes'
   }
 });
 
+it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
+  'uses provider and review revisions to recover a legacy pending fix (%s)',
+  async (scenario) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const original = task.pr!;
+      const rolledBack = scenario === 'rolled back';
+      const wrongDraftBase = scenario === 'draft on another base';
+      if (rolledBack) f.store.event(task.id, 'author.submitted', { head, pushed: true });
+      const pr = rolledBack ? { ...original, base: 'e'.repeat(40) } : { ...original, head };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'New revision is ready for review',
+        generation,
+        head: pr.head,
+      });
+      const review = rolledBack
+        ? undefined
+        : await f.provider.createReview(
+            prRef(task),
+            wrongDraftBase ? { ...revision, base: 'e'.repeat(40) } : revision,
+            'legacy-review-on-H2',
+          );
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        pendingAuthorHead: head,
+        authorBaseHead: original.head,
+        state: rolledBack ? 'queued' : 'awaiting_publication',
+        review,
+        snapshot: review && (await f.provider.getReview(prRef(task), review)),
+        reviewFinished: !rolledBack,
+      });
+      f.store.setSetting('demo-pr:1', pr);
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      const current = f.store.getTask(task.id);
+      expect(runtime.run).not.toHaveBeenCalled();
+      if (rolledBack) {
+        expect(current.state).toBe('needs_input');
+        expect(current.reason).toContain(head);
+        expect(current.reason).toContain(original.head);
+      } else if (wrongDraftBase) {
+        expect(current).toMatchObject({ state: 'needs_input', revision });
+        expect(await f.provider.getReview(prRef(task), review!)).toMatchObject({ status: 'draft' });
+      } else {
+        expect(current).toMatchObject({ state: 'complete', revision });
+        expect(await f.provider.getReview(prRef(task), review!)).toMatchObject({
+          status: 'published',
+        });
+      }
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it('does not repeat a legacy push while the provider still shows the old revision', async () => {
+  const f = await fixture();
+  try {
+    await queueFix(f);
+    const author = f.store.claim()!;
+    const task = f.store.getTask(f.task.id);
+    const head = 'f'.repeat(40);
+    f.store.event(
+      task.id,
+      'author.feedback_snapshot',
+      { ...task.feedback, targetBranch: task.pr!.targetBranch },
+      author.id,
+    );
+    f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+    f.store.saveJob({ ...author, status: 'completed' });
+    f.store.event(task.id, 'author.submitted', { head, pushed: true });
+    f.store.saveTask({
+      ...task,
+      state: 'awaiting_push',
+      pendingAuthorHead: head,
+      authorBaseHead: task.revision!.head,
+    });
+    const prepare = vi.fn(async () => async () => {});
+    await f.engine.submitSavedFix(task.id, prepare);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(f.store.getTask(task.id).reason).toContain(
+      `Waiting for the PR to confirm saved fix ${head}`,
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
 it('still blocks retry review after an author discussion fails with a legacy pending fix', async () => {
   const f = await fixture();
   try {
@@ -424,6 +529,37 @@ it.each([false, true])(
     }
   },
 );
+
+it('requires a new review when legacy published feedback has no recorded target branch', async () => {
+  const f = await fixture();
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const workspaces = new Workspaces('/tmp');
+  const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  try {
+    await queueFix(f);
+    const task = f.store.getTask(f.task.id);
+    const oldReview = task.review!;
+    delete oldReview.targetBranch;
+    const pr = { ...task.pr!, targetBranch: 'release' };
+    f.store.saveTask({ ...task, pr });
+    f.store.setSetting('demo-pr:1', pr);
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    const blocked = f.store.getTask(task.id);
+    expect(blocked).toMatchObject({ state: 'needs_input', review: oldReview });
+    expect(blocked.reason).toContain('no recorded target branch');
+    expect(blocked.reason).toContain('release');
+    const next = await f.engine.review(task.id, true);
+    expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+    expect(next.review?.id).not.toBe(oldReview.id);
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
 
 it.each([
   ['head before push', false, { head: 'd'.repeat(40) }],

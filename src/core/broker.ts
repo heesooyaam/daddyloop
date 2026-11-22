@@ -7,6 +7,7 @@ import {
   type Task,
   type Job,
   type PRRef,
+  type PullRequest,
   type ReviewSnapshot,
 } from './types.js';
 import type { Store } from './store.js';
@@ -240,10 +241,9 @@ export class Broker {
     );
     return { summaryUpdated: true };
   }
-  async publish(task: Task): Promise<ReviewSnapshot> {
+  async publish(task: Task, pr: PullRequest): Promise<ReviewSnapshot> {
     const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
-    const pr = await provider.getPR(prRef(task));
     if (pr.state !== 'open' || !sameRevision(pr, task.review.revision))
       throw new AppError(
         'stale_revision',
