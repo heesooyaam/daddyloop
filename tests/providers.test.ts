@@ -6,6 +6,10 @@ import { Store } from '../src/core/store.js';
 import { ProviderHttp, type Fetch } from '../src/providers/http.js';
 import { parsePR, tag } from '../src/providers/provider.js';
 import type { ReviewHandle } from '../src/core/types.js';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const revision = {
   head: 'a'.repeat(40),
   base: 'b'.repeat(40),
@@ -38,6 +42,10 @@ describe('GitHub draft review contract', () => {
     'unavailable before creation',
     'another pending review',
     'another account has a pending review',
+    'pending review appeared before POST',
+    'unclear POST rejection',
+    'completed review then deleted',
+    'completed review then published',
     'lost response on current revision',
     'lost response',
     'lost response and new base',
@@ -54,7 +62,7 @@ describe('GitHub draft review contract', () => {
     let attempts = 0;
     let summaryEdits = 0;
     let reviewsAvailable = scenario !== 'unavailable before creation';
-    const hasOtherReview =
+    let hasOtherReview =
       scenario === 'another pending review' || scenario === 'another account has a pending review';
     const otherReview = {
       id: 90,
@@ -93,7 +101,11 @@ describe('GitHub draft review contract', () => {
         if (!reviewsAvailable) return new Response('{}', { status: 503 });
         return [...(draft ? [draft] : []), ...(hasOtherReview ? [otherReview] : [])];
       }
-      if (path.includes('/comments?')) return [];
+      if (path.includes('/comments?'))
+        return scenario === 'completed review then published' &&
+          path.startsWith(`${pull}/reviews/1/comments?`)
+          ? [{ id: 202, body: 'Review this finding on the new base', html_url: ref.url }]
+          : [];
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
         return draft ?? new Response('{}', { status: 404 });
       if (method === 'PUT' && path === `${pull}/reviews/${draft?.id}` && draft) {
@@ -103,8 +115,27 @@ describe('GitHub draft review contract', () => {
       }
       if (method === 'POST' && path === `${pull}/reviews`) {
         attempts++;
+        if (attempts === 1 && scenario === 'pending review appeared before POST') {
+          hasOtherReview = true;
+          otherReview.user.id = 7;
+          return new Response(
+            JSON.stringify({
+              message: 'Validation Failed',
+              errors: [
+                {
+                  resource: 'PullRequestReview',
+                  code: 'custom',
+                  message: 'User can only have one pending review per pull request',
+                },
+              ],
+            }),
+            { status: 422 },
+          );
+        }
+        if (scenario === 'unclear POST rejection')
+          return new Response('{"message":"Validation Failed"}', { status: 422 });
         if (
-          draft ||
+          draft?.state === 'PENDING' ||
           (hasOtherReview && otherReview.user.id === 7 && otherReview.state === 'PENDING')
         )
           return new Response('{}', { status: 422 });
@@ -133,6 +164,67 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      if (
+        scenario === 'completed review then deleted' ||
+        scenario === 'completed review then published'
+      ) {
+        await engine.review(task.id);
+        // Restore the task row as it was before the completed create result was attached.
+        store.cancelJobs(task.id);
+        store.saveTask(task);
+        expect(
+          store.db.prepare("SELECT id FROM operations WHERE status='done'").all(),
+        ).toHaveLength(1);
+        if (scenario === 'completed review then deleted') draft = undefined;
+        else draft!.state = 'COMMENTED';
+        base = 'e'.repeat(40);
+        const restarted = new Engine(store, () => provider);
+        if (scenario === 'completed review then published') {
+          expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'needs_input',
+            review: { id: '1' },
+          });
+        }
+        const next = await restarted.review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { id: '2', revision: { base } } });
+        expect(
+          http.mock.calls.some(([url]) => new URL(String(url)).pathname === `${pull}/reviews/1`),
+        ).toBe(true);
+        if (scenario === 'completed review then published')
+          expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['202']);
+        expect(attempts).toBe(2);
+        return;
+      }
+      if (
+        scenario === 'pending review appeared before POST' ||
+        scenario === 'unclear POST rejection'
+      ) {
+        await expect(engine.review(task.id)).rejects.toMatchObject({
+          code: scenario === 'unclear POST rejection' ? 'provider_422' : 'existing_drafts',
+        });
+        const restarted = new Engine(store, () => provider);
+        if (scenario === 'unclear POST rejection') {
+          expect(
+            store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
+          ).toHaveLength(1);
+          await expect(restarted.review(task.id, true)).rejects.toMatchObject({
+            code: 'ambiguous_write',
+          });
+          expect(attempts).toBe(1);
+        } else {
+          expect(
+            store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
+          ).toEqual([]);
+          otherReview.state = 'COMMENTED';
+          base = 'e'.repeat(40);
+          expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'reviewing',
+            review: { id: '2', revision: { base } },
+          });
+          expect(attempts).toBe(2);
+        }
+        return;
+      }
       if (hasOtherReview) {
         if (scenario === 'another pending review') {
           await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'existing_drafts' });
@@ -391,54 +483,103 @@ describe('GitHub draft review contract', () => {
 });
 describe('GitLab draft notes contract', () => {
   const ref = parsePR('https://gitlab.example.com/team/subgroup/service/-/merge_requests/9');
-  it('starts a review on the current GitLab base after draft notes failed to load', async () => {
-    const store = new Store(':memory:');
-    const mr = `/api/v4/projects/${encodeURIComponent(ref.repo)}/merge_requests/${ref.number}`;
-    let draftNotesAvailable = false;
-    let base = revision.base;
-    let creates = 0;
-    const http = transport((path, method, body) => {
-      if (path === mr)
-        return {
-          title: 'Changes',
-          state: 'opened',
-          source_branch: 'fix',
-          target_branch: 'main',
-          source_project_id: 3,
-          diff_refs: { head_sha: revision.head, base_sha: base, start_sha: revision.start },
-        };
-      if (path === '/api/v4/projects/3')
-        return { http_url_to_repo: 'https://gitlab.example.com/team/subgroup/service.git' };
-      if (path === '/api/v4/user') return { id: 7 };
-      if (path.startsWith(`${mr}/draft_notes?`))
-        return draftNotesAvailable ? [] : new Response('{}', { status: 503 });
-      if (path.startsWith(`${mr}/notes?`)) return [];
-      if (method === 'POST' && path === `${mr}/draft_notes`)
-        return { id: ++creates, note: body.note, author_id: 7 };
-      throw new Error(`Unexpected fixture request ${method} ${path}`);
-    });
-    const provider = new GitLabProvider(ref.host, 'fake', http);
-    const engine = new Engine(store, () => provider);
-    try {
-      const task = await engine.create({
-        ref,
-        repoPath: '/tmp',
-        requirements: 'Review the change',
+  it.each(['draft read failed', 'writer locked database', 'baseline insert failed'] as const)(
+    'starts a review on the current GitLab base after %s',
+    async (scenario) => {
+      const dir = mkdtempSync(join(tmpdir(), 'daddyloop-review-intent-'));
+      const filename = join(dir, 'db.sqlite');
+      const store = new Store(filename);
+      const writer = new DatabaseSync(filename);
+      store.db.exec('PRAGMA busy_timeout=0');
+      let locked = false;
+      const mr = `/api/v4/projects/${encodeURIComponent(ref.repo)}/merge_requests/${ref.number}`;
+      let fail = true;
+      let base = revision.base;
+      let creates = 0;
+      const http = transport((path, method, body) => {
+        if (path === mr)
+          return {
+            title: 'Changes',
+            state: 'opened',
+            source_branch: 'fix',
+            target_branch: 'main',
+            source_project_id: 3,
+            diff_refs: { head_sha: revision.head, base_sha: base, start_sha: revision.start },
+          };
+        if (path === '/api/v4/projects/3')
+          return { http_url_to_repo: 'https://gitlab.example.com/team/subgroup/service.git' };
+        if (path === '/api/v4/user') return { id: 7 };
+        if (path.startsWith(`${mr}/draft_notes?`)) {
+          if (fail && scenario === 'draft read failed') return new Response('{}', { status: 503 });
+          if (fail && scenario === 'writer locked database') {
+            writer.exec('BEGIN IMMEDIATE');
+            locked = true;
+          }
+          return [];
+        }
+        if (path.startsWith(`${mr}/notes?`))
+          return [{ id: 103, note: 'Previous finding', author_id: 7 }];
+        if (method === 'POST' && path === `${mr}/draft_notes`) {
+          expect(
+            writer.prepare("SELECT status FROM operations WHERE status='pending'").all(),
+          ).toEqual([{ status: 'pending' }]);
+          expect(
+            writer
+              .prepare(
+                "SELECT json_extract(data, '$.noteId') AS noteId FROM events WHERE type='review.note_baseline'",
+              )
+              .all(),
+          ).toEqual([{ noteId: 103 }]);
+          return { id: ++creates, note: body.note, author_id: 7 };
+        }
+        throw new Error(`Unexpected fixture request ${method} ${path}`);
       });
-      await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_503' });
-      expect(creates).toBe(0);
-      expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
-        [],
-      );
-      draftNotesAvailable = true;
-      base = 'e'.repeat(40);
-      const next = await new Engine(store, () => provider).review(task.id, true);
-      expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
-      expect(creates).toBe(1);
-    } finally {
-      store.close();
-    }
-  });
+      const provider = new GitLabProvider(ref.host, 'fake', http);
+      const engine = new Engine(store, () => provider);
+      try {
+        const task = await engine.create({
+          ref,
+          repoPath: '/tmp',
+          requirements: 'Review the change',
+        });
+        if (scenario === 'baseline insert failed')
+          store.db.exec(`
+        CREATE TRIGGER fail_baseline BEFORE INSERT ON events WHEN NEW.type='review.note_baseline'
+        BEGIN SELECT RAISE(ABORT, 'baseline insert failed'); END
+      `);
+        const reason = {
+          'draft read failed': /503/,
+          'writer locked database': /locked/,
+          'baseline insert failed': /baseline insert failed/,
+        };
+        await expect(engine.review(task.id)).rejects.toThrow(reason[scenario]);
+        if (locked) {
+          writer.exec('ROLLBACK');
+          locked = false;
+        }
+        if (scenario === 'baseline insert failed') store.db.exec('DROP TRIGGER fail_baseline');
+        expect(creates).toBe(0);
+        expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+          [],
+        );
+        expect(
+          store
+            .events(task.id)
+            .filter(({ type }) => type === 'operation.started' || type === 'review.note_baseline'),
+        ).toEqual([]);
+        fail = false;
+        base = 'e'.repeat(40);
+        const next = await new Engine(store, () => provider).review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
+        expect(creates).toBe(1);
+      } finally {
+        if (locked) writer.exec('ROLLBACK');
+        writer.close();
+        store.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
   it.each([
     ['retarget', 'draft'],
     ['retarget', 'partial'],

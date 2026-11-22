@@ -153,7 +153,9 @@ export class Broker {
     const prefix = `daddyloop:${task.id}:`;
     const suffix = `:${task.round + 1}`;
     const operations = this.store.db
-      .prepare('SELECT id FROM operations WHERE task_id=? AND id GLOB ? ORDER BY rowid')
+      .prepare(
+        'SELECT id, status, result FROM operations WHERE task_id=? AND id GLOB ? ORDER BY rowid',
+      )
       .all(task.id, `${prefix}[0-9]*${suffix}`);
     for (const row of operations) {
       const marker = String(row.id);
@@ -161,12 +163,18 @@ export class Broker {
       if (!Number.isSafeInteger(generation)) continue;
       const { targetBranch, revision: recorded, eventId } = this.reviewIntent(task.id, marker);
       if (recorded && !this.outbox.hasOperation(marker, recorded)) continue;
+      const completed =
+        row.status === 'done' && typeof row.result === 'string'
+          ? (JSON.parse(row.result) as ReviewHandle)
+          : undefined;
       const revision = recorded ?? this.legacyReviewRevision(task, marker, eventId);
-      const existing = await this.findCreatedReview(prRef(task), marker, revision, targetBranch);
+      const existing =
+        completed ?? (await this.findCreatedReview(prRef(task), marker, revision, targetBranch));
       return {
         generation,
         targetBranch,
         revision,
+        completed: !!completed,
         review: existing && { ...existing, revision: revision ?? existing.revision, targetBranch },
       };
     }
@@ -186,18 +194,26 @@ export class Broker {
         'review_target_unverified',
         'The earlier review creation has a different or unknown target branch. Inspect the native review before retrying.',
       );
+    const prepare = provider.prepareReviewCreation?.bind(provider);
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      async () => ({
-        ...(await (ref.provider === 'gitlab'
-          ? provider.createReview(ref, revision, marker, (noteId) =>
-              this.store.event(task.id, 'review.note_baseline', { marker, noteId }),
-            )
-          : provider.createReview(ref, revision, marker))),
-        targetBranch,
-      }),
+      prepare
+        ? {
+            prepare: async () => {
+              const prepared = await prepare(ref, revision, marker);
+              return {
+                record: () =>
+                  this.store.event(task.id, 'review.note_baseline', {
+                    marker,
+                    noteId: prepared.baselineNoteId,
+                  }),
+                write: async () => ({ ...(await prepared.write()), targetBranch }),
+              };
+            },
+          }
+        : async () => ({ ...(await provider.createReview(ref, revision, marker)), targetBranch }),
       async () => {
         const existing = await this.findCreatedReview(ref, marker, revision, targetBranch);
         return existing

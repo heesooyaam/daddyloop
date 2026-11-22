@@ -11,6 +11,9 @@ import { AppError, ProviderWriteNotAttempted } from '../core/types.js';
 import { type ReviewProvider, reviewPreparationError, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 
+const pendingReviewMessage =
+  'The current GitHub account has a pending review. Publish or discard it before starting a new review.';
+
 type GHReview = {
   id: number;
   node_id: string;
@@ -172,14 +175,23 @@ export class GitHubProvider implements ReviewProvider {
     const existing = reviews.find((item) => (item.body ?? '').includes(tag(marker)));
     if (existing) return this.handle(existing, marker, revision);
     if (reviews.some((item) => item.state === 'PENDING'))
-      throw new ProviderWriteNotAttempted(
-        'existing_drafts',
-        'The current GitHub account has a pending review. Publish or discard it before starting a new review.',
-      );
-    const review = await this.http.request<GHReview>('POST', `${path(ref)}/reviews`, {
-      commit_id: revision.head,
-      body: `Review in progress.\n\n${tag(marker)}`,
-    });
+      throw new ProviderWriteNotAttempted('existing_drafts', pendingReviewMessage);
+    const review = await this.http
+      .request<GHReview>('POST', `${path(ref)}/reviews`, {
+        commit_id: revision.head,
+        body: `Review in progress.\n\n${tag(marker)}`,
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof AppError &&
+          error.code === 'provider_422' &&
+          /\b(?:user can only have one pending review per pull request|you already have a pending review|a pending review already exists)\b/i.test(
+            error.message,
+          )
+        )
+          throw new ProviderWriteNotAttempted('existing_drafts', pendingReviewMessage);
+        throw error;
+      });
     return this.handle(review, marker, revision);
   }
   async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {

@@ -361,10 +361,19 @@ export class Engine {
         (retryWithoutTarget ? missingReviewTargetReason(pr) : undefined);
       const changed = !sameRevision(task.revision, pr) || !!targetIssue;
       const replacingReview = changed || (retry && !!task.review);
-      const attempt =
+      let attempt =
         hasSharedDraftSlot(task) && (!task.review || replacingReview)
           ? await this.broker.findAttemptedReview(task)
           : undefined;
+      const completedSnapshot =
+        task.ref.provider === 'github' && attempt?.completed && attempt.review
+          ? await this.provider(prRef(task)).getReview(prRef(task), attempt.review)
+          : undefined;
+      if (retry && completedSnapshot?.status === 'missing') {
+        // The stored ID confirms which attempted round was removed. Retire its marker.
+        task.round++;
+        attempt = undefined;
+      }
       const attempted = attempt?.review;
       const draftReason = task.ref.provider === 'gitlab' ? gitLabDraftReason : arcanumDraftReason;
       if (
@@ -401,7 +410,8 @@ export class Engine {
         return task;
       }
       const recoveredSnapshot =
-        attempted && (await this.provider(prRef(task)).getReview(prRef(task), attempted));
+        attempted &&
+        (completedSnapshot ?? (await this.provider(prRef(task)).getReview(prRef(task), attempted)));
       if (recoveredSnapshot?.status === 'partial') {
         if (pending) this.blockSavedFix(task, pending, draftReason);
         else this.state(task, 'needs_input', draftReason);

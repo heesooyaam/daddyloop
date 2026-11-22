@@ -18,12 +18,12 @@ export interface ReviewProvider {
     marker: string,
     intent?: { revision: Revision; targetBranch?: string },
   ): Promise<ReviewHandle | undefined>;
-  createReview(
+  createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
+  prepareReviewCreation?(
     ref: PRRef,
     revision: Revision,
     marker: string,
-    recordBaseline?: (noteId: number) => void,
-  ): Promise<ReviewHandle>;
+  ): Promise<{ baselineNoteId: number; write: () => Promise<ReviewHandle> }>;
   getReview(ref: PRRef, review: ReviewHandle, successor?: ReviewHandle): Promise<ReviewSnapshot>;
   createComment(
     ref: PRRef,

@@ -3,6 +3,13 @@ import { AppError, ProviderWriteNotAttempted } from './types.js';
 import type { Store } from './store.js';
 import { redact } from './security.js';
 
+type ProviderWrite<T> =
+  | (() => Promise<T>)
+  | {
+      // Preparation only reads. The optional record is committed with the intent before write.
+      prepare: () => Promise<{ write: () => Promise<T>; record?: () => void }>;
+    };
+
 /** External writes are never blindly retried after an ambiguous outcome. */
 export class Outbox {
   private active = new Set<string>();
@@ -29,7 +36,7 @@ export class Outbox {
     taskId: string,
     id: string,
     input: unknown,
-    write: () => Promise<T>,
+    operation: ProviderWrite<T>,
     recover: () => Promise<{ found: true; value: T } | { found: false }>,
     intent?: Record<string, unknown>,
   ): Promise<T> {
@@ -51,14 +58,17 @@ export class Outbox {
         this.store.event(taskId, 'operation.recovered', { operationId: id });
         return result.value;
       }
+      const prepared =
+        typeof operation === 'function' ? { write: operation } : await operation.prepare();
       this.store.transaction(() => {
         this.store.db
           .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
           .run(id, taskId, 'pending', request);
         this.store.event(taskId, 'operation.started', { operationId: id, ...intent });
+        prepared.record?.();
       });
       try {
-        const result = await write();
+        const result = await prepared.write();
         this.complete(id, result);
         this.store.event(taskId, 'operation.completed', { operationId: id });
         return result;

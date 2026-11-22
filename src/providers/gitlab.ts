@@ -138,12 +138,11 @@ export class GitLabProvider implements ReviewProvider {
         }
       : undefined;
   }
-  async createReview(
-    ref: PRRef,
-    revision: Revision,
-    marker: string,
-    recordBaseline?: (noteId: number) => void,
-  ): Promise<ReviewHandle> {
+  async createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle> {
+    const prepared = await this.prepareReviewCreation(ref, revision, marker);
+    return prepared.write();
+  }
+  async prepareReviewCreation(ref: PRRef, revision: Revision, marker: string) {
     const [drafts, notes, user] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
@@ -152,31 +151,23 @@ export class GitLabProvider implements ReviewProvider {
       throw reviewPreparationError(error, 'GitLab');
     });
     const existing = drafts.find((n) => body(n).includes(tag(marker)));
-    if (existing)
-      return {
-        id: String(existing.id),
-        marker,
-        revision,
-        authorId: String(user.id),
-        baselineNoteId: Math.max(0, ...notes.map((n) => n.id)),
-      };
-    if (drafts.length)
+    if (!existing && drafts.length)
       throw new ProviderWriteNotAttempted(
         'existing_drafts',
         'There are existing GitLab draft notes. Publish or discard them before starting this review.',
       );
     const baselineNoteId = Math.max(0, ...notes.map((n) => n.id));
-    recordBaseline?.(baselineNoteId);
-    const item = await this.http.request<Note>('POST', `${path(ref)}/draft_notes`, {
-      note: `Review in progress.\n\n${tag(marker)}`,
-      commit_id: revision.head,
-    });
     return {
-      id: String(item.id),
-      marker,
-      revision,
-      authorId: String(user.id),
       baselineNoteId,
+      write: async () => {
+        const item =
+          existing ??
+          (await this.http.request<Note>('POST', `${path(ref)}/draft_notes`, {
+            note: `Review in progress.\n\n${tag(marker)}`,
+            commit_id: revision.head,
+          }));
+        return { id: String(item.id), marker, revision, authorId: String(user.id), baselineNoteId };
+      },
     };
   }
   async getReview(
