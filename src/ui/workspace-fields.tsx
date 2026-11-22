@@ -26,7 +26,6 @@ export function WorkspaceFields({
   onEditingChange?: (editing: boolean) => void;
 }) {
   const { t } = useLocale();
-  const compact = target !== 'session';
   const [editing, setEditing] = useState(false),
     [picking, setPicking] = useState(false);
   const [draft, setDraft] = useState<RepositorySelection>({});
@@ -104,48 +103,53 @@ export function WorkspaceFields({
       if (!controller.signal.aborted) setBusy(false);
     }
   };
+  const changeLabel = t(
+    {
+      session: 'Change folder for this session',
+      message: 'Change folder for the next message',
+      task: 'Change folder for this task',
+    }[target],
+  );
+  const change = (
+    <button
+      type="button"
+      className="daddy-button quiet"
+      onClick={begin}
+      aria-label={changeLabel}
+      aria-expanded={false}
+    >
+      {target === 'message' && !value ? changeLabel : t('Change')}
+    </button>
+  );
   return (
-    <div className={'daddy-workspace-fields' + (compact ? ' compact' : '')}>
-      {!editing && (
-        <div className="daddy-repository-summary">
-          <FolderGit2 size={18} />
-          <div>
-            <span>
-              {t(
-                value
-                  ? {
-                      session: 'Repository for this session',
-                      message: 'Repository for the next message',
-                      task: 'Repository for this task',
-                    }[target]
-                  : 'Workspace source',
-              )}
-            </span>
-            <code>
-              {path}
-              {scope ? '/' + scope : ''}
-            </code>
-            {base && <small>{t('Starting branch: {branch}', { branch: base })}</small>}
+    <div className={'daddy-workspace-fields' + (target === 'task' ? ' compact' : '')}>
+      {!editing &&
+        (target === 'message' && !value ? (
+          change
+        ) : (
+          <div className="daddy-repository-summary">
+            <FolderGit2 size={18} />
+            <div>
+              <span>
+                {t(
+                  value
+                    ? {
+                        session: 'Repository for this session',
+                        message: 'Repository for the next message',
+                        task: 'Repository for this task',
+                      }[target]
+                    : 'Workspace source',
+                )}
+              </span>
+              <code>
+                {path}
+                {scope ? '/' + scope : ''}
+              </code>
+              {base && <small>{t('Starting branch: {branch}', { branch: base })}</small>}
+            </div>
+            {change}
           </div>
-          {!editing && (
-            <button
-              type="button"
-              className="daddy-button quiet"
-              onClick={begin}
-              aria-label={t(
-                {
-                  session: 'Change folder for this session',
-                  message: 'Change folder for the next message',
-                  task: 'Change folder for this task',
-                }[target],
-              )}
-              aria-expanded={false}
-            >
-              {t('Change')}
-            </button>
-          )}
-        </div>
-      )}
+        ))}
       {!editing && value && (
         <div className="daddy-repository-override">
           <span>
@@ -163,7 +167,7 @@ export function WorkspaceFields({
           </button>
         </div>
       )}
-      {!editing && !compact && workspace.vcs === 'arcadia' && copyMode && (
+      {!editing && target === 'session' && workspace.vcs === 'arcadia' && copyMode && (
         <label className="daddy-toggle">
           <input
             type="checkbox"

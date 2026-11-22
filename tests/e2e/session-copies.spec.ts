@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import type { ReviewGroup } from '../../src/core/types.js';
 
 async function login(page: import('@playwright/test').Page) {
   await page.goto('/');
@@ -39,6 +40,50 @@ test('offers automatic Arc session copies and sends the selected mode', async ({
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
   await expect.poll(() => creation?.repository?.copyMode).toBe('pool');
 });
+test('keeps copy preparation and retry visible and shows the ready path in session settings', async ({
+  page,
+}) => {
+  const title = 'Session copy status fixture';
+  const copyPath = '/fixture/session-copies/' + 'a'.repeat(100);
+  const error = 'Fixture: copy preparation failed';
+  let preparation: ReviewGroup['workspacePreparation'] = { state: 'preparing' };
+  await page.route('**/api/daddy/sessions/*', async (route) => {
+    const response = await route.fetch();
+    const board = await response.json();
+    if (board.group?.title === title) board.group.workspacePreparation = preparation;
+    await route.fulfill({ response, json: board });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill(title);
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const progress = page.getByRole('status').filter({ hasText: 'Preparing the session copy' });
+  await expect(progress).toBeVisible();
+
+  preparation = { state: 'error', error };
+  const failure = page
+    .getByRole('status')
+    .filter({ hasText: 'Could not prepare the session copy' });
+  await expect(failure.getByText(error, { exact: true })).toBeVisible();
+  const retried = page.waitForResponse(
+    (response) => response.url().endsWith('/resume') && response.request().method() === 'POST',
+  );
+  await failure.getByRole('button', { name: 'Retry', exact: true }).click();
+  expect((await retried).ok()).toBe(true);
+
+  preparation = { state: 'ready', path: copyPath };
+  await expect(failure).toHaveCount(0);
+  await expect(progress).toHaveCount(0);
+  await expect(page.getByText('Session copy ready', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(copyPath, { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  await expect(settings.getByText('Session copy ready', { exact: true })).toBeVisible();
+  await expect(settings.getByText(copyPath, { exact: true })).toBeVisible();
+  expect(await settings.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth)).toBe(true);
+});
+
 test('confirms session deletion, sends its generation and clears the deleted selection', async ({
   page,
 }) => {
