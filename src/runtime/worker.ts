@@ -1,5 +1,5 @@
 import type { Engine } from '../core/engine.js';
-import type { Job, ResourceStatus } from '../core/types.js';
+import type { Job, ResourceStatus, Revision } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
@@ -137,6 +137,7 @@ export class Worker {
             task.ref.kind !== 'ticket' &&
             task.arcWorkspaces?.author &&
             !store.busy(task.id) &&
+            !task.pendingAuthorFix &&
             task.pendingAuthorHead === task.revision?.head &&
             task.pr?.head === task.revision?.head
           ) {
@@ -147,6 +148,7 @@ export class Worker {
                   store.busy(current.id) ||
                   current.ref.kind === 'ticket' ||
                   !current.arcWorkspaces?.author ||
+                  current.pendingAuthorFix ||
                   current.pendingAuthorHead !== current.revision?.head ||
                   current.pr?.head !== current.revision?.head
                 )
@@ -379,7 +381,7 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (startingPR && !sameRevision(startingPR, task.revision))
+      if (startingPR && (startingPR.state !== 'open' || !sameRevision(startingPR, task.revision)))
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
@@ -530,13 +532,15 @@ export class Worker {
           store.saveTask(latest);
         }
       }
+      let savedFix: { head: string; revision: Revision } | undefined;
       if (
         !abort.signal.aborted &&
         task.generation === job.generation &&
         job.kind === 'fix' &&
         result.status === 'completed' &&
         !result.disputedCommentIds?.length &&
-        result.checkedHead === task.revision?.head
+        task.revision &&
+        result.checkedHead === task.revision.head
       ) {
         if (demo) await new DemoProvider(store).advance(prRef(task));
         else {
@@ -545,15 +549,10 @@ export class Worker {
             `Address review feedback (round ${task.round})`,
             abort.signal,
           );
-          const latest = store.getTask(task.id);
-          if (latest.generation === job.generation && !abort.signal.aborted) {
-            latest.pendingAuthorHead = head;
-            store.saveTask(latest);
-          }
-          store.event(task.id, 'author.fixes_saved', { head }, job.id);
+          savedFix = { head, revision: task.revision };
         }
       }
-      if (!abort.signal.aborted) await this.engine.completeJob(job, result);
+      if (savedFix || !abort.signal.aborted) await this.engine.completeJob(job, result, savedFix);
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
       const capacity =

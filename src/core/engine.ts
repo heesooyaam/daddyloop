@@ -20,6 +20,8 @@ import {
   revisionOf,
   type Task,
   type PRRef,
+  type PullRequest,
+  type Revision,
   type State,
   type Policy,
   type Job,
@@ -34,6 +36,28 @@ import { inheritedProfiles } from './agents.js';
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
+const noAuthorChanges =
+  'Author made no code changes; independent verification of the decisions is next';
+
+function pendingFixHead(task: Task) {
+  if (
+    task.pendingAuthorFix ||
+    ((task.state === 'awaiting_push' ||
+      ((task.state === 'paused' || task.state === 'needs_input') &&
+        task.resumeState === 'awaiting_push')) &&
+      task.pendingAuthorHead !== task.revision?.head)
+  )
+    return task.pendingAuthorHead;
+}
+
+function samePullRequestBranches(expected: PullRequest | undefined, current: PullRequest) {
+  return (
+    current.state === 'open' &&
+    expected?.branch === current.branch &&
+    expected.targetBranch === current.targetBranch &&
+    expected.cloneUrl === current.cloneUrl
+  );
+}
 
 export class Engine {
   readonly broker: Broker;
@@ -197,7 +221,34 @@ export class Engine {
         this.store.transaction(() => this.queueReportReview(task));
         return task;
       }
+      const pending = pendingFixHead(task);
+      const confirmed =
+        pending &&
+        pending === task.revision?.head &&
+        task.pendingAuthorFix?.generation === task.generation;
+      const unsent = confirmed ? undefined : (pending ?? this.lostFixHead(task));
+      if (unsent)
+        throw new AppError(
+          'fix_pending',
+          `Resume the task to submit saved fix ${unsent} before review.`,
+        );
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (pending && (!sameRevision(task.revision, pr) || !samePullRequestBranches(task.pr, pr))) {
+        this.blockSavedFix(task, pending, 'The PR changed after submission and before review.');
+        return task;
+      }
+      const staleDraft = task.pendingAuthorFix?.staleDraft;
+      if (pending && staleDraft) {
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), staleDraft);
+        if (snapshot.status === 'draft') {
+          this.blockSavedFix(
+            task,
+            pending,
+            'GitHub still has a draft on the previous revision. Inspect it on GitHub and clear the pending review before resuming.',
+          );
+          return task;
+        }
+      }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       const changed = !sameRevision(task.revision, pr);
       if (changed) this.invalidate(task, pr);
@@ -217,6 +268,10 @@ export class Engine {
       task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
       task.reviewFinished = false;
+      if (confirmed) {
+        task.pendingAuthorFix = undefined;
+        task.resumeState = undefined;
+      }
       this.store.transaction(() => {
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
@@ -263,9 +318,11 @@ export class Engine {
   }
   private async reconcileLocked(id: string): Promise<Task> {
     const task = this.store.getTask(id);
-    if (task.state === 'paused' || isTicket(task)) return task;
+    if (task.state === 'paused' || isTicket(task) || pendingFixHead(task)) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
+    // The fix completion owns the transition, including any remote revision mismatch.
+    if (task.state === 'fixing' && this.store.busy(id)) return task;
     if (pr.state !== 'open') {
       this.onCancel(id);
       this.store.cancelJobs(id);
@@ -394,6 +451,128 @@ export class Engine {
     });
   }
 
+  private blockSavedFix(task: Task, head: string, reason: string) {
+    task.resumeState = 'awaiting_push';
+    this.state(task, 'needs_input', `${reason} Saved fix ${head} is preserved.`);
+  }
+
+  private savedFixStatus(
+    task: Task,
+    pr: PullRequest,
+    head: string,
+  ): { status: 'ready' | 'confirmed' | 'waiting' } | { status: 'blocked'; reason: string } {
+    const pending = task.pendingAuthorFix;
+    const original = pending?.revision ?? task.feedback?.revision ?? task.revision;
+    if (
+      !original ||
+      !sameRevision(original, task.revision) ||
+      (pending ? pending.generation !== task.generation : task.authorBaseHead !== original.head)
+    )
+      return {
+        status: 'blocked',
+        reason: 'The saved fix belongs to a different task revision or generation.',
+      };
+    if (!samePullRequestBranches(task.pr, pr))
+      return {
+        status: 'blocked',
+        reason: 'The PR was closed or its source or target branch changed.',
+      };
+    if (pr.base !== original.base || pr.start !== original.start)
+      return { status: 'blocked', reason: 'The PR comparison base changed.' };
+    if (pr.head === head) {
+      if (original.revisionId && (!pr.revisionId || pr.revisionId === original.revisionId))
+        return { status: 'waiting' };
+      return { status: 'confirmed' };
+    }
+    return sameRevision(original, pr)
+      ? { status: 'ready' }
+      : { status: 'blocked', reason: 'The PR points to a different revision.' };
+  }
+
+  async submitSavedFix(id: string, push: (task: Task, head: string) => Promise<void>) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (isTicket(task) || task.state !== 'awaiting_push' || this.store.busy(id)) return;
+      const head = pendingFixHead(task);
+      if (!head || head === task.revision?.head) return;
+      const ref = prRef(task);
+      const provider = this.provider(ref);
+      let pr = await provider.getPR(ref);
+      let check = this.savedFixStatus(task, pr, head);
+      if (check.status === 'ready' && !task.pendingAuthorFix?.sent) {
+        const pending = (task.pendingAuthorFix ??= {
+          revision: task.revision!,
+          generation: task.generation,
+        });
+        // Persist the original revision before crossing the repository boundary.
+        this.store.saveTask(task);
+        try {
+          await push(task, head);
+        } catch (error) {
+          this.blockSavedFix(task, head, redact(String(error)));
+          return;
+        }
+        pending.sent = true;
+        this.store.saveTask(task);
+        pr = await provider.getPR(ref);
+        check = this.savedFixStatus(task, pr, head);
+      }
+      if (check.status === 'blocked') {
+        this.blockSavedFix(task, head, check.reason);
+        return;
+      }
+      if (check.status !== 'confirmed') {
+        const reason = `Waiting for the PR to confirm saved fix ${head}.`;
+        if (task.reason !== reason) this.state(task, 'awaiting_push', reason);
+        return;
+      }
+      this.store.transaction(() => {
+        const sent = task.pendingAuthorFix?.sent === true;
+        const original = task.revision!;
+        this.invalidate(task, pr, false);
+        task.pendingAuthorFix = {
+          ...task.pendingAuthorFix,
+          revision: original,
+          generation: task.generation,
+          sent,
+        };
+        task.resumeState = undefined;
+        this.store.event(id, 'author.submitted', { head, pushed: sent });
+        this.state(task, 'queued', 'New revision is ready for review');
+      });
+    });
+  }
+
+  private lostFixHead(task: Task): string | undefined {
+    const original = task.revision;
+    if (
+      !['queued', 'needs_input'].includes(task.state) ||
+      !original ||
+      task.feedback?.status !== 'published' ||
+      !sameRevision(task.feedback.revision, original)
+    )
+      return;
+    // Older versions could lose the saved head while recording a no-change transition.
+    const saved = this.store.db
+      .prepare(
+        `SELECT id, run_id, json_extract(data, '$.head') AS head FROM events
+         WHERE task_id=? AND type='author.fixes_saved' ORDER BY id DESC LIMIT 1`,
+      )
+      .get(task.id);
+    if (typeof saved?.head !== 'string' || saved.head === original.head) return;
+    const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
+    if (job?.kind !== 'fix' || job.status !== 'completed' || job.generation + 1 !== task.generation)
+      return;
+    const transition = this.store.db
+      .prepare(
+        `SELECT 1 FROM events WHERE task_id=? AND id>? AND type='task.state'
+         AND json_extract(data, '$.state')='queued' AND json_extract(data, '$.reason')=?
+         AND json_extract(data, '$.generation')=? AND json_extract(data, '$.head')=? LIMIT 1`,
+      )
+      .get(task.id, saved.id!, noAuthorChanges, task.generation, original.head);
+    if (transition) return saved.head;
+  }
+
   recoverReviewRoundLimits() {
     for (const task of this.store.tasks()) {
       if (!['needs_input', 'awaiting_push'].includes(task.state) || this.store.busy(task.id))
@@ -475,10 +654,25 @@ export class Engine {
       return task;
     });
   }
-  async completeJob(job: Job, result: AgentResult) {
+  async completeJob(
+    job: Job,
+    result: AgentResult,
+    savedFix?: { head: string; revision: Revision },
+  ) {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
-      if (task.generation !== job.generation || task.state === 'paused') {
+      const stale = task.generation !== job.generation || task.state === 'paused';
+      if (savedFix) {
+        this.store.transaction(() => {
+          this.store.event(task.id, 'author.fixes_saved', savedFix, job.id);
+          if (!stale && savedFix.head !== savedFix.revision.head) {
+            task.pendingAuthorHead = savedFix.head;
+            task.pendingAuthorFix = { revision: savedFix.revision, generation: job.generation };
+            this.store.saveTask(task);
+          }
+        });
+      }
+      if (stale) {
         this.store.event(task.id, 'job.stale_result', { generation: job.generation }, job.id);
         return;
       }
@@ -560,6 +754,14 @@ export class Engine {
         return;
       }
       this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+      const pending = job.kind === 'fix' ? pendingFixHead(task) : undefined;
+      if (pending) {
+        const check = this.savedFixStatus(task, pr, pending);
+        if (check.status === 'blocked') {
+          this.blockSavedFix(task, pending, check.reason);
+          return;
+        }
+      }
       if (pr.state !== 'open') {
         this.state(
           task,
@@ -645,22 +847,22 @@ export class Engine {
           );
           return;
         }
-        if (
-          sameRevision(pr, task.revision) &&
-          task.pendingAuthorHead &&
-          task.pendingAuthorHead !== task.revision?.head
-        )
+        if (pending) {
           this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
-        else {
+        } else if (
+          !samePullRequestBranches(task.pr, pr) ||
+          (!sameRevision(pr, task.revision) && task.ref.provider !== 'demo')
+        ) {
+          task.resumeState = 'fixing';
+          this.state(task, 'needs_input', 'The PR head, base or branch changed during the fix.');
+        } else {
           const changed = !sameRevision(pr, task.revision);
           task.pendingAuthorHead = undefined;
           this.invalidate(task, pr, false);
           this.state(
             task,
             'queued',
-            changed
-              ? 'Author pushed changes; independent verification is next'
-              : 'Author made no code changes; independent verification of the decisions is next',
+            changed ? 'Author pushed changes; independent verification is next' : noAuthorChanges,
           );
         }
       } else {
@@ -719,6 +921,30 @@ export class Engine {
               'implement',
               'Continue the interrupted task. Preserve the existing working copy and verify the requested outcome.',
             );
+          return task;
+        }
+        const pending = pendingFixHead(task);
+        const lost = pending ? undefined : this.lostFixHead(task);
+        const saved = pending ?? lost;
+        if (saved) {
+          if (lost) {
+            task.pendingAuthorHead = lost;
+            task.pendingAuthorFix = {
+              revision: task.revision!,
+              generation: task.generation,
+              staleDraft: task.ref.provider === 'github' ? task.review : undefined,
+            };
+          } else if (task.pendingAuthorFix) {
+            task.pendingAuthorFix.generation = task.generation;
+          }
+          this.store.transaction(() => {
+            this.state(
+              task,
+              saved === task.revision?.head ? 'queued' : 'awaiting_push',
+              `Resumed with saved fix ${saved}. The PR revision will be checked before continuing.`,
+            );
+            this.store.event(id, 'human.resume', { reason });
+          });
           return task;
         }
         if (

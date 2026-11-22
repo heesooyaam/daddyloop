@@ -242,19 +242,23 @@ export class Workspaces {
   }
   async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
     if (task.ref.provider === 'arcadia') return this.arc.pushSavedFix(task, head, signal);
-    if (!task.authorWorktree || !task.pr || !task.revision || !/^[a-f0-9]{40,64}$/i.test(head))
+    if (!/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('Invalid task ID');
+    if (!task.pr || !task.revision || !/^[a-f0-9]{40,64}$/i.test(head))
       throw new AppError(
         'workspace_missing',
         'A saved author commit and PR workspace are required',
       );
     const root = join(realpathSync(this.dataDir), 'workspaces', task.id);
-    const cwd = realpathSync(task.authorWorktree);
+    const author = task.authorWorktree ?? join(root, 'author');
+    if (!existsSync(author))
+      throw new AppError('workspace_missing', 'The managed author workspace is missing');
+    const cwd = realpathSync(author);
     if (cwd !== join(root, 'author') || realpathSync(root) !== root)
       throw new AppError(
         'workspace_invalid',
         'The author workspace is outside the managed task directory',
       );
-    await this.verifyCopy(task.authorWorktree, join(root, 'objects.git'), signal);
+    await this.verifyCopy(author, join(root, 'objects.git'), signal);
     const run = (args: string[], env: NodeJS.ProcessEnv = {}) => git(args, cwd, env, signal);
     if ((await run(['rev-parse', 'HEAD'])) !== head)
       throw new AppError(

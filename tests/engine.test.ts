@@ -89,17 +89,25 @@ describe('publication gates and revision safety', () => {
     expect(f.store.getTask(f.task.id).state).toBe('complete');
     f.store.close();
   });
-  it('waits for a manual push when real unpushed author commits exist', async () => {
+  it('holds a saved fix when the PR base moves while the author is working', async () => {
     const f = await fixture();
     await f.engine.review(f.task.id);
     await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'Fix this' });
     await f.run();
     await f.engine.publish(f.task.id);
     const task = f.store.getTask(f.task.id);
-    task.pendingAuthorHead = 'd'.repeat(40);
-    f.store.saveTask(task);
-    await f.run();
-    expect(f.store.getTask(f.task.id).state).toBe('awaiting_push');
+    const author = f.store.claim()!;
+    const head = 'd'.repeat(40);
+    f.store.setSetting('demo-pr:1', { ...task.pr!, base: 'e'.repeat(40) });
+    await f.engine.reconcile(task.id);
+    await f.engine.completeJob(author, f.result(), { head, revision: task.revision! });
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'needs_input',
+      generation: author.generation,
+      revision: task.revision,
+      pendingAuthorHead: head,
+      reason: expect.stringContaining(head),
+    });
     f.store.close();
   });
   it('never gives the author draft feedback; starts exactly one fix after publication', async () => {

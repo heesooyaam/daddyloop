@@ -72,7 +72,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   pause_task:
     'Pause a task and preserve its current work. Use when the user changes direction or a dependent task must wait.',
   resume_task:
-    'Resume a paused task in this session, preserving existing work and revision guards.',
+    'Resume a paused or blocked task in this session, preserving existing work and revision guards. If a fix was saved, let the service verify it before the next review.',
   submit_task:
     'Submit or reconcile a completed implementation when its automatic-push policy allows it. An uncertain native PR creation is reconciled, never repeated blindly.',
   retry_review:

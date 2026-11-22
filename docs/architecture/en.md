@@ -164,15 +164,17 @@ flowchart TB
     R["Review code<br/>Draft findings"] -->|"Review completed"| P["Publish<br/>the review"]
     P --> Q{"Any findings?"}
     Q -->|"Yes"| F["Worker<br/>fixes findings"]
-    F --> H["Push<br/>a new commit"]
-    H -->|"Review again"| R
+    F -->|"Saved commit and starting revision"| H["Send the saved commit<br/>and verify the PR revision"]
+    H -->|"Confirmed revision"| R
     Q -->|"No"| C["CI and plan<br/>Engine checks"]
     C -->|"Passed"| E["Task complete"]
 ```
 
 **From review to fixes.** `Engine.review()` queues a review. The reviewer reads the code and leaves draft comments. The service publishes only after the review finishes successfully. If it contains findings, `Engine.reconcile()` creates a fix run. The worker receives the published snapshot; the private draft is unavailable to it.
 
-**From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
+**From a fix to another review.** Suppose a bug was found in H1 and the worker saves the fix in H2. The service records H2 together with H1's full PR revision and the run generation under the same lock used to reconcile PR state. It sends H2 if the head and comparison base still match. The next review starts after the provider confirms H2 and the comparison base. If the PR moves, the task reports the mismatch and keeps the saved commit.
+
+If an older run recorded a saved fix and then incorrectly reported no changes, ask daddy to resume the task. The service can recover the commit when the saved run, original revision and task history agree. It verifies the managed checkout before pushing and keeps the earlier review rounds in the task history. If GitHub still has an unpublished draft on the old revision, inspect the draft on GitHub, clear the pending review and resume the task again.
 
 **Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. Merging the PR remains a separate user action.
 
