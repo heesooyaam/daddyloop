@@ -605,7 +605,7 @@ it.each([
   },
 );
 
-it.each(['head', 'base', 'targetBranch'] as const)(
+it.each(['head', 'base', 'targetBranch', 'cached targetBranch'] as const)(
   'checks a published legacy fix when the next PR %s changes',
   async (changed) => {
     const f = await fixture();
@@ -638,13 +638,17 @@ it.each(['head', 'base', 'targetBranch'] as const)(
       f.store.setSetting('demo-pr:1', pr);
       expect(await f.engine.publish(task.id)).toMatchObject({ state: 'awaiting_checks', revision });
 
-      const next =
-        changed === 'targetBranch'
-          ? { ...pr, targetBranch: 'release', checks: 'passing' as const }
-          : { ...pr, [changed]: 'e'.repeat(40) };
+      const retargeted = changed === 'targetBranch' || changed === 'cached targetBranch';
+      const next = retargeted
+        ? { ...pr, targetBranch: 'release', checks: 'passing' as const }
+        : { ...pr, [changed]: 'e'.repeat(40) };
+      if (changed === 'cached targetBranch') {
+        const legacy = f.store.getTask(task.id);
+        f.store.saveTask({ ...legacy, pr: { ...pr, targetBranch: next.targetBranch } });
+      }
       f.store.setSetting('demo-pr:1', next);
       const restarted = new Engine(f.store, () => f.provider);
-      if (changed === 'targetBranch') {
+      if (retargeted) {
         const runtime = { run: vi.fn() };
         const worker = new Worker(restarted, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
         try {
@@ -654,9 +658,11 @@ it.each(['head', 'base', 'targetBranch'] as const)(
           expect(blocked).toMatchObject({
             state: 'needs_input',
             review,
-            pr: { targetBranch: pr.targetBranch },
+            pr: { targetBranch: changed === 'targetBranch' ? pr.targetBranch : next.targetBranch },
           });
-          for (const value of [pr.targetBranch, next.targetBranch, 'Retry review'])
+          const branchEvidence =
+            changed === 'targetBranch' ? pr.targetBranch : 'no recorded target branch';
+          for (const value of [branchEvidence, next.targetBranch, 'Retry review'])
             expect(blocked.reason).toContain(value);
         } finally {
           await worker.stop();
@@ -672,6 +678,39 @@ it.each(['head', 'base', 'targetBranch'] as const)(
         review: { revision: revisionOf(next), targetBranch: next.targetBranch },
       });
     } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each(['after polling', 'after reading the draft'] as const)(
+  'keeps a legacy review in draft when the target changes %s',
+  async (when) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn() };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await f.engine.review(f.task.id);
+      await f.run();
+      const task = f.store.getTask(f.task.id);
+      const review = { ...task.review!, targetBranch: undefined };
+      f.store.saveTask({ ...task, review });
+      const pr = task.pr!;
+      const retargeted = { ...pr, targetBranch: 'release' };
+      const publish = vi.spyOn(f.provider, 'publish');
+      const check = vi.spyOn(f.provider, 'getPR').mockResolvedValue(retargeted);
+      check.mockResolvedValueOnce(pr);
+      if (when === 'after reading the draft') check.mockResolvedValueOnce(pr);
+      await worker.tick();
+      const blocked = f.store.getTask(task.id);
+      expect(blocked.state).toBe('needs_input');
+      expect(blocked.review?.id).toBe(review.id);
+      expect(blocked.reason).toContain(pr.targetBranch);
+      expect(blocked.reason).toContain(retargeted.targetBranch);
+      expect(publish).not.toHaveBeenCalled();
+      expect(await f.provider.getReview(prRef(task), review)).toMatchObject({ status: 'draft' });
+    } finally {
+      await worker.stop();
       f.store.close();
     }
   },
@@ -1614,18 +1653,19 @@ it('resumes a paused legacy task after the saved commit was pushed manually', as
 });
 
 it.each([
-  ['resume', 'published'],
-  ['resume', 'missing'],
-  ['retry', 'published'],
-  ['retry', 'missing'],
+  ['github', 'resume', 'published'],
+  ['github', 'resume', 'missing'],
+  ['github', 'retry', 'published'],
+  ['github', 'retry', 'missing'],
+  ['gitlab', 'retry', 'published'],
 ] as const)(
-  'preserves published feedback while recovering a confirmed fix (%s, stale draft %s)',
-  async (path, status) => {
+  'preserves published feedback while recovering a confirmed fix (%s, %s, stale draft %s)',
+  async (provider, path, status) => {
     const f = await fixture();
     try {
       const { task, saved } = await recordLegacyLostFix(f, false);
       const prior = task.feedback!;
-      task.ref.provider = 'github';
+      task.ref.provider = provider;
       const ref = prRef(task);
       const stale = await f.provider.createReview(ref, task.revision!, 'stale-draft-on-H1');
       const finding = await f.provider.createComment(
@@ -1655,7 +1695,9 @@ it.each([
           : await f.engine.review(task.id);
       expect(blocked).toMatchObject({
         state: 'needs_input',
-        reason: expect.stringContaining('GitHub still has a draft'),
+        reason: expect.stringContaining(
+          provider === 'github' ? 'GitHub still has a draft' : 'GitLab still has draft',
+        ),
       });
       expect(prepare).not.toHaveBeenCalled();
 

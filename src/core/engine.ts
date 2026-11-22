@@ -23,6 +23,8 @@ import {
   type PRRef,
   type PullRequest,
   type Revision,
+  type ReviewHandle,
+  type ReviewSnapshot,
   type State,
   type Policy,
   type Job,
@@ -87,12 +89,19 @@ function savedFixTargetChange(expected: string | undefined, pr: PullRequest): st
     return `The PR target branch changed. Expected ${expected}. Observed ${pr.targetBranch}.`;
 }
 
-function observedReviewTargetChange(task: Task, pr: PullRequest): string | undefined {
-  if (task.review?.targetBranch) return reviewTargetChange(task.review, pr);
-  // The previous PR snapshot can show a change, but cannot prove a legacy review's target.
-  const previous = task.pr?.targetBranch;
-  if (task.review && pr.state === 'open' && previous && previous !== pr.targetBranch)
-    return `The PR target branch changed from ${previous} to ${pr.targetBranch}. Use Retry review to start a review on the current branch.`;
+function hasSharedDraftSlot(task: Task): boolean {
+  return task.ref.provider === 'github' || task.ref.provider === 'gitlab';
+}
+
+function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
+  if (snapshot.status === 'published') task.feedback = snapshot;
+  // A missing GitLab summary can leave published findings, but no pending notes.
+  else if (
+    task.ref.provider === 'gitlab' &&
+    snapshot.status === 'missing' &&
+    snapshot.comments.length
+  )
+    task.feedback = { ...snapshot, status: 'published' };
 }
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
@@ -319,30 +328,26 @@ export class Engine {
       }
       const staleDraft = task.pendingAuthorFix?.staleDraft;
       if (pending && staleDraft) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), staleDraft);
-        if (snapshot.status === 'draft') {
-          this.blockSavedFix(task, pending, staleDraftReason);
+        const reason = await this.inspectPreviousDraft(task, staleDraft);
+        if (reason) {
+          this.blockSavedFix(task, pending, reason);
           return task;
         }
-        if (snapshot.status === 'published') task.feedback = snapshot;
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
-      const targetChange = observedReviewTargetChange(task, pr);
-      const gitLab = task.ref.provider === 'gitlab';
-      if (targetChange && task.review && (gitLab || task.ref.provider === 'github')) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
-        if (snapshot.status === 'draft' || (gitLab && snapshot.status === 'partial')) {
-          const reason = gitLab ? gitLabDraftReason : staleDraftReason;
+      const targetChange = reviewTargetChange(task.review, pr, task.pr?.targetBranch);
+      if (targetChange && task.review && hasSharedDraftSlot(task)) {
+        const reason = await this.inspectPreviousDraft(task, task.review);
+        if (reason) {
           this.state(task, 'needs_input', `${targetChange} ${reason}`);
           return task;
         }
-        if (snapshot.status === 'published') task.feedback = snapshot;
       }
       const changed = !sameRevision(task.revision, pr) || !!targetChange;
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
-        if (snapshot.status === 'published') task.feedback = snapshot;
+        retainPublishedFeedback(task, snapshot);
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
       }
@@ -374,6 +379,16 @@ export class Engine {
       return task;
     });
   }
+
+  private async inspectPreviousDraft(task: Task, review: ReviewHandle) {
+    const ref = prRef(task);
+    const snapshot = await this.provider(ref).getReview(ref, review);
+    const gitLab = ref.provider === 'gitlab';
+    if (snapshot.status === 'draft' || (gitLab && snapshot.status === 'partial'))
+      return gitLab ? gitLabDraftReason : staleDraftReason;
+    retainPublishedFeedback(task, snapshot);
+  }
+
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
     task.generation++;
     this.store.cancelJobs(task.id);
@@ -564,6 +579,12 @@ export class Engine {
       );
       return;
     }
+    if (
+      task.state === 'awaiting_checks' &&
+      task.pr &&
+      this.stopUnverifiedReviewTarget(task, task.pr)
+    )
+      return;
     if (task.kind === 'plan' && task.policy.planApproval === 'human' && !task.approvedAt)
       this.state(
         task,
@@ -631,13 +652,13 @@ export class Engine {
   }
 
   private stopReviewOnTargetChange(task: Task, pr: PullRequest): boolean {
-    const targetChange = observedReviewTargetChange(task, pr);
+    const targetChange = reviewTargetChange(task.review, pr, task.pr?.targetBranch);
     if (!targetChange) return false;
     this.holdTaskForInput(task, targetChange);
     return true;
   }
 
-  private stopUnverifiedManualDecision(task: Task, pr: PullRequest): boolean {
+  private stopUnverifiedReviewTarget(task: Task, pr: PullRequest): boolean {
     const target = task.review?.targetBranch;
     if (pr.state !== 'open') {
       const reviewed = target ? ` Review target branch ${target}.` : '';
@@ -1079,14 +1100,13 @@ export class Engine {
       const current = await provider.getPR(ref);
       const check = this.savedFixRemoteStatus(task, current, lost.head, original, targetBranch);
       if (check.status === 'confirmed') {
-        const staleDraft = ref.provider === 'github' ? task.review : undefined;
+        const staleDraft = hasSharedDraftSlot(task) ? task.review : undefined;
         if (staleDraft) {
-          const snapshot = await provider.getReview(ref, staleDraft);
-          if (snapshot.status === 'draft') {
-            this.holdLostFix(task, lost.head, staleDraftReason);
+          const reason = await this.inspectPreviousDraft(task, staleDraft);
+          if (reason) {
+            this.holdLostFix(task, lost.head, reason);
             return;
           }
-          if (snapshot.status === 'published') task.feedback = snapshot;
         }
         task.pendingAuthorHead = lost.head;
         task.pendingAuthorFix = {
@@ -1486,7 +1506,7 @@ export class Engine {
               revision: task.revision!,
               generation: task.generation,
               targetBranch: lost.targetBranch,
-              staleDraft: task.ref.provider === 'github' ? task.review : undefined,
+              staleDraft: hasSharedDraftSlot(task) ? task.review : undefined,
             };
           } else if (task.pendingAuthorFix) {
             task.pendingAuthorFix.generation = task.generation;
@@ -1530,7 +1550,7 @@ export class Engine {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (this.stopUnverifiedManualDecision(task, current)) return task;
+        if (this.stopUnverifiedReviewTarget(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError('stale_plan', 'The plan changed after review');
@@ -1544,7 +1564,7 @@ export class Engine {
             400,
           );
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (this.stopUnverifiedManualDecision(task, current)) return task;
+        if (this.stopUnverifiedReviewTarget(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError(

@@ -247,8 +247,9 @@ export class Broker {
     if (!review) throw new AppError('review_missing', 'No review to publish');
     const ref = prRef(task);
     const provider = this.provider(ref);
+    const previousTarget = task.pr?.targetBranch;
     const assertCurrentRevision = (current: PullRequest) => {
-      const targetChange = reviewTargetChange(review, current);
+      const targetChange = reviewTargetChange(review, current, previousTarget);
       if (targetChange) throw new AppError('review_target_changed', targetChange);
       if (current.state !== 'open' || !sameRevision(current, review.revision))
         throw new AppError(
@@ -260,7 +261,7 @@ export class Broker {
     const snapshot = await provider.getReview(ref, review);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
-    if (review.targetBranch) assertCurrentRevision(await provider.getPR(ref));
+    if (review.targetBranch || previousTarget) assertCurrentRevision(await provider.getPR(ref));
     await this.outbox.perform(
       task.id,
       `${review.marker}:publish`,

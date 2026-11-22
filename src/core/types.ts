@@ -397,8 +397,15 @@ export const revisionOf = (value: Revision): Revision => ({
 export function reviewTargetChange(
   review: ReviewHandle | undefined,
   pr: PullRequest,
+  previousTarget?: string,
 ): string | undefined {
-  const expected = review?.targetBranch;
-  if (pr.state === 'open' && expected && expected !== pr.targetBranch)
-    return `The PR target branch changed after review was queued. Review target branch ${expected}. Observed target branch ${pr.targetBranch}.`;
+  if (pr.state !== 'open' || !review) return;
+  if (review.targetBranch) {
+    if (review.targetBranch !== pr.targetBranch)
+      return `The PR target branch changed after review was queued. Review target branch ${review.targetBranch}. Observed target branch ${pr.targetBranch}.`;
+    return;
+  }
+  // A previous PR read can show a change, but cannot establish a legacy review's target.
+  if (previousTarget && previousTarget !== pr.targetBranch)
+    return `The PR target branch changed from ${previousTarget} to ${pr.targetBranch}. Use Retry review to start a review on the current branch.`;
 }
