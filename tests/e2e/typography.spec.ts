@@ -1,8 +1,39 @@
-import { test, expect, type Locator } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { translator } from '../../src/i18n/index.js';
+import type { DaddyBoard } from '../../src/client/daddy.js';
+import { translator, type Locale } from '../../src/i18n/index.js';
 
 test.use({ reducedMotion: 'reduce' });
+
+async function loginInLocale(page: Page, locale: Locale) {
+  await page.goto('/');
+  await page
+    .getByLabel('Local access token')
+    .fill(readFileSync('.daddyloop/e2e/access-token', 'utf8'));
+  await page.getByRole('button', { name: 'Connect to workspace' }).click();
+  await expect(page.locator('.daddy-app')).toBeVisible();
+  // Apply the language only in this browser context, since the fixture server is shared.
+  await page.route('**/api/preferences', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), locale } });
+  });
+}
+
+async function createFixtureSession(page: Page, title: string, message?: string) {
+  const workspaces = await page.request.get('/api/workspaces');
+  await expect(workspaces).toBeOK();
+  const workspace = ((await workspaces.json()) as { id: string; name: string }[]).find(
+    ({ name }) => name === 'Fixture workspace',
+  );
+  const response = await page.request.post('/api/daddy/sessions', {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { workspaceId: workspace?.id, title, message },
+  });
+  await expect(response).toBeOK();
+  const { group } = (await response.json()) as DaddyBoard;
+  return group.id;
+}
 
 async function expectType(element: Locator, size: number, weight: number, lineHeight: number) {
   await expect(element).toBeVisible();
@@ -33,17 +64,7 @@ for (const locale of ['en', 'ru'] as const) {
         ? 'Собери список изменений и добавь пояснения к решениям, которые пригодятся следующей команде.'
         : 'Collect the changes and explain the decisions that will help the next team continue the work.';
 
-    await page.goto('/');
-    await page
-      .getByLabel('Local access token')
-      .fill(readFileSync('.daddyloop/e2e/access-token', 'utf8'));
-    await page.getByRole('button', { name: 'Connect to workspace' }).click();
-    await expect(page.locator('.daddy-app')).toBeVisible();
-    // Apply the language only in this browser context, since the fixture server is shared.
-    await page.route('**/api/preferences', async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({ response, json: { ...(await response.json()), locale } });
-    });
+    await loginInLocale(page, locale);
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', locale);
 
@@ -133,5 +154,66 @@ for (const locale of ['en', 'ru'] as const) {
         await expectTextToFit(page.locator('html'));
       });
     }
+  });
+
+  test(`can switch ${locale} sessions in short phone and desktop windows`, async ({ page }) => {
+    const t = translator(locale);
+    const first = locale === 'ru' ? 'Первый разговор' : 'First conversation';
+    const second = locale === 'ru' ? 'Второй разговор' : 'Second conversation';
+    await loginInLocale(page, locale);
+    await createFixtureSession(page, second);
+    const active = await createFixtureSession(page, first);
+
+    for (const width of [390, 1024]) {
+      await test.step(`${width} × 540`, async () => {
+        await page.setViewportSize({ width, height: 540 });
+        await page.goto(`/#session/${active}`);
+        await page.reload();
+        await expect(page.locator('html')).toHaveAttribute('lang', locale);
+        await expect(page.getByRole('heading', { name: first, exact: true })).toBeVisible();
+        const openSessions = page.getByRole('button', { name: t('Sessions'), exact: true });
+        if (width === 390) await openSessions.click();
+        const sessions = page.getByRole('navigation', { name: t('Sessions'), exact: true });
+        await sessions.getByRole('button', { name: second }).click({ timeout: 3000 });
+        await expect(page.getByRole('heading', { name: second, exact: true })).toBeVisible();
+
+        if (width === 390) await openSessions.click();
+        const language = page.getByRole('combobox', { name: t('Language'), exact: true });
+        await language.scrollIntoViewIfNeeded();
+        await expect(language).toBeInViewport({ ratio: 0.99 });
+      });
+    }
+  });
+
+  test(`can open the last ${locale} task in a short desktop window`, async ({ page }) => {
+    const t = translator(locale);
+    const sessionTitle =
+      locale === 'ru'
+        ? 'Проверка истории статусов всех задач, настроек воркеров и сохранённых отчётов по рабочим копиям в общем воркспейсе перед публикацией следующего релиза'
+        : 'Review the status history, worker settings and saved reports for every task in the shared workspace before publishing the next release';
+    await loginInLocale(page, locale);
+    const id = await createFixtureSession(page, sessionTitle, sessionTitle);
+    for (const title of locale === 'ru'
+      ? ['Проверить настройки', 'Сверить статусы', 'Прочитать отчёт']
+      : ['Check settings', 'Compare statuses', 'Read the report']) {
+      const task = await page.request.post(`/api/daddy/sessions/${id}/tasks`, {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { requirements: title, requestId: randomUUID() },
+      });
+      await expect(task).toBeOK();
+    }
+
+    await page.setViewportSize({ width: 1024, height: 600 });
+    await page.goto(`/#session/${id}`);
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    await expect(page.getByRole('heading', { name: sessionTitle, exact: true })).toBeVisible();
+    await expect(page.locator('.daddy-session-progress')).toContainText(t('Session copy ready'));
+    await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(1);
+    const tasks = page.locator('.daddy-work-item');
+    await expect(tasks).toHaveCount(3);
+    const lastTitle = await tasks.last().locator('strong').innerText();
+    await tasks.filter({ hasText: lastTitle }).click({ timeout: 3000 });
+    await expect(page.getByRole('dialog').getByRole('heading', { name: lastTitle })).toBeVisible();
   });
 }

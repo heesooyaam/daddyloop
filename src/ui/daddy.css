@@ -36,6 +36,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 .daddy-brand {
   display: flex;
@@ -126,7 +127,8 @@
   letter-spacing: 0;
 }
 .daddy-session-list {
-  min-height: 0;
+  /* Leave room for a row when the sidebar itself needs to scroll. */
+  min-height: 4.5rem;
   overflow: auto;
   flex: 1;
 }
@@ -555,7 +557,12 @@
   padding: 26px 22px 20px;
   border-left: 1px solid var(--line);
   min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
   background: var(--panel);
+}
+.daddy-board > * {
+  flex-shrink: 0;
 }
 .daddy-board-header {
   display: flex;
@@ -604,11 +611,6 @@
 .daddy-board > .daddy-section-label {
   margin-left: 0;
   margin-right: 0;
-}
-.daddy-work-items {
-  overflow: auto;
-  min-height: 0;
-  scrollbar-width: thin;
 }
 .daddy-work-item {
   display: block;
@@ -1209,13 +1211,6 @@
     width: 100%;
     border: 0;
     padding: 24px 20px;
-    overflow-y: auto;
-  }
-  .daddy-board > * {
-    flex-shrink: 0;
-  }
-  .daddy-board .daddy-work-items {
-    overflow: visible;
   }
   .mobile-hidden {
     display: none;
