@@ -300,6 +300,52 @@ it('reads a recovered Arcanum review on its original diff after retargeting', as
     store.close();
   }
 });
+
+it.each(['deleted', 'published finding', 'partial'] as const)(
+  'continues a completed Arcanum creation without a summary (%s)',
+  async (status) => {
+    const bridge = new FakeArc();
+    bridge.general = [];
+    bridge.inline = [];
+    const provider = new ArcadiaProvider(bridge);
+    const store = new Store(':memory:');
+    const engine = new Engine(store, () => provider);
+    try {
+      const task = await engine.create({ ref, repoPath: '/tmp', requirements: 'Check the change' });
+      const previous = await engine.review(task.id);
+      store.cancelJobs(task.id);
+      store.saveTask(task);
+      bridge.general = [];
+      const author = { name: 'tester' };
+      if (status !== 'deleted')
+        bridge.inline.push({
+          id: 110,
+          content: tag(`${previous.review!.marker}:comment:R1`),
+          is_draft: false,
+          author,
+        });
+      const restarted = new Engine(store, () => provider);
+      if (status === 'partial') {
+        bridge.inline.push({
+          id: -111,
+          content: tag(`${previous.review!.marker}:comment:R2`),
+          is_draft: true,
+          author,
+        });
+        expect(await restarted.review(task.id, true)).toMatchObject({ state: 'needs_input' });
+        expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(1);
+        bridge.inline.pop();
+      }
+      const next = await restarted.review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', round: 2, revision: task.revision });
+      expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
+      if (status !== 'deleted')
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['diff:110']);
+    } finally {
+      store.close();
+    }
+  },
+);
 it('refuses to publish unrelated Arc drafts', async () => {
   const bridge = new FakeArc();
   bridge.general.push({

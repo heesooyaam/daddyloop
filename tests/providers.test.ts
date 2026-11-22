@@ -46,6 +46,9 @@ describe('GitHub draft review contract', () => {
     'unclear POST rejection',
     'completed review then deleted',
     'completed review then published',
+    'completed review then dismissed',
+    'base changed after the second response was lost',
+    'base changed before retrying the deleted review',
     'lost response on current revision',
     'lost response',
     'lost response and new base',
@@ -61,6 +64,9 @@ describe('GitHub draft review contract', () => {
     let head = revision.head;
     let attempts = 0;
     let summaryEdits = 0;
+    const lostSecondResponse =
+      scenario === 'base changed after the second response was lost' ||
+      scenario === 'base changed before retrying the deleted review';
     let reviewsAvailable = scenario !== 'unavailable before creation';
     let hasOtherReview =
       scenario === 'another pending review' || scenario === 'another account has a pending review';
@@ -101,13 +107,21 @@ describe('GitHub draft review contract', () => {
         if (!reviewsAvailable) return new Response('{}', { status: 503 });
         return [...(draft ? [draft] : []), ...(hasOtherReview ? [otherReview] : [])];
       }
-      if (path.includes('/comments?'))
-        return scenario === 'completed review then published' &&
+      if (path.includes('/comments?')) {
+        if (
+          (scenario === 'completed review then published' ||
+            scenario === 'completed review then dismissed') &&
           path.startsWith(`${pull}/reviews/1/comments?`)
-          ? [{ id: 202, body: 'Review this finding on the new base', html_url: ref.url }]
-          : [];
+        )
+          return [{ id: 202, body: 'Review this finding on the new base', html_url: ref.url }];
+        if (lostSecondResponse && path.startsWith(`${pull}/reviews/2/comments?`))
+          return [{ id: 203, body: 'Finding from the second review', html_url: ref.url }];
+        return [];
+      }
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
-        return draft ?? new Response('{}', { status: 404 });
+        return draft && path === `${pull}/reviews/${draft.id}`
+          ? draft
+          : new Response('{}', { status: 404 });
       if (method === 'PUT' && path === `${pull}/reviews/${draft?.id}` && draft) {
         summaryEdits++;
         draft.body = body.body;
@@ -152,6 +166,7 @@ describe('GitHub draft review contract', () => {
           (scenario.startsWith('lost response') || scenario.startsWith('legacy intent'))
         )
           throw new Error('Lost create response');
+        if (attempts === 2 && lostSecondResponse) throw new Error('Lost second create response');
         return draft;
       }
       throw new Error(`Unexpected fixture request ${method} ${path}`);
@@ -166,7 +181,9 @@ describe('GitHub draft review contract', () => {
       });
       if (
         scenario === 'completed review then deleted' ||
-        scenario === 'completed review then published'
+        scenario === 'completed review then published' ||
+        scenario === 'completed review then dismissed' ||
+        lostSecondResponse
       ) {
         await engine.review(task.id);
         // Restore the task row as it was before the completed create result was attached.
@@ -175,10 +192,38 @@ describe('GitHub draft review contract', () => {
         expect(
           store.db.prepare("SELECT id FROM operations WHERE status='done'").all(),
         ).toHaveLength(1);
-        if (scenario === 'completed review then deleted') draft = undefined;
-        else draft!.state = 'COMMENTED';
-        base = 'e'.repeat(40);
+        if (scenario === 'completed review then deleted' || lostSecondResponse) draft = undefined;
+        else
+          draft!.state = scenario === 'completed review then dismissed' ? 'DISMISSED' : 'COMMENTED';
+        if (scenario !== 'base changed after the second response was lost') base = 'e'.repeat(40);
         const restarted = new Engine(store, () => provider);
+        if (lostSecondResponse) {
+          await expect(restarted.review(task.id, true)).rejects.toThrow(
+            'Lost second create response',
+          );
+          expect(store.getTask(task.id).round).toBe(1);
+          draft!.state = 'COMMENTED';
+          base = 'f'.repeat(40);
+          const recovered = new Engine(store, () => provider);
+          expect(await recovered.review(task.id, true)).toMatchObject({
+            state: 'needs_input',
+            review: { id: '2' },
+          });
+          expect(attempts).toBe(2);
+          const next = await recovered.review(task.id, true);
+          expect(next).toMatchObject({
+            state: 'reviewing',
+            review: { id: '3', revision: { base } },
+          });
+          expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['203']);
+          await recovered.completeJob(store.claim()!, {
+            status: 'completed',
+            summary: 'Review complete',
+            checkedHead: head,
+          });
+          expect(store.getTask(task.id).state).toBe('needs_input');
+          return;
+        }
         if (scenario === 'completed review then published') {
           expect(await restarted.review(task.id, true)).toMatchObject({
             state: 'needs_input',
@@ -190,8 +235,19 @@ describe('GitHub draft review contract', () => {
         expect(
           http.mock.calls.some(([url]) => new URL(String(url)).pathname === `${pull}/reviews/1`),
         ).toBe(true);
-        if (scenario === 'completed review then published')
+        if (
+          scenario === 'completed review then published' ||
+          scenario === 'completed review then dismissed'
+        )
           expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['202']);
+        if (scenario === 'completed review then dismissed') {
+          await restarted.completeJob(store.claim()!, {
+            status: 'completed',
+            summary: 'Review complete',
+            checkedHead: head,
+          });
+          expect(store.getTask(task.id).state).toBe('needs_input');
+        }
         expect(attempts).toBe(2);
         return;
       }
@@ -590,6 +646,9 @@ describe('GitLab draft notes contract', () => {
     ['resume', 'published'],
     ['resume', 'lost create response'],
     ['resume', 'draft appears before POST'],
+    ['restore', 'deleted'],
+    ['restore', 'delete summary'],
+    ['restore', 'partial'],
   ] as const)('handles the old GitLab review before %s (%s)', async (entry, status) => {
     const store = new Store(':memory:');
     const mr = `/api/v4/projects/${encodeURIComponent(ref.repo)}/merge_requests/${ref.number}`;
@@ -660,6 +719,26 @@ describe('GitLab draft notes contract', () => {
         note: `Second round finding\n\n${tag(`${old.marker}:comment:R2`)}`,
         author_id: 7,
       };
+      if (entry === 'restore') {
+        store.cancelJobs(task.id);
+        store.saveTask({ ...task, feedback: prior });
+        drafts = [];
+        if (status !== 'deleted') notes.push(finding);
+        const restarted = new Engine(store, () => provider);
+        if (status === 'partial') {
+          drafts.push({ id: 108, note: tag(`${old.marker}:comment:R3`), author_id: 7 });
+          expect(await restarted.review(task.id, true)).toMatchObject({ state: 'needs_input' });
+          expect(creates).toBe(1);
+          drafts = [];
+        }
+        const next = await restarted.review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', round: 2, review: { revision } });
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual(
+          status === 'deleted' ? ['103'] : ['103', '107'],
+        );
+        expect(creates).toBe(2);
+        return;
+      }
       if (status === 'partial' || status === 'delete summary') notes.push(finding);
       else drafts.push(finding);
       const recovery = status === 'lost create response' || status === 'draft appears before POST';

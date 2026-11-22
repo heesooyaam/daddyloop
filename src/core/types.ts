@@ -193,6 +193,7 @@ export interface ReviewHandle {
 }
 export interface ReviewSnapshot {
   status: 'draft' | 'published' | 'missing' | 'partial';
+  dismissed?: true;
   body: string;
   comments: ReviewComment[];
   url: string;

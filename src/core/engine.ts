@@ -101,11 +101,11 @@ function retainPublishedFeedback(
   snapshot: ReviewSnapshot,
   carryPrior = !task.reviewFinished,
 ) {
-  // These providers return missing with findings only when the remaining findings are published.
+  // A removed summary or dismissed review can still have published findings.
   if (
-    ['gitlab', 'arcadia'].includes(task.ref.provider) &&
     snapshot.status === 'missing' &&
-    snapshot.comments.length
+    snapshot.comments.length &&
+    (snapshot.dismissed || task.ref.provider === 'gitlab' || task.ref.provider === 'arcadia')
   )
     snapshot = { ...snapshot, status: 'published' };
   if (snapshot.status !== 'published') return;
@@ -365,14 +365,17 @@ export class Engine {
         hasSharedDraftSlot(task) && (!task.review || replacingReview)
           ? await this.broker.findAttemptedReview(task)
           : undefined;
-      const completedSnapshot =
-        task.ref.provider === 'github' && attempt?.completed && attempt.review
-          ? await this.provider(prRef(task)).getReview(prRef(task), attempt.review)
-          : undefined;
-      if (retry && completedSnapshot?.status === 'missing') {
-        // The stored ID confirms which attempted round was removed. Retire its marker.
+      let completedSnapshot: ReviewSnapshot | undefined;
+      while (attempt?.completed && attempt.review) {
+        const ref = prRef(task);
+        completedSnapshot = await this.provider(ref).getReview(ref, attempt.review);
+        if (!retry || completedSnapshot.status !== 'missing') break;
+        retainPublishedFeedback(task, completedSnapshot, true);
+        // Save the retired round before another write can have an uncertain outcome.
         task.round++;
-        attempt = undefined;
+        this.store.saveTask(task);
+        attempt = await this.broker.findAttemptedReview(task);
+        completedSnapshot = undefined;
       }
       const attempted = attempt?.review;
       const draftReason = task.ref.provider === 'gitlab' ? gitLabDraftReason : arcanumDraftReason;
