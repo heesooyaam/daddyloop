@@ -180,29 +180,70 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await page.getByLabel('Язык', { exact: true }).selectOption('en');
   await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeVisible();
 });
-test('opens the new chat after starting a session from the limits page', async ({ page }) => {
+test('opens the new chat from the limits page even when a session list is out of date', async ({
+  page,
+}) => {
   await login(page);
+  await create(page, 'Previous session', Date.now());
+  const previousId = new URL(page.url()).hash.slice(9);
   await page.getByRole('link', { name: 'Limits', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  let listRead!: () => void, releaseList!: () => void;
+  const snapshotReady = new Promise<void>((resolve) => {
+    listRead = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseList = resolve;
+  });
+  let holdNextList = true;
+  await page.route('**/api/daddy/sessions', async (route) => {
+    if (!holdNextList || route.request().method() !== 'GET') return route.continue();
+    holdNextList = false;
+    const response = await route.fetch();
+    listRead();
+    await release;
+    await route.fulfill({ response, headers: { ...response.headers(), 'x-fixture-stale': '1' } });
+  });
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'New daddy session' });
   await dialog.getByLabel('Session name (optional)').fill('Created from limits');
+  await snapshotReady;
   const created = page.waitForResponse(
     (response) =>
       response.url().endsWith('/api/daddy/sessions') && response.request().method() === 'POST',
   );
-  await dialog.getByRole('button', { name: 'Start session', exact: true }).click();
-  const response = await created;
-  expect(response.status()).toBe(201);
-  const { group } = await response.json();
-  await expect(page).toHaveURL(
-    (url) => url.pathname === '/' && url.hash === `#session/${group.id}`,
+  const detail = page.waitForRequest(
+    (request) =>
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname.startsWith('/api/daddy/sessions/') &&
+      !request.url().endsWith('/' + previousId),
   );
+  let id: string;
+  try {
+    await dialog.getByRole('button', { name: 'Start session', exact: true }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    id = (await response.json()).group.id;
+    expect(new URL((await detail).url()).pathname).toBe(`/api/daddy/sessions/${id}`);
+    const stale = page.waitForResponse((response) => response.headers()['x-fixture-stale'] === '1');
+    releaseList();
+    expect((await (await stale).json()).some((session: { id: string }) => session.id === id)).toBe(
+      false,
+    );
+  } finally {
+    releaseList();
+  }
+  await expect(page).toHaveURL((url) => url.pathname === '/' && url.hash === `#session/${id}`);
   await expect(dialog).toBeHidden();
   await expect(
     page.getByRole('heading', { name: 'Created from limits', exact: true }),
   ).toBeVisible();
   await page.getByLabel('Message daddy').fill('Continue the conversation');
+  const sent = page.waitForRequest(
+    (request) => request.method() === 'POST' && request.url().endsWith('/chat'),
+  );
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  expect(new URL((await sent).url()).pathname).toBe(`/api/daddy/sessions/${id}/chat`);
 });
 test('shows quota remaining on a phone and requires confirmation before spending one reset', async ({
   page,
