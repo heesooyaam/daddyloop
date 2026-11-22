@@ -64,8 +64,19 @@ type SavedFixCheck =
 function unknownFixTarget(task: Task, current?: PullRequest) {
   const created = task.ticketRepository?.baseBranch ?? 'unknown';
   const stored = task.pr?.targetBranch ?? 'unknown';
-  const observed = current ? ` Observed target branch ${current.targetBranch}.` : '';
+  const observed = current
+    ? ` Observed PR head ${current.head} and target branch ${current.targetBranch}.`
+    : '';
   return `The original PR target branch could not be verified from the author run. Target branch at creation ${created}. Stored target branch ${stored}.${observed}`;
+}
+
+function parseRecordedRevision(value: unknown): Revision | undefined {
+  return typeof value === 'string' ? (JSON.parse(value) as Revision) : undefined;
+}
+
+function savedFixBaseChange(original: Revision, pr: PullRequest): string | undefined {
+  if (pr.base !== original.base || pr.start !== original.start)
+    return `The PR comparison base changed. Original base ${original.base} (start ${original.start}). Observed base ${pr.base} (start ${pr.start}).`;
 }
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
@@ -252,12 +263,13 @@ export class Engine {
       return pending;
     const lost = pending ? undefined : this.lostFix(task, pr);
     const unsent = pending ?? lost?.head;
-    if (unsent)
-      throw new AppError(
-        'fix_pending',
+    if (unsent) {
+      const reason = pr && this.savedFixReviewReason(task, unsent, pr);
+      const recovery =
         (lost && lostFixRecoveryBlock(lost, task)) ??
-          `${pr ? `The PR currently points to ${pr.head}. ` : ''}Resume the task to confirm saved fix ${unsent} before review.`,
-      );
+        `Resume the task to confirm saved fix ${unsent} before review.`;
+      throw new AppError('fix_pending', reason ? `${reason} ${recovery}` : recovery);
+    }
   }
   async review(id: string, retry = false) {
     return this.lock(id, async () => {
@@ -391,7 +403,7 @@ export class Engine {
       pr = await provider.getPR(prRef(task));
     const legacyPending = !task.pendingAuthorFix && this.pendingFixHead(task, pr);
     if (legacyPending && task.state !== 'fixing') {
-      this.holdLostFix(task, legacyPending, `The PR currently points to ${pr.head}.`);
+      this.holdLostFix(task, legacyPending, this.savedFixReviewReason(task, legacyPending, pr));
       return task;
     }
     const lost = this.lostFix(task, pr);
@@ -581,8 +593,17 @@ export class Engine {
       return false;
     const head = pending ?? this.lostFix(task, pr)?.head;
     if (!head) return false;
-    this.holdLostFix(task, head, `The PR currently points to ${pr.head}.`);
+    this.holdLostFix(task, head, this.savedFixReviewReason(task, head, pr));
     return true;
+  }
+
+  private savedFixReviewReason(task: Task, head: string, pr: PullRequest): string {
+    if (pr.head === head) {
+      const original = parseRecordedRevision(this.savedFixEvent(task, head)?.revision);
+      const change = original && savedFixBaseChange(original, pr);
+      if (change) return change;
+    }
+    return `The PR currently points to ${pr.head}.`;
   }
 
   private savedFixStatus(task: Task, pr: PullRequest, head: string): SavedFixCheck {
@@ -592,11 +613,18 @@ export class Engine {
       typeof saved?.target_branch === 'string' ? saved.target_branch : undefined;
     // Old saves logged the SHA without a revision. Recovered task metadata may still reflect the creation branch.
     const legacy = !pending || (saved && typeof saved.saved_revision !== 'string');
-    if (legacy && !recordedTarget) return { status: 'blocked', reason: unknownFixTarget(task, pr) };
+    const recordedOriginal = legacy ? parseRecordedRevision(saved?.revision) : undefined;
+    if (legacy && !recordedTarget) {
+      const baseChange =
+        pr.head === head && recordedOriginal && savedFixBaseChange(recordedOriginal, pr);
+      const unknownTarget = unknownFixTarget(task, pr);
+      return {
+        status: 'blocked',
+        reason: baseChange ? `${baseChange} ${unknownTarget}` : unknownTarget,
+      };
+    }
     const original =
-      legacy && typeof saved?.revision === 'string'
-        ? (JSON.parse(saved.revision) as Revision)
-        : (pending?.revision ?? task.feedback?.revision ?? task.revision);
+      recordedOriginal ?? pending?.revision ?? task.feedback?.revision ?? task.revision;
     if (
       original &&
       (pending ? pending.generation === task.generation : task.authorBaseHead === original.head)
@@ -644,11 +672,8 @@ export class Engine {
         status: 'blocked',
         reason: 'The PR was closed or its source or target branch changed.',
       };
-    if (pr.base !== original.base || pr.start !== original.start)
-      return {
-        status: 'blocked',
-        reason: `The PR comparison base changed. Original base ${original.base} (start ${original.start}). Observed base ${pr.base} (start ${pr.start}).`,
-      };
+    const baseChange = savedFixBaseChange(original, pr);
+    if (baseChange) return { status: 'blocked', reason: baseChange };
     if (pr.head === head) {
       if (original.revisionId && (!pr.revisionId || pr.revisionId === original.revisionId))
         return { status: 'waiting' };
@@ -700,9 +725,20 @@ export class Engine {
         saved &&
         typeof saved.saved_revision !== 'string' &&
         this.savedFixSubmissionRecorded(task, head, Number(saved.id));
-      const pendingFix = task.pendingAuthorFix;
-      if ((pendingFix?.sent || pendingFix?.pushStarted) && pendingFix.confirmUntil === undefined) {
-        pendingFix.confirmUntil = Date.now() + fixConfirmationGraceMs;
+      const pendingFix = legacyPush
+        ? (task.pendingAuthorFix ??= {
+            revision:
+              parseRecordedRevision(saved.revision) ?? task.feedback?.revision ?? task.revision!,
+            generation: task.generation,
+          })
+        : task.pendingAuthorFix;
+      if (
+        pendingFix &&
+        (legacyPush || pendingFix.sent || pendingFix.pushStarted) &&
+        (pendingFix.confirmUntil === undefined || (legacyPush && !pendingFix.sent))
+      ) {
+        if (legacyPush) pendingFix.sent = true;
+        pendingFix.confirmUntil ??= Date.now() + fixConfirmationGraceMs;
         this.store.saveTask(task);
       }
       let pr = await this.readSavedFixPR(task, head);
@@ -812,10 +848,37 @@ export class Engine {
       .get(task.id, after, head);
   }
 
-  private legacyFixObserved(task: Task, pr: PullRequest | undefined, head: string, after: number) {
+  private legacyFixPublished(task: Task, head: string, after: number): boolean {
+    return !!this.store.db
+      .prepare(
+        `SELECT 1 FROM events published
+       WHERE published.task_id=? AND published.id>? AND published.type='review.published'
+         AND json_extract(published.data, '$.snapshot.revision.head')=?
+         AND EXISTS (
+           SELECT 1 FROM events observed
+           WHERE observed.task_id=published.task_id AND observed.id>? AND observed.id<published.id
+             AND observed.type='revision.changed'
+             AND json_extract(observed.data, '$.revision.head')=json_extract(published.data, '$.snapshot.revision.head')
+             AND json_extract(observed.data, '$.revision.base')=json_extract(published.data, '$.snapshot.revision.base')
+             AND json_extract(observed.data, '$.revision.start')=json_extract(published.data, '$.snapshot.revision.start')
+             AND json_extract(observed.data, '$.revision.revisionId') IS json_extract(published.data, '$.snapshot.revision.revisionId')
+         ) LIMIT 1`,
+      )
+      .get(task.id, after, head, after);
+  }
+
+  private legacyFixConfirmed(
+    task: Task,
+    pr: PullRequest | undefined,
+    head: string,
+    after: number,
+    original: Revision | undefined,
+  ): boolean {
+    if (this.legacyFixPublished(task, head, after)) return true;
     if (
       pr?.state !== 'open' ||
       pr.head !== head ||
+      (original ? savedFixBaseChange(original, pr) : !task.reviewFinished || !task.review) ||
       !sameRevision(task.revision, pr) ||
       (task.review && !sameRevision(task.review.revision, pr)) ||
       (task.review?.targetBranch && task.review.targetBranch !== pr.targetBranch) ||
@@ -841,14 +904,13 @@ export class Engine {
     const saved = this.savedFixEvent(task, head);
     const job = saved && this.store.jobs(task.id).find((job) => job.id === saved.run_id);
     if (saved && job?.role === 'author' && job.kind === 'fix') {
-      const original =
-        typeof saved.revision === 'string' ? (JSON.parse(saved.revision) as Revision) : undefined;
+      const original = parseRecordedRevision(saved.revision);
       if (head === original?.head) return;
       // Older push receipts preceded the provider read. The old revision transition is the observation.
       const confirmed =
         typeof saved.saved_revision === 'string'
           ? this.savedFixSubmissionRecorded(task, head, Number(saved.id))
-          : this.legacyFixObserved(task, pr, head, Number(saved.id));
+          : this.legacyFixConfirmed(task, pr, head, Number(saved.id), original);
       return confirmed ? undefined : head;
     }
 
@@ -870,11 +932,8 @@ export class Engine {
     // Read the revision pinned to the author run. Older services could replace the task's base.
     const saved = this.savedFixEvent(task);
     if (typeof saved?.head !== 'string') return;
-    const confirmed =
-      typeof saved.saved_revision === 'string'
-        ? this.savedFixSubmissionRecorded(task, saved.head, Number(saved.id))
-        : this.legacyFixObserved(task, pr, saved.head, Number(saved.id));
-    if (confirmed) return;
+    const legacy = typeof saved.saved_revision !== 'string';
+    if (!legacy && this.savedFixSubmissionRecorded(task, saved.head, Number(saved.id))) return;
     const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
     if (job?.kind !== 'fix') return;
     const generation = job.generation + 1;
@@ -902,9 +961,12 @@ export class Engine {
           )
           .get(task.id, saved.id!, transition.id!, generation)?.revision ?? null;
     }
-    const revision =
-      typeof recordedRevision === 'string' ? (JSON.parse(recordedRevision) as Revision) : undefined;
-    if (revision?.head === saved.head) return;
+    const revision = parseRecordedRevision(recordedRevision);
+    if (
+      revision?.head === saved.head ||
+      (legacy && this.legacyFixConfirmed(task, pr, saved.head, Number(saved.id), revision))
+    )
+      return;
     const targetBranch = typeof saved.target_branch === 'string' ? saved.target_branch : undefined;
     return {
       head: saved.head,

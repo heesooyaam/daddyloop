@@ -344,7 +344,13 @@ it('keeps a legacy pending fix ahead of queued review after the PR base changes'
   }
 });
 
-it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
+it.each([
+  'rolled back',
+  'manually reviewed',
+  'draft on another base',
+  'first observation on another base',
+  'first observation with another start',
+] as const)(
   'uses provider and review revisions to recover a legacy pending fix (%s)',
   async (scenario) => {
     const f = await fixture();
@@ -361,8 +367,18 @@ it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
       const original = task.pr!;
       const rolledBack = scenario === 'rolled back';
       const wrongDraftBase = scenario === 'draft on another base';
+      const firstObservationChanged = scenario.startsWith('first observation');
       if (rolledBack) f.store.event(task.id, 'author.submitted', { head, pushed: true });
-      const pr = rolledBack ? { ...original, base: 'e'.repeat(40) } : { ...original, head };
+      const pr = {
+        ...original,
+        head: rolledBack ? original.head : head,
+        base:
+          rolledBack || scenario === 'first observation on another base'
+            ? 'e'.repeat(40)
+            : original.base,
+        start:
+          scenario === 'first observation with another start' ? 'd'.repeat(40) : original.start,
+      };
       const revision = revisionOf(pr);
       const generation = author.generation + 1;
       f.store.event(task.id, 'revision.changed', { revision, generation });
@@ -372,13 +388,14 @@ it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
         generation,
         head: pr.head,
       });
-      const review = rolledBack
-        ? undefined
-        : await f.provider.createReview(
-            prRef(task),
-            wrongDraftBase ? { ...revision, base: 'e'.repeat(40) } : revision,
-            'legacy-review-on-H2',
-          );
+      const review =
+        rolledBack || firstObservationChanged
+          ? undefined
+          : await f.provider.createReview(
+              prRef(task),
+              wrongDraftBase ? { ...revision, base: 'e'.repeat(40) } : revision,
+              'legacy-review-on-H2',
+            );
       f.store.saveTask({
         ...task,
         pr,
@@ -386,10 +403,10 @@ it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
         generation,
         pendingAuthorHead: head,
         authorBaseHead: original.head,
-        state: rolledBack ? 'queued' : 'awaiting_publication',
+        state: review ? 'awaiting_publication' : 'queued',
         review,
         snapshot: review && (await f.provider.getReview(prRef(task), review)),
-        reviewFinished: !rolledBack,
+        reviewFinished: !!review,
       });
       f.store.setSetting('demo-pr:1', pr);
       await worker.tick();
@@ -400,6 +417,17 @@ it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
         expect(current.state).toBe('needs_input');
         expect(current.reason).toContain(head);
         expect(current.reason).toContain(original.head);
+      } else if (firstObservationChanged) {
+        expect(current).toMatchObject({ state: 'needs_input', pendingAuthorHead: head });
+        for (const sha of [head, original.base, original.start, pr.base, pr.start])
+          expect(current.reason).toContain(sha);
+        await f.engine.action(task.id, 'resume');
+        const prepare = vi.fn(async () => async () => {});
+        await f.engine.submitSavedFix(task.id, prepare);
+        expect(prepare).not.toHaveBeenCalled();
+        expect(f.store.getTask(task.id).state).toBe('needs_input');
+        for (const sha of [head, original.base, original.start, pr.base, pr.start])
+          expect(f.store.getTask(task.id).reason).toContain(sha);
       } else if (wrongDraftBase) {
         expect(current).toMatchObject({ state: 'needs_input', revision });
         expect(await f.provider.getReview(prRef(task), review!)).toMatchObject({ status: 'draft' });
@@ -416,38 +444,128 @@ it.each(['rolled back', 'manually reviewed', 'draft on another base'] as const)(
   },
 );
 
-it('does not repeat a legacy push while the provider still shows the old revision', async () => {
-  const f = await fixture();
-  try {
-    await queueFix(f);
-    const author = f.store.claim()!;
-    const task = f.store.getTask(f.task.id);
-    const head = 'f'.repeat(40);
-    f.store.event(
-      task.id,
-      'author.feedback_snapshot',
-      { ...task.feedback, targetBranch: task.pr!.targetBranch },
-      author.id,
-    );
-    f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
-    f.store.saveJob({ ...author, status: 'completed' });
-    f.store.event(task.id, 'author.submitted', { head, pushed: true });
-    f.store.saveTask({
-      ...task,
-      state: 'awaiting_push',
-      pendingAuthorHead: head,
-      authorBaseHead: task.revision!.head,
-    });
-    const prepare = vi.fn(async () => async () => {});
-    await f.engine.submitSavedFix(task.id, prepare);
-    expect(prepare).not.toHaveBeenCalled();
-    expect(f.store.getTask(task.id).reason).toContain(
-      `Waiting for the PR to confirm saved fix ${head}`,
-    );
-  } finally {
-    f.store.close();
-  }
-});
+it.each(['head', 'base'] as const)(
+  'releases a published legacy fix when the next PR %s changes',
+  async (changed) => {
+    const f = await fixture();
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.event(task.id, 'author.submitted', { head, pushed: true });
+      const pr = { ...task.pr!, head, checks: 'pending' as const };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      const review = await f.provider.createReview(prRef(task), revision, 'legacy-review-on-H2');
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        pendingAuthorHead: head,
+        authorBaseHead: task.revision!.head,
+        state: 'awaiting_publication',
+        review,
+        reviewFinished: true,
+        snapshot: await f.provider.getReview(prRef(task), review),
+      });
+      f.store.setSetting('demo-pr:1', pr);
+      expect(await f.engine.publish(task.id)).toMatchObject({ state: 'awaiting_checks', revision });
+
+      const next = { ...pr, [changed]: 'e'.repeat(40) };
+      f.store.setSetting('demo-pr:1', next);
+      const restarted = new Engine(f.store, () => f.provider);
+      expect(await restarted.reconcile(task.id)).toMatchObject({
+        state: 'queued',
+        revision: revisionOf(next),
+      });
+      expect(await restarted.review(task.id, true)).toMatchObject({
+        state: 'reviewing',
+        review: { revision: revisionOf(next) },
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each(['available', 'unavailable', 'unknown target'] as const)(
+  'recovers a legacy push receipt without sending again (%s)',
+  async (scenario) => {
+    const f = await fixture();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      f.store.event(
+        task.id,
+        'author.feedback_snapshot',
+        {
+          ...task.feedback,
+          targetBranch: scenario === 'unknown target' ? undefined : task.pr!.targetBranch,
+        },
+        author.id,
+      );
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.event(task.id, 'author.submitted', { head, pushed: true });
+      f.store.saveTask({
+        ...task,
+        state: 'awaiting_push',
+        pendingAuthorHead: head,
+        authorBaseHead: task.revision!.head,
+      });
+      const prepare = vi.fn(async () => async () => {});
+      const now = Date.now();
+      if (scenario === 'unavailable') {
+        const getPR = vi.spyOn(f.provider, 'getPR').mockImplementation(async () => {
+          expect(f.store.getTask(task.id).pendingAuthorFix).toMatchObject({
+            sent: true,
+            confirmUntil: now + 60_000,
+          });
+          throw new Error('Provider unavailable');
+        });
+        await expect(f.engine.submitSavedFix(task.id, prepare)).rejects.toThrow(
+          'Provider unavailable',
+        );
+        vi.setSystemTime(now + 120_000);
+        await new Engine(f.store, () => f.provider).submitSavedFix(task.id, prepare);
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          pendingAuthorHead: head,
+        });
+        expect(f.store.getTask(task.id).reason).toContain('Provider unavailable');
+        expect(f.store.getTask(task.id).reason).toContain(head);
+        vi.setSystemTime(now + 2 * 60 * 60_000);
+        await f.engine.submitSavedFix(task.id, prepare);
+        expect(f.store.getTask(task.id).state).toBe('needs_input');
+        expect(getPR).toHaveBeenCalledTimes(2);
+      } else {
+        await f.engine.submitSavedFix(task.id, prepare);
+        const current = f.store.getTask(task.id);
+        if (scenario === 'unknown target') {
+          expect(current.state).toBe('needs_input');
+          expect(current.reason).toContain('target branch could not be verified');
+          expect(current.reason).toContain(head);
+          expect(current.reason).toContain(task.revision!.head);
+        } else {
+          expect(current.reason).toContain(`Waiting for the PR to confirm saved fix ${head}`);
+        }
+      }
+      expect(prepare).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      f.store.close();
+    }
+  },
+);
 
 it('still blocks retry review after an author discussion fails with a legacy pending fix', async () => {
   const f = await fixture();
