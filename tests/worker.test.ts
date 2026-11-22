@@ -6,6 +6,7 @@ import { DemoRuntime } from '../src/runtime/demo.js';
 import { TicketWorkflow } from '../src/core/ticket-workflow.js';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
+import { DemoProvider } from '../src/providers/demo.js';
 import type { AgentInput } from '../src/runtime/agent.js';
 import { prRef, revisionOf } from '../src/core/types.js';
 import { allRepositories } from '../src/modules/repositories/index.js';
@@ -96,6 +97,48 @@ it('keeps a saved fix when reconcile overlaps the author commit', async () => {
     await vi.waitFor(() => expect(provider).toHaveBeenCalled());
     commitResult.resolve(head);
     await vi.waitFor(() => expect(complete).toHaveBeenCalled());
+
+    const author = complete.mock.calls[0][0];
+    const snapshotDir = mkdtempSync(join(tmpdir(), 'daddyloop-saved-fix-snapshot-'));
+    const snapshotPath = join(snapshotDir, 'state.sqlite');
+    try {
+      f.store.db.prepare('VACUUM INTO ?').run(snapshotPath);
+      const snapshot = new Store(snapshotPath);
+      try {
+        expect(snapshot.getTask(task.id).pendingAuthorFix).toBeUndefined();
+        const restored = new Engine(snapshot, () => new DemoProvider(snapshot));
+        restored.recoverInterruptedJobs();
+        await expect(restored.review(task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+          message: expect.stringContaining(head),
+        });
+        expect(snapshot.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          revision: { head: originalHead },
+          reason: expect.stringContaining(head),
+        });
+        expect(snapshot.events(task.id)).toContainEqual(
+          expect.objectContaining({
+            type: 'author.fixes_saved',
+            runId: author.id,
+            data: { head, revision: task.revision },
+          }),
+        );
+        expect(snapshot.activeJobs(task.id)).toEqual([]);
+        expect(await restored.action(task.id, 'resume')).toMatchObject({
+          state: 'needs_input',
+          reason: expect.stringContaining(head),
+        });
+        const prepare = vi.fn(async () => async () => {});
+        await restored.submitSavedFix(task.id, prepare);
+        expect(prepare).not.toHaveBeenCalled();
+      } finally {
+        snapshot.close();
+      }
+    } finally {
+      rmSync(snapshotDir, { recursive: true, force: true });
+    }
+
     providerRead.resolve(current);
     await reconcile;
     await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));

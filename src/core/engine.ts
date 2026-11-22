@@ -967,9 +967,17 @@ export class Engine {
          AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
       )
       .get(task.id, saved.id!, noAuthorChanges, authorPushedChanges, generation);
-    if (!transition || (!legacy && transition.head === saved.head)) return;
+    const interrupted =
+      !legacy &&
+      job.status === 'failed' &&
+      this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND run_id=? AND id>? AND type='job.interrupted' LIMIT 1`,
+        )
+        .get(task.id, job.id, saved.id!);
+    if (!interrupted && (!transition || (!legacy && transition.head === saved.head))) return;
     let recordedRevision = saved.revision;
-    if (typeof recordedRevision !== 'string' && transition.reason === noAuthorChanges) {
+    if (typeof recordedRevision !== 'string' && transition?.reason === noAuthorChanges) {
       // The old no-change transition was written only when the full revision still matched.
       recordedRevision =
         this.store.db
@@ -1122,22 +1130,18 @@ export class Engine {
     result: AgentResult,
     savedFix?: { head: string; revision: Revision },
   ) {
+    // Journal the local result before waiting on a task operation that may be reading the PR.
+    if (savedFix) this.store.event(job.taskId, 'author.fixes_saved', savedFix, job.id);
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
-      const stale = task.generation !== job.generation || task.state === 'paused';
-      if (savedFix) {
-        this.store.transaction(() => {
-          this.store.event(task.id, 'author.fixes_saved', savedFix, job.id);
-          if (!stale && savedFix.head !== savedFix.revision.head) {
-            task.pendingAuthorHead = savedFix.head;
-            task.pendingAuthorFix = { revision: savedFix.revision, generation: job.generation };
-            this.store.saveTask(task);
-          }
-        });
-      }
-      if (stale) {
+      if (task.generation !== job.generation || task.state === 'paused') {
         this.store.event(task.id, 'job.stale_result', { generation: job.generation }, job.id);
         return;
+      }
+      if (savedFix && savedFix.head !== savedFix.revision.head) {
+        task.pendingAuthorHead = savedFix.head;
+        task.pendingAuthorFix = { revision: savedFix.revision, generation: job.generation };
+        this.store.saveTask(task);
       }
       if (isTicket(task)) {
         this.store.transaction(() => {
@@ -1515,17 +1519,30 @@ export class Engine {
           job.generation === this.store.getTask(job.taskId).generation &&
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
-        job.status = 'failed';
-        job.error =
-          'Server restarted during this run. Its external effects must be reconciled before retry.';
-        job.finishedAt = now();
-        this.store.saveJob(job);
         const task = this.store.getTask(job.taskId);
-        task.resumeState = task.state;
-        task.generation++;
-        this.store.cancelJobs(task.id);
-        this.state(task, 'needs_input', job.error);
-        this.store.event(task.id, 'job.interrupted', {}, job.id);
+        const saved =
+          job.role === 'author' && job.kind === 'fix' ? this.savedFixEvent(task) : undefined;
+        const original = parseRecordedRevision(saved?.saved_revision);
+        const restartReason =
+          'Server restarted during this run. Its external effects must be reconciled before retry.';
+        const reason =
+          saved?.run_id === job.id &&
+          typeof saved.head === 'string' &&
+          original &&
+          saved.head !== original.head
+            ? `${restartReason} Saved fix ${saved.head} is preserved.`
+            : restartReason;
+        this.store.transaction(() => {
+          job.status = 'failed';
+          job.error = restartReason;
+          job.finishedAt = now();
+          this.store.saveJob(job);
+          task.resumeState = task.state;
+          task.generation++;
+          this.store.cancelJobs(task.id);
+          this.state(task, 'needs_input', reason);
+          this.store.event(task.id, 'job.interrupted', {}, job.id);
+        });
       }
   }
   async interruptTask(id: string, reason: string, source: string) {
