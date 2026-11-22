@@ -9,7 +9,7 @@ import {
   type ReviewComment,
   type Location,
 } from '../core/types.js';
-import { type ReviewProvider, tag } from './provider.js';
+import { type ReviewProvider, reviewPreparationError, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 type Note = {
   id: number;
@@ -148,7 +148,9 @@ export class GitLabProvider implements ReviewProvider {
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
       this.http.request<{ id: number }>('GET', '/user'),
-    ]);
+    ]).catch((error: unknown) => {
+      throw reviewPreparationError(error, 'GitLab');
+    });
     const existing = drafts.find((n) => body(n).includes(tag(marker)));
     if (existing)
       return {

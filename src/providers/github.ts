@@ -8,7 +8,7 @@ import type {
   Location,
 } from '../core/types.js';
 import { AppError, ProviderWriteNotAttempted } from '../core/types.js';
-import { type ReviewProvider, tag } from './provider.js';
+import { type ReviewProvider, reviewPreparationError, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 
 type GHReview = {
@@ -144,12 +144,16 @@ export class GitHubProvider implements ReviewProvider {
     }
     throw new AppError('pagination_limit', 'Too many check runs', 502);
   }
-  async findReview(ref: PRRef, marker: string) {
+  private async readOwnReviews(ref: PRRef): Promise<GHReview[]> {
     const [list, user] = await Promise.all([
       this.http.pages<GHReview>(`${path(ref)}/reviews`),
       this.http.request<{ id: number }>('GET', '/user'),
     ]);
-    const review = list.find((r) => r.user.id === user.id && (r.body ?? '').includes(tag(marker)));
+    return list.filter((review) => review.user.id === user.id);
+  }
+  async findReview(ref: PRRef, marker: string) {
+    const reviews = await this.readOwnReviews(ref);
+    const review = reviews.find((item) => (item.body ?? '').includes(tag(marker)));
     return review ? this.handle(review, marker) : undefined;
   }
   private handle(review: GHReview, marker: string, revision?: Revision): ReviewHandle {
@@ -162,18 +166,16 @@ export class GitHubProvider implements ReviewProvider {
     };
   }
   async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const existing = await this.findReview(ref, marker).catch((error: unknown) => {
-      if (error instanceof AppError)
-        throw new ProviderWriteNotAttempted(error.code, error.message, error.statusCode);
-      throw new ProviderWriteNotAttempted(
-        'provider_shape',
-        'Could not read existing GitHub reviews before creating a draft.',
-        502,
-      );
+    const reviews = await this.readOwnReviews(ref).catch((error: unknown) => {
+      throw reviewPreparationError(error, 'GitHub');
     });
-    if (existing) return { ...existing, revision };
-    // GitHub itself enforces one pending review per authenticated account. Never adopt
-    // or delete the user's unrelated review when that constraint rejects this call.
+    const existing = reviews.find((item) => (item.body ?? '').includes(tag(marker)));
+    if (existing) return this.handle(existing, marker, revision);
+    if (reviews.some((item) => item.state === 'PENDING'))
+      throw new ProviderWriteNotAttempted(
+        'existing_drafts',
+        'The current GitHub account has a pending review. Publish or discard it before starting a new review.',
+      );
     const review = await this.http.request<GHReview>('POST', `${path(ref)}/reviews`, {
       commit_id: revision.head,
       body: `Review in progress.\n\n${tag(marker)}`,

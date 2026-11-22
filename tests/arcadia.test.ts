@@ -1,16 +1,18 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import { ArcadiaProvider } from '../src/providers/arcadia.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
 import { parsePR, tag } from '../src/providers/provider.js';
-import { sameRevision, type ReviewHandle } from '../src/core/types.js';
+import { ProviderWriteNotAttempted, sameRevision, type ReviewHandle } from '../src/core/types.js';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
 class FakeArc extends ArcBridge {
   calls: string[][] = [];
   head = 'a'.repeat(40);
+  base = 'b'.repeat(40);
   diff = '99';
   targetBranch = 'main';
   loseCreateResponse = false;
+  cannotReadComments = false;
   general = [
     { id: -7, content: tag('daddyloop:test'), is_draft: true, author: { name: 'tester' } },
   ];
@@ -36,7 +38,7 @@ class FakeArc extends ArcBridge {
         from_branch: 'fix',
         to_branch: this.targetBranch,
       },
-      base: 'b'.repeat(40),
+      base: this.base,
       user: 'tester',
     };
   }
@@ -45,10 +47,12 @@ class FakeArc extends ArcBridge {
   }
   override async api<T>(args: string[]): Promise<T> {
     this.calls.push(args);
-    if (args[1] === 'comments')
+    if (args[1] === 'comments') {
+      if (this.cannotReadComments) throw new Error('Failed to read comments');
       return (
         args[0] === 'pr' ? this.general : (this.inlineByDiff.get(args.at(-1)!) ?? this.inline)
       ) as T;
+    }
     if (args[1] === 'checks') return { checks: [] } as T;
     if (args[1] === 'create-comment') {
       const note = {
@@ -72,6 +76,48 @@ const review: ReviewHandle = {
   authorId: 'tester',
   revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40), revisionId: '99' },
 };
+it.each(['metadata', 'activeDiff'] as const)(
+  'classifies an Arcanum %s failure before writing',
+  async (method) => {
+    const bridge = new FakeArc();
+    vi.spyOn(bridge, method).mockRejectedValueOnce(new Error('Bridge read failed'));
+    await expect(
+      new ArcadiaProvider(bridge).createReview(
+        ref,
+        { ...review.revision, revisionId: undefined },
+        review.marker,
+      ),
+    ).rejects.toBeInstanceOf(ProviderWriteNotAttempted);
+    expect(bridge.calls.some((args) => args[1] === 'create-comment')).toBe(false);
+  },
+);
+
+it('starts a review on the current Arcanum diff after preflight comment reads fail', async () => {
+  const bridge = new FakeArc();
+  bridge.general = [];
+  bridge.inline = [];
+  const provider = new ArcadiaProvider(bridge);
+  const store = new Store(':memory:');
+  const engine = new Engine(store, () => provider);
+  try {
+    const task = await engine.create({ ref, repoPath: '/tmp', requirements: 'Review the change' });
+    bridge.cannotReadComments = true;
+    await expect(engine.review(task.id)).rejects.toThrow();
+    expect(bridge.calls.some((args) => args[1] === 'create-comment')).toBe(false);
+    expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual([]);
+    bridge.cannotReadComments = false;
+    bridge.base = 'e'.repeat(40);
+    bridge.diff = '100';
+    const next = await new Engine(store, () => provider).review(task.id, true);
+    expect(next).toMatchObject({
+      state: 'reviewing',
+      review: { nodeId: '100', revision: { base: bridge.base } },
+    });
+    expect(bridge.calls.filter((args) => args[1] === 'create-comment')).toHaveLength(1);
+  } finally {
+    store.close();
+  }
+});
 it('parses Arcanum URLs and keeps diff versions in revision identity', () => {
   expect(ref.provider).toBe('arcadia');
   expect(parsePR('https://a.yandex-team.ru/arc/trunk/arcadia/pull/11111111').number).toBe(

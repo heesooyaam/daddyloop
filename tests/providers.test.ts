@@ -36,6 +36,8 @@ describe('GitHub draft review contract', () => {
   it.each([
     'regular',
     'unavailable before creation',
+    'another pending review',
+    'another account has a pending review',
     'lost response on current revision',
     'lost response',
     'lost response and new base',
@@ -52,6 +54,16 @@ describe('GitHub draft review contract', () => {
     let attempts = 0;
     let summaryEdits = 0;
     let reviewsAvailable = scenario !== 'unavailable before creation';
+    const hasOtherReview =
+      scenario === 'another pending review' || scenario === 'another account has a pending review';
+    const otherReview = {
+      id: 90,
+      node_id: 'PRR_90',
+      body: 'Manual review',
+      commit_id: head,
+      user: { id: scenario === 'another pending review' ? 7 : 8 },
+      state: 'PENDING',
+    };
     let draft:
       | {
           id: number;
@@ -77,8 +89,10 @@ describe('GitHub draft review contract', () => {
       if (path.includes('/check-runs?')) return { check_runs: [] };
       if (path.includes('/status?')) return { statuses: [] };
       if (path === '/user') return { id: 7 };
-      if (path.startsWith(`${pull}/reviews?`))
-        return reviewsAvailable ? (draft ? [draft] : []) : new Response('{}', { status: 503 });
+      if (path.startsWith(`${pull}/reviews?`)) {
+        if (!reviewsAvailable) return new Response('{}', { status: 503 });
+        return [...(draft ? [draft] : []), ...(hasOtherReview ? [otherReview] : [])];
+      }
       if (path.includes('/comments?')) return [];
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
         return draft ?? new Response('{}', { status: 404 });
@@ -89,7 +103,11 @@ describe('GitHub draft review contract', () => {
       }
       if (method === 'POST' && path === `${pull}/reviews`) {
         attempts++;
-        if (draft) return new Response('{}', { status: 422 });
+        if (
+          draft ||
+          (hasOtherReview && otherReview.user.id === 7 && otherReview.state === 'PENDING')
+        )
+          return new Response('{}', { status: 422 });
         draft = {
           id: attempts,
           node_id: `PRR_${attempts}`,
@@ -98,7 +116,10 @@ describe('GitHub draft review contract', () => {
           user: { id: 7 },
           state: 'PENDING',
         };
-        if (attempts === 1 && scenario !== 'regular' && scenario !== 'unavailable before creation')
+        if (
+          attempts === 1 &&
+          (scenario.startsWith('lost response') || scenario.startsWith('legacy intent'))
+        )
           throw new Error('Lost create response');
         return draft;
       }
@@ -112,6 +133,21 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      if (hasOtherReview) {
+        if (scenario === 'another pending review') {
+          await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'existing_drafts' });
+          expect(attempts).toBe(0);
+          expect(
+            store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
+          ).toEqual([]);
+          otherReview.state = 'COMMENTED';
+          base = 'e'.repeat(40);
+        }
+        const next = await new Engine(store, () => provider).review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
+        expect(attempts).toBe(1);
+        return;
+      }
       if (scenario === 'unavailable before creation') {
         await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_503' });
         expect(attempts).toBe(0);
@@ -355,6 +391,54 @@ describe('GitHub draft review contract', () => {
 });
 describe('GitLab draft notes contract', () => {
   const ref = parsePR('https://gitlab.example.com/team/subgroup/service/-/merge_requests/9');
+  it('starts a review on the current GitLab base after draft notes failed to load', async () => {
+    const store = new Store(':memory:');
+    const mr = `/api/v4/projects/${encodeURIComponent(ref.repo)}/merge_requests/${ref.number}`;
+    let draftNotesAvailable = false;
+    let base = revision.base;
+    let creates = 0;
+    const http = transport((path, method, body) => {
+      if (path === mr)
+        return {
+          title: 'Changes',
+          state: 'opened',
+          source_branch: 'fix',
+          target_branch: 'main',
+          source_project_id: 3,
+          diff_refs: { head_sha: revision.head, base_sha: base, start_sha: revision.start },
+        };
+      if (path === '/api/v4/projects/3')
+        return { http_url_to_repo: 'https://gitlab.example.com/team/subgroup/service.git' };
+      if (path === '/api/v4/user') return { id: 7 };
+      if (path.startsWith(`${mr}/draft_notes?`))
+        return draftNotesAvailable ? [] : new Response('{}', { status: 503 });
+      if (path.startsWith(`${mr}/notes?`)) return [];
+      if (method === 'POST' && path === `${mr}/draft_notes`)
+        return { id: ++creates, note: body.note, author_id: 7 };
+      throw new Error(`Unexpected fixture request ${method} ${path}`);
+    });
+    const provider = new GitLabProvider(ref.host, 'fake', http);
+    const engine = new Engine(store, () => provider);
+    try {
+      const task = await engine.create({
+        ref,
+        repoPath: '/tmp',
+        requirements: 'Review the change',
+      });
+      await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_503' });
+      expect(creates).toBe(0);
+      expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+        [],
+      );
+      draftNotesAvailable = true;
+      base = 'e'.repeat(40);
+      const next = await new Engine(store, () => provider).review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
+      expect(creates).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
   it.each([
     ['retarget', 'draft'],
     ['retarget', 'partial'],

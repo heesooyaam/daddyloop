@@ -9,7 +9,7 @@ import type {
 } from '../core/types.js';
 import { ProviderWriteNotAttempted } from '../core/types.js';
 import { ArcBridge } from '../integrations/arcadia.js';
-import { type ReviewProvider, tag, assertDraft } from './provider.js';
+import { type ReviewProvider, tag, assertDraft, reviewPreparationError } from './provider.js';
 type Note = {
   id: number;
   content: string;
@@ -144,14 +144,20 @@ export class ArcadiaProvider implements ReviewProvider {
       : undefined;
   }
   async createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle> {
-    const { user } = await this.bridge.metadata(ref.number),
+    let user: string;
+    let diffId: string;
+    try {
+      ({ user } = await this.bridge.metadata(ref.number));
       diffId = revision.revisionId ?? (await this.bridge.activeDiff(ref.number));
-    const [notes, inline] = await this.notes(ref, diffId);
-    if ([...notes, ...inline].some((n) => n.author?.name === user && n.is_draft && !n.deleted_at))
-      throw new ProviderWriteNotAttempted(
-        'existing_drafts',
-        'Existing Arcanum drafts were preserved. Publish or discard them before starting a new review.',
-      );
+      const [notes, inline] = await this.notes(ref, diffId);
+      if ([...notes, ...inline].some((n) => n.author?.name === user && n.is_draft && !n.deleted_at))
+        throw new ProviderWriteNotAttempted(
+          'existing_drafts',
+          'Existing Arcanum drafts were preserved. Publish or discard them before starting a new review.',
+        );
+    } catch (error) {
+      throw reviewPreparationError(error, 'Arcanum');
+    }
     const note = await this.bridge.api<Note>(
       [
         'pr',

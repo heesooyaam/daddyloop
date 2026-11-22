@@ -1,6 +1,7 @@
 import { allRepositories } from '../modules/repositories/index.js';
 import {
   AppError,
+  ProviderWriteNotAttempted,
   type PRRef,
   type PullRequest,
   type ReviewHandle,
@@ -37,6 +38,21 @@ export interface ReviewProvider {
   publish(ref: PRRef, review: ReviewHandle): Promise<void>;
 }
 export const tag = (marker: string) => `<!-- ${marker} -->`;
+
+export function reviewPreparationError(
+  error: unknown,
+  provider: string,
+): ProviderWriteNotAttempted {
+  if (error instanceof ProviderWriteNotAttempted) return error;
+  if (error instanceof AppError)
+    return new ProviderWriteNotAttempted(error.code, error.message, error.statusCode);
+  return new ProviderWriteNotAttempted(
+    'provider_shape',
+    `Could not read ${provider} review information before creating a draft.`,
+    502,
+  );
+}
+
 export function parsePR(url: string, provider?: string): PRRef {
   let parsed: URL;
   try {
