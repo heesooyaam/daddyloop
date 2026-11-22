@@ -440,7 +440,7 @@ export class Engine {
           this.state(task, 'needs_input', draftReason);
           return task;
         }
-        retainPublishedFeedback(task, snapshot);
+        this.retainPreviousReviewFeedback(task, task.review, snapshot);
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
       }
@@ -497,7 +497,24 @@ export class Engine {
     if (pendingNotes && ref.provider === 'gitlab') return gitLabDraftReason;
     if (pendingNotes && ref.provider === 'arcadia') return arcanumDraftReason;
     if (snapshot.status === 'draft' && ref.provider === 'github') return staleDraftReason;
-    retainPublishedFeedback(task, snapshot);
+    this.retainPreviousReviewFeedback(task, review, snapshot);
+  }
+
+  private retainPreviousReviewFeedback(task: Task, review: ReviewHandle, snapshot: ReviewSnapshot) {
+    const carryPrior = !task.reviewFinished || !this.reviewPublicationProcessed(task, review);
+    retainPublishedFeedback(task, snapshot, carryPrior);
+  }
+
+  private reviewPublicationProcessed(task: Task, review: ReviewHandle): boolean {
+    return (
+      task.state !== 'awaiting_publication' &&
+      !!this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND type='review.published'
+         AND json_extract(data, '$.reviewId')=? LIMIT 1`,
+        )
+        .get(task.id, review.id)
+    );
   }
 
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
@@ -599,7 +616,7 @@ export class Engine {
     if (pending || (task.state === 'fixing' && this.store.busy(id))) return task;
     if (this.stopReviewOnTargetChange(task, pr)) return task;
     if (!sameRevision(task.revision, pr)) {
-      if (this.preservePreviousNativeReview(task)) return task;
+      if (await this.preservePreviousNativeReview(task)) return task;
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
       this.invalidate(task, pr);
@@ -751,7 +768,7 @@ export class Engine {
     if (running) this.onCancel(task.id);
   }
 
-  private preservePreviousNativeReview(task: Task): boolean {
+  private async preservePreviousNativeReview(task: Task): Promise<boolean> {
     const { review, snapshot } = task;
     if (!review || !hasSharedDraftSlot(task)) return false;
     if (
@@ -760,18 +777,17 @@ export class Engine {
       sameRevision(snapshot.revision, review.revision)
     ) {
       // A discussion can observe publication before reconcile processes it.
-      const processed =
-        task.state !== 'awaiting_publication' &&
-        this.store.db
-          .prepare(
-            `SELECT 1 FROM events WHERE task_id=? AND type='review.published'
-         AND json_extract(data, '$.reviewId')=? LIMIT 1`,
-          )
-          .get(task.id, review.id);
-      if (!processed && snapshot.comments.length) retainPublishedFeedback(task, snapshot, true);
-      return false;
-    }
-    if (task.reviewFinished && task.state === 'awaiting_push') return false;
+      if (this.reviewPublicationProcessed(task, review)) return false;
+      const ref = prRef(task);
+      const current = await this.provider(ref).getReview(ref, review);
+      if (
+        sameRevision(current.revision, review.revision) &&
+        (current.status === 'published' || current.status === 'missing')
+      ) {
+        retainPublishedFeedback(task, current, true);
+        return false;
+      }
+    } else if (task.reviewFinished && task.state === 'awaiting_push') return false;
     this.holdTaskForInput(
       task,
       'PR revision changed. Use Retry review to check the previous native review before starting the next one.',
@@ -1511,7 +1527,7 @@ export class Engine {
           this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
           return;
         }
-        if (this.preservePreviousNativeReview(task)) return;
+        if (await this.preservePreviousNativeReview(task)) return;
         this.invalidate(task, pr);
         this.state(
           task,

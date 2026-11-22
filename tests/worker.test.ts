@@ -70,6 +70,9 @@ it.each([
   ['reconcile first', 'published'],
   ['completeJob first', 'published'],
   ['reconcile after discussion', 'published'],
+  ['retry after discussion', 'published'],
+  ['reconcile after discussion and deletion', 'published'],
+  ['reconcile after discussion and edit', 'published'],
 ] as const)(
   'retains the old native review when %s notices the new base (%s)',
   async (first, status) => {
@@ -97,9 +100,15 @@ it.each([
         'A newly published finding',
         `${old.marker}:comment:R2`,
       );
-      const observedInChat = first === 'reconcile after discussion';
+      const observedInChat = first.includes('after discussion');
+      const retriedFirst = first === 'retry after discussion';
+      const deleted = first === 'reconcile after discussion and deletion';
+      const edited = first === 'reconcile after discussion and edit';
       if (observedInChat) {
-        await f.engine.completeJob(reviewer, f.result({ verifiedCommentIds: [earlier] }));
+        await f.engine.completeJob(
+          reviewer,
+          f.result(retriedFirst ? {} : { verifiedCommentIds: [earlier] }),
+        );
         f.store.saveJob({ ...reviewer, status: 'completed' });
         await f.engine.chat(task.id, 'reviewer', 'Discuss the review');
       }
@@ -113,6 +122,9 @@ it.each([
           feedback: { comments: [{ id: earlier }] },
         });
       }
+      if (deleted) await f.provider.deleteComment(ref, old, added.id);
+      if (edited) await f.provider.updateComment(ref, old, added.id, 'Updated finding');
+      const findings = deleted ? [earlier] : [earlier, added.id];
 
       const moved = { ...fixed, base: 'e'.repeat(40) };
       f.store.setSetting('demo-pr:1', moved);
@@ -121,10 +133,11 @@ it.each([
         await f.engine.completeJob(reviewer, f.result({ verifiedCommentIds: [earlier] }));
       if (first === 'completeJob first') await f.engine.reconcile(task.id);
       const blocked = f.store.getTask(task.id);
-      if (observedInChat) {
+      if (observedInChat && !retriedFirst) {
         expect(blocked.state).toBe('queued');
-        expect(blocked.feedback?.comments.map(({ id }) => id)).toEqual([earlier, added.id]);
-      } else expect(blocked).toMatchObject({ state: 'needs_input', review: old });
+        expect(blocked.feedback?.comments.map(({ id }) => id)).toEqual(findings);
+      } else if (!retriedFirst)
+        expect(blocked).toMatchObject({ state: 'needs_input', review: old });
       expect(f.store.busy(task.id)).toBe(false);
       const restarted = new Engine(f.store, () => f.provider);
       if (status === 'draft') {
@@ -138,12 +151,21 @@ it.each([
       }
       const next = await restarted.review(task.id, true);
       expect(next).toMatchObject({ state: 'reviewing', review: { revision: revisionOf(moved) } });
-      expect(next.feedback?.comments.map(({ id }) => id)).toEqual([earlier, added.id]);
-      await f.run({ verifiedCommentIds: [earlier] });
-      expect(f.store.getTask(task.id)).toMatchObject({
-        state: 'needs_input',
-        reviewFinished: false,
-      });
+      expect(next.feedback?.comments.map(({ id }) => id)).toEqual(findings);
+      if (edited)
+        expect(next.feedback?.comments.find(({ id }) => id === added.id)?.body).toBe(
+          'Updated finding',
+        );
+      await f.run({ verifiedCommentIds: [retriedFirst ? added.id : earlier] });
+      if (deleted) {
+        expect(f.store.getTask(task.id).state).toBe('awaiting_publication');
+        expect(await f.engine.publish(task.id)).toMatchObject({ state: 'complete' });
+      } else {
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          reviewFinished: false,
+        });
+      }
     } finally {
       f.store.close();
     }
@@ -1416,7 +1438,7 @@ it.each(['before reviewer', 'before publication', 'while reading the draft'] as 
 );
 
 it.each(['published', 'deleted'] as const)(
-  'uses the latest published feedback on retry after the old GitHub draft was %s',
+  'carries published feedback on retry after the old GitHub draft was %s',
   async (status) => {
     const f = await fixture();
     try {
@@ -1450,15 +1472,18 @@ it.each(['published', 'deleted'] as const)(
           comments: [],
         });
       }
+      const snapshot = await f.provider.getReview(prRef(task), oldReview);
       const expected =
-        status === 'published' ? await f.provider.getReview(prRef(task), oldReview) : task.feedback;
+        status === 'published'
+          ? { ...snapshot, comments: [...task.feedback!.comments, ...snapshot.comments] }
+          : task.feedback;
 
       const next = await f.engine.review(task.id, true);
       expect(next.review?.targetBranch).toBe('release');
       expect(next.feedback).toEqual(expected);
-      expect(next.feedback?.comments.map((comment) => comment.id)).toEqual([
-        status === 'published' ? second.id : first,
-      ]);
+      expect(next.feedback?.comments.map((comment) => comment.id)).toEqual(
+        status === 'published' ? [first, second.id] : [first],
+      );
       await f.run({ verifiedCommentIds: [first] });
       if (status === 'published') {
         expect(f.store.getTask(task.id)).toMatchObject({
