@@ -196,8 +196,18 @@ it('sends an older task’s saved corrections and reconciles the new PR head', a
   const workflow = new TicketWorkflow(f.engine, workspaces);
   worker.autoSubmit = (id) => workflow.pushFixes(id);
   try {
+    await queueFix(f);
+    const author = f.store.claim()!;
     const task = f.store.getTask(f.task.id);
     const pending = 'f'.repeat(40);
+    f.store.event(
+      task.id,
+      'author.feedback_snapshot',
+      { ...task.feedback, targetBranch: task.pr?.targetBranch },
+      author.id,
+    );
+    f.store.event(task.id, 'author.fixes_saved', { head: pending }, author.id);
+    f.store.saveJob({ ...author, status: 'completed' });
     task.state = 'awaiting_push';
     task.pendingAuthorHead = pending;
     task.authorBaseHead = task.revision?.head;
@@ -218,6 +228,67 @@ it('sends an older task’s saved corrections and reconciles the new PR head', a
     f.store.close();
   }
 });
+
+it.each([true, false])(
+  'holds a legacy pending head after a retarget (author target recorded: %s)',
+  async (recorded) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn() };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    const push = vi.fn(async () => {});
+    worker.autoSubmit = (id) => f.engine.submitSavedFix(id, async () => push);
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const created = task.pr!;
+      const saved = 'f'.repeat(40);
+      f.store.event(
+        task.id,
+        'author.feedback_snapshot',
+        { ...task.feedback, targetBranch: recorded ? created.targetBranch : undefined },
+        author.id,
+      );
+      f.store.event(task.id, 'author.fixes_saved', { head: saved }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const retargeted = { ...created, targetBranch: 'release' };
+      f.store.saveTask({
+        ...task,
+        state: 'awaiting_push',
+        pendingAuthorHead: saved,
+        authorBaseHead: task.revision!.head,
+        pr: retargeted,
+        ticketRepository: {
+          baseBranch: created.targetBranch,
+          baseHead: created.base,
+          branch: created.branch,
+        },
+      });
+      f.store.setSetting('demo-pr:1', retargeted);
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('needs_input'));
+      expect(f.store.getTask(task.id).reason).toContain(saved);
+      expect(f.store.getTask(task.id).reason).toContain(created.targetBranch);
+      expect(f.store.getTask(task.id).reason).toContain(retargeted.targetBranch);
+      expect(push).not.toHaveBeenCalled();
+      expect(runtime.run).not.toHaveBeenCalled();
+
+      if (!recorded) {
+        f.store.setSetting('demo-pr:1', created);
+        await f.engine.action(task.id, 'resume');
+        await f.engine.submitSavedFix(task.id, async () => push);
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          pendingAuthorHead: saved,
+        });
+        expect(push).not.toHaveBeenCalled();
+      }
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
 
 it.each([
   ['head before push', false, { head: 'd'.repeat(40) }],
@@ -696,7 +767,7 @@ it.each(['ticket', 'author run', 'unknown'] as const)(
         revision,
       });
       f.store.setSetting('demo-pr:1', current);
-      if (branchEvidence === 'unknown') {
+      if (branchEvidence !== 'author run') {
         expect(await f.engine.action(task.id, 'resume')).toMatchObject({
           state: 'needs_input',
           revision,
@@ -787,6 +858,55 @@ it('continues to block review of a lost fix after pause advances the generation'
     await f.engine.submitSavedFix(id, async () => push);
     expect(push).not.toHaveBeenCalled();
     expect(f.store.busy(id)).toBe(false);
+  } finally {
+    f.store.close();
+  }
+});
+
+it('does not use the creation branch as the target of an unrecorded legacy fix', async () => {
+  const f = await fixture();
+  try {
+    const created = f.task.pr!;
+    const retargeted = { ...created, targetBranch: 'release' };
+    f.store.setSetting('demo-pr:1', retargeted);
+    await queueFix(f);
+    const author = f.store.claim()!;
+    const task = f.store.getTask(f.task.id);
+    const saved = 'f'.repeat(40);
+    f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+    f.store.event(task.id, 'author.fixes_saved', { head: saved }, author.id);
+    await f.engine.completeJob(author, f.result());
+    f.store.saveJob({ ...author, status: 'completed' });
+    f.store.saveTask({
+      ...f.store.getTask(task.id),
+      state: 'needs_input',
+      ticketRepository: {
+        baseBranch: created.targetBranch,
+        baseHead: created.base,
+        branch: created.branch,
+      },
+    });
+    const push = vi.fn(async () => {
+      f.store.setSetting('demo-pr:1', { ...created, head: saved });
+    });
+    for (const pr of [retargeted, created, { ...created, head: saved }]) {
+      f.store.setSetting('demo-pr:1', pr);
+      await f.engine.action(task.id, 'resume');
+      await f.engine.submitSavedFix(task.id, async () => push);
+      const blocked = f.store.getTask(task.id);
+      expect(blocked.state).toBe('needs_input');
+      expect(blocked.reason).toContain(saved);
+      expect(blocked.reason).toContain(created.targetBranch);
+      expect(blocked.reason).toContain(retargeted.targetBranch);
+      expect(push).not.toHaveBeenCalled();
+      await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+    }
+    vi.spyOn(f.provider, 'getPR').mockRejectedValue(new Error('Provider unavailable'));
+    const blocked = await f.engine.action(task.id, 'resume');
+    expect(blocked.state).toBe('needs_input');
+    expect(blocked.reason).toContain(saved);
+    expect(blocked.reason).toContain(created.targetBranch);
+    expect(blocked.reason).toContain(retargeted.targetBranch);
   } finally {
     f.store.close();
   }

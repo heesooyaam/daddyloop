@@ -41,7 +41,6 @@ const noAuthorChanges =
 const authorPushedChanges = 'Author pushed changes; independent verification is next';
 const staleDraftReason =
   'GitHub still has a draft on the previous revision. Inspect it on GitHub and clear the pending review before resuming.';
-const unknownLostFixTarget = 'The original PR target branch could not be verified.';
 const fixConfirmationGraceMs = 60_000;
 const reviewCompletionStates: State[] = [
   'awaiting_publication',
@@ -58,14 +57,23 @@ interface LostFix {
 }
 
 type SavedFixCheck =
-  { status: 'ready' | 'confirmed' | 'waiting' } | { status: 'blocked'; reason: string };
+  | { status: 'ready' | 'waiting' }
+  | { status: 'confirmed'; original: Revision }
+  | { status: 'blocked'; reason: string };
+
+function unknownFixTarget(task: Task, current?: PullRequest) {
+  const created = task.ticketRepository?.baseBranch ?? 'unknown';
+  const stored = task.pr?.targetBranch ?? 'unknown';
+  const observed = current ? ` Observed target branch ${current.targetBranch}.` : '';
+  return `The original PR target branch could not be verified from the author run. Target branch at creation ${created}. Stored target branch ${stored}.${observed}`;
+}
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
   const storedBase = task.revision?.base ?? 'unknown';
   if (!fix.revision)
     return `The original PR revision for saved fix ${fix.head} is unavailable. Stored PR base ${storedBase}.`;
   if (!fix.targetBranch)
-    return `${unknownLostFixTarget} Saved fix ${fix.head} is preserved. Original base ${fix.revision.base}. Stored PR base ${storedBase}.`;
+    return `${unknownFixTarget(task)} Saved fix ${fix.head} is preserved. Original base ${fix.revision.base}. Stored PR base ${storedBase}.`;
   if (!sameRevision(fix.revision, task.revision))
     return `The stored PR revision changed for saved fix ${fix.head}. Original base ${fix.revision.base}. Stored PR base ${storedBase}.`;
   if (!fix.authorCompleted)
@@ -376,7 +384,7 @@ export class Engine {
     if (lost && task.state === 'awaiting_push') {
       const reason = lost.targetBranch
         ? 'Resume the task to recover the saved fix before review.'
-        : unknownLostFixTarget;
+        : unknownFixTarget(task);
       this.holdLostFix(task, lost.head, reason);
       return task;
     }
@@ -385,7 +393,7 @@ export class Engine {
     if (lost) {
       if (pr.state !== 'open')
         this.holdLostFix(task, lost.head, `PR is ${pr.state}. Automatic work stopped.`);
-      else if (!lost.targetBranch) this.holdLostFix(task, lost.head, unknownLostFixTarget);
+      else if (!lost.targetBranch) this.holdLostFix(task, lost.head, unknownFixTarget(task, pr));
       else if (
         lost.revision &&
         this.savedFixRemoteStatus(task, pr, lost.head, lost.revision, lost.targetBranch).status ===
@@ -566,12 +574,27 @@ export class Engine {
 
   private savedFixStatus(task: Task, pr: PullRequest, head: string): SavedFixCheck {
     const pending = task.pendingAuthorFix;
-    const original = pending?.revision ?? task.feedback?.revision ?? task.revision;
+    const saved = this.savedFixEvent(task, head);
+    const recordedTarget =
+      typeof saved?.target_branch === 'string' ? saved.target_branch : undefined;
+    // Old saves logged the SHA without a revision. Recovered task metadata may still reflect the creation branch.
+    const legacy = !pending || (saved && typeof saved.saved_revision !== 'string');
+    if (legacy && !recordedTarget) return { status: 'blocked', reason: unknownFixTarget(task, pr) };
+    const original =
+      legacy && typeof saved?.revision === 'string'
+        ? (JSON.parse(saved.revision) as Revision)
+        : (pending?.revision ?? task.feedback?.revision ?? task.revision);
     if (
       original &&
       (pending ? pending.generation === task.generation : task.authorBaseHead === original.head)
     ) {
-      const check = this.savedFixRemoteStatus(task, pr, head, original);
+      const check = this.savedFixRemoteStatus(
+        task,
+        pr,
+        head,
+        original,
+        recordedTarget ?? pending?.targetBranch,
+      );
       // A stale local revision can be replaced by remote confirmation, but cannot authorize a send.
       if (check.status !== 'ready' || sameRevision(original, task.revision)) return check;
     }
@@ -587,7 +610,7 @@ export class Engine {
       !!pendingAuthorFix &&
       !!pr &&
       sameRevision(task.revision, pr) &&
-      this.savedFixRemoteStatus(task, pr, head, pendingAuthorFix.revision).status === 'confirmed'
+      this.savedFixStatus(task, pr, head).status === 'confirmed'
     );
   }
 
@@ -596,8 +619,13 @@ export class Engine {
     pr: PullRequest,
     head: string,
     original: Revision,
-    targetBranch = task.pendingAuthorFix?.targetBranch,
+    targetBranch = task.pendingAuthorFix?.targetBranch ?? task.pr?.targetBranch,
   ): SavedFixCheck {
+    if (pr.state === 'open' && targetBranch && pr.targetBranch !== targetBranch)
+      return {
+        status: 'blocked',
+        reason: `The PR target branch changed. Expected ${targetBranch}. Observed ${pr.targetBranch}.`,
+      };
     if (!samePullRequestBranches(task.pr, pr, targetBranch))
       return {
         status: 'blocked',
@@ -611,7 +639,7 @@ export class Engine {
     if (pr.head === head) {
       if (original.revisionId && (!pr.revisionId || pr.revisionId === original.revisionId))
         return { status: 'waiting' };
-      return { status: 'confirmed' };
+      return { status: 'confirmed', original };
     }
     return sameRevision(original, pr)
       ? { status: 'ready' }
@@ -629,10 +657,9 @@ export class Engine {
     }
   }
 
-  private queueConfirmedFixReview(task: Task, pr: PullRequest, head: string) {
+  private queueConfirmedFixReview(task: Task, pr: PullRequest, head: string, original: Revision) {
     this.store.transaction(() => {
       const sent = task.pendingAuthorFix?.sent === true;
-      const original = task.pendingAuthorFix?.revision ?? task.revision!;
       this.invalidate(task, pr, false);
       task.pendingAuthorFix = {
         ...task.pendingAuthorFix,
@@ -732,20 +759,15 @@ export class Engine {
         if (task.reason !== waitingReason) this.state(task, 'awaiting_push', waitingReason);
         return;
       }
-      this.queueConfirmedFixReview(task, pr, head);
+      this.queueConfirmedFixReview(task, pr, head, check.original);
     });
   }
 
-  private lostFix(task: Task): LostFix | undefined {
-    if (
-      !['queued', 'reviewing', 'needs_input', 'paused', 'awaiting_push'].includes(task.state) &&
-      !reviewCompletionStates.includes(task.state)
-    )
-      return;
-    // Read the revision pinned to the author run. Older services could replace the task's base.
-    const saved = this.store.db
+  private savedFixEvent(task: Task, head?: string) {
+    return this.store.db
       .prepare(
         `SELECT saved.id, saved.run_id, json_extract(saved.data, '$.head') AS head,
+            json_extract(saved.data, '$.revision') AS saved_revision,
             COALESCE(json_extract(saved.data, '$.revision'), json_extract(feedback.data, '$.revision')) AS revision,
             json_extract(feedback.data, '$.targetBranch') AS target_branch
          FROM events saved
@@ -755,9 +777,21 @@ export class Engine {
              AND prior.type='author.feedback_snapshot' AND prior.id<saved.id
            ORDER BY prior.id DESC LIMIT 1
          )
-         WHERE saved.task_id=? AND saved.type='author.fixes_saved' ORDER BY saved.id DESC LIMIT 1`,
+         WHERE saved.task_id=? AND saved.type='author.fixes_saved'
+           AND (? IS NULL OR json_extract(saved.data, '$.head')=?)
+         ORDER BY saved.id DESC LIMIT 1`,
       )
-      .get(task.id);
+      .get(task.id, head ?? null, head ?? null);
+  }
+
+  private lostFix(task: Task): LostFix | undefined {
+    if (
+      !['queued', 'reviewing', 'needs_input', 'paused', 'awaiting_push'].includes(task.state) &&
+      !reviewCompletionStates.includes(task.state)
+    )
+      return;
+    // Read the revision pinned to the author run. Older services could replace the task's base.
+    const saved = this.savedFixEvent(task);
     if (typeof saved?.head !== 'string') return;
     const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
     if (job?.kind !== 'fix') return;
@@ -794,10 +828,7 @@ export class Engine {
     const revision =
       typeof recordedRevision === 'string' ? (JSON.parse(recordedRevision) as Revision) : undefined;
     if (revision?.head === saved.head) return;
-    const targetBranch =
-      typeof saved.target_branch === 'string' && saved.target_branch
-        ? saved.target_branch
-        : task.ticketRepository?.baseBranch;
+    const targetBranch = typeof saved.target_branch === 'string' ? saved.target_branch : undefined;
     return {
       head: saved.head,
       revision,
@@ -810,9 +841,14 @@ export class Engine {
   private async resumeBlockedLostFix(task: Task, lost: LostFix, reason: string) {
     // The old job cannot authorize a send. An observed exact match can authorize review.
     const { revision: original, targetBranch } = lost;
-    if (original && targetBranch) {
+    if (original) {
       const ref = prRef(task);
       const provider = this.provider(ref);
+      if (!targetBranch) {
+        const current = await provider.getPR(ref).catch(() => undefined);
+        this.holdLostFix(task, lost.head, unknownFixTarget(task, current));
+        return;
+      }
       const current = await provider.getPR(ref);
       const check = this.savedFixRemoteStatus(task, current, lost.head, original, targetBranch);
       if (check.status === 'confirmed') {
@@ -828,7 +864,7 @@ export class Engine {
           targetBranch,
           staleDraft,
         };
-        this.queueConfirmedFixReview(task, current, lost.head);
+        this.queueConfirmedFixReview(task, current, lost.head, check.original);
         return;
       }
       if (check.status === 'blocked') {
