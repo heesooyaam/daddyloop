@@ -158,8 +158,9 @@ for (const locale of ['en', 'ru'] as const) {
 
   test(`can switch ${locale} sessions in short phone and desktop windows`, async ({ page }) => {
     const t = translator(locale);
-    const first = locale === 'ru' ? 'Первый разговор' : 'First conversation';
-    const second = locale === 'ru' ? 'Второй разговор' : 'Second conversation';
+    const suffix = randomUUID();
+    const first = `${locale === 'ru' ? 'Первый разговор' : 'First conversation'} ${suffix}`;
+    const second = `${locale === 'ru' ? 'Второй разговор' : 'Second conversation'} ${suffix}`;
     await loginInLocale(page, locale);
     await createFixtureSession(page, second);
     const active = await createFixtureSession(page, first);
