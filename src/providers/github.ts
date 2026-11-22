@@ -69,6 +69,7 @@ export class GitHubProvider implements ReviewProvider {
       base: { sha: string; ref: string };
       state: string;
       merged: boolean;
+      merge_commit_sha?: string;
     }>('GET', path(ref));
     const [status, checks] = await Promise.all([
       this.http.request<{
@@ -106,6 +107,7 @@ export class GitHubProvider implements ReviewProvider {
     const pending = new Set(['pending', 'queued', 'in_progress', 'waiting', 'requested']);
     return {
       head: pr.head.sha,
+      mergeCommit: pr.merged ? pr.merge_commit_sha : undefined,
       base: pr.base.sha,
       start: pr.base.sha,
       title: pr.title,

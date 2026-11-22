@@ -1357,6 +1357,15 @@ function TaskReport({
               <ArrowUpRight size={15} />
             </a>
           )}
+          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+            <button
+              className="daddy-button outline"
+              disabled={busy}
+              onClick={() => void action('verify-merge')}
+            >
+              {t('Verify merge')}
+            </button>
+          )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button
               disabled={busy}
