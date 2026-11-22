@@ -164,14 +164,16 @@ export class DaddyClient {
   private refreshUsage() {
     if (this.usagePending || this.stopped) return;
     const epoch = this.epoch;
+    const previous = this.value.usage;
+    const current = () => !this.stopped && epoch === this.epoch && this.value.usage === previous;
     const pending = this.api<UsageView>('/usage', undefined, this.controller.signal)
       .then((usage) => {
-        if (!this.stopped && epoch === this.epoch) this.update({ usage });
+        if (current()) this.update({ usage });
       })
       .catch(() => {
-        if (!this.stopped && epoch === this.epoch && this.value.usage)
+        if (current() && previous)
           this.update({
-            usage: { agents: this.value.usage.agents.map((agent) => ({ ...agent, stale: true })) },
+            usage: { agents: previous.agents.map((agent) => ({ ...agent, stale: true })) },
           });
       })
       .finally(() => {

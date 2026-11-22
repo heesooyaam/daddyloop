@@ -70,7 +70,7 @@ test('offers eight readable themes, preserves drafts and remembers a browser cho
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'plum');
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('region', { name: 'Current usage' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Agent limits' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 test('follows system appearance and allows selecting a theme before login', async ({ page }) => {
@@ -88,85 +88,139 @@ test('follows system appearance and allows selecting a theme before login', asyn
   await page.emulateMedia({ colorScheme: 'light' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'glacier');
 });
-test('shows all quota windows without a click and marks last-known readings after disconnect', async ({
+test('summarizes limits on hover and focus and keeps last-known readings after disconnect', async ({
   page,
 }) => {
   await login(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  const strip = page.getByRole('region', { name: 'Current usage' });
-  await expect(strip.getByRole('progressbar')).toHaveCount(2);
-  await expect(strip.getByText('68% left', { exact: true })).toBeVisible();
-  await expect(strip.getByText('27% left', { exact: true })).toBeVisible();
-  await expect(strip.getByText('Resets available: 3')).toBeVisible();
+  const indicator = page.getByRole('button', { name: 'Agent limits' });
+  const tooltip = page.getByRole('tooltip');
+  const details = page.getByRole('region', { name: 'Agent limit details' });
+  await expect(indicator).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await indicator.hover();
+  await expect(tooltip).toHaveText('Codex · 7 days: 27% remaining');
+  await page.keyboard.press('Escape');
+  await expect(tooltip).toBeHidden();
+  await page.mouse.move(0, 0);
+
+  await indicator.focus();
+  await expect(tooltip).toBeVisible();
+  await indicator.press('Enter');
+  await expect(tooltip).toBeHidden();
+  await expect(details.getByRole('progressbar')).toHaveCount(2);
+  await expect(details.getByText('5 hours: 68% remaining', { exact: true })).toBeVisible();
+  await expect(details.getByText('Available resets: 3')).toBeVisible();
+  await page.keyboard.press('Tab');
+  const link = details.getByRole('link', { name: 'Open limits page' });
+  await expect(link).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(details).toBeHidden();
+  await expect(indicator).toBeFocused();
+  await expect(tooltip).toBeHidden();
+
+  await indicator.click();
+  await page.locator('.daddy-topbar h1').click();
+  await expect(details).toBeHidden();
   await page.route('**/api/usage', (route) => route.abort());
-  await expect(strip.getByText('Last known usage')).toBeVisible({ timeout: 10000 });
-  await expect(strip.getByText('27% left', { exact: true })).toBeVisible();
+  await indicator.hover();
+  await expect(tooltip).toContainText('Last known usage', { timeout: 10000 });
+  await indicator.click();
+  await expect(details.getByText('7 days: 27% remaining', { exact: true })).toBeVisible();
+  await link.click();
+  await expect(page).toHaveURL(/\/limits(?:#|$)/);
+  const main = page.getByRole('main');
+  await expect(main.getByRole('heading', { name: 'Agent limits' })).toBeFocused();
+  await expect(main.getByText('These readings are outdated.', { exact: false })).toBeVisible();
+  await expect(main.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
 });
-test('renders provider-specific buckets and credit-only plans while another adapter has no quota data', async ({
-  page,
-}) => {
-  await page.route('**/api/usage', async (route) => {
-    await route.fulfill({
-      json: {
-        agents: [
-          {
-            engine: 'codex',
-            name: 'Codex',
-            source: 'fixture',
-            available: true,
-            stale: false,
-            retrievedAt: new Date().toISOString(),
-            buckets: [
-              {
-                id: 'weekly',
-                name: 'Account weekly',
-                windows: [{ durationMinutes: 10080, remainingPercent: 88 }],
-              },
-              {
-                id: 'spark',
-                name: 'GPT-5.3-Codex-Spark',
-                windows: [
-                  { durationMinutes: 300, remainingPercent: 100 },
-                  { durationMinutes: 10080, remainingPercent: 71 },
-                ],
-              },
-              {
-                id: 'credits',
-                name: 'Workspace credits',
-                windows: [],
-                credits: { hasCredits: true, unlimited: false, balance: '42' },
-              },
-            ],
-            resets: { availableCount: 2, canUse: true, credits: [] },
-          },
-          {
-            engine: 'claude',
-            name: 'Claude',
-            source: 'events',
-            available: false,
-            stale: false,
-            buckets: [],
-            resets: { availableCount: null, canUse: false, credits: [] },
-          },
-        ],
-      },
+test.describe('limits on a touch screen', () => {
+  test.use({ hasTouch: true, viewport: { width: 320, height: 700 } });
+  test('shows exhausted periods, credit-only buckets and providers without quota data', async ({
+    page,
+  }) => {
+    await page.route('**/api/usage', async (route) => {
+      await route.fulfill({
+        json: {
+          agents: [
+            {
+              engine: 'codex',
+              name: 'Codex',
+              source: 'fixture',
+              available: true,
+              stale: false,
+              retrievedAt: new Date().toISOString(),
+              buckets: [
+                {
+                  id: 'weekly',
+                  name: 'Account weekly',
+                  windows: [{ durationMinutes: 10080, remainingPercent: 0 }],
+                },
+                {
+                  id: 'spark',
+                  name: 'GPT-5.3-Codex-Spark',
+                  windows: [
+                    { durationMinutes: 300, remainingPercent: 100 },
+                    { durationMinutes: 10080, remainingPercent: 71 },
+                  ],
+                },
+                {
+                  id: 'credits',
+                  name: 'Workspace credits',
+                  windows: [],
+                  credits: { hasCredits: true, unlimited: false, balance: '42' },
+                },
+              ],
+              resets: { availableCount: 2, canUse: true, credits: [] },
+            },
+            {
+              engine: 'claude',
+              name: 'Claude',
+              source: 'events',
+              available: false,
+              stale: false,
+              buckets: [],
+              resets: { availableCount: null, canUse: false, credits: [] },
+            },
+          ],
+        },
+      });
     });
+    await login(page);
+    const indicator = page.getByRole('button', { name: 'Agent limits' });
+    await indicator.tap();
+    const details = page.getByRole('region', { name: 'Agent limit details' });
+    await expect(details.getByRole('progressbar')).toHaveCount(3);
+    await expect(details.getByText('7 days: 0% remaining', { exact: true })).toBeVisible();
+    await expect(details.getByText('Credit balance: 42', { exact: true })).toBeVisible();
+    await expect(details.getByRole('heading', { name: 'Claude' })).toBeVisible();
+    await expect(details.getByText('This provider has no current quota readings.')).toBeVisible();
+    const panel = await details.boundingBox();
+    expect(panel!.x).toBeGreaterThanOrEqual(0);
+    expect(panel!.x + panel!.width).toBeLessThanOrEqual(320);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await details.getByRole('link', { name: 'Open limits page' }).tap();
+    await page.reload();
+    const main = page.getByRole('main');
+    await expect(main.getByText('7 days: 0% remaining', { exact: true })).toBeVisible();
+    await main.getByLabel('Agent usage').selectOption('claude');
+    await expect(main.getByText('This provider has no current quota readings.')).toBeVisible();
+    await expect(main.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
+    await main.getByRole('link', { name: 'Back to workspace' }).tap();
+    await expect(indicator).toHaveAttribute('aria-expanded', 'false');
   });
+});
+test('offers access to limits when the server has never returned readings', async ({ page }) => {
+  await page.route('**/api/usage', (route) => route.abort());
   await login(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  const strips = page.getByRole('region', { name: 'Current usage' });
-  await expect(strips).toHaveCount(2);
-  await expect(strips.nth(0).getByRole('progressbar')).toHaveCount(3);
-  await expect(
-    strips
-      .nth(0)
-      .getByRole('button', { name: 'About Codex credits' })
-      .getByText('42', { exact: true }),
-  ).toBeVisible();
-  await expect(strips.nth(1).getByText('No quota readings yet')).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await strips.nth(1).getByRole('button', { name: 'Usage details for Claude' }).click();
-  const dialog = page.getByRole('dialog');
-  await expect(dialog.getByLabel('Agent usage')).toHaveValue('claude');
-  await expect(dialog.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
+  const indicator = page.getByRole('button', { name: 'Agent limits' });
+  await indicator.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('No quota readings yet');
+  await indicator.click();
+  const details = page.getByRole('region', { name: 'Agent limit details' });
+  await expect(details.getByText('No quota readings yet')).toBeVisible();
+  await details.getByRole('link', { name: 'Open limits page' }).click();
+  await expect(page.getByRole('main').getByText('No quota readings yet')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Refresh limits' })).toBeEnabled();
 });

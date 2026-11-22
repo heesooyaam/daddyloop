@@ -1,13 +1,15 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type MouseEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
+  ArrowLeft,
   ArrowUpRight,
   Check,
   CircleCheck,
   Folder,
   FolderGit2,
+  Gauge,
   GitPullRequest,
   LoaderCircle,
   Menu,
@@ -39,8 +41,7 @@ import { PresetLibrary } from './preset-library.js';
 import type { SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
-import { UsageStrip, UsagePanel } from './usage.js';
-import { usageSummary } from '../client/usage.js';
+import { UsageIndicator, UsagePanel } from './usage.js';
 import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
 import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
 import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
@@ -57,15 +58,19 @@ function safeUrl(value: string) {
     return;
   }
 }
+const isLimitsPage = () => location.pathname === '/limits' || location.pathname === '/limits/';
+const sessionFromHash = () => (location.hash.startsWith('#session/') ? location.hash.slice(9) : '');
+
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
-  const [usageEngine, setUsageEngine] = useState<string>();
+  const [limitsPage, setLimitsPage] = useState(isLimitsPage);
+  const chatHeading = useRef<HTMLHeadingElement>(null);
+  const limitsHeading = useRef<HTMLHeadingElement>(null);
+  const wasOnLimits = useRef(false);
   const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [returnToNew, setReturnToNew] = useState(false);
-  const [model] = useState(
-    () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
-  );
+  const [model] = useState(() => new DaddyClient(api, sessionFromHash()));
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, setModal] = useState<
@@ -74,7 +79,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'settings'
       | 'updates'
       | 'notifications'
-      | 'limits'
       | 'presets'
       | 'delete'
       | 'queue-task'
@@ -92,20 +96,49 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   useEffect(() => {
     if (state.status?.preferences) adopt(state.status.preferences);
   }, [state.status?.preferences?.version]);
+  const sessionHash = state.selected ? `#session/${state.selected}` : '';
+  const chatHref = '/' + sessionHash;
+  const limitsHref = '/limits' + sessionHash;
   useEffect(() => {
-    history.replaceState(
-      null,
-      '',
-      state.selected ? `#session/${state.selected}` : location.pathname + location.search,
-    );
-  }, [state.selected]);
+    const syncPage = () => {
+      setLimitsPage(isLimitsPage());
+      setMenu(false);
+      const id = sessionFromHash();
+      const { selected, sessions } = model.snapshot();
+      if (id !== selected && sessions.some((session) => session.id === id)) void model.select(id);
+    };
+    window.addEventListener('popstate', syncPage);
+    return () => window.removeEventListener('popstate', syncPage);
+  }, [model]);
+  useEffect(() => {
+    if (location.hash !== sessionHash)
+      history.replaceState(history.state, '', location.pathname + location.search + sessionHash);
+  }, [sessionHash, limitsPage]);
+  useEffect(() => {
+    if (limitsPage) limitsHeading.current?.focus();
+    else if (wasOnLimits.current) chatHeading.current?.focus();
+    wasOnLimits.current = limitsPage;
+  }, [limitsPage]);
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [board?.messages.length, state.selected]);
   const choose = (id: string) => {
+    if (limitsPage) {
+      history.pushState(null, '', `/#session/${id}`);
+      setLimitsPage(false);
+    }
     void model.select(id);
     setMenu(false);
     setPane('chat');
+  };
+  const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.button !== 0)
+      return;
+    event.preventDefault();
+    if (event.currentTarget.href !== location.href)
+      history.pushState(null, '', event.currentTarget.href);
+    setLimitsPage(isLimitsPage());
+    setMenu(false);
   };
   const setLanguage = async (value: 'en' | 'ru') => {
     local(value);
@@ -199,11 +232,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <RefreshCw size={17} />
             {t('CLI updates')}
           </button>
-          <button onClick={() => setModal('limits')}>
-            <RefreshCw size={17} />
+          <a href={limitsHref} onClick={navigate} aria-current={limitsPage ? 'page' : undefined}>
+            <Gauge size={17} aria-hidden="true" />
             {t('Limits')}
-            {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
-          </button>
+          </a>
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -228,7 +260,26 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main">
+      {limitsPage && (
+        <main className="daddy-main daddy-limits-page">
+          <div className="daddy-limits-content">
+            <a className="daddy-limits-back" href={chatHref} onClick={navigate}>
+              <ArrowLeft size={16} aria-hidden="true" />
+              {t('Back to workspace')}
+            </a>
+            <h1 ref={limitsHeading} tabIndex={-1}>
+              {t('Agent limits')}
+            </h1>
+            <UsagePanel
+              api={api}
+              overview={state.usage}
+              connected={state.connected}
+              onUpdate={model.setUsage}
+            />
+          </div>
+        </main>
+      )}
+      <main className="daddy-main" hidden={limitsPage}>
         <header className="daddy-topbar">
           <button
             className="daddy-icon mobile-menu"
@@ -239,7 +290,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
+            <h1 ref={chatHeading} tabIndex={-1}>
+              {board?.group.title ?? t('Your dashboard')}
+            </h1>
           </div>
           <ThemeButton />
           {board && (
@@ -274,15 +327,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               )}
             </div>
           )}
+          {!limitsPage && (
+            <UsageIndicator
+              usage={state.usage}
+              connected={state.connected}
+              href={limitsHref}
+              onNavigate={navigate}
+            />
+          )}
         </header>
-        <UsageStrip
-          usage={state.usage}
-          connected={state.connected}
-          onDetails={(engine) => {
-            setUsageEngine(engine);
-            setModal('limits');
-          }}
-        />
         {state.error && (
           <div className="daddy-error" role="alert">
             {t(state.error)}
@@ -744,11 +797,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       {modal === 'updates' && (
         <Dialog title={t('CLI updates')} onClose={() => setModal(null)}>
           <UpdatesPanel api={api} />
-        </Dialog>
-      )}
-      {modal === 'limits' && (
-        <Dialog title={t('Limits')} onClose={() => setModal(null)}>
-          <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
       {modal === 'notifications' && (

@@ -136,7 +136,7 @@ Restored work starts paused. Authenticate the accounts, check the workspaces, th
 
 ## Make yourself comfortable
 
-Eight themes: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest and Plum. Four dark choices. Remaining quotas sit above the conversation. English and Russian throughout.
+Eight themes: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest and Plum. Four dark choices. The gauge in the workspace header shows remaining quotas. English and Russian throughout.
 
 ![The dark Graphite theme](docs/media/en/daddy-dark.png)
 

@@ -136,7 +136,7 @@ daddy up
 
 ## Обустройся
 
-Восемь тем: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest и Plum. Четыре тёмные. Остаток лимитов сразу виден над разговором. Язык — русский или английский.
+Восемь тем: Mint, Glacier, Pearl, Lilac, Graphite, Midnight, Forest и Plum. Четыре тёмные. Остаток квот можно посмотреть по значку в верхней панели. Язык — русский или английский.
 
 ![Тёмная тема Graphite](docs/media/ru/daddy-dark.png)
 

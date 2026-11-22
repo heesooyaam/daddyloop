@@ -184,25 +184,39 @@ test('shows quota remaining on a phone and requires confirmation before spending
   page,
 }) => {
   await login(page);
+  await create(page, 'Limits navigation session', Date.now());
+  await page.getByLabel('Message daddy').fill('Keep this draft while checking limits');
+  const sessionUrl = page.url();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
-  await page.getByRole('button', { name: /Limits/ }).click();
-  const dialog = page.getByRole('dialog');
-  await expect(dialog.getByText('7 days: 27% remaining')).toBeVisible();
-  await expect(dialog.getByText('Available resets: 3')).toBeVisible();
+  await page.getByRole('link', { name: 'Limits', exact: true }).click();
+  await expect(page).toHaveURL(/\/limits#session\//);
+  const main = page.getByRole('main');
+  const refreshed = page.waitForResponse('**/api/usage?refresh=1');
+  await main.getByRole('button', { name: 'Refresh limits' }).click();
+  expect((await refreshed).ok()).toBe(true);
+  await expect(main.getByText('7 days: 27% remaining')).toBeVisible();
+  await expect(main.getByText('Available resets: 3')).toBeVisible();
   const writes: string[] = [];
   page.on('request', (request) => {
     if (/\/api\/usage\/reset\/[a-f0-9-]{36}$/.test(request.url())) writes.push(request.url());
   });
-  await dialog.getByRole('button', { name: 'Use a reset', exact: true }).click();
-  await expect(dialog.getByRole('button', { name: 'Confirm: use one reset' })).toBeVisible();
+  await main.getByRole('button', { name: 'Use a reset', exact: true }).click();
+  await expect(main.getByRole('button', { name: 'Confirm: use one reset' })).toBeVisible();
   expect(writes).toHaveLength(0);
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await main.getByRole('button', { name: 'Cancel', exact: true }).click();
   expect(writes).toHaveLength(0);
-  await dialog.getByRole('button', { name: 'Use a reset', exact: true }).click();
-  await dialog.getByRole('button', { name: 'Confirm: use one reset' }).click();
-  await expect(dialog.getByText('Available resets: 2')).toBeVisible();
-  await expect(dialog.getByText('7 days: 100% remaining')).toBeVisible();
+  await main.getByRole('button', { name: 'Use a reset', exact: true }).click();
+  await main.getByRole('button', { name: 'Confirm: use one reset' }).click();
+  await expect(main.getByText('Available resets: 2')).toBeVisible();
+  await expect(main.getByText('7 days: 100% remaining')).toBeVisible();
   expect(writes).toHaveLength(1);
+  await page.goBack();
+  await expect(page).toHaveURL(sessionUrl);
+  await expect(page.getByLabel('Message daddy')).toHaveValue(
+    'Keep this draft while checking limits',
+  );
+  await page.goForward();
+  await expect(main.getByText('Available resets: 2')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
