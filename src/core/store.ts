@@ -415,7 +415,7 @@ export class Store {
       .all(id)
       .map((row) => JSON.parse(row.data as string));
   }
-  decision(task: Task, data: Pick<Decision, 'commentId' | 'outcome' | 'reason'>) {
+  decision(task: Task, data: Pick<Decision, 'commentId' | 'outcome' | 'reason'>, runId?: string) {
     const item: Decision = {
       ...data,
       id: randomUUID(),
@@ -424,12 +424,13 @@ export class Store {
       revision: task.revision,
       targetBranch: task.review?.targetBranch,
       generation: task.generation,
+      runId,
       at: now(),
     };
     this.db
       .prepare('INSERT INTO decisions VALUES(?,?,?)')
       .run(item.id, task.id, JSON.stringify(item));
-    this.event(task.id, 'decision.recorded', item);
+    this.event(task.id, 'decision.recorded', item, runId);
     return item;
   }
   decisions(id: string): Decision[] {

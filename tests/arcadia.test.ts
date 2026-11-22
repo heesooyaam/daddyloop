@@ -305,7 +305,9 @@ it.each([
       review: { targetBranch: bridge.targetBranch, revision: { head: bridge.head } },
     });
     const latestFinding = status === 'draft' || status === 'orphan draft' ? 'pr:102' : 'pr:104';
-    expect(next.feedback?.comments.map(({ id }) => id)).toEqual([latestFinding]);
+    expect(next.feedback?.comments.map(({ id }) => id)).toEqual(
+      status === 'published' ? ['pr:102', latestFinding] : [latestFinding],
+    );
     expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
   } finally {
     store.close();

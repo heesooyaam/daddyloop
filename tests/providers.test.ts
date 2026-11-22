@@ -33,120 +33,139 @@ function transport(
   return spy as typeof spy & Fetch;
 }
 describe('GitHub draft review contract', () => {
-  it.each(['regular', 'lost response', 'legacy intent'] as const)(
-    'preserves the old GitHub draft when retrying (%s)',
-    async (scenario) => {
-      const store = new Store(':memory:');
-      const pull = '/repos/acme/service/pulls/12';
-      let branch = 'main';
-      let attempts = 0;
-      let draft:
-        | {
-            id: number;
-            node_id: string;
-            body: unknown;
-            commit_id: string;
-            user: { id: number };
-            state: string;
-          }
-        | undefined;
-      const http = transport((path, method, body) => {
-        if (path === pull)
-          return {
-            state: 'open',
-            title: 'Changes',
-            head: {
-              sha: revision.head,
-              ref: 'fix',
-              repo: { clone_url: 'https://github.com/acme/service.git' },
-            },
-            base: { sha: revision.base, ref: branch },
-          };
-        if (path.includes('/check-runs?')) return { check_runs: [] };
-        if (path.includes('/status?')) return { statuses: [] };
-        if (path === '/user') return { id: 7 };
-        if (path.startsWith(`${pull}/reviews?`)) return draft ? [draft] : [];
-        if (path.includes('/comments?')) return [];
-        if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
-          return draft ?? new Response('{}', { status: 404 });
-        if (method === 'POST' && path === `${pull}/reviews`) {
-          attempts++;
-          if (draft) return new Response('{}', { status: 422 });
-          draft = {
-            id: attempts,
-            node_id: `PRR_${attempts}`,
-            body: body.body,
-            commit_id: revision.head,
-            user: { id: 7 },
-            state: 'PENDING',
-          };
-          if (attempts === 1 && scenario !== 'regular') throw new Error('Lost create response');
-          return draft;
+  it.each([
+    'regular',
+    'lost response',
+    'lost response and new base',
+    'lost response before reconcile',
+    'legacy intent',
+  ] as const)('preserves the old GitHub draft when retrying (%s)', async (scenario) => {
+    const store = new Store(':memory:');
+    const pull = '/repos/acme/service/pulls/12';
+    let branch = 'main';
+    let base = revision.base;
+    let attempts = 0;
+    let draft:
+      | {
+          id: number;
+          node_id: string;
+          body: unknown;
+          commit_id: string;
+          user: { id: number };
+          state: string;
         }
-        throw new Error(`Unexpected fixture request ${method} ${path}`);
-      });
-      const provider = new GitHubProvider('github.com', 'fake', http);
-      const engine = new Engine(store, () => provider);
-      try {
-        const task = await engine.create({
-          ref,
-          repoPath: '/tmp',
-          requirements: 'Check the target branch',
-        });
-        if (scenario !== 'regular') {
-          await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
-          if (scenario === 'legacy intent') {
-            store.db
-              .prepare(
-                "UPDATE events SET data=json_remove(data, '$.targetBranch') WHERE type='operation.started'",
-              )
-              .run();
-          }
-          branch = scenario === 'lost response' ? 'release' : 'main';
-          const restarted = new Engine(store, () => provider);
-          const held = await restarted.review(task.id, true);
-          expect(held.state).toBe('needs_input');
-          expect(held.review?.id).toBe('1');
-          expect(held.review?.targetBranch).toBe(scenario === 'lost response' ? 'main' : undefined);
-          expect(held.reason).toContain(
-            scenario === 'lost response' ? 'release' : 'no recorded target branch',
-          );
-          expect(draft?.state).toBe('PENDING');
-          expect(store.busy(task.id)).toBe(false);
-          draft = undefined;
-          const retried = await restarted.review(task.id, true);
-          expect(retried).toMatchObject({
-            state: 'reviewing',
-            review: { targetBranch: branch, id: '2' },
-          });
-          return;
-        }
-        const original = await engine.review(task.id);
-        branch = 'release';
-        await engine.reconcile(task.id);
-        const operations = store.db.prepare('SELECT id, status FROM operations').all();
-        const blocked = await engine.review(task.id, true);
-        expect(blocked).toMatchObject({
-          state: 'needs_input',
-          generation: original.generation,
-          review: original.review,
-        });
-        for (const value of ['main', 'release', 'GitHub', 'draft'])
-          expect(blocked.reason).toContain(value);
-        expect(attempts).toBe(1);
-        expect(store.db.prepare('SELECT id, status FROM operations').all()).toEqual(operations);
-        expect(await provider.getReview(ref, original.review!)).toMatchObject({ status: 'draft' });
-
-        draft = undefined;
-        const next = await engine.review(task.id, true);
-        expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
-        expect(next.review?.id).not.toBe(original.review?.id);
-        expect(attempts).toBe(2);
-      } finally {
-        store.close();
+      | undefined;
+    const http = transport((path, method, body) => {
+      if (path === pull)
+        return {
+          state: 'open',
+          title: 'Changes',
+          head: {
+            sha: revision.head,
+            ref: 'fix',
+            repo: { clone_url: 'https://github.com/acme/service.git' },
+          },
+          base: { sha: base, ref: branch },
+        };
+      if (path.includes('/check-runs?')) return { check_runs: [] };
+      if (path.includes('/status?')) return { statuses: [] };
+      if (path === '/user') return { id: 7 };
+      if (path.startsWith(`${pull}/reviews?`)) return draft ? [draft] : [];
+      if (path.includes('/comments?')) return [];
+      if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
+        return draft ?? new Response('{}', { status: 404 });
+      if (method === 'POST' && path === `${pull}/reviews`) {
+        attempts++;
+        if (draft) return new Response('{}', { status: 422 });
+        draft = {
+          id: attempts,
+          node_id: `PRR_${attempts}`,
+          body: body.body,
+          commit_id: revision.head,
+          user: { id: 7 },
+          state: 'PENDING',
+        };
+        if (attempts === 1 && scenario !== 'regular') throw new Error('Lost create response');
+        return draft;
       }
-    },
-  );
+      throw new Error(`Unexpected fixture request ${method} ${path}`);
+    });
+    const provider = new GitHubProvider('github.com', 'fake', http);
+    const engine = new Engine(store, () => provider);
+    try {
+      const task = await engine.create({
+        ref,
+        repoPath: '/tmp',
+        requirements: 'Check the target branch',
+      });
+      if (scenario !== 'regular') {
+        await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+        if (scenario === 'legacy intent') {
+          store.db
+            .prepare(
+              "UPDATE events SET data=json_remove(data, '$.targetBranch') WHERE type='operation.started'",
+            )
+            .run();
+        }
+        branch = scenario === 'legacy intent' ? 'main' : 'release';
+        const movedBase =
+          scenario === 'lost response and new base' ||
+          scenario === 'lost response before reconcile';
+        if (movedBase) base = 'e'.repeat(40);
+        if (scenario === 'lost response before reconcile')
+          expect(await engine.reconcile(task.id)).toMatchObject({ revision: { base } });
+        const restarted = new Engine(store, () => provider);
+        const held = await restarted.review(task.id, true);
+        expect(held.state).toBe('needs_input');
+        expect(held.review?.id).toBe('1');
+        expect(held.review?.targetBranch).toBe(scenario === 'legacy intent' ? undefined : 'main');
+        expect(held.review?.revision.base).toBe(revision.base);
+        expect(held.reason).toContain(
+          scenario === 'legacy intent' ? 'no recorded target branch' : 'release',
+        );
+        expect(draft?.state).toBe('PENDING');
+        expect(store.busy(task.id)).toBe(false);
+        if (movedBase) {
+          expect(held.reason).toContain(base);
+          expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'needs_input',
+            review: held.review,
+          });
+          expect(attempts).toBe(1);
+        }
+        draft = undefined;
+        const retried = await restarted.review(task.id, true);
+        expect(retried).toMatchObject({
+          state: 'reviewing',
+          review: { targetBranch: branch, id: '2', revision: { base } },
+        });
+        return;
+      }
+      const original = await engine.review(task.id);
+      branch = 'release';
+      await engine.reconcile(task.id);
+      const operations = store.db.prepare('SELECT id, status FROM operations').all();
+      const blocked = await engine.review(task.id, true);
+      expect(blocked).toMatchObject({
+        state: 'needs_input',
+        generation: original.generation,
+        review: original.review,
+      });
+      for (const value of ['main', 'release', 'GitHub', 'draft'])
+        expect(blocked.reason).toContain(value);
+      expect(attempts).toBe(1);
+      expect(store.db.prepare('SELECT id, status FROM operations').all()).toEqual(operations);
+      expect(await provider.getReview(ref, original.review!)).toMatchObject({ status: 'draft' });
+
+      draft = undefined;
+      const next = await engine.review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+      expect(next.review?.id).not.toBe(original.review?.id);
+      expect(attempts).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
 
   it('does not adopt another account’s review based only on a matching marker', async () => {
     const http = transport((path) =>
@@ -392,9 +411,15 @@ describe('GitLab draft notes contract', () => {
         state: 'reviewing',
         review: { targetBranch: branch, revision: { head } },
       });
-      expect(next.feedback?.comments.map(({ id }) => id)).toEqual([
-        status === 'draft' ? '103' : '107',
-      ]);
+      const expectedFindings = {
+        draft: ['103'],
+        'delete summary': ['107'],
+      };
+      const expected =
+        status === 'draft' || status === 'delete summary'
+          ? expectedFindings[status]
+          : ['103', '107'];
+      expect(next.feedback?.comments.map(({ id }) => id)).toEqual(expected);
       expect(creates).toBe(2);
       const reviewer = store.claim()!;
       await engine.completeJob(reviewer, {

@@ -46,25 +46,79 @@ describe('publication gates and revision safety', () => {
       }
     },
   );
-  it('keeps prematurely published findings in the next review’s verification obligations', async () => {
+  it.each([false, true])(
+    'keeps earlier and prematurely published findings (saved snapshot: %s)',
+    async (savedSnapshot) => {
+      const f = await fixture();
+      await f.engine.review(f.task.id);
+      const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+        key: 'R1',
+        body: 'Needs verification',
+      })) as { id: string };
+      const first = f.store.claim()!,
+        task = f.store.getTask(f.task.id);
+      task.feedback = {
+        status: 'published',
+        body: '',
+        revision: task.revision!,
+        url: task.ref.url,
+        comments: [{ id: 'earlier', body: 'Fix the earlier finding', url: task.ref.url }],
+      };
+      await f.provider.publish(prRef(task), task.review!);
+      if (savedSnapshot) task.snapshot = await f.provider.getReview(prRef(task), task.review!);
+      f.store.saveTask(task);
+      await f.engine.completeJob(first, f.result());
+      first.status = 'completed';
+      f.store.saveJob(first);
+      expect(f.store.getTask(task.id).state).toBe('needs_input');
+      await f.engine.review(task.id, true);
+      expect(f.store.getTask(task.id).feedback?.comments.map(({ id }) => id)).toEqual([
+        'earlier',
+        finding.id,
+      ]);
+      await f.run({ verifiedCommentIds: [finding.id] });
+      expect(f.store.getTask(task.id).reason).toMatch(/not verified/);
+      f.store.close();
+    },
+  );
+  it('allows a later review of the same draft to verify a previously disputed finding', async () => {
     const f = await fixture();
-    await f.engine.review(f.task.id);
-    const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
-      key: 'R1',
-      body: 'Needs verification',
-    })) as { id: string };
-    const first = f.store.claim()!,
-      task = f.store.getTask(f.task.id);
-    await f.provider.publish(prRef(task), task.review!);
-    await f.engine.completeJob(first, f.result());
-    first.status = 'completed';
-    f.store.saveJob(first);
-    expect(f.store.getTask(task.id).state).toBe('needs_input');
-    await f.engine.review(task.id, true);
-    expect(f.store.getTask(task.id).feedback?.comments[0].id).toBe(finding.id);
-    await f.run();
-    expect(f.store.getTask(task.id).reason).toMatch(/not verified/);
-    f.store.close();
+    try {
+      const task = await f.engine.review(f.task.id);
+      task.feedback = {
+        status: 'published',
+        body: '',
+        revision: task.revision!,
+        url: task.ref.url,
+        comments: [{ id: '101', body: 'Verify this fix', url: task.ref.url }],
+      };
+      f.store.saveTask(task);
+      const first = f.store.claim()!;
+      await f.engine.broker.call(first, 'record_decision', {
+        commentId: '101',
+        outcome: 'disputed',
+        reason: 'Fix was incomplete',
+      });
+      await f.engine.completeJob(first, f.result({ verifiedCommentIds: ['101'] }));
+      f.store.saveJob({ ...first, status: 'completed' });
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('disputes'),
+      });
+      expect(await f.engine.review(task.id, true)).toMatchObject({
+        state: 'reviewing',
+        review: task.review,
+        generation: task.generation,
+      });
+      const second = await f.run({ verifiedCommentIds: ['101'] });
+      expect(f.store.getTask(task.id).state).toBe('awaiting_publication');
+      expect(f.store.decisions(task.id)).toMatchObject([
+        { commentId: '101', outcome: 'disputed', runId: first.id },
+        { commentId: '101', outcome: 'verified', runId: second.id },
+      ]);
+    } finally {
+      f.store.close();
+    }
   });
   it('can restore an earlier summary in a later tool call without an idempotency-cache collision', async () => {
     const f = await fixture();

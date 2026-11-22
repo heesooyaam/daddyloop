@@ -310,6 +310,7 @@ export interface Decision {
   revision?: Revision;
   targetBranch?: string;
   generation?: number;
+  runId?: string;
   at: string;
 }
 export interface Job {

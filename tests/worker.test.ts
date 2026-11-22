@@ -873,6 +873,7 @@ it.each([
   ['release', 'published'],
   ['main', 'rolled back'],
   ['main', 'changed base'],
+  ['main', 'lost response then published'],
 ] as const)(
   'binds an explicit legacy fix retry to the observed PR (%s, %s)',
   async (branch, status) => {
@@ -936,6 +937,22 @@ it.each([
         await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
         expect(create).not.toHaveBeenCalled();
         return;
+      }
+      if (status === 'lost response then published') {
+        const create = f.provider.createReview.bind(f.provider);
+        vi.spyOn(f.provider, 'createReview').mockImplementationOnce(async (...args) => {
+          const saved = await create(...args);
+          await f.provider.publish(ref, saved);
+          throw new Error('Lost create response');
+        });
+        await expect(f.engine.review(task.id, true)).rejects.toThrow('Lost create response');
+        expect(await restarted.review(task.id, true)).toMatchObject({
+          state: 'needs_input',
+          reason: expect.stringContaining('already published'),
+        });
+        expect(
+          f.store.events(task.id).some(({ type }) => type === 'author.fix_confirmed_for_review'),
+        ).toBe(true);
       }
       expect(await f.engine.review(task.id, true)).toMatchObject({
         state: 'reviewing',
@@ -1904,12 +1921,7 @@ it.each([
       task.ref.provider = provider;
       const ref = prRef(task);
       const stale = await f.provider.createReview(ref, task.revision!, 'stale-draft-on-H1');
-      const finding = await f.provider.createComment(
-        ref,
-        stale,
-        'A second finding',
-        `${stale.marker}:comment:R2`,
-      );
+      await f.provider.createComment(ref, stale, 'A second finding', `${stale.marker}:comment:R2`);
       task.review = stale;
       task.state = 'needs_input';
       if (path === 'retry') {
@@ -1943,7 +1955,11 @@ it.each([
           ...(await f.provider.getReview(ref, stale)),
           status: 'missing',
         });
-      const expected = status === 'published' ? await f.provider.getReview(ref, stale) : prior;
+      const snapshot = await f.provider.getReview(ref, stale);
+      const expected =
+        status === 'published'
+          ? { ...snapshot, comments: [...prior.comments, ...snapshot.comments] }
+          : prior;
       const queued = await f.engine.action(task.id, 'resume');
       expect(queued.state).toBe('queued');
       if (path === 'resume') expect(queued.feedback).toEqual(expected);
@@ -1953,9 +1969,6 @@ it.each([
         revision: { head: saved },
         feedback: expected,
       });
-      expect(next.feedback?.comments.map(({ id }) => id)).toEqual([
-        status === 'published' ? finding.id : prior.comments[0].id,
-      ]);
       await f.run({ verifiedCommentIds: [prior.comments[0].id] });
       expect(f.store.getTask(task.id).state).toBe(
         status === 'published' ? 'needs_input' : 'awaiting_publication',

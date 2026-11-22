@@ -98,11 +98,7 @@ function hasSharedDraftSlot(task: Task): boolean {
 
 function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
   if (snapshot.status === 'published') {
-    if (
-      task.feedback &&
-      !task.reviewFinished &&
-      (!snapshot.comments.length || task.snapshot?.status === 'published')
-    ) {
+    if (task.feedback && !task.reviewFinished) {
       const comments = new Map(task.feedback.comments.map((comment) => [comment.id, comment]));
       for (const comment of snapshot.comments) comments.set(comment.id, comment);
       task.feedback = { ...snapshot, comments: [...comments.values()] };
@@ -364,18 +360,24 @@ export class Engine {
       const replacingReview = changed || (retry && !!task.review);
       const attempt =
         hasSharedDraftSlot(task) && (!task.review || replacingReview)
-          ? await this.broker.findAttemptedReview(
-              task,
-              pr,
-              replacingReview ? task.generation + 1 : task.generation,
-            )
+          ? await this.broker.findAttemptedReview(task, pr)
           : undefined;
       const attempted = attempt?.review;
       const draftReason = task.ref.provider === 'gitlab' ? gitLabDraftReason : arcanumDraftReason;
-      if (attempt && attempt.targetBranch !== pr.targetBranch) {
-        const reason = attempt.targetBranch
-          ? `The earlier review was requested for ${attempt.targetBranch}. The PR now targets ${pr.targetBranch}. Inspect the native review before retrying.`
-          : `The earlier review creation has no recorded target branch. Inspect the native review before retrying on ${pr.targetBranch}.`;
+      if (
+        attempt &&
+        (attempt.targetBranch !== pr.targetBranch ||
+          !sameRevision(attempt.revision, pr) ||
+          attempt.generation !== task.generation + Number(replacingReview))
+      ) {
+        let targetReason =
+          'The earlier review creation belongs to a different revision or generation. Inspect the native review before retrying.';
+        if (!attempt.targetBranch)
+          targetReason = `The earlier review creation has no recorded target branch. Inspect the native review before retrying on ${pr.targetBranch}.`;
+        else if (attempt.targetBranch !== pr.targetBranch)
+          targetReason = `The earlier review was requested for ${attempt.targetBranch}. The PR now targets ${pr.targetBranch}. Inspect the native review before retrying.`;
+        const baseChange = savedFixBaseChange(attempt.revision, pr);
+        const reason = baseChange ? `${targetReason} ${baseChange}` : targetReason;
         if (attempted) {
           const previous = staleDraft ?? task.review;
           const blocked = previous && (await this.inspectPreviousDraft(task, previous, attempted));
@@ -384,9 +386,10 @@ export class Engine {
             return task;
           }
           task.review = attempted;
+          task.revision = attempt.revision;
           task.snapshot = undefined;
           task.reviewFinished = false;
-          task.generation = attempt.generation;
+          task.generation = Math.max(task.generation, attempt.generation);
           task.round++;
         }
         this.state(task, 'needs_input', reason);
@@ -414,10 +417,10 @@ export class Engine {
           return task;
         }
       }
-      if (targetIssue && task.review && (hasSharedDraftSlot(task) || retryWithoutTarget)) {
+      if (changed && task.review && (hasSharedDraftSlot(task) || retryWithoutTarget)) {
         const reason = await this.inspectPreviousDraft(task, task.review, attempted);
         if (reason) {
-          this.state(task, 'needs_input', `${targetIssue} ${reason}`);
+          this.state(task, 'needs_input', targetIssue ? `${targetIssue} ${reason}` : reason);
           return task;
         }
       }
@@ -445,21 +448,6 @@ export class Engine {
       task.pr = pr;
       task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
-      if (attempted && recoveredSnapshot?.status === 'published') {
-        task.snapshot = recoveredSnapshot;
-        task.reviewFinished = false;
-        retainPublishedFeedback(task, recoveredSnapshot);
-        if (pending) {
-          task.pendingAuthorFix = undefined;
-          task.resumeState = undefined;
-        }
-        this.state(
-          task,
-          'needs_input',
-          'The recovered review was already published. Use Retry review to verify outstanding findings in a new draft.',
-        );
-        return task;
-      }
       task.reviewFinished = false;
       if (pending) {
         task.pendingAuthorFix = undefined;
@@ -473,6 +461,16 @@ export class Engine {
             branch: pr.branch,
             targetBranch: pr.targetBranch,
           });
+        if (attempted && recoveredSnapshot?.status === 'published') {
+          task.snapshot = recoveredSnapshot;
+          retainPublishedFeedback(task, recoveredSnapshot);
+          this.state(
+            task,
+            'needs_input',
+            'The recovered review was already published. Use Retry review to verify outstanding findings in a new draft.',
+          );
+          return;
+        }
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
@@ -1530,11 +1528,16 @@ export class Engine {
                 sameRevision(d.revision, task.revision) &&
                 d.targetBranch === task.review?.targetBranch,
             )
-            .map((d) => [d.commentId, d.outcome]),
+            .map((d) => [d.commentId, d]),
         );
+        const verified = new Set(result.verifiedCommentIds ?? []);
         if (
           result.disputedCommentIds?.length ||
-          [...currentDecisions.values()].includes('disputed')
+          [...currentDecisions.values()].some(
+            (d) =>
+              d.outcome === 'disputed' &&
+              (d.runId === job.id || !d.commentId || !verified.has(d.commentId)),
+          )
         ) {
           task.reviewFinished = false;
           this.state(
@@ -1544,13 +1547,12 @@ export class Engine {
           );
           return;
         }
-        const verified = new Set(result.verifiedCommentIds ?? []);
         const exempt = new Set(
           decisions
             .filter(
               (d) =>
                 ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
-                currentDecisions.get(d.commentId) === 'verified',
+                currentDecisions.get(d.commentId)?.outcome === 'verified',
             )
             .map((d) => d.commentId),
         );
@@ -1576,11 +1578,15 @@ export class Engine {
         }
         task.reviewFinished = true;
         for (const id of verified)
-          this.store.decision(task, {
-            commentId: id,
-            outcome: 'verified',
-            reason: `Verified by the independent reviewer in round ${task.round}`,
-          });
+          this.store.decision(
+            task,
+            {
+              commentId: id,
+              outcome: 'verified',
+              reason: `Verified by the independent reviewer in round ${task.round}`,
+            },
+            job.id,
+          );
         this.state(
           task,
           'awaiting_publication',

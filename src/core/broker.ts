@@ -107,26 +107,43 @@ export class Broker {
     }
     return existing;
   }
-  private reviewIntent(marker: string) {
-    const branch = this.store.db
+  private reviewIntent(taskId: string, marker: string) {
+    const intent = this.store.db
       .prepare(
-        `SELECT json_extract(data, '$.targetBranch') AS branch FROM events
-       WHERE type='operation.started' AND json_extract(data, '$.operationId')=? ORDER BY id DESC LIMIT 1`,
+        `SELECT json_extract(data, '$.targetBranch') AS branch,
+                json_extract(data, '$.revision') AS revision FROM events
+       WHERE task_id=? AND type='operation.started' AND json_extract(data, '$.operationId')=? ORDER BY id DESC LIMIT 1`,
       )
-      .get(marker)?.branch;
-    return typeof branch === 'string' ? branch : undefined;
-  }
-  async findAttemptedReview(task: Task, pr: PullRequest, generation: number) {
-    const marker = this.reviewMarker(task, generation, task.round + 1);
-    const revision = revisionOf(pr);
-    if (!this.outbox.hasOperation(marker, revision)) return;
-    const targetBranch = this.reviewIntent(marker);
-    const existing = await this.findCreatedReview(prRef(task), marker, revision, pr.targetBranch);
+      .get(taskId, marker);
     return {
-      generation,
-      targetBranch,
-      review: existing && { ...existing, revision, targetBranch },
+      targetBranch: typeof intent?.branch === 'string' ? intent.branch : undefined,
+      revision:
+        typeof intent?.revision === 'string'
+          ? (JSON.parse(intent.revision) as Revision)
+          : undefined,
     };
+  }
+  async findAttemptedReview(task: Task, pr: PullRequest) {
+    const prefix = `daddyloop:${task.id}:`;
+    const suffix = `:${task.round + 1}`;
+    const operations = this.store.db
+      .prepare('SELECT id FROM operations WHERE task_id=? AND id GLOB ? ORDER BY rowid')
+      .all(task.id, `${prefix}[0-9]*${suffix}`);
+    for (const row of operations) {
+      const marker = String(row.id);
+      const generation = Number(marker.slice(prefix.length, -suffix.length));
+      if (!Number.isSafeInteger(generation)) continue;
+      const { targetBranch, revision: recorded } = this.reviewIntent(task.id, marker);
+      const revision = recorded ?? task.revision ?? revisionOf(pr);
+      if (!this.outbox.hasOperation(marker, revision)) continue;
+      const existing = await this.findCreatedReview(prRef(task), marker, revision, targetBranch);
+      return {
+        generation,
+        targetBranch,
+        revision,
+        review: existing && { ...existing, revision, targetBranch },
+      };
+    }
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
@@ -135,7 +152,10 @@ export class Broker {
     const provider = this.provider(ref),
       revision = task.revision!,
       targetBranch = task.pr?.targetBranch;
-    if (this.outbox.hasOperation(marker, revision) && this.reviewIntent(marker) !== targetBranch)
+    if (
+      this.outbox.hasOperation(marker, revision) &&
+      this.reviewIntent(task.id, marker).targetBranch !== targetBranch
+    )
       throw new AppError(
         'review_target_unverified',
         'The earlier review creation has a different or unknown target branch. Inspect the native review before retrying.',
@@ -205,7 +225,7 @@ export class Broker {
           'The author may accept or dispute feedback but cannot resolve it',
           403,
         );
-      return this.store.decision(task, data);
+      return this.store.decision(task, data, job.id);
     }
     assertDraft(snapshot);
     const hash = createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 24);
