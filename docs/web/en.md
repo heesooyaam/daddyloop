@@ -96,7 +96,7 @@ The application itself stays on loopback. The public origin must exactly match t
 
 ## Themes
 
-Click the **palette icon** in the top bar, or on the login screen. Eight themes are available:
+Choose **Change theme** in the settings at the bottom of the sidebar. On a narrow screen, open **Sessions** first. You can also use the palette icon on the login screen. The web interface offers eight themes.
 
 | Light   | Dark     |
 | ------- | -------- |
@@ -105,7 +105,7 @@ Click the **palette icon** in the top bar, or on the login screen. Eight themes 
 | Mint    | Forest   |
 | Lilac   | Plum     |
 
-**Follow system** uses Glacier for light mode and Graphite for dark mode. An explicit choice is saved in this browser, survives reloads, and synchronizes across its tabs. Your phone can use a different theme. Choosing colors does not change tasks, drafts, models or server settings.
+**Follow system** uses Glacier for light mode and Graphite for dark mode. A theme chosen in this browser applies across sessions, survives reloads, and synchronizes across tabs. Your phone can use a different theme. Choosing colors does not change tasks, drafts, models or server settings.
 
 The web palettes cover the conversation, task board, dialogs, forms and login screen. The terminal separately supports `daddy --theme dark` and `daddy --theme light`.
 

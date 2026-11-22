@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useMemo } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Palette, Check, Monitor, Moon, Sun } from 'lucide-react';
 import { Dialog } from './dialog.js';
 import { useLocale } from './i18n.js';
@@ -73,87 +74,94 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
   return <Context.Provider value={context}>{children}</Context.Provider>;
 }
-export function ThemeButton() {
+export function ThemeButton({ showLabel = false }: { showLabel?: boolean }) {
   const { t } = useLocale(),
     { choice, effective, select } = useContext(Context);
   const [open, setOpen] = useState(false);
+  const label = t('Change theme');
   return (
     <>
       <button
-        className="daddy-icon daddy-theme-toggle"
-        aria-label={t('Change theme')}
-        title={t('Change theme')}
+        type="button"
+        className={showLabel ? undefined : 'daddy-icon daddy-theme-toggle'}
+        aria-label={showLabel ? undefined : label}
+        title={showLabel ? undefined : label}
+        aria-haspopup="dialog"
         onClick={() => setOpen(true)}
       >
-        <Palette size={19} />
+        <Palette size={showLabel ? 17 : 19} aria-hidden="true" />
+        {showLabel && label}
       </button>
-      {open && (
-        <Dialog title={t('Make yourself at home')} onClose={() => setOpen(false)} wide>
-          <p className="daddy-muted">{t('Pick your colors. The crew keeps working.')}</p>
-          <div
-            role="radiogroup"
-            aria-label={t('Theme')}
-            className="daddy-theme-grid"
-            onKeyDown={(event) => {
-              if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-              event.preventDefault();
-              const buttons = [
-                ...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
-              ];
-              const current = buttons.indexOf(document.activeElement as HTMLButtonElement),
-                step = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1;
-              const next = buttons[(current + step + buttons.length) % buttons.length];
-              next?.focus();
-              next?.click();
-            }}
-          >
-            <button
-              role="radio"
-              aria-checked={choice === 'system'}
-              className="daddy-theme-system"
-              onClick={() => select('system')}
+      {open &&
+        createPortal(
+          <Dialog title={t('Make yourself at home')} onClose={() => setOpen(false)} wide>
+            <p className="daddy-muted">{t('Pick your colors. The crew keeps working.')}</p>
+            <div
+              role="radiogroup"
+              aria-label={t('Theme')}
+              className="daddy-theme-grid"
+              onKeyDown={(event) => {
+                if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key))
+                  return;
+                event.preventDefault();
+                const buttons = [
+                  ...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+                ];
+                const current = buttons.indexOf(document.activeElement as HTMLButtonElement),
+                  step = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1;
+                const next = buttons[(current + step + buttons.length) % buttons.length];
+                next?.focus();
+                next?.click();
+              }}
             >
-              <Monitor size={18} />
-              <span>
-                {t('Follow system')}
-                <small>{t('Light or dark, with your device')}</small>
-              </span>
-              {choice === 'system' && <Check size={17} />}
-            </button>
-            {themes.map((theme) => (
               <button
-                key={theme.id}
                 role="radio"
-                aria-label={t(theme.name)}
-                aria-checked={choice === theme.id}
-                data-theme={theme.id}
-                className="daddy-theme-card"
-                onClick={() => select(theme.id)}
+                aria-checked={choice === 'system'}
+                className="daddy-theme-system"
+                onClick={() => select('system')}
               >
-                <span className="daddy-theme-preview" aria-hidden="true">
-                  <span>d.</span>
-                  <i />
-                  <i />
-                  <b />
+                <Monitor size={18} />
+                <span>
+                  {t('Follow system')}
+                  <small>{t('Light or dark, with your device')}</small>
                 </span>
-                <span className="daddy-theme-name">
-                  {theme.dark ? <Moon size={14} /> : <Sun size={14} />}
-                  {t(theme.name)}
-                  {choice === theme.id && <Check size={15} />}
-                </span>
+                {choice === 'system' && <Check size={17} />}
               </button>
-            ))}
-          </div>
-          <p className="daddy-muted">
-            {t('Saved in this browser. Your phone can have its own theme.')}
-          </p>
-          <small className="daddy-muted">
-            {t('Current theme: {name}', {
-              name: t(themes.find((theme) => theme.id === effective)!.name),
-            })}
-          </small>
-        </Dialog>
-      )}
+              {themes.map((theme) => (
+                <button
+                  key={theme.id}
+                  role="radio"
+                  aria-label={t(theme.name)}
+                  aria-checked={choice === theme.id}
+                  data-theme={theme.id}
+                  className="daddy-theme-card"
+                  onClick={() => select(theme.id)}
+                >
+                  <span className="daddy-theme-preview" aria-hidden="true">
+                    <span>d.</span>
+                    <i />
+                    <i />
+                    <b />
+                  </span>
+                  <span className="daddy-theme-name">
+                    {theme.dark ? <Moon size={14} /> : <Sun size={14} />}
+                    {t(theme.name)}
+                    {choice === theme.id && <Check size={15} />}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="daddy-muted">
+              {t('Saved in this browser. Your phone can have its own theme.')}
+            </p>
+            <small className="daddy-muted">
+              {t('Current theme: {name}', {
+                name: t(themes.find((theme) => theme.id === effective)!.name),
+              })}
+            </small>
+          </Dialog>,
+          document.body,
+        )}
     </>
   );
 }

@@ -124,7 +124,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   );
   return (
     <div className="daddy-app">
-      <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
+      <aside id="daddy-sidebar" className={'daddy-sidebar' + (menu ? ' open' : '')}>
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
           <span>
@@ -204,6 +204,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Limits')}
             {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
           </button>
+          <ThemeButton showLabel />
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -233,6 +234,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <button
             className="daddy-icon mobile-menu"
             aria-label={t('Sessions')}
+            aria-controls="daddy-sidebar"
+            aria-expanded={menu}
             onClick={() => setMenu(!menu)}
           >
             <Menu size={20} />
@@ -241,7 +244,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
             <h1>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
-          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button
