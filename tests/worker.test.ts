@@ -169,100 +169,123 @@ it('keeps a saved fix when reconcile overlaps the author commit', async () => {
   }
 });
 
-it.each(['service.interrupted', 'resource.pause'] as const)(
-  'recovers a saved fix from an author run cancelled by %s',
-  async (source) => {
-    const f = await fixture();
-    const snapshotDir = mkdtempSync(join(tmpdir(), 'daddyloop-stopped-fix-'));
-    const snapshotPath = join(snapshotDir, 'state.sqlite');
-    const workspaces = new Workspaces('/tmp');
-    const commitResult = deferred<string>();
-    const commit = vi.spyOn(workspaces, 'commitFix').mockReturnValue(commitResult.promise);
-    vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
-    const runtime = { run: vi.fn(async () => f.result()) };
-    let resources: ResourceStatus = healthy();
-    const worker = new Worker(f.engine, workspaces, runtime, runtime, () => resources, 0);
-    const head = 'f'.repeat(40);
-    try {
-      await queueFix(f);
-      const task = f.store.getTask(f.task.id);
-      task.ref.provider = 'github';
-      f.store.saveTask(task);
-      await worker.tick();
-      await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce());
-      const author = f.store.jobs(task.id).find((job) => job.kind === 'fix')!;
-      if (source === 'resource.pause')
-        resources = { ...resources, ok: false, reasons: ['Disk threshold reached'] };
-      const stopped = source === 'service.interrupted' ? worker.stop() : worker.tick();
-      await vi.waitFor(() =>
-        expect(f.store.events(task.id).some((event) => event.type === source)).toBe(true),
-      );
-      const stoppedReason = f.store.getTask(task.id).reason;
-      commitResult.resolve(head);
-      await stopped;
-      await vi.waitFor(() =>
-        expect(f.store.events(task.id)).toContainEqual(
-          expect.objectContaining({ type: 'job.cancelled', runId: author.id }),
-        ),
-      );
-      expect(f.store.jobs(task.id).find((job) => job.id === author.id)?.status).toBe('cancelled');
-      expect(f.store.getTask(task.id).pendingAuthorFix).toBeUndefined();
-      if (source === 'resource.pause') expect(f.store.getTask(task.id).reason).toContain(head);
+it.each([
+  'service.interrupted',
+  'resource.pause',
+  'closed PR',
+  'manual pause',
+  'legacy manual pause',
+] as const)('recovers a saved fix from an author run cancelled by %s', async (source) => {
+  const f = await fixture();
+  const snapshotDir = mkdtempSync(join(tmpdir(), 'daddyloop-stopped-fix-'));
+  const snapshotPath = join(snapshotDir, 'state.sqlite');
+  const workspaces = new Workspaces('/tmp');
+  const commitResult = deferred<string>();
+  const commit = vi.spyOn(workspaces, 'commitFix').mockReturnValue(commitResult.promise);
+  vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const runtime = { run: vi.fn(async () => f.result()) };
+  let resources: ResourceStatus = healthy();
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, () => resources, 0);
+  const head = 'f'.repeat(40);
+  try {
+    await queueFix(f);
+    const task = f.store.getTask(f.task.id);
+    task.ref.provider = 'github';
+    f.store.saveTask(task);
+    await worker.tick();
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce());
+    const author = f.store.jobs(task.id).find((job) => job.kind === 'fix')!;
+    if (source === 'resource.pause')
+      resources = { ...resources, ok: false, reasons: ['Disk threshold reached'] };
+    if (source === 'closed PR') f.store.setSetting('demo-pr:1', { ...task.pr!, state: 'closed' });
+    const manuallyPaused = source === 'manual pause' || source === 'legacy manual pause';
+    let stopped: Promise<unknown>;
+    if (source === 'closed PR') stopped = f.engine.reconcile(task.id);
+    else if (manuallyPaused) stopped = f.engine.action(task.id, 'pause');
+    else if (source === 'service.interrupted') stopped = worker.stop();
+    else stopped = worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(task.id).generation).toBe(author.generation + 1));
+    const stoppedReason = f.store.getTask(task.id).reason;
+    commitResult.resolve(head);
+    await stopped;
+    await vi.waitFor(() =>
       expect(f.store.events(task.id)).toContainEqual(
-        expect.objectContaining({
-          type: 'author.fixes_saved',
-          runId: author.id,
-          data: { head, revision: task.revision },
-        }),
-      );
+        expect.objectContaining({ type: 'job.cancelled', runId: author.id }),
+      ),
+    );
+    expect(f.store.jobs(task.id).find((job) => job.id === author.id)?.status).toBe('cancelled');
+    expect(f.store.getTask(task.id).pendingAuthorFix).toBeUndefined();
+    if (source === 'resource.pause') expect(f.store.getTask(task.id).reason).toContain(head);
+    expect(f.store.events(task.id)).toContainEqual(
+      expect.objectContaining({
+        type: 'author.fixes_saved',
+        runId: author.id,
+        data: { head, revision: task.revision },
+      }),
+    );
 
-      f.store.db.prepare('VACUUM INTO ?').run(snapshotPath);
-      const snapshot = new Store(snapshotPath);
-      try {
-        // Older snapshots show only the interruption reason until recovery reads the fix journal.
-        snapshot.saveTask({ ...snapshot.getTask(task.id), reason: stoppedReason });
-        const provider = new DemoProvider(snapshot);
-        const restored = new Engine(snapshot, () => provider);
-        restored.recoverInterruptedJobs();
-        await expect(restored.review(task.id, true)).rejects.toMatchObject({
-          code: 'fix_pending',
-          message: expect.stringContaining(head),
-        });
-        expect(snapshot.getTask(task.id)).toMatchObject({
-          state: 'needs_input',
-          revision: task.revision,
-          reason: expect.stringContaining(head),
-        });
-        expect(snapshot.activeJobs(task.id)).toEqual([]);
-        expect(snapshot.jobs(task.id).find((job) => job.id === author.id)?.status).toBe(
-          'cancelled',
-        );
-
-        expect(await restored.action(task.id, 'resume')).toMatchObject({ state: 'needs_input' });
-        const prepare = vi.fn(async () => async () => {});
-        await restored.submitSavedFix(task.id, prepare);
-        expect(prepare).not.toHaveBeenCalled();
-
-        snapshot.setSetting('demo-pr:1', { ...task.pr!, head });
-        expect(await restored.action(task.id, 'resume')).toMatchObject({
-          state: 'queued',
-          revision: { head },
-        });
-        expect(await restored.review(task.id)).toMatchObject({
-          state: 'reviewing',
-          review: { revision: { head } },
-        });
-      } finally {
-        snapshot.close();
+    f.store.db.prepare('VACUUM INTO ?').run(snapshotPath);
+    const snapshot = new Store(snapshotPath);
+    try {
+      // Older snapshots show only the interruption reason until recovery reads the fix journal.
+      snapshot.saveTask({ ...snapshot.getTask(task.id), reason: stoppedReason });
+      if (source === 'closed PR') snapshot.setSetting('demo-pr:1', task.pr);
+      if (source === 'legacy manual pause') {
+        const saved = snapshot
+          .events(task.id)
+          .find((event) => event.type === 'author.fixes_saved' && event.runId === author.id)!;
+        snapshot.db
+          .prepare('UPDATE events SET data=? WHERE id=?')
+          .run(JSON.stringify({ head }), saved.id);
       }
+      const provider = new DemoProvider(snapshot);
+      const restored = new Engine(snapshot, () => provider);
+      if (manuallyPaused) {
+        // Simulate a legacy Resume that queued another author before checking the journal.
+        const fixing = { ...snapshot.getTask(task.id), state: 'fixing' as const };
+        snapshot.saveTask(fixing);
+        snapshot.enqueue(fixing, 'author', 'fix', 'Continue the interrupted fix');
+        const retry = snapshot.claim()!;
+        await restored.completeJob(retry, f.result({ status: 'incomplete' }));
+        snapshot.saveJob({ ...retry, status: 'completed' });
+      }
+      restored.recoverInterruptedJobs();
+      await expect(restored.review(task.id, true)).rejects.toMatchObject({
+        code: 'fix_pending',
+        message: expect.stringContaining(head),
+      });
+      expect(snapshot.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        revision: task.revision,
+        reason: expect.stringContaining(head),
+      });
+      expect(snapshot.activeJobs(task.id)).toEqual([]);
+      expect(snapshot.jobs(task.id).find((job) => job.id === author.id)?.status).toBe('cancelled');
+
+      expect(await restored.action(task.id, 'resume')).toMatchObject({ state: 'needs_input' });
+      const prepare = vi.fn(async () => async () => {});
+      await restored.submitSavedFix(task.id, prepare);
+      expect(prepare).not.toHaveBeenCalled();
+
+      snapshot.setSetting('demo-pr:1', { ...task.pr!, head });
+      expect(await restored.action(task.id, 'resume')).toMatchObject({
+        state: 'queued',
+        revision: { head },
+      });
+      expect(await restored.review(task.id)).toMatchObject({
+        state: 'reviewing',
+        review: { revision: { head } },
+      });
     } finally {
-      commitResult.resolve(head);
-      await worker.stop();
-      f.store.close();
-      rmSync(snapshotDir, { recursive: true, force: true });
+      snapshot.close();
     }
-  },
-);
+  } finally {
+    commitResult.resolve(head);
+    await worker.stop();
+    f.store.close();
+    rmSync(snapshotDir, { recursive: true, force: true });
+  }
+});
 
 it('persists each completed draft before publishing it and running the next stage', async () => {
   const f = await fixture();
@@ -985,6 +1008,56 @@ it.each(['before reviewer', 'before publication', 'while reading the draft'] as 
       expect(await f.provider.getReview(ref, draft)).toEqual(before);
     } finally {
       await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it.each(['approve-plan', 'waive-checks'] as const)(
+  'rejects %s after the published fix review target changes',
+  async (action) => {
+    const plan = action === 'approve-plan';
+    const f = await fixture({ kind: plan ? 'plan' : 'code' });
+    try {
+      const finding = await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const head = 'f'.repeat(40);
+      await f.engine.completeJob(author, f.result(), { head, revision: task.revision! });
+      f.store.saveJob({ ...author, status: 'completed' });
+      const pr = { ...task.pr!, head, checks: plan ? 'passing' : 'missing' };
+      await f.engine.submitSavedFix(
+        task.id,
+        async () => async () => f.store.setSetting('demo-pr:1', pr),
+      );
+      const review = await f.engine.review(task.id);
+      await f.run({ verifiedCommentIds: [finding] });
+      const published = await f.engine.publish(task.id);
+      expect(published.state).toBe(plan ? 'awaiting_plan_approval' : 'awaiting_checks');
+      const retargeted = { ...pr, targetBranch: 'release' };
+      f.store.setSetting('demo-pr:1', retargeted);
+
+      const blocked = await f.engine.action(task.id, action, 'Reviewed output manually');
+      expect(blocked).toMatchObject({
+        state: 'needs_input',
+        review: review.review,
+        snapshot: published.snapshot,
+      });
+      expect(blocked.reason).toContain(pr.targetBranch);
+      expect(blocked.reason).toContain(retargeted.targetBranch);
+      expect(blocked.checksWaivedAt).toBeUndefined();
+      expect(blocked.approvedAt).toBeUndefined();
+      expect(
+        f.store
+          .events(task.id)
+          .filter((event) => ['checks.waived', `human.${action}`].includes(event.type)),
+      ).toEqual([]);
+
+      expect(await f.engine.review(task.id, true)).toMatchObject({
+        state: 'reviewing',
+        review: { targetBranch: 'release' },
+      });
+    } finally {
       f.store.close();
     }
   },

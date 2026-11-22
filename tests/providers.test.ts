@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubProvider } from '../src/providers/github.js';
 import { GitLabProvider } from '../src/providers/gitlab.js';
+import { Engine } from '../src/core/engine.js';
+import { Store } from '../src/core/store.js';
 import { ProviderHttp, type Fetch } from '../src/providers/http.js';
 import { parsePR, tag } from '../src/providers/provider.js';
 import type { ReviewHandle } from '../src/core/types.js';
@@ -31,6 +33,89 @@ function transport(
   return spy as typeof spy & Fetch;
 }
 describe('GitHub draft review contract', () => {
+  it('waits for the old GitHub draft to be handled before retrying a retargeted review', async () => {
+    const store = new Store(':memory:');
+    const pull = '/repos/acme/service/pulls/12';
+    let branch = 'main';
+    let attempts = 0;
+    let draft:
+      | {
+          id: number;
+          node_id: string;
+          body: unknown;
+          commit_id: string;
+          user: { id: number };
+          state: string;
+        }
+      | undefined;
+    const http = transport((path, method, body) => {
+      if (path === pull)
+        return {
+          state: 'open',
+          title: 'Changes',
+          head: {
+            sha: revision.head,
+            ref: 'fix',
+            repo: { clone_url: 'https://github.com/acme/service.git' },
+          },
+          base: { sha: revision.base, ref: branch },
+        };
+      if (path.includes('/check-runs?')) return { check_runs: [] };
+      if (path.includes('/status?')) return { statuses: [] };
+      if (path === '/user') return { id: 7 };
+      if (path.startsWith(`${pull}/reviews?`)) return draft ? [draft] : [];
+      if (path.includes('/comments?')) return [];
+      if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
+        return draft ?? new Response('{}', { status: 404 });
+      if (method === 'POST' && path === `${pull}/reviews`) {
+        attempts++;
+        if (draft) return new Response('{}', { status: 422 });
+        draft = {
+          id: attempts,
+          node_id: `PRR_${attempts}`,
+          body: body.body,
+          commit_id: revision.head,
+          user: { id: 7 },
+          state: 'PENDING',
+        };
+        return draft;
+      }
+      throw new Error(`Unexpected fixture request ${method} ${path}`);
+    });
+    const provider = new GitHubProvider('github.com', 'fake', http);
+    const engine = new Engine(store, () => provider);
+    try {
+      const task = await engine.create({
+        ref,
+        repoPath: '/tmp',
+        requirements: 'Check the target branch',
+      });
+      const original = await engine.review(task.id);
+      branch = 'release';
+      await engine.reconcile(task.id);
+      const operations = store.db.prepare('SELECT id, status FROM operations').all();
+      const blocked = await engine.review(task.id, true);
+      expect(blocked).toMatchObject({
+        state: 'needs_input',
+        generation: original.generation,
+        review: original.review,
+      });
+      for (const value of ['main', 'release', 'GitHub', 'draft'])
+        expect(blocked.reason).toContain(value);
+      expect(attempts).toBe(1);
+      expect(store.db.prepare('SELECT id, status FROM operations').all()).toEqual(operations);
+      expect(await provider.getReview(ref, original.review!)).toMatchObject({ status: 'draft' });
+
+      draft = undefined;
+      const next = await engine.review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+      expect(next.review?.id).not.toBe(original.review?.id);
+      expect(attempts).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
   it('does not adopt another account’s review based only on a matching marker', async () => {
     const http = transport((path) =>
       path === '/user' ? { id: 7 } : [{ id: 44, body: tag('daddyloop:t:1'), user: { id: 999 } }],

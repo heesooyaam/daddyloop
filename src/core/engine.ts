@@ -41,7 +41,7 @@ const noAuthorChanges =
   'Author made no code changes; independent verification of the decisions is next';
 const authorPushedChanges = 'Author pushed changes; independent verification is next';
 const staleDraftReason =
-  'GitHub still has a draft on the previous revision. Inspect it on GitHub and clear the pending review before resuming.';
+  'GitHub still has a draft from the previous review. Inspect it on GitHub and clear the pending review before resuming.';
 const fixConfirmationGraceMs = 60_000;
 const reviewCompletionStates: State[] = [
   'awaiting_publication',
@@ -316,7 +316,15 @@ export class Engine {
         }
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
-      const changed = !sameRevision(task.revision, pr) || !!reviewTargetChange(task.review, pr);
+      const targetChange = reviewTargetChange(task.review, pr);
+      if (targetChange && task.ref.provider === 'github' && task.review) {
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+        if (snapshot.status === 'draft') {
+          this.state(task, 'needs_input', `${targetChange} ${staleDraftReason}`);
+          return task;
+        }
+      }
+      const changed = !sameRevision(task.revision, pr) || !!targetChange;
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
@@ -447,11 +455,7 @@ export class Engine {
     }
     // Fix completion handles open PR revisions.
     if (pending || (task.state === 'fixing' && this.store.busy(id))) return task;
-    const targetChange = reviewTargetChange(task.review, pr);
-    if (targetChange) {
-      this.holdTaskForInput(task, targetChange);
-      return task;
-    }
+    if (this.stopReviewOnTargetChange(task, pr)) return task;
     if (!sameRevision(task.revision, pr)) {
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
@@ -609,6 +613,13 @@ export class Engine {
     const head = pending ?? this.lostFix(task, pr)?.head;
     if (!head) return false;
     this.holdLostFix(task, head, this.savedFixReviewReason(task, head, pr));
+    return true;
+  }
+
+  private stopReviewOnTargetChange(task: Task, pr: PullRequest): boolean {
+    const targetChange = reviewTargetChange(task.review, pr);
+    if (!targetChange) return false;
+    this.holdTaskForInput(task, targetChange);
     return true;
   }
 
@@ -952,24 +963,8 @@ export class Engine {
       return head;
   }
 
-  private cancelledByInterruption(job: Job): boolean {
-    // Both interruption paths record the new generation before their task-level event.
-    return !!this.store.db
-      .prepare(
-        `SELECT 1 FROM events stopped JOIN events transition ON transition.id=(
-         SELECT previous.id FROM events previous
-         WHERE previous.task_id=stopped.task_id AND previous.id<stopped.id
-         ORDER BY previous.id DESC LIMIT 1
-       )
-       WHERE stopped.task_id=? AND stopped.type IN ('service.interrupted', 'resource.pause')
-         AND transition.type='task.state' AND json_extract(transition.data, '$.state')='needs_input'
-         AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
-      )
-      .get(job.taskId, job.generation + 1);
-  }
-
   private fixRunInterrupted(job: Job, savedEventId: number): boolean {
-    if (job.status === 'cancelled') return this.cancelledByInterruption(job);
+    if (job.status === 'cancelled') return true;
     return (
       job.status === 'failed' &&
       !!this.store.db
@@ -992,9 +987,12 @@ export class Engine {
     const legacy = typeof saved.saved_revision !== 'string';
     if (!legacy && this.savedFixSubmissionRecorded(task, saved.head, Number(saved.id))) return;
     const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
-    if (job?.kind !== 'fix') return;
+    if (job?.role !== 'author' || job.kind !== 'fix') return;
+    const interrupted =
+      (!legacy || (job.status === 'cancelled' && typeof saved.revision === 'string')) &&
+      this.fixRunInterrupted(job, Number(saved.id));
     const generation = job.generation + 1;
-    if (generation > task.generation) return;
+    if (!interrupted && generation > task.generation) return;
     const transition = this.store.db
       .prepare(
         `SELECT transition.id, json_extract(transition.data, '$.head') AS head,
@@ -1005,7 +1003,6 @@ export class Engine {
          AND json_extract(transition.data, '$.generation')=? LIMIT 1`,
       )
       .get(task.id, saved.id!, noAuthorChanges, authorPushedChanges, generation);
-    const interrupted = !legacy && this.fixRunInterrupted(job, Number(saved.id));
     if (!interrupted && (!transition || (!legacy && transition.head === saved.head))) return;
     let recordedRevision = saved.revision;
     if (typeof recordedRevision !== 'string' && transition?.reason === noAuthorChanges) {
@@ -1497,6 +1494,7 @@ export class Engine {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
         const current = await this.provider(prRef(task)).getPR(prRef(task));
+        if (this.stopReviewOnTargetChange(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError('stale_plan', 'The plan changed after review');
@@ -1510,6 +1508,7 @@ export class Engine {
             400,
           );
         const current = await this.provider(prRef(task)).getPR(prRef(task));
+        if (this.stopReviewOnTargetChange(task, current)) return task;
         if (this.stopReviewBeforeSavedFix(task, current)) return task;
         if (!sameRevision(current, task.revision))
           throw new AppError(
@@ -1579,16 +1578,16 @@ export class Engine {
   }
 
   private showInterruptedFix(task: Task, job: Job) {
-    if (task.state !== 'needs_input' || task.generation !== job.generation + 1) return;
+    if (task.state !== 'needs_input' && task.state !== 'paused') return;
     const head = this.interruptedFixHead(task, job);
-    if (head && !task.reason.includes(head) && this.cancelledByInterruption(job))
-      this.state(task, 'needs_input', `${task.reason} Saved fix ${head} is preserved.`);
+    if (head && !task.reason.includes(head))
+      this.state(task, task.state, `${task.reason} Saved fix ${head} is preserved.`);
   }
 
   private interruptedFixHead(task: Task, job: Job): string | undefined {
     if (job.role !== 'author' || job.kind !== 'fix') return;
     const saved = this.savedFixEvent(task);
-    const original = parseRecordedRevision(saved?.saved_revision);
+    const original = parseRecordedRevision(saved?.revision);
     if (
       saved?.run_id === job.id &&
       typeof saved.head === 'string' &&
