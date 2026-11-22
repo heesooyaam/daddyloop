@@ -59,11 +59,11 @@ type SavedFixCheck =
   { status: 'ready' | 'confirmed' | 'waiting' } | { status: 'blocked'; reason: string };
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
-  const observedBase = task.revision?.base ?? 'unknown';
+  const storedBase = task.revision?.base ?? 'unknown';
   if (!fix.revision)
-    return `The original PR revision for saved fix ${fix.head} is unavailable. Observed PR base ${observedBase}.`;
+    return `The original PR revision for saved fix ${fix.head} is unavailable. Stored PR base ${storedBase}.`;
   if (!sameRevision(fix.revision, task.revision))
-    return `The PR revision changed for saved fix ${fix.head}. Original base ${fix.revision.base}. Observed PR base ${observedBase}.`;
+    return `The stored PR revision changed for saved fix ${fix.head}. Original base ${fix.revision.base}. Stored PR base ${storedBase}.`;
   if (!fix.authorCompleted)
     return `The author run did not record completion. Inspect saved fix ${fix.head} before continuing.`;
   if (fix.generation !== task.generation)
@@ -241,8 +241,8 @@ export class Engine {
     const pending = pendingFixHead(task);
     if (
       pending &&
-      pending === task.revision?.head &&
-      task.pendingAuthorFix?.generation === task.generation
+      task.pendingAuthorFix?.generation === task.generation &&
+      this.isConfirmedSavedFix(task, pending)
     )
       return pending;
     const lost = pending ? undefined : this.lostFix(task);
@@ -276,7 +276,12 @@ export class Engine {
       const pending = this.requireSubmittedFix(task);
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (pending && (!sameRevision(task.revision, pr) || !samePullRequestBranches(task.pr, pr))) {
-        this.blockSavedFix(task, pending, 'The PR changed after submission and before review.');
+        const check = this.savedFixStatus(task, pr, pending);
+        const reason =
+          check.status === 'blocked'
+            ? check.reason
+            : 'The PR changed after submission and before review.';
+        this.blockSavedFix(task, pending, reason);
         return task;
       }
       const staleDraft = task.pendingAuthorFix?.staleDraft;
@@ -367,7 +372,6 @@ export class Engine {
         this.holdLostFix(task, lost.head, `PR is ${pr.state}. Automatic work stopped.`);
       else if (
         lost.revision &&
-        sameRevision(lost.revision, task.revision) &&
         this.savedFixRemoteStatus(task, pr, lost.head, lost.revision).status === 'confirmed'
       )
         this.holdLostFix(
@@ -547,15 +551,27 @@ export class Engine {
     const pending = task.pendingAuthorFix;
     const original = pending?.revision ?? task.feedback?.revision ?? task.revision;
     if (
-      !original ||
-      !sameRevision(original, task.revision) ||
-      (pending ? pending.generation !== task.generation : task.authorBaseHead !== original.head)
-    )
-      return {
-        status: 'blocked',
-        reason: 'The saved fix belongs to a different task revision or generation.',
-      };
-    return this.savedFixRemoteStatus(task, pr, head, original);
+      original &&
+      (pending ? pending.generation === task.generation : task.authorBaseHead === original.head)
+    ) {
+      const check = this.savedFixRemoteStatus(task, pr, head, original);
+      // A stale local revision can be replaced by remote confirmation, but cannot authorize a send.
+      if (check.status !== 'ready' || sameRevision(original, task.revision)) return check;
+    }
+    return {
+      status: 'blocked',
+      reason: 'The saved fix belongs to a different task revision or generation.',
+    };
+  }
+
+  private isConfirmedSavedFix(task: Task, head: string) {
+    const { pendingAuthorFix, pr } = task;
+    return (
+      !!pendingAuthorFix &&
+      !!pr &&
+      sameRevision(task.revision, pr) &&
+      this.savedFixRemoteStatus(task, pr, head, pendingAuthorFix.revision).status === 'confirmed'
+    );
   }
 
   private savedFixRemoteStatus(
@@ -570,7 +586,10 @@ export class Engine {
         reason: 'The PR was closed or its source or target branch changed.',
       };
     if (pr.base !== original.base || pr.start !== original.start)
-      return { status: 'blocked', reason: 'The PR comparison base changed.' };
+      return {
+        status: 'blocked',
+        reason: `The PR comparison base changed. Original base ${original.base} (start ${original.start}). Observed base ${pr.base} (start ${pr.start}).`,
+      };
     if (pr.head === head) {
       if (original.revisionId && (!pr.revisionId || pr.revisionId === original.revisionId))
         return { status: 'waiting' };
@@ -617,7 +636,7 @@ export class Engine {
       const task = this.store.getTask(id);
       if (isTicket(task) || task.state !== 'awaiting_push' || this.store.busy(id)) return;
       const head = pendingFixHead(task);
-      if (!head || head === task.revision?.head) return;
+      if (!head) return;
       const pendingFix = task.pendingAuthorFix;
       if ((pendingFix?.sent || pendingFix?.pushStarted) && pendingFix.confirmUntil === undefined) {
         pendingFix.confirmUntil = Date.now() + fixConfirmationGraceMs;
@@ -633,27 +652,38 @@ export class Engine {
         !task.pendingAuthorFix?.pushStarted &&
         task.pendingAuthorFix?.confirmUntil === undefined
       ) {
-        const pending = (task.pendingAuthorFix ??= {
-          revision: task.revision!,
-          generation: task.generation,
-        });
+        let push: () => Promise<void>;
         try {
-          const push = await preparePush(task, head);
-          // Only a failure after local preparation can leave the send result unknown.
-          pending.pushStarted = true;
-          pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
-          this.store.saveTask(task);
-          await push();
+          push = await preparePush(task, head);
         } catch (error) {
           this.blockSavedFix(task, head, redact(String(error)));
           return;
         }
-        pending.sent = true;
-        pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
-        this.state(task, 'awaiting_push', waitingReason);
         pr = await this.readSavedFixPR(task, head);
         if (!pr) return;
         check = this.savedFixStatus(task, pr, head);
+        if (check.status === 'ready') {
+          const pending = (task.pendingAuthorFix ??= {
+            revision: task.revision!,
+            generation: task.generation,
+          });
+          // Only a failure after local preparation can leave the send result unknown.
+          pending.pushStarted = true;
+          pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
+          this.store.saveTask(task);
+          try {
+            await push();
+          } catch (error) {
+            this.blockSavedFix(task, head, redact(String(error)));
+            return;
+          }
+          pending.sent = true;
+          pending.confirmUntil = Date.now() + fixConfirmationGraceMs;
+          this.state(task, 'awaiting_push', waitingReason);
+          pr = await this.readSavedFixPR(task, head);
+          if (!pr) return;
+          check = this.savedFixStatus(task, pr, head);
+        }
       }
       if (check.status === 'blocked') {
         this.blockSavedFix(task, head, check.reason);
@@ -746,7 +776,7 @@ export class Engine {
   private async resumeBlockedLostFix(task: Task, lost: LostFix, reason: string) {
     // The old job cannot authorize a send. An observed exact match can authorize review.
     const original = lost.revision;
-    if (original && sameRevision(original, task.revision)) {
+    if (original) {
       const ref = prRef(task);
       const provider = this.provider(ref);
       const current = await provider.getPR(ref);
@@ -944,6 +974,13 @@ export class Engine {
       if (job.kind === 'review' && this.stopLegacyReview(task)) return;
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
+        const saved = task.pendingAuthorHead;
+        if (task.pendingAuthorFix && saved) {
+          this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+          const check = this.savedFixStatus(task, pr, saved);
+          if (check.status === 'blocked') this.blockSavedFix(task, saved, check.reason);
+          return;
+        }
         const lost = this.lostFix(task);
         if (lost) {
           this.holdLostFix(task, lost.head, changedBeforeRecovery(pr));
@@ -1146,7 +1183,7 @@ export class Engine {
           this.store.transaction(() => {
             this.state(
               task,
-              saved === task.revision?.head ? 'queued' : 'awaiting_push',
+              this.isConfirmedSavedFix(task, saved) ? 'queued' : 'awaiting_push',
               `Resumed with saved fix ${saved}. The PR revision will be checked before continuing.`,
             );
             this.store.event(id, 'human.resume', { reason });
