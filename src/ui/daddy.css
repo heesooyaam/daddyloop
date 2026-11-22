@@ -2404,6 +2404,11 @@ body {
   flex-wrap: wrap;
   align-items: center;
 }
+.daddy-main > .daddy-session-progress {
+  flex-shrink: 0;
+  margin-block: 6px;
+  padding-block: 6px;
+}
 .daddy-session-progress code {
   overflow-wrap: anywhere;
 }

@@ -145,6 +145,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const resourceWait = board?.group.resourceWait;
   const deletion = board?.group.deletion;
   const preparation = deletion ? undefined : board?.group.workspacePreparation;
+  const deleting = deletion?.state === 'pending' || deletion?.state === 'running';
+  const preparing =
+    preparation?.state === 'preparing' || (preparation?.state === 'pending' && !paused);
+  const draft = state.drafts[state.selected] ?? '';
+  const messageDisabled = paused || !!deletion;
+  const canSend = !messageDisabled && !repositoryEditing && !state.busy && !!draft.trim();
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -344,6 +350,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </span>
           </div>
         )}
+        {(preparing || deleting) && (
+          <div className="daddy-session-progress" role="status">
+            {t(
+              deleting
+                ? 'Saving results and removing session copies'
+                : 'Preparing the session copy',
+            )}
+          </div>
+        )}
         <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
           <UsageStrip
             usage={state.usage}
@@ -353,19 +368,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               setModal('limits');
             }}
           />
-          {preparation && preparation.state !== 'error' && (
+          {preparation?.state === 'ready' && (
             <div className="daddy-session-progress" role="status">
-              {t(
-                preparation.state === 'ready' ? 'Session copy ready' : 'Preparing the session copy',
-              )}
+              {t('Session copy ready')}
               {preparation.path && <code>{preparation.path}</code>}
               {preparation.error && <span>{t(preparation.error)}</span>}
-            </div>
-          )}
-          {deletion && deletion.state !== 'error' && (
-            <div className="daddy-session-progress" role="status">
-              {t('Saving results and removing session copies')}
-              {deletion.error && <span>{t(deletion.error)}</span>}
             </div>
           )}
         </section>
@@ -436,7 +443,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (!repositoryEditing) void model.send();
+                    if (canSend) void model.send();
                   }}
                 >
                   <WorkspaceFields
@@ -451,13 +458,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   />
                   <textarea
                     aria-label={t('Message daddy')}
-                    placeholder={t(
-                      paused
-                        ? 'Resume daddy to continue'
-                        : 'A task, a ticket, a voice note. daddy’s listening.',
-                    )}
-                    value={state.drafts[state.selected] ?? ''}
-                    disabled={paused}
+                    placeholder={
+                      deletion
+                        ? undefined
+                        : t(
+                            paused
+                              ? 'Resume daddy to continue'
+                              : 'A task, a ticket, a voice note. daddy’s listening.',
+                          )
+                    }
+                    value={draft}
+                    disabled={messageDisabled}
                     rows={3}
                     onChange={(event) => model.draft(event.target.value)}
                     onKeyDown={(event) => {
@@ -467,7 +478,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                         !event.nativeEvent.isComposing
                       ) {
                         event.preventDefault();
-                        if (!repositoryEditing) void model.send();
+                        if (canSend) void model.send();
                       }
                     }}
                   />
@@ -483,22 +494,19 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       type="submit"
                       className="daddy-send"
                       aria-label={t('Send message')}
-                      disabled={
-                        state.busy ||
-                        paused ||
-                        repositoryEditing ||
-                        !state.drafts[state.selected]?.trim()
-                      }
+                      disabled={!canSend}
                     >
                       <Send size={17} />
                     </button>
                   </footer>
                 </form>
-                <div className="daddy-composer-note">
-                  {t(
-                    'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
-                  )}
-                </div>
+                {!deletion && (
+                  <div className="daddy-composer-note">
+                    {t(
+                      'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
+                    )}
+                  </div>
+                )}
               </section>
               <aside
                 className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}
