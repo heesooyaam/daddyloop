@@ -318,7 +318,8 @@
   overscroll-behavior-y: contain;
   scrollbar-width: thin;
 }
-.daddy-session-overview:focus-visible {
+.daddy-session-overview:focus-visible,
+.daddy-session-error-reason:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
@@ -825,6 +826,14 @@
 }
 .daddy-main > .daddy-error {
   flex-shrink: 0;
+}
+.daddy-session-error-reason {
+  /* Long diagnostics can scroll without pushing the action or a task card out of view. */
+  max-block-size: 4.5em;
+  line-height: 1.5;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
 }
 .daddy-error button {
   margin-left: auto;

@@ -343,6 +343,66 @@ test('shows message send errors without scrolling on short screens', async ({ pa
     });
   }
 });
+test('shows copy and deletion failures with the task board without scrolling', async ({ page }) => {
+  await mockTwoProviders(page);
+  await login(page);
+  await create(page, 'Session maintenance failure', Date.now());
+  const sessionId = new URL(page.url()).hash.slice('#session/'.length);
+  let groupPatch: Partial<DaddyBoard['group']>;
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch();
+    const board: DaddyBoard = await response.json();
+    await route.fulfill({ response, json: { ...board, group: { ...board.group, ...groupPatch } } });
+  });
+
+  for (const { group, heading, reason, retry } of [
+    {
+      group: {
+        daddyState: 'needs_input',
+        workspacePreparation: { state: 'error', error: 'The session copy could not be written' },
+      },
+      heading: 'Could not prepare the session copy',
+      reason: 'The session copy could not be written',
+      retry: 'Retry',
+    },
+    {
+      group: {
+        daddyState: 'paused',
+        deletion: { state: 'error', error: 'The session archive could not be written' },
+      },
+      heading: 'Session deletion stopped; working copies were preserved',
+      reason: 'The session archive could not be written',
+      retry: 'Retry deletion',
+    },
+  ] satisfies {
+    group: Partial<DaddyBoard['group']>;
+    heading: string;
+    reason: string;
+    retry: string;
+  }[]) {
+    groupPatch = group;
+    await page.reload();
+    await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+    const overview = page.getByRole('region', { name: 'Session overview' });
+    const tasks = page.locator('.daddy-work-items .daddy-work-item');
+    for (const viewport of [
+      { width: 390, height: 540 },
+      { width: 1024, height: 480 },
+    ]) {
+      await page.setViewportSize(viewport);
+      if (viewport.width === 390) {
+        await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+      }
+      await expect(page.getByText(reason, { exact: true })).toBeInViewport({ ratio: 1 });
+      await expect(page.getByText(heading, { exact: true })).toBeInViewport({ ratio: 1 });
+      await expect(page.getByRole('button', { name: retry, exact: true })).toBeInViewport({
+        ratio: 1,
+      });
+      await expect(tasks.first()).toBeInViewport({ ratio: 1 });
+      expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    }
+  }
+});
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({
   page,
 }) => {

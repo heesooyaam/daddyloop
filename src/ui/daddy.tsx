@@ -57,6 +57,32 @@ function safeUrl(value: string) {
     return;
   }
 }
+function SessionMaintenanceError({
+  title,
+  reason,
+  retryLabel,
+  onRetry,
+}: {
+  title: string;
+  reason?: string;
+  retryLabel: string;
+  onRetry: () => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="daddy-error" role="alert">
+      <div>
+        <strong>{t(title)}</strong>
+        {reason && (
+          <div className="daddy-session-error-reason" tabIndex={0}>
+            {t(reason)}
+          </div>
+        )}
+      </div>
+      <button onClick={onRetry}>{t(retryLabel)}</button>
+    </div>
+  );
+}
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
   const [usageEngine, setUsageEngine] = useState<string>();
@@ -116,6 +142,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const deletion = board?.group.deletion;
+  const preparation = deletion ? undefined : board?.group.workspacePreparation;
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -281,6 +309,22 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
           </div>
         )}
+        {preparation?.state === 'error' && (
+          <SessionMaintenanceError
+            title="Could not prepare the session copy"
+            reason={preparation.error}
+            retryLabel="Retry"
+            onRetry={() => void model.action('resume')}
+          />
+        )}
+        {deletion?.state === 'error' && (
+          <SessionMaintenanceError
+            title="Session deletion stopped; working copies were preserved"
+            reason={deletion.error}
+            retryLabel="Retry deletion"
+            onRetry={() => setModal('delete')}
+          />
+        )}
         <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
           <UsageStrip
             usage={state.usage}
@@ -301,49 +345,19 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               </span>
             </div>
           )}
-          {board?.group.workspacePreparation && !board.group.deletion && (
-            <div
-              className={
-                board.group.workspacePreparation.state === 'error'
-                  ? 'daddy-error'
-                  : 'daddy-session-progress'
-              }
-              role="status"
-            >
+          {preparation && preparation.state !== 'error' && (
+            <div className="daddy-session-progress" role="status">
               {t(
-                board.group.workspacePreparation.state === 'ready'
-                  ? 'Session copy ready'
-                  : board.group.workspacePreparation.state === 'error'
-                    ? 'Could not prepare the session copy'
-                    : 'Preparing the session copy',
+                preparation.state === 'ready' ? 'Session copy ready' : 'Preparing the session copy',
               )}
-              {board.group.workspacePreparation.path && (
-                <code>{board.group.workspacePreparation.path}</code>
-              )}
-              {board.group.workspacePreparation.error && (
-                <span>{t(board.group.workspacePreparation.error)}</span>
-              )}
-              {board.group.workspacePreparation.state === 'error' && (
-                <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
-              )}
+              {preparation.path && <code>{preparation.path}</code>}
+              {preparation.error && <span>{t(preparation.error)}</span>}
             </div>
           )}
-          {board?.group.deletion && (
-            <div
-              className={
-                board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
-              }
-              role="status"
-            >
-              {t(
-                board.group.deletion.state === 'error'
-                  ? 'Session deletion stopped; working copies were preserved'
-                  : 'Saving results and removing session copies',
-              )}
-              {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
-              {board.group.deletion.state === 'error' && (
-                <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
-              )}
+          {deletion && deletion.state !== 'error' && (
+            <div className="daddy-session-progress" role="status">
+              {t('Saving results and removing session copies')}
+              {deletion.error && <span>{t(deletion.error)}</span>}
             </div>
           )}
         </section>
