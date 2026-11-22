@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DaddyBoard } from '../../src/client/daddy.js';
-import type { UsageView } from '../../src/core/usage.js';
+import { mockTwoProviders } from './usage-helpers.js';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -27,28 +27,6 @@ async function create(page: Page, title: string, issue: number) {
 async function openWorkers(page: Page) {
   await page.getByRole('button', { name: /^Workers \d/ }).click();
   return page.getByRole('dialog', { name: 'Workers' });
-}
-async function mockTwoProviders(page: Page) {
-  await page.route('**/api/usage', async (route) => {
-    const response = await route.fetch();
-    const { agents }: UsageView = await response.json();
-    const codex = agents[0]!;
-    await route.fulfill({
-      response,
-      json: {
-        agents: [
-          codex,
-          {
-            ...codex,
-            engine: 'claude',
-            name: 'Claude',
-            buckets: codex.buckets.map((bucket) => ({ ...bucket, id: 'claude', name: 'Claude' })),
-            resets: { availableCount: null, canUse: false, credits: [] },
-          },
-        ],
-      } satisfies UsageView,
-    });
-  });
 }
 test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,

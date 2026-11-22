@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { mockTwoProviders } from './usage-helpers.js';
 
 async function login(page: import('@playwright/test').Page) {
   await page.goto('/');
@@ -97,9 +98,11 @@ test('confirms session deletion, sends its generation and clears the deleted sel
   );
 });
 
-test('explains resource waits on a phone instead of leaving the conversation silently pending', async ({
+test('shows the resource wait and a task card without scrolling on short screens', async ({
   page,
 }) => {
+  const reason = 'Disk-space threshold reached';
+  await mockTwoProviders(page);
   await page.route('**/api/daddy/sessions/**', async (route) => {
     const response = await route.fetch();
     const body = await response.json();
@@ -112,7 +115,7 @@ test('explains resource waits on a phone instead of leaving the conversation sil
           resourceWait: {
             state: 'repairing',
             since: new Date().toISOString(),
-            reasons: ['Disk-space threshold reached'],
+            reasons: [reason],
           },
         },
       },
@@ -120,15 +123,35 @@ test('explains resource waits on a phone instead of leaving the conversation sil
   });
   await login(page);
   await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page
+    .getByLabel('What should daddy do?')
+    .fill(`https://github.com/fixture/planning/issues/${Date.now()}`);
   await page.getByLabel('Session name (optional)').fill('Resource status fixture');
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByText('Waiting for server resources', { exact: true })).toBeVisible();
-  await expect(
-    page.getByText(
-      'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-      { exact: true },
-    ),
-  ).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+
+  const overview = page.getByRole('region', { name: 'Session overview' });
+  const notice = page.getByRole('status').filter({ hasText: 'Waiting for server resources' });
+  await expect(notice).toContainText('Your messages and working files are saved.');
+  for (const viewport of [
+    { width: 390, height: 540 },
+    { width: 1024, height: 480 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(notice.getByText(reason, { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(notice.getByText('Waiting for server resources', { exact: true })).toBeInViewport({
+      ratio: 1,
+    });
+    if (viewport.width === 390) {
+      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+    }
+    await expect(notice).toBeInViewport({ ratio: 1 });
+    await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
+      ratio: 1,
+    });
+    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  }
 });

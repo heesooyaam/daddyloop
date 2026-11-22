@@ -142,6 +142,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const resourceWait = board?.group.resourceWait;
   const deletion = board?.group.deletion;
   const preparation = deletion ? undefined : board?.group.workspacePreparation;
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
@@ -325,6 +326,24 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onRetry={() => setModal('delete')}
           />
         )}
+        {resourceWait && (
+          <div className="daddy-error daddy-resource-wait" role="status">
+            <div>
+              <strong>{t('Waiting for server resources')}</strong>
+              {resourceWait.reasons.length > 0 && (
+                <>
+                  {' · '}
+                  <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
+                </>
+              )}
+            </div>
+            <span>
+              {t(
+                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+              )}
+            </span>
+          </div>
+        )}
         <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
           <UsageStrip
             usage={state.usage}
@@ -334,17 +353,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               setModal('limits');
             }}
           />
-          {board?.group.resourceWait && (
-            <div className="daddy-error daddy-resource-wait" role="status">
-              <strong>{t('Waiting for server resources')}</strong>
-              <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
-              <span>
-                {t(
-                  'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-                )}
-              </span>
-            </div>
-          )}
           {preparation && preparation.state !== 'error' && (
             <div className="daddy-session-progress" role="status">
               {t(
