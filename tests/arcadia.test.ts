@@ -10,6 +10,7 @@ class FakeArc extends ArcBridge {
   head = 'a'.repeat(40);
   diff = '99';
   targetBranch = 'main';
+  loseCreateResponse = false;
   general = [
     { id: -7, content: tag('daddyloop:test'), is_draft: true, author: { name: 'tester' } },
   ];
@@ -21,6 +22,7 @@ class FakeArc extends ArcBridge {
       author: { name: 'tester' },
     },
   ];
+  inlineByDiff = new Map<string, typeof this.inline>();
   override async metadata(id: number) {
     return {
       pr: {
@@ -43,7 +45,10 @@ class FakeArc extends ArcBridge {
   }
   override async api<T>(args: string[]): Promise<T> {
     this.calls.push(args);
-    if (args[1] === 'comments') return (args[0] === 'pr' ? this.general : this.inline) as T;
+    if (args[1] === 'comments')
+      return (
+        args[0] === 'pr' ? this.general : (this.inlineByDiff.get(args.at(-1)!) ?? this.inline)
+      ) as T;
     if (args[1] === 'checks') return { checks: [] } as T;
     if (args[1] === 'create-comment') {
       const note = {
@@ -53,6 +58,7 @@ class FakeArc extends ArcBridge {
         author: { name: 'tester' },
       };
       this.general.push(note);
+      if (this.loseCreateResponse) throw new Error('Lost create response');
       return note as T;
     }
     return { success: true } as T;
@@ -72,6 +78,99 @@ it('parses Arcanum URLs and keeps diff versions in revision identity', () => {
     ref.number,
   );
   expect(sameRevision(review.revision, { ...review.revision, revisionId: '100' })).toBe(false);
+});
+
+it.each([
+  'draft on new diff',
+  'lost response',
+  'lost response with another draft',
+  'lost response after retargeting',
+] as const)('retries Arcanum review creation after %s', async (scenario) => {
+  const bridge = new FakeArc();
+  bridge.general = [];
+  bridge.inline = [];
+  const provider = new ArcadiaProvider(bridge);
+  const store = new Store(':memory:');
+  const engine = new Engine(store, () => provider);
+  try {
+    const task = await engine.create({ ref, repoPath: '/tmp', requirements: 'Check the fix' });
+    const started = await engine.review(task.id);
+    const old = started.review!;
+    store.cancelJobs(task.id);
+    store.saveTask({ ...started, state: 'needs_input' });
+    bridge.general[0].is_draft = false;
+    bridge.general.push({
+      id: 104,
+      content: tag(`${old.marker}:comment:R2`),
+      is_draft: false,
+      author: { name: 'tester' },
+    });
+    bridge.diff = '100';
+    const retargeted = scenario === 'lost response after retargeting';
+    if (retargeted) {
+      bridge.targetBranch = 'release';
+    } else {
+      const author = store.enqueue(started, 'author', 'fix', 'Save the fix');
+      store.saveJob({ ...author, status: 'cancelled' });
+      const original = started.revision!;
+      bridge.head = 'c'.repeat(40);
+      store.event(
+        task.id,
+        'author.feedback_snapshot',
+        { revision: original, targetBranch: 'main' },
+        author.id,
+      );
+      store.event(
+        task.id,
+        'author.fixes_saved',
+        { head: bridge.head, revision: original },
+        author.id,
+      );
+      store.saveTask({ ...store.getTask(task.id), generation: author.generation + 1 });
+      expect(await engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
+    }
+
+    const manual = {
+      id: -110,
+      content: 'Manual note',
+      is_draft: true,
+      author: { name: 'tester' },
+    };
+    if (scenario === 'draft on new diff') {
+      bridge.inlineByDiff.set('100', [manual]);
+      await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'existing_drafts' });
+      expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+        [],
+      );
+      bridge.inlineByDiff.delete('100');
+    } else {
+      bridge.loseCreateResponse = true;
+      await expect(engine.review(task.id, retargeted)).rejects.toThrow('Lost create response');
+      expect(
+        store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
+      ).toHaveLength(1);
+      bridge.loseCreateResponse = false;
+    }
+    const restarted = new Engine(store, () => provider);
+    if (scenario === 'lost response with another draft') {
+      bridge.inlineByDiff.set('100', [manual]);
+      expect(await restarted.review(task.id, true)).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('Arcanum'),
+      });
+      bridge.inlineByDiff.delete('100');
+    }
+    const next = await restarted.review(task.id, true);
+    expect(next).toMatchObject({
+      state: 'reviewing',
+      review: { nodeId: '100', targetBranch: bridge.targetBranch, revision: { head: bridge.head } },
+    });
+    expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['pr:104']);
+    expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
+    expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual([]);
+  } finally {
+    store.close();
+  }
 });
 it('preserves negative Arcanum IDs and publishes only its explicitly tracked drafts', async () => {
   const bridge = new FakeArc(),

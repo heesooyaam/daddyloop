@@ -7,7 +7,7 @@ import type {
   Revision,
   Location,
 } from '../core/types.js';
-import { AppError } from '../core/types.js';
+import { ProviderWriteNotAttempted } from '../core/types.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 import { type ReviewProvider, tag, assertDraft } from './provider.js';
 type Note = {
@@ -121,7 +121,7 @@ export class ArcadiaProvider implements ReviewProvider {
     };
   }
   async findReview(ref: PRRef, marker: string) {
-    const { user } = await this.bridge.metadata(ref.number),
+    const { user, pr, base } = await this.bridge.metadata(ref.number),
       diffId = await this.bridge.activeDiff(ref.number);
     const [notes] = await this.notes(ref, diffId),
       summary = notes.find(
@@ -133,7 +133,8 @@ export class ArcadiaProvider implements ReviewProvider {
           marker,
           nodeId: diffId,
           authorId: user,
-          revision: { head: '', base: '', start: '', revisionId: diffId },
+          targetBranch: pr.to_branch,
+          revision: { head: pr.from_id, base, start: base, revisionId: diffId },
         }
       : undefined;
   }
@@ -142,7 +143,7 @@ export class ArcadiaProvider implements ReviewProvider {
       diffId = revision.revisionId ?? (await this.bridge.activeDiff(ref.number));
     const [notes, inline] = await this.notes(ref, diffId);
     if ([...notes, ...inline].some((n) => n.author?.name === user && n.is_draft && !n.deleted_at))
-      throw new AppError(
+      throw new ProviderWriteNotAttempted(
         'existing_drafts',
         'Existing Arcanum drafts were preserved. Publish or discard them before starting a new review.',
       );
@@ -167,15 +168,29 @@ export class ArcadiaProvider implements ReviewProvider {
       revision,
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    successor?: ReviewHandle,
+  ): Promise<ReviewSnapshot> {
     const [general, inline] = await this.notes(ref, review.nodeId!);
     const owned = (note: Note) => !note.deleted_at && note.author?.name === review.authorId;
     const summary = general.find((n) => owned(n) && n.content.includes(tag(review.marker)));
     const isFinding = (n: Note) => owned(n) && n.content.includes(`<!-- ${review.marker}:comment:`);
     const notes = [...general.filter(isFinding), ...inline.filter(isFinding)];
-    const unknown = [...general, ...inline].some(
-      (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
-    );
+    const unknownDraft = (note: Note) =>
+      owned(note) && note.is_draft && note !== summary && !isFinding(note);
+    const unknown =
+      inline.some(unknownDraft) ||
+      general.some(
+        (note) =>
+          unknownDraft(note) &&
+          !(
+            successor &&
+            String(note.id) === successor.id &&
+            note.content.includes(tag(successor.marker))
+          ),
+      );
     const partial =
       unknown ||
       (summary

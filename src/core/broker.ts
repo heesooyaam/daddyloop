@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
   prRef,
+  revisionOf,
   sameRevision,
   reviewTargetChange,
   missingReviewTargetReason,
@@ -10,6 +11,7 @@ import {
   type Job,
   type PRRef,
   type PullRequest,
+  type Revision,
   type ReviewSnapshot,
 } from './types.js';
 import type { Store } from './store.js';
@@ -76,10 +78,35 @@ export class Broker {
   ) {
     this.outbox = new Outbox(store);
   }
+  private reviewMarker(task: Task, generation: number, round: number): string {
+    return `daddyloop:${task.id}:${generation}:${round}`;
+  }
+  private async findCreatedReview(
+    ref: PRRef,
+    marker: string,
+    revision: Revision,
+    targetBranch?: string,
+  ) {
+    const existing = await this.provider(ref).findReview(ref, marker);
+    if (
+      existing &&
+      ref.provider === 'arcadia' &&
+      (!sameRevision(existing.revision, revision) || existing.targetBranch !== targetBranch)
+    )
+      return;
+    return existing;
+  }
+  async findAttemptedReview(task: Task, pr: PullRequest, generation: number) {
+    const marker = this.reviewMarker(task, generation, task.round + 1);
+    const revision = revisionOf(pr);
+    if (this.outbox.hasOperation(marker, revision))
+      return this.findCreatedReview(prRef(task), marker, revision, pr.targetBranch);
+  }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
-    const marker = `daddyloop:${task.id}:${task.generation}:${task.round}`;
-    const provider = this.provider(prRef(task)),
+    const marker = this.reviewMarker(task, task.generation, task.round);
+    const ref = prRef(task);
+    const provider = this.provider(ref),
       revision = task.revision!,
       targetBranch = task.pr?.targetBranch;
     const review = await this.outbox.perform(
@@ -87,11 +114,11 @@ export class Broker {
       marker,
       revision,
       async () => ({
-        ...(await provider.createReview(prRef(task), revision, marker)),
+        ...(await provider.createReview(ref, revision, marker)),
         targetBranch,
       }),
       async () => {
-        const existing = await provider.findReview(prRef(task), marker);
+        const existing = await this.findCreatedReview(ref, marker, revision, targetBranch);
         return existing
           ? { found: true, value: { ...existing, revision, targetBranch } }
           : { found: false };

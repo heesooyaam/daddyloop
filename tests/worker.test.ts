@@ -685,6 +685,70 @@ it.each(['head', 'base', 'targetBranch', 'cached targetBranch'] as const)(
   },
 );
 
+it.each(['base', 'start'] as const)(
+  'blocks a rollback when the legacy fix was published with a different %s',
+  async (field) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(
+      new Engine(f.store, () => f.provider),
+      new Workspaces('/tmp'),
+      runtime,
+      runtime,
+      healthy,
+      0,
+    );
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const original = task.pr!;
+      const head = 'fc7653947a156709d819016a0aaa0c7d0a0b8908';
+      const wrong = 'e'.repeat(40);
+      f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const pr = { ...original, head, [field]: wrong };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        head,
+        generation,
+        reason: 'Author pushed changes; independent verification is next',
+      });
+      const ref = prRef(task);
+      const review = await f.provider.createReview(ref, revision, 'legacy-review-on-moved-base');
+      await f.provider.publish(ref, review);
+      const snapshot = await f.provider.getReview(ref, review);
+      f.store.event(task.id, 'review.published', { reviewId: review.id, snapshot });
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        review,
+        snapshot,
+        state: 'awaiting_checks',
+        reviewFinished: true,
+      });
+      f.store.setSetting('demo-pr:1', original);
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      const blocked = f.store.getTask(task.id);
+      expect(blocked).toMatchObject({ state: 'needs_input', review });
+      for (const expected of [head, original[field], wrong])
+        expect(blocked.reason).toContain(expected);
+      expect(runtime.run).not.toHaveBeenCalled();
+      await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
 it.each(['after polling', 'after reading the draft'] as const)(
   'keeps a legacy review in draft when the target changes %s',
   async (when) => {

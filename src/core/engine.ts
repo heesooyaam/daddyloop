@@ -345,29 +345,55 @@ export class Engine {
         return task;
       }
       const staleDraft = task.pendingAuthorFix?.staleDraft;
-      if (pending && staleDraft) {
-        const reason = await this.inspectPreviousDraft(task, staleDraft);
-        if (reason) {
-          this.blockSavedFix(task, pending, reason);
-          return task;
-        }
-      }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       const retryWithoutTarget = retry && task.review && !task.review.targetBranch;
       const targetIssue =
         reviewTargetChange(task.review, pr, task.pr?.targetBranch) ??
         (retryWithoutTarget ? missingReviewTargetReason(pr) : undefined);
+      const changed = !sameRevision(task.revision, pr) || !!targetIssue;
+      const replacingReview = changed || (retry && !!task.review);
+      const attempted =
+        task.ref.provider === 'arcadia' &&
+        ((pending && staleDraft) || (task.review && replacingReview))
+          ? await this.broker.findAttemptedReview(
+              task,
+              pr,
+              replacingReview ? task.generation + 1 : task.generation,
+            )
+          : undefined;
+      if (attempted) {
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), attempted);
+        if (snapshot.status === 'partial') {
+          if (pending) this.blockSavedFix(task, pending, arcanumDraftReason);
+          else this.state(task, 'needs_input', arcanumDraftReason);
+          return task;
+        }
+      }
+      if (pending && staleDraft) {
+        const reason = await this.inspectPreviousDraft(task, staleDraft, attempted);
+        if (reason) {
+          this.blockSavedFix(task, pending, reason);
+          return task;
+        }
+      }
       if (targetIssue && task.review && (hasSharedDraftSlot(task) || retryWithoutTarget)) {
-        const reason = await this.inspectPreviousDraft(task, task.review);
+        const reason = await this.inspectPreviousDraft(task, task.review, attempted);
         if (reason) {
           this.state(task, 'needs_input', `${targetIssue} ${reason}`);
           return task;
         }
       }
-      const changed = !sameRevision(task.revision, pr) || !!targetIssue;
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+        const snapshot = await this.provider(prRef(task)).getReview(
+          prRef(task),
+          task.review,
+          attempted,
+        );
+        if (attempted && (snapshot.status === 'partial' || snapshot.status === 'draft')) {
+          this.state(task, 'needs_input', arcanumDraftReason);
+          return task;
+        }
         retainPublishedFeedback(task, snapshot);
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
@@ -408,9 +434,9 @@ export class Engine {
     });
   }
 
-  private async inspectPreviousDraft(task: Task, review: ReviewHandle) {
+  private async inspectPreviousDraft(task: Task, review: ReviewHandle, successor?: ReviewHandle) {
     const ref = prRef(task);
-    const snapshot = await this.provider(ref).getReview(ref, review);
+    const snapshot = await this.provider(ref).getReview(ref, review, successor);
     const pendingNotes = snapshot.status === 'draft' || snapshot.status === 'partial';
     if (pendingNotes && ref.provider === 'gitlab') return gitLabDraftReason;
     if (pendingNotes && ref.provider === 'arcadia') return arcanumDraftReason;
@@ -480,8 +506,10 @@ export class Engine {
     }
     const lost = this.lostFix(task, pr);
     if (lost) {
+      const publicationMismatch = this.legacyPublicationMismatch(task, lost.head);
       if (pr.state !== 'open')
         this.holdLostFix(task, lost.head, `PR is ${pr.state}. Automatic work stopped.`);
+      else if (publicationMismatch) this.holdLostFix(task, lost.head, publicationMismatch);
       else if (!lost.targetBranch) this.holdLostFix(task, lost.head, unknownFixTarget(task, pr));
       else if (
         lost.revision &&
@@ -704,6 +732,8 @@ export class Engine {
   }
 
   private savedFixReviewReason(task: Task, head: string, pr: PullRequest): string {
+    const publicationMismatch = this.legacyPublicationMismatch(task, head);
+    if (publicationMismatch) return publicationMismatch;
     const saved = this.savedFixEvent(task, head);
     const original = parseRecordedRevision(saved?.revision);
     const baseChange = original && savedFixBaseChange(original, pr);
@@ -963,12 +993,18 @@ export class Engine {
       .get(task.id, after, head);
   }
 
-  private legacyFixPublished(task: Task, head: string, after: number): boolean {
-    return !!this.store.db
+  private legacyFixPublication(task: Task, head: string, after: number, original?: Revision) {
+    return this.store.db
       .prepare(
-        `SELECT 1 FROM events published
+        `SELECT json_extract(published.data, '$.snapshot.revision.base') AS base,
+                json_extract(published.data, '$.snapshot.revision.start') AS start
+         FROM events published
        WHERE published.task_id=? AND published.id>? AND published.type='review.published'
          AND json_extract(published.data, '$.snapshot.revision.head')=?
+         AND (? IS NULL OR (
+           json_extract(published.data, '$.snapshot.revision.base')=?
+           AND json_extract(published.data, '$.snapshot.revision.start')=?
+         ))
          AND EXISTS (
            SELECT 1 FROM events observed
            WHERE observed.task_id=published.task_id AND observed.id>? AND observed.id<published.id
@@ -977,9 +1013,27 @@ export class Engine {
              AND json_extract(observed.data, '$.revision.base')=json_extract(published.data, '$.snapshot.revision.base')
              AND json_extract(observed.data, '$.revision.start')=json_extract(published.data, '$.snapshot.revision.start')
              AND json_extract(observed.data, '$.revision.revisionId') IS json_extract(published.data, '$.snapshot.revision.revisionId')
-         ) LIMIT 1`,
+         ) ORDER BY published.id DESC LIMIT 1`,
       )
-      .get(task.id, after, head, after);
+      .get(
+        task.id,
+        after,
+        head,
+        original?.base ?? null,
+        original?.base ?? null,
+        original?.start ?? null,
+        after,
+      );
+  }
+
+  private legacyPublicationMismatch(task: Task, head: string): string | undefined {
+    const saved = this.savedFixEvent(task, head);
+    if (!saved || typeof saved.saved_revision === 'string') return;
+    const original = parseRecordedRevision(saved.revision);
+    if (!original) return;
+    const published = this.legacyFixPublication(task, head, Number(saved.id));
+    if (published && (published.base !== original.base || published.start !== original.start))
+      return `The published review of saved fix ${head} used base ${published.base} (start ${published.start}). The author used base ${original.base} (start ${original.start}).`;
   }
 
   private legacyFixConfirmed(
@@ -990,7 +1044,7 @@ export class Engine {
     original: Revision | undefined,
     targetBranch: string | undefined,
   ): boolean {
-    if (this.legacyFixPublished(task, head, after)) return true;
+    if (original && this.legacyFixPublication(task, head, after, original)) return true;
     const finishedReview = task.reviewFinished && !!task.review;
     if (
       pr?.state !== 'open' ||

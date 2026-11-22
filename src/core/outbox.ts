@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { AppError } from './types.js';
+import { AppError, ProviderWriteNotAttempted } from './types.js';
 import type { Store } from './store.js';
 import { redact } from './security.js';
 
@@ -7,6 +7,18 @@ import { redact } from './security.js';
 export class Outbox {
   private active = new Set<string>();
   constructor(private store: Store) {}
+  private operation(id: string, request: string) {
+    const existing = this.store.db.prepare('SELECT * FROM operations WHERE id=?').get(id);
+    if (existing && existing.request !== request)
+      throw new AppError(
+        'idempotency_conflict',
+        'This operation key was already used with different arguments',
+      );
+    return existing;
+  }
+  hasOperation(id: string, input: unknown): boolean {
+    return !!this.operation(id, createHash('sha256').update(JSON.stringify(input)).digest('hex'));
+  }
   async perform<T>(
     taskId: string,
     id: string,
@@ -19,12 +31,7 @@ export class Outbox {
     this.active.add(id);
     try {
       const request = createHash('sha256').update(JSON.stringify(input)).digest('hex');
-      const existing = this.store.db.prepare('SELECT * FROM operations WHERE id=?').get(id);
-      if (existing && existing.request !== request)
-        throw new AppError(
-          'idempotency_conflict',
-          'This operation key was already used with different arguments',
-        );
+      const existing = this.operation(id, request);
       if (existing?.status === 'done') return JSON.parse(existing.result as string) as T;
       if (existing) {
         const result = await recover();
@@ -47,6 +54,13 @@ export class Outbox {
         this.store.event(taskId, 'operation.completed', { operationId: id });
         return result;
       } catch (error) {
+        if (error instanceof ProviderWriteNotAttempted) {
+          this.store.transaction(() => {
+            this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
+            this.store.event(taskId, 'operation.blocked', { operationId: id, code: error.code });
+          });
+          throw error;
+        }
         this.store.event(taskId, 'operation.uncertain', {
           operationId: id,
           error: redact(String(error)),

@@ -359,6 +359,7 @@ export class AppError extends Error {
     this.name = 'AppError';
   }
 }
+export class ProviderWriteNotAttempted extends AppError {}
 export const now = () => new Date().toISOString();
 export interface ExpectedTask {
   head: string;
