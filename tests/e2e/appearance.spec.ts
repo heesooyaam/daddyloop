@@ -76,6 +76,28 @@ test('offers eight readable themes in general settings and preserves drafts', as
     'Keep this draft while changing colors',
   );
 });
+test('opens the palette and switches sessions in a short desktop window', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 540 });
+  await login(page);
+  await createSession(page, 'First desktop theme session');
+  await createSession(page, 'Second desktop theme session');
+
+  await page
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: 'Change theme', exact: true })
+    .click();
+  const palette = page.getByRole('dialog', { name: 'Make yourself at home' });
+  await expect(palette).toBeVisible();
+  await palette.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await page
+    .getByRole('navigation', { name: 'Sessions' })
+    .getByRole('button', { name: /First desktop theme session/ })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'First desktop theme session', exact: true }),
+  ).toBeVisible();
+});
 test('opens the palette from the mobile sidebar and keeps the choice across sessions and reloads', async ({
   page,
 }) => {
