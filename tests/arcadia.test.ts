@@ -210,6 +210,50 @@ it('preserves negative Arcanum IDs and publishes only its explicitly tracked dra
     '--comment-for-diff-ids=-9',
   ]);
 });
+
+it('reads a recovered Arcanum review on its original diff after retargeting', async () => {
+  const bridge = new FakeArc();
+  bridge.general = [];
+  bridge.inline = [];
+  const provider = new ArcadiaProvider(bridge);
+  const store = new Store(':memory:');
+  const engine = new Engine(store, () => provider);
+  try {
+    const task = await engine.create({ ref, repoPath: '/tmp', requirements: 'Check the fix' });
+    bridge.loseCreateResponse = true;
+    await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+    bridge.loseCreateResponse = false;
+    const summary = bridge.general[0];
+    const note = {
+      id: 110,
+      content: summary.content.replace(/ -->$/, ':comment:R1 -->'),
+      is_draft: true,
+      author: summary.author,
+    };
+    bridge.inlineByDiff.set('99', [note]);
+    bridge.targetBranch = 'release';
+    bridge.diff = '100';
+    const restarted = new Engine(store, () => provider);
+    const blocked = await restarted.review(task.id, true);
+    expect(blocked).toMatchObject({
+      state: 'needs_input',
+      review: { nodeId: '99', targetBranch: 'main', revision: { revisionId: '99' } },
+    });
+    expect(blocked.reason).toContain('release');
+    expect(store.busy(task.id)).toBe(false);
+    summary.is_draft = false;
+    note.is_draft = false;
+    const next = await restarted.review(task.id, true);
+    expect(next).toMatchObject({
+      state: 'reviewing',
+      review: { nodeId: '100', targetBranch: 'release' },
+    });
+    expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['diff:110']);
+    expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
+  } finally {
+    store.close();
+  }
+});
 it('refuses to publish unrelated Arc drafts', async () => {
   const bridge = new FakeArc();
   bridge.general.push({
@@ -306,7 +350,9 @@ it.each([
     });
     const latestFinding = status === 'draft' || status === 'orphan draft' ? 'pr:102' : 'pr:104';
     expect(next.feedback?.comments.map(({ id }) => id)).toEqual(
-      status === 'published' ? ['pr:102', latestFinding] : [latestFinding],
+      status === 'published' || status === 'partial' || status === 'orphan published'
+        ? ['pr:102', latestFinding]
+        : [latestFinding],
     );
     expect(bridge.calls.filter((call) => call[1] === 'create-comment')).toHaveLength(2);
   } finally {

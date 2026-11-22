@@ -12,7 +12,11 @@ import {
 
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
-  findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
+  findReview(
+    ref: PRRef,
+    marker: string,
+    intent?: { revision: Revision; targetBranch?: string },
+  ): Promise<ReviewHandle | undefined>;
   createReview(
     ref: PRRef,
     revision: Revision,

@@ -19,6 +19,12 @@ export class Outbox {
   hasOperation(id: string, input: unknown): boolean {
     return !!this.operation(id, createHash('sha256').update(JSON.stringify(input)).digest('hex'));
   }
+  matchesOperation(id: string, input: unknown): boolean {
+    const request = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    return !!this.store.db
+      .prepare('SELECT 1 FROM operations WHERE id=? AND request=?')
+      .get(id, request);
+  }
   async perform<T>(
     taskId: string,
     id: string,

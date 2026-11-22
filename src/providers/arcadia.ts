@@ -120,21 +120,26 @@ export class ArcadiaProvider implements ReviewProvider {
         : {}),
     };
   }
-  async findReview(ref: PRRef, marker: string) {
-    const { user, pr, base } = await this.bridge.metadata(ref.number),
-      diffId = await this.bridge.activeDiff(ref.number);
-    const [notes] = await this.notes(ref, diffId),
-      summary = notes.find(
-        (n) => n.author?.name === user && n.content.includes(tag(marker)) && !n.deleted_at,
-      );
+  async findReview(
+    ref: PRRef,
+    marker: string,
+    intent?: { revision: Revision; targetBranch?: string },
+  ) {
+    const { user, pr, base } = await this.bridge.metadata(ref.number);
+    const diffId = intent ? intent.revision.revisionId : await this.bridge.activeDiff(ref.number);
+    if (!diffId) return;
+    const notes = await this.bridge.api<Note[]>(['pr', 'comments', String(ref.number)]);
+    const summary = notes.find(
+      (n) => n.author?.name === user && n.content.includes(tag(marker)) && !n.deleted_at,
+    );
     return summary
       ? {
           id: String(summary.id),
           marker,
           nodeId: diffId,
           authorId: user,
-          targetBranch: pr.to_branch,
-          revision: { head: pr.from_id, base, start: base, revisionId: diffId },
+          targetBranch: intent ? intent.targetBranch : pr.to_branch,
+          revision: intent?.revision ?? { head: pr.from_id, base, start: base, revisionId: diffId },
         }
       : undefined;
   }

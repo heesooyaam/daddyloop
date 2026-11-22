@@ -97,20 +97,19 @@ function hasSharedDraftSlot(task: Task): boolean {
 }
 
 function retainPublishedFeedback(task: Task, snapshot: ReviewSnapshot) {
-  if (snapshot.status === 'published') {
-    if (task.feedback && !task.reviewFinished) {
-      const comments = new Map(task.feedback.comments.map((comment) => [comment.id, comment]));
-      for (const comment of snapshot.comments) comments.set(comment.id, comment);
-      task.feedback = { ...snapshot, comments: [...comments.values()] };
-    } else task.feedback = snapshot;
-  }
   // These providers return missing with findings only when the remaining findings are published.
-  else if (
+  if (
     ['gitlab', 'arcadia'].includes(task.ref.provider) &&
     snapshot.status === 'missing' &&
     snapshot.comments.length
   )
-    task.feedback = { ...snapshot, status: 'published' };
+    snapshot = { ...snapshot, status: 'published' };
+  if (snapshot.status !== 'published') return;
+  if (task.feedback && !task.reviewFinished) {
+    const comments = new Map(task.feedback.comments.map((comment) => [comment.id, comment]));
+    for (const comment of snapshot.comments) comments.set(comment.id, comment);
+    task.feedback = { ...snapshot, comments: [...comments.values()] };
+  } else task.feedback = snapshot;
 }
 
 function lostFixRecoveryBlock(fix: LostFix, task: Task) {
@@ -360,7 +359,7 @@ export class Engine {
       const replacingReview = changed || (retry && !!task.review);
       const attempt =
         hasSharedDraftSlot(task) && (!task.review || replacingReview)
-          ? await this.broker.findAttemptedReview(task, pr)
+          ? await this.broker.findAttemptedReview(task)
           : undefined;
       const attempted = attempt?.review;
       const draftReason = task.ref.provider === 'gitlab' ? gitLabDraftReason : arcanumDraftReason;
@@ -376,7 +375,9 @@ export class Engine {
           targetReason = `The earlier review creation has no recorded target branch. Inspect the native review before retrying on ${pr.targetBranch}.`;
         else if (attempt.targetBranch !== pr.targetBranch)
           targetReason = `The earlier review was requested for ${attempt.targetBranch}. The PR now targets ${pr.targetBranch}. Inspect the native review before retrying.`;
-        const baseChange = savedFixBaseChange(attempt.revision, pr);
+        const baseChange = attempt.revision
+          ? savedFixBaseChange(attempt.revision, pr)
+          : 'The earlier comparison revision is unknown.';
         const reason = baseChange ? `${targetReason} ${baseChange}` : targetReason;
         if (attempted) {
           const previous = staleDraft ?? task.review;
@@ -386,7 +387,7 @@ export class Engine {
             return task;
           }
           task.review = attempted;
-          task.revision = attempt.revision;
+          if (attempt.revision) task.revision = attempt.revision;
           task.snapshot = undefined;
           task.reviewFinished = false;
           task.generation = Math.max(task.generation, attempt.generation);
@@ -596,6 +597,13 @@ export class Engine {
     if (!sameRevision(task.revision, pr)) {
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
+      if (task.review && hasSharedDraftSlot(task) && (hadUnpublished || !task.reviewFinished)) {
+        this.holdTaskForInput(
+          task,
+          'PR revision changed. Use Retry review to check the previous native review before starting the next one.',
+        );
+        return task;
+      }
       this.invalidate(task, pr);
       this.state(
         task,

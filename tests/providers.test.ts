@@ -39,6 +39,8 @@ describe('GitHub draft review contract', () => {
     'lost response and new base',
     'lost response before reconcile',
     'legacy intent',
+    'legacy intent after reconcile',
+    'legacy intent with revision history',
   ] as const)('preserves the old GitHub draft when retrying (%s)', async (scenario) => {
     const store = new Store(':memory:');
     const pull = '/repos/acme/service/pulls/12';
@@ -99,37 +101,44 @@ describe('GitHub draft review contract', () => {
         requirements: 'Check the target branch',
       });
       if (scenario !== 'regular') {
+        if (scenario === 'legacy intent with revision history')
+          store.event(task.id, 'revision.changed', {
+            revision: task.revision,
+            generation: task.generation,
+          });
         await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
-        if (scenario === 'legacy intent') {
+        const legacy = scenario.startsWith('legacy intent');
+        if (legacy) {
           store.db
             .prepare(
-              "UPDATE events SET data=json_remove(data, '$.targetBranch') WHERE type='operation.started'",
+              "UPDATE events SET data=json_remove(data, '$.targetBranch', '$.revision') WHERE type='operation.started'",
             )
             .run();
         }
         branch = scenario === 'legacy intent' ? 'main' : 'release';
         const movedBase =
           scenario === 'lost response and new base' ||
-          scenario === 'lost response before reconcile';
+          scenario === 'lost response before reconcile' ||
+          (legacy && scenario !== 'legacy intent');
         if (movedBase) base = 'e'.repeat(40);
-        if (scenario === 'lost response before reconcile')
+        if (scenario === 'lost response before reconcile' || (legacy && movedBase))
           expect(await engine.reconcile(task.id)).toMatchObject({ revision: { base } });
         const restarted = new Engine(store, () => provider);
         const held = await restarted.review(task.id, true);
         expect(held.state).toBe('needs_input');
         expect(held.review?.id).toBe('1');
-        expect(held.review?.targetBranch).toBe(scenario === 'legacy intent' ? undefined : 'main');
-        expect(held.review?.revision.base).toBe(revision.base);
-        expect(held.reason).toContain(
-          scenario === 'legacy intent' ? 'no recorded target branch' : 'release',
+        expect(held.review?.targetBranch).toBe(legacy ? undefined : 'main');
+        expect(held.review?.revision.base).toBe(
+          scenario === 'legacy intent after reconcile' ? '' : revision.base,
         );
+        expect(held.reason).toContain(legacy ? 'no recorded target branch' : 'release');
         expect(draft?.state).toBe('PENDING');
         expect(store.busy(task.id)).toBe(false);
         if (movedBase) {
-          expect(held.reason).toContain(base);
+          if (scenario !== 'legacy intent after reconcile') expect(held.reason).toContain(base);
           expect(await restarted.review(task.id, true)).toMatchObject({
             state: 'needs_input',
-            review: held.review,
+            review: { id: held.review?.id, revision: held.review?.revision },
           });
           expect(attempts).toBe(1);
         }
@@ -411,14 +420,7 @@ describe('GitLab draft notes contract', () => {
         state: 'reviewing',
         review: { targetBranch: branch, revision: { head } },
       });
-      const expectedFindings = {
-        draft: ['103'],
-        'delete summary': ['107'],
-      };
-      const expected =
-        status === 'draft' || status === 'delete summary'
-          ? expectedFindings[status]
-          : ['103', '107'];
+      const expected = status === 'draft' ? ['103'] : ['103', '107'];
       expect(next.feedback?.comments.map(({ id }) => id)).toEqual(expected);
       expect(creates).toBe(2);
       const reviewer = store.claim()!;
@@ -426,7 +428,7 @@ describe('GitLab draft notes contract', () => {
         status: 'completed',
         summary: 'Reviewed the new target',
         checkedHead: head,
-        verifiedCommentIds: ['103'],
+        verifiedCommentIds: [status === 'delete summary' ? '107' : '103'],
       });
       expect(store.getTask(task.id).state).toBe(
         status === 'draft' ? 'awaiting_publication' : 'needs_input',

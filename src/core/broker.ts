@@ -3,7 +3,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
   prRef,
-  revisionOf,
   sameRevision,
   reviewTargetChange,
   missingReviewTargetReason,
@@ -85,17 +84,28 @@ export class Broker {
   private async findCreatedReview(
     ref: PRRef,
     marker: string,
-    revision: Revision,
+    revision?: Revision,
     targetBranch?: string,
   ): Promise<ReviewHandle | undefined> {
-    const existing = await this.provider(ref).findReview(ref, marker);
+    if (ref.provider === 'arcadia' && !revision) return;
+    const existing = await this.provider(ref).findReview(
+      ref,
+      marker,
+      revision && { revision, targetBranch },
+    );
     if (
       existing &&
       ref.provider === 'arcadia' &&
       (!sameRevision(existing.revision, revision) || existing.targetBranch !== targetBranch)
     )
       return;
-    if (existing && ref.provider === 'github' && existing.revision.head !== revision.head) return;
+    if (
+      existing &&
+      ref.provider === 'github' &&
+      revision &&
+      existing.revision.head !== revision.head
+    )
+      return;
     if (existing && ref.provider === 'gitlab') {
       const baseline = this.store.db
         .prepare(
@@ -110,12 +120,13 @@ export class Broker {
   private reviewIntent(taskId: string, marker: string) {
     const intent = this.store.db
       .prepare(
-        `SELECT json_extract(data, '$.targetBranch') AS branch,
+        `SELECT id, json_extract(data, '$.targetBranch') AS branch,
                 json_extract(data, '$.revision') AS revision FROM events
        WHERE task_id=? AND type='operation.started' AND json_extract(data, '$.operationId')=? ORDER BY id DESC LIMIT 1`,
       )
       .get(taskId, marker);
     return {
+      eventId: typeof intent?.id === 'number' ? intent.id : undefined,
       targetBranch: typeof intent?.branch === 'string' ? intent.branch : undefined,
       revision:
         typeof intent?.revision === 'string'
@@ -123,7 +134,22 @@ export class Broker {
           : undefined,
     };
   }
-  async findAttemptedReview(task: Task, pr: PullRequest) {
+  private legacyReviewRevision(task: Task, marker: string, eventId?: number) {
+    if (task.revision && this.outbox.matchesOperation(marker, task.revision)) return task.revision;
+    if (eventId === undefined) return;
+    const history = this.store.db
+      .prepare(
+        `SELECT json_extract(data, '$.revision') AS revision FROM events
+       WHERE task_id=? AND type='revision.changed' AND id<? ORDER BY id DESC`,
+      )
+      .all(task.id, eventId);
+    for (const event of history) {
+      if (typeof event.revision !== 'string') continue;
+      const revision = JSON.parse(event.revision) as Revision;
+      if (this.outbox.matchesOperation(marker, revision)) return revision;
+    }
+  }
+  async findAttemptedReview(task: Task) {
     const prefix = `daddyloop:${task.id}:`;
     const suffix = `:${task.round + 1}`;
     const operations = this.store.db
@@ -133,15 +159,15 @@ export class Broker {
       const marker = String(row.id);
       const generation = Number(marker.slice(prefix.length, -suffix.length));
       if (!Number.isSafeInteger(generation)) continue;
-      const { targetBranch, revision: recorded } = this.reviewIntent(task.id, marker);
-      const revision = recorded ?? task.revision ?? revisionOf(pr);
-      if (!this.outbox.hasOperation(marker, revision)) continue;
+      const { targetBranch, revision: recorded, eventId } = this.reviewIntent(task.id, marker);
+      if (recorded && !this.outbox.hasOperation(marker, recorded)) continue;
+      const revision = recorded ?? this.legacyReviewRevision(task, marker, eventId);
       const existing = await this.findCreatedReview(prRef(task), marker, revision, targetBranch);
       return {
         generation,
         targetBranch,
         revision,
-        review: existing && { ...existing, revision, targetBranch },
+        review: existing && { ...existing, revision: revision ?? existing.revision, targetBranch },
       };
     }
   }

@@ -62,6 +62,63 @@ async function recordLegacyLostFix(f: Awaited<ReturnType<typeof fixture>>, compl
   return { task, saved };
 }
 
+it.each(['draft', 'published'] as const)(
+  'retains the old native review when reconciliation moves the base (%s)',
+  async (status) => {
+    const f = await fixture();
+    try {
+      const earlier = await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider: 'github' as const };
+      f.store.saveTask({ ...task, ref });
+      const head = 'fc7653947a156709d819016a0aaa0c7d0a0b8908';
+      await f.engine.completeJob(author, f.result(), { head, revision: task.revision! });
+      f.store.saveJob({ ...author, status: 'completed' });
+      const fixed = { ...task.pr!, head };
+      await f.engine.submitSavedFix(
+        task.id,
+        async () => async () => f.store.setSetting('demo-pr:1', fixed),
+      );
+      const started = await f.engine.review(task.id);
+      const old = started.review!;
+      const added = await f.provider.createComment(
+        ref,
+        old,
+        'A newly published finding',
+        `${old.marker}:comment:R2`,
+      );
+      if (status === 'published') await f.provider.publish(ref, old);
+
+      const moved = { ...fixed, base: 'e'.repeat(40) };
+      f.store.setSetting('demo-pr:1', moved);
+      const blocked = await f.engine.reconcile(task.id);
+      expect(blocked).toMatchObject({ state: 'needs_input', review: old });
+      expect(f.store.busy(task.id)).toBe(false);
+      const restarted = new Engine(f.store, () => f.provider);
+      if (status === 'draft') {
+        const create = vi.spyOn(f.provider, 'createReview');
+        expect(await restarted.review(task.id, true)).toMatchObject({
+          state: 'needs_input',
+          review: old,
+        });
+        expect(create).not.toHaveBeenCalled();
+        await f.provider.publish(ref, old);
+      }
+      const next = await restarted.review(task.id, true);
+      expect(next).toMatchObject({ state: 'reviewing', review: { revision: revisionOf(moved) } });
+      expect(next.feedback?.comments.map(({ id }) => id)).toEqual([earlier, added.id]);
+      await f.run({ verifiedCommentIds: [earlier] });
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        reviewFinished: false,
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
 it('keeps a saved fix when reconcile overlaps the author commit', async () => {
   const f = await fixture();
   const originalHead = '17ee5c79997b7f5402d3d2c66c3cc59a75854098';
