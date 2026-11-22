@@ -166,6 +166,8 @@ export const daddyRu: Record<string, string> = {
   'The branch daddy starts from. Leave it empty to use the repository default.':
     'С какой ветки папочка начнёт работу. Можно оставить пустым.',
   'Apply settings': 'Применить настройки',
+  'Apply or cancel folder settings before saving.':
+    'Примени или отмени настройки папки перед сохранением.',
   'Apply or cancel folder settings before starting the session.':
     'Примени или отмени настройки папки перед началом сессии.',
   'Tell daddy the goal, paste a ticket, or start with a question.':

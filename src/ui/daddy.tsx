@@ -665,22 +665,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'settings' && board && (
         <Dialog title={t('Session settings')} onClose={() => setModal(null)}>
-          <div className="daddy-form" key={board.group.id}>
-            <SessionRepository
-              api={api}
-              board={board}
-              repository={repository}
-              onChange={(value) => model.repository(value)}
-            />
-            <SessionSettings
-              api={api}
-              board={board}
-              onSave={async (profiles, instructions) => {
-                await model.action('settings', { profiles, instructions });
-                if (!model.snapshot().error) setModal(null);
-              }}
-            />
-          </div>
+          <SessionSettings
+            key={board.group.id}
+            api={api}
+            board={board}
+            repository={repository}
+            onRepositoryChange={(value) => model.repository(value)}
+            onSave={async (profiles, instructions) => {
+              await model.action('settings', { profiles, instructions });
+              if (!model.snapshot().error) setModal(null);
+            }}
+          />
         </Dialog>
       )}
       {modal === 'queue-task' && board && (
@@ -1198,12 +1193,16 @@ function SessionRepository({
   api,
   board,
   repository,
+  disabled,
   onChange,
+  onEditingChange,
 }: {
   api: DaddyApi;
   board: DaddyBoard;
   repository?: RepositorySelection;
+  disabled: boolean;
   onChange: (value?: RepositorySelection) => void;
+  onEditingChange: (editing: boolean) => void;
 }) {
   const { t } = useLocale();
   const { workspace, group } = board;
@@ -1211,7 +1210,7 @@ function SessionRepository({
   if (!workspace) return null;
 
   return (
-    <fieldset>
+    <fieldset disabled={disabled}>
       <legend>{t('Repository')}</legend>
       <dl className="daddy-session-repository">
         <dt>{t('Workspace source')}</dt>
@@ -1237,6 +1236,7 @@ function SessionRepository({
         sessionId={group.id}
         value={repository}
         onChange={onChange}
+        onEditingChange={onEditingChange}
         target="message"
       />
     </fieldset>
@@ -1245,10 +1245,14 @@ function SessionRepository({
 function SessionSettings({
   api,
   board,
+  repository,
+  onRepositoryChange,
   onSave,
 }: {
   api: DaddyApi;
   board: DaddyBoard;
+  repository?: RepositorySelection;
+  onRepositoryChange: (value?: RepositorySelection) => void;
   onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1259,17 +1263,19 @@ function SessionSettings({
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
     ),
+    [editingFolder, setEditingFolder] = useState(false),
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const originalProfiles = useRef(profiles);
   const { catalogue, load } = useAgentCatalogue(api);
+  const savingBlocked = busy || editingFolder || importingInstructions;
   return (
     <form
       className="daddy-form"
       onSubmit={(event) => {
         event.preventDefault();
-        if (importingInstructions) return;
+        if (savingBlocked) return;
         setBusy(true);
         void onSave(
           JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
@@ -1281,6 +1287,14 @@ function SessionSettings({
           .finally(() => setBusy(false));
       }}
     >
+      <SessionRepository
+        api={api}
+        board={board}
+        repository={repository}
+        disabled={busy}
+        onChange={onRepositoryChange}
+        onEditingChange={setEditingFolder}
+      />
       {(['daddy', 'worker'] as const).map((role) => {
         const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
@@ -1316,7 +1330,10 @@ function SessionSettings({
           {t(error || catalogue.error!)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy || importingInstructions}>
+      {editingFolder && (
+        <p className="daddy-muted">{t('Apply or cancel folder settings before saving.')}</p>
+      )}
+      <button className="daddy-button primary" disabled={savingBlocked}>
         {t('Save settings')}
       </button>
     </form>

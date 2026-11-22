@@ -59,16 +59,43 @@ test('sets a one-message repository in session settings and sends the next messa
   const source = resolve('.daddyloop/e2e/fixture-repository');
   const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
   const settings = page.getByRole('dialog', { name: 'Session settings' });
+  const changeFolder = settings.getByRole('button', { name: 'Change folder for the next message' });
+  const save = settings.getByRole('button', { name: 'Save settings', exact: true });
   const override = page.getByRole('button', { name: 'Repository override for the next message' });
   await expect(page.getByText('Workspace source', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Session settings' }).click();
   await expect(settings.getByText(source, { exact: true })).toBeVisible();
-  await settings.getByRole('button', { name: 'Change folder for the next message' }).click();
+  await changeFolder.click();
   await settings.getByLabel('Repository URL or server folder').fill(alternate);
-  await settings.getByRole('button', { name: 'Apply settings' }).click();
+  let releasePreview!: () => void;
+  const pendingPreview = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  await page.route(
+    '**/api/workspaces/preview',
+    async (route) => {
+      await pendingPreview;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  const preview = page.waitForRequest('**/api/workspaces/preview');
+  try {
+    await settings.getByRole('button', { name: 'Apply settings' }).click();
+    await preview;
+    await expect(save).toBeDisabled();
+  } finally {
+    releasePreview();
+  }
   await expect(settings.getByText(alternate, { exact: true })).toBeVisible();
   await expect(settings.getByText(source, { exact: true })).toBeVisible();
-  await settings.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(save).toBeEnabled();
+  await changeFolder.click();
+  await expect(save).toBeDisabled();
+  await settings.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(settings).toHaveCount(0);
   await expect(override).toBeVisible();
 
   const sent = page.waitForResponse(
@@ -79,6 +106,7 @@ test('sets a one-message repository in session settings and sends the next messa
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   const response = await sent;
   expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toMatchObject({ repository: { path: alternate } });
   const board = await response.json();
   expect(board.messages.at(-1).workspace.repoPath).toBe(alternate);
   expect(board.workspace.repoPath).toBe(source);
