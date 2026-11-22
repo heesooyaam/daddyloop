@@ -494,6 +494,135 @@ it.each(['head', 'base'] as const)(
   },
 );
 
+it.each([false, true])(
+  'recovers a fix whose first legacy observation cleared its pointer (rolled back: %s)',
+  async (rolledBack) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const original = task.pr!;
+      const head = 'f'.repeat(40);
+      f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      // Legacy completeJob saw H2 on B2 before awaiting_push and cleared the pending pointer.
+      const pr = { ...original, head, base: 'e'.repeat(40) };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'Author pushed changes; independent verification is next',
+        generation,
+        head,
+      });
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        state: 'queued',
+        review: undefined,
+        snapshot: undefined,
+        reviewFinished: false,
+        pendingAuthorHead: undefined,
+      });
+      const observed = rolledBack ? { ...pr, head: original.head } : pr;
+      f.store.setSetting('demo-pr:1', observed);
+
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      expect(runtime.run).not.toHaveBeenCalled();
+      const blocked = f.store.getTask(task.id);
+      expect(blocked).toMatchObject({ state: 'needs_input', revision });
+      expect(blocked.reason).toContain(head);
+      expect(blocked.reason).toContain(observed.head);
+      expect(blocked.reason).toContain(original.base);
+      expect(blocked.reason).toContain(observed.base);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it.each(['retargeted', 'unknown', 'matching'] as const)(
+  'checks the author target before the first review of a recovered fix (%s)',
+  async (scenario) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    try {
+      await queueFix(f);
+      const author = f.store.claim()!;
+      const task = f.store.getTask(f.task.id);
+      const original = task.pr!;
+      const head = 'f'.repeat(40);
+      f.store.event(
+        task.id,
+        'author.feedback_snapshot',
+        {
+          ...task.feedback,
+          targetBranch: scenario === 'unknown' ? undefined : original.targetBranch,
+        },
+        author.id,
+      );
+      f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+      f.store.saveJob({ ...author, status: 'completed' });
+      const pr = {
+        ...original,
+        head,
+        targetBranch: scenario === 'matching' ? original.targetBranch : 'release',
+      };
+      const revision = revisionOf(pr);
+      const generation = author.generation + 1;
+      f.store.event(task.id, 'revision.changed', { revision, generation });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'New revision is ready for review',
+        generation,
+        head,
+      });
+      f.store.saveTask({
+        ...task,
+        pr,
+        revision,
+        generation,
+        state: 'queued',
+        review: undefined,
+        snapshot: undefined,
+        reviewFinished: false,
+        pendingAuthorHead: head,
+        authorBaseHead: original.head,
+      });
+      f.store.setSetting('demo-pr:1', pr);
+
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      const current = f.store.getTask(task.id);
+      if (scenario === 'matching') {
+        expect(runtime.run).toHaveBeenCalledOnce();
+        expect(current.review).toMatchObject({ revision, targetBranch: pr.targetBranch });
+      } else {
+        expect(runtime.run).not.toHaveBeenCalled();
+        expect(current).toMatchObject({ state: 'needs_input', revision, pendingAuthorHead: head });
+        expect(current.reason).toContain(head);
+        expect(current.reason).toContain(pr.targetBranch);
+        expect(current.reason).toContain(
+          scenario === 'retargeted' ? original.targetBranch : 'target branch could not be verified',
+        );
+      }
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
 it.each(['available', 'unavailable', 'unknown target'] as const)(
   'recovers a legacy push receipt without sending again (%s)',
   async (scenario) => {
