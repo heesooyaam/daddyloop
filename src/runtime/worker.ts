@@ -382,6 +382,12 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const feedbackTarget = task.review?.targetBranch ?? task.pr?.targetBranch;
+      if (job.kind === 'fix' && startingPR && startingPR.targetBranch !== feedbackTarget)
+        throw new AppError(
+          'stale_revision',
+          `The PR target branch differs from the published feedback. Feedback target branch ${feedbackTarget ?? 'unknown'}. Observed target branch ${startingPR.targetBranch}.`,
+        );
       if (startingPR && (startingPR.state !== 'open' || !sameRevision(startingPR, task.revision)))
         throw new AppError(
           'stale_revision',
@@ -457,11 +463,13 @@ export class Worker {
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
         task.feedback = actual;
+        if (task.pr && feedbackTarget && task.pr.targetBranch !== feedbackTarget)
+          task.pr = { ...task.pr, targetBranch: feedbackTarget };
         store.saveTask(task);
         store.event(
           task.id,
           'author.feedback_snapshot',
-          { ...actual, targetBranch: startingPR?.targetBranch },
+          { ...actual, targetBranch: feedbackTarget },
           job.id,
         );
       }

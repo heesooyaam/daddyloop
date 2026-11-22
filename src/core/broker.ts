@@ -77,15 +77,21 @@ export class Broker {
     if (task.review) return task.review;
     const marker = `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
-      revision = task.revision!;
+      revision = task.revision!,
+      targetBranch = task.pr?.targetBranch;
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => provider.createReview(prRef(task), revision, marker),
+      async () => ({
+        ...(await provider.createReview(prRef(task), revision, marker)),
+        targetBranch,
+      }),
       async () => {
         const existing = await provider.findReview(prRef(task), marker);
-        return existing ? { found: true, value: { ...existing, revision } } : { found: false };
+        return existing
+          ? { found: true, value: { ...existing, revision, targetBranch } }
+          : { found: false };
       },
     );
     task.review = review;

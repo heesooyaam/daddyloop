@@ -86,17 +86,6 @@ function changedBeforeRecovery(pr: PullRequest) {
   return `The PR revision or branch changed before recovery. Observed PR head ${pr.head}, base ${pr.base}, and target branch ${pr.targetBranch}.`;
 }
 
-function pendingFixHead(task: Task) {
-  if (
-    task.pendingAuthorFix ||
-    ((task.state === 'awaiting_push' ||
-      ((task.state === 'paused' || task.state === 'needs_input') &&
-        task.resumeState === 'awaiting_push')) &&
-      task.pendingAuthorHead !== task.revision?.head)
-  )
-    return task.pendingAuthorHead;
-}
-
 function samePullRequestBranches(
   expected: PullRequest | undefined,
   current: PullRequest,
@@ -254,7 +243,7 @@ export class Engine {
     });
   }
   requireSubmittedFix(task: Task): string | undefined {
-    const pending = pendingFixHead(task);
+    const pending = this.pendingFixHead(task);
     if (
       pending &&
       task.pendingAuthorFix?.generation === task.generation &&
@@ -378,8 +367,12 @@ export class Engine {
   private async reconcileLocked(id: string): Promise<Task> {
     const task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
-    const pending = pendingFixHead(task);
-    if (pending && task.state !== 'fixing') return task;
+    const pending = this.pendingFixHead(task);
+    if (pending && task.state !== 'fixing') {
+      if (reviewCompletionStates.includes(task.state) && !this.isConfirmedSavedFix(task, pending))
+        this.holdLostFix(task, pending);
+      return task;
+    }
     const lost = this.lostFix(task);
     if (lost && task.state === 'awaiting_push') {
       const reason = lost.targetBranch
@@ -565,10 +558,12 @@ export class Engine {
     if (running) this.onCancel(task.id);
   }
 
-  private stopLegacyReview(task: Task): boolean {
-    const lost = this.lostFix(task);
-    if (!lost) return false;
-    this.holdLostFix(task, lost.head);
+  private stopReviewBeforeSavedFix(task: Task): boolean {
+    const pending = this.pendingFixHead(task);
+    if (pending && this.isConfirmedSavedFix(task, pending)) return false;
+    const head = pending ?? this.lostFix(task)?.head;
+    if (!head) return false;
+    this.holdLostFix(task, head);
     return true;
   }
 
@@ -680,7 +675,7 @@ export class Engine {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (isTicket(task) || task.state !== 'awaiting_push' || this.store.busy(id)) return;
-      const head = pendingFixHead(task);
+      const head = this.pendingFixHead(task);
       if (!head) return;
       const pendingFix = task.pendingAuthorFix;
       if ((pendingFix?.sent || pendingFix?.pushStarted) && pendingFix.confirmUntil === undefined) {
@@ -782,6 +777,36 @@ export class Engine {
          ORDER BY saved.id DESC LIMIT 1`,
       )
       .get(task.id, head ?? null, head ?? null);
+  }
+
+  private pendingFixHead(task: Task): string | undefined {
+    const head = task.pendingAuthorHead;
+    if (!head || isTicket(task)) return;
+    if (task.pendingAuthorFix) return head;
+
+    const saved = this.savedFixEvent(task, head);
+    const job = saved && this.store.jobs(task.id).find((job) => job.id === saved.run_id);
+    if (saved && job?.role === 'author' && job.kind === 'fix') {
+      const original =
+        typeof saved.revision === 'string' ? (JSON.parse(saved.revision) as Revision) : undefined;
+      if (head === original?.head) return;
+      const submitted = this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND id>? AND type='author.submitted'
+           AND json_extract(data, '$.head')=? LIMIT 1`,
+        )
+        .get(task.id, saved.id!, head);
+      if (!submitted) return head;
+      return;
+    }
+
+    if (
+      head !== task.revision?.head &&
+      (task.state === 'awaiting_push' ||
+        ((task.state === 'paused' || task.state === 'needs_input') &&
+          task.resumeState === 'awaiting_push'))
+    )
+      return head;
   }
 
   private lostFix(task: Task): LostFix | undefined {
@@ -937,7 +962,7 @@ export class Engine {
           'publication_unavailable',
           'Wait until the reviewer has finished and discussion is idle',
         );
-      if (this.stopLegacyReview(task)) return task;
+      if (this.stopReviewBeforeSavedFix(task)) return task;
       await this.broker.publish(task);
       return this.reconcileLocked(id);
     });
@@ -1046,11 +1071,11 @@ export class Engine {
         });
         return;
       }
-      if (job.kind === 'review' && this.stopLegacyReview(task)) return;
+      if (job.kind === 'review' && this.stopReviewBeforeSavedFix(task)) return;
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
-        const saved = task.pendingAuthorHead;
-        if (task.pendingAuthorFix && saved) {
+        const saved = this.pendingFixHead(task);
+        if (saved) {
           this.store.message(task.id, job.role, 'agent', result.summary, job.id);
           const check = this.savedFixStatus(task, pr, saved);
           if (check.status === 'blocked') this.blockSavedFix(task, saved, check.reason);
@@ -1070,7 +1095,7 @@ export class Engine {
         return;
       }
       this.store.message(task.id, job.role, 'agent', result.summary, job.id);
-      const pending = job.kind === 'fix' ? pendingFixHead(task) : undefined;
+      const pending = job.kind === 'fix' ? this.pendingFixHead(task) : undefined;
       if (pending) {
         const check = this.savedFixStatus(task, pr, pending);
         if (check.status === 'blocked') {
@@ -1235,7 +1260,7 @@ export class Engine {
             );
           return task;
         }
-        const pending = pendingFixHead(task);
+        const pending = this.pendingFixHead(task);
         const lost = pending ? undefined : this.lostFix(task);
         const recoveryBlock = lost && lostFixRecoveryBlock(lost, task);
         if (lost && recoveryBlock) {
@@ -1294,7 +1319,7 @@ export class Engine {
       } else if (action === 'approve-plan') {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
-        if (this.stopLegacyReview(task)) return task;
+        if (this.stopReviewBeforeSavedFix(task)) return task;
         const current = await this.provider(prRef(task)).getPR(prRef(task));
         if (!sameRevision(current, task.revision))
           throw new AppError('stale_plan', 'The plan changed after review');
@@ -1307,7 +1332,7 @@ export class Engine {
             'A waiver requires a reason and a task waiting for CI checks',
             400,
           );
-        if (this.stopLegacyReview(task)) return task;
+        if (this.stopReviewBeforeSavedFix(task)) return task;
         const current = await this.provider(prRef(task)).getPR(prRef(task));
         if (!sameRevision(current, task.revision))
           throw new AppError(
@@ -1391,8 +1416,12 @@ export class Engine {
     if (task.generation !== job.generation || task.state === 'paused') return;
     task.resumeState = task.state;
     if (job.role === 'reviewer') task.reviewFinished = false;
-    this.state(task, 'needs_input', redact(String(error)));
-    this.store.event(task.id, 'job.failed', { error: redact(String(error)) }, job.id);
+    const message = redact(String(error));
+    const saved = this.pendingFixHead(task);
+    const reason =
+      saved && !message.includes(saved) ? `${message} Saved fix ${saved} is preserved.` : message;
+    this.state(task, 'needs_input', reason);
+    this.store.event(task.id, 'job.failed', { error: message }, job.id);
   }
   defaultAgents(): AgentProfiles {
     return this.store.setting<AgentProfiles>('agents.defaults') ?? inheritedProfiles();

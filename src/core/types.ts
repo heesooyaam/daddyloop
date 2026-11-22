@@ -186,6 +186,7 @@ export interface ReviewHandle {
   nodeId?: string;
   marker: string;
   revision: Revision;
+  targetBranch?: string;
   authorId?: string;
   createdAt?: string;
   baselineNoteId?: number;

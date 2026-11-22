@@ -290,6 +290,141 @@ it.each([true, false])(
   },
 );
 
+it('keeps a legacy pending fix ahead of queued review after the PR base changes', async () => {
+  const f = await fixture();
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+  try {
+    await queueFix(f);
+    const author = f.store.claim()!;
+    const task = f.store.getTask(f.task.id);
+    const head = 'f'.repeat(40);
+    f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+    f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+    f.store.saveJob({ ...author, status: 'completed' });
+    f.store.event(task.id, 'task.state', {
+      state: 'awaiting_push',
+      generation: author.generation,
+      head: task.revision!.head,
+    });
+    const pr = { ...task.pr!, base: 'e'.repeat(40) };
+    const revision = revisionOf(pr);
+    const generation = author.generation + 1;
+    f.store.event(task.id, 'revision.changed', { revision, generation });
+    f.store.event(task.id, 'task.state', {
+      state: 'queued',
+      reason: 'New revision is ready for review',
+      generation,
+      head: pr.head,
+    });
+    f.store.saveTask({
+      ...task,
+      pr,
+      revision,
+      generation,
+      state: 'queued',
+      review: undefined,
+      snapshot: undefined,
+      pendingAuthorHead: head,
+      authorBaseHead: task.revision!.head,
+    });
+    f.store.setSetting('demo-pr:1', pr);
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'needs_input',
+      pendingAuthorHead: head,
+      reason: expect.stringContaining(head),
+    });
+    await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
+it('still blocks retry review after an author discussion fails with a legacy pending fix', async () => {
+  const f = await fixture();
+  try {
+    await queueFix(f);
+    const author = f.store.claim()!;
+    const task = f.store.getTask(f.task.id);
+    const head = 'f'.repeat(40);
+    f.store.event(task.id, 'author.feedback_snapshot', task.feedback, author.id);
+    f.store.event(task.id, 'author.fixes_saved', { head }, author.id);
+    f.store.saveJob({ ...author, status: 'completed' });
+    f.store.saveTask({
+      ...task,
+      state: 'awaiting_push',
+      pendingAuthorHead: head,
+      authorBaseHead: task.revision!.head,
+    });
+    const push = vi.fn(async () => {});
+    await f.engine.submitSavedFix(task.id, async () => push);
+    expect(f.store.getTask(task.id).state).toBe('needs_input');
+    await f.engine.chat(task.id, 'author', 'Discuss the target branch');
+    const chat = f.store.claim()!;
+    f.engine.failJob(chat, new Error('Discussion failed'));
+    f.store.saveJob({ ...chat, status: 'failed' });
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'needs_input',
+      resumeState: 'needs_input',
+      pendingAuthorHead: head,
+      reason: expect.stringContaining(head),
+    });
+    await expect(f.engine.review(task.id, true)).rejects.toMatchObject({
+      code: 'fix_pending',
+      message: expect.stringContaining(head),
+    });
+    expect(push).not.toHaveBeenCalled();
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each([false, true])(
+  'stops the author when the PR is retargeted after feedback was published (cached PR already updated: %s)',
+  async (cachedPRMoved) => {
+    const f = await fixture();
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const workspaces = new Workspaces('/tmp');
+    const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const commit = vi.spyOn(workspaces, 'commitFix').mockResolvedValue('f'.repeat(40));
+    const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+    const push = vi.fn(async () => {});
+    worker.autoSubmit = (id) => f.engine.submitSavedFix(id, async () => push);
+    try {
+      await queueFix(f);
+      const task = f.store.getTask(f.task.id);
+      const original = task.pr!;
+      const retargeted = { ...original, targetBranch: 'release' };
+      task.ref.provider = 'github';
+      if (cachedPRMoved) task.pr = retargeted;
+      f.store.saveTask(task);
+      f.store.setSetting('demo-pr:1', retargeted);
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      expect(runtime.run).not.toHaveBeenCalled();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        revision: task.revision,
+        reason: expect.stringContaining(original.targetBranch),
+      });
+      expect(f.store.getTask(task.id).reason).toContain(retargeted.targetBranch);
+      expect(
+        f.store.events(task.id).some((event) => event.type === 'author.feedback_snapshot'),
+      ).toBe(false);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
 it.each([
   ['head before push', false, { head: 'd'.repeat(40) }],
   ['base before push', false, { base: 'e'.repeat(40) }],
