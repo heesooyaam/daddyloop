@@ -141,6 +141,7 @@ export interface DaddyJob {
   groupId: string;
   generation: number;
   trigger: 'user' | 'worker' | 'recovery' | 'resources';
+  waitingTaskId?: string;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;

@@ -735,7 +735,31 @@ export class Engine {
     return true;
   }
 
-  async recoverIncompleteFix(id: string, checkpoint: (task: Task) => Promise<string>) {
+  async publishedFixBaseAdvanced(task: Task, pr: PullRequest) {
+    const pinned = task.revision;
+    if (
+      task.ref.provider !== 'github' ||
+      !pinned ||
+      task.pendingFix ||
+      task.fixingMergeConflict ||
+      !task.reviewFinished ||
+      task.snapshot?.status !== 'published' ||
+      !sameRevision(task.snapshot.revision, pinned) ||
+      !sameRevision(task.review?.revision, pinned) ||
+      (task.pendingAuthorHead && task.pendingAuthorHead !== pinned.head) ||
+      pr.draft !== false ||
+      pr.head !== pinned.head ||
+      pr.base === pinned.base ||
+      !sameOpenTarget(task.pr, pr)
+    )
+      return false;
+    return (
+      (await this.provider(prRef(task)).targetAdvanced?.(prRef(task), pinned.base, pr.base)) ===
+      true
+    );
+  }
+
+  async recoverInterruptedFix(id: string, checkpoint: (task: Task) => Promise<string>) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (
@@ -743,18 +767,47 @@ export class Engine {
         task.resumeState !== 'fixing' ||
         task.pendingFix ||
         task.fixingMergeConflict ||
-        this.store.busy(id) ||
-        !autoMergeEnabled(this.store, task)
+        this.store.busy(id)
       )
         return;
       const job = this.store.jobs(id).at(-1);
+      if (!job || job.kind !== 'fix' || job.generation !== task.generation) return;
+
       if (
-        !job ||
-        job.kind !== 'fix' ||
-        job.generation !== task.generation ||
-        job.status !== 'completed'
-      )
+        job.status === 'failed' &&
+        job.errorCode === 'stale_revision' &&
+        job.error === task.reason &&
+        job.error ===
+          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.'
+      ) {
+        if (
+          !(await this.publishedFixBaseAdvanced(
+            task,
+            await this.provider(prRef(task)).getPR(prRef(task)),
+          ))
+        )
+          return;
+        const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+        if (
+          group &&
+          (group.generation !== job.groupGeneration ||
+            group.deletedAt ||
+            group.deletion ||
+            group.daddyState === 'paused' ||
+            group.daddyState === 'archived')
+        )
+          return;
+        this.store.transaction(() => {
+          this.state(
+            task,
+            'fixing',
+            'The target branch advanced. Continuing the published feedback on the same PR commit.',
+          );
+          this.store.enqueue(task, 'author', 'fix', job.input);
+        });
         return;
+      }
+      if (job.status !== 'completed' || !autoMergeEnabled(this.store, task)) return;
       const item = this.store.db
         .prepare(
           "SELECT json_extract(data,'$.text') AS text FROM events WHERE task_id=? AND run_id=? AND type='runtime.item' AND json_extract(data,'$.type')='agentMessage' AND json_extract(data,'$.phase')='final_answer' ORDER BY id DESC LIMIT 1",
@@ -934,6 +987,15 @@ export class Engine {
       }
       return task;
     }
+    if (
+      task.state === 'fixing' &&
+      !sameRevision(task.revision, pr) &&
+      this.store
+        .activeJobs(id)
+        .some((job) => job.generation === task.generation && job.kind === 'fix') &&
+      (await this.publishedFixBaseAdvanced(task, pr))
+    )
+      return task;
     if (!sameRevision(task.revision, pr)) {
       await this.changeReviewRevision(task, pr);
       return task;

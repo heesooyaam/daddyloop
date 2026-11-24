@@ -487,6 +487,8 @@ export const daddyRu: Record<string, string> = {
   'Handling your request': 'Разбирает запрос',
   'Checking server resources': 'Проверяет ресурсы сервера',
   'Waiting for assignment': 'Ждёт назначения',
+  'The target branch advanced. Continuing the published feedback on the same PR commit.':
+    'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
   'The target branch advanced. Reviewing the updated change.':
     'Целевая ветка обновилась. daddy заново проверяет изменения.',
   'Rechecking the existing draft on the updated target branch':
