@@ -38,6 +38,10 @@ export class Worker {
   private lastCleanup = 0;
   private lastArcRelease = 0;
   private reservedGroups = new Set<string>();
+  updateAuthorGroupGeneration(groupId: string, generation: number) {
+    for (const job of this.runningJobs.values())
+      if (job.groupId === groupId && job.role === 'author') job.groupGeneration = generation;
+  }
   reserveGroup(id: string) {
     if (
       this.reservedGroups.has(id) ||
@@ -667,6 +671,12 @@ export class Worker {
               store.saveGroup(shared);
             }
           }
+          if (
+            job.role === 'author' &&
+            current.agents?.worker &&
+            current.agents.worker.engine !== job.profile?.engine
+          )
+            return;
           if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);

@@ -25,9 +25,9 @@ function readTask(data: string): Task {
 }
 
 // A replacement run keeps the queue position of the original, including across restarts.
-const jobOrder = `ORDER BY coalesce(
-  (SELECT rowid FROM jobs AS first_attempt WHERE id=json_extract(jobs.data,'$.firstAttemptId')),
-  jobs.rowid
+const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
+  (SELECT rowid FROM ${table} AS first_attempt WHERE id=json_extract(${table}.data,'$.firstAttemptId')),
+  ${table}.rowid
 )`;
 
 export class Store {
@@ -223,8 +223,8 @@ export class Store {
   activeJobs(taskId?: string): Job[] {
     const active = "SELECT data FROM jobs WHERE status IN ('queued','running')";
     const rows = taskId
-      ? this.db.prepare(`${active} AND task_id=? ${jobOrder}`).all(taskId)
-      : this.db.prepare(`${active} ${jobOrder}`).all();
+      ? this.db.prepare(`${active} AND task_id=? ${jobOrder('jobs')}`).all(taskId)
+      : this.db.prepare(`${active} ${jobOrder('jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
   claim(
@@ -234,7 +234,7 @@ export class Store {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
-          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder}`,
+          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder('jobs')}`,
         )
         .all();
       for (const row of rows) {
@@ -298,8 +298,10 @@ export class Store {
   }
   daddyJobs(groupId?: string): DaddyJob[] {
     const rows = groupId
-      ? this.db.prepare('SELECT data FROM daddy_jobs WHERE group_id=? ORDER BY rowid').all(groupId)
-      : this.db.prepare('SELECT data FROM daddy_jobs ORDER BY rowid').all();
+      ? this.db
+          .prepare(`SELECT data FROM daddy_jobs WHERE group_id=? ${jobOrder('daddy_jobs')}`)
+          .all(groupId)
+      : this.db.prepare(`SELECT data FROM daddy_jobs ${jobOrder('daddy_jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
   activeDaddyJobs(): DaddyJob[] {

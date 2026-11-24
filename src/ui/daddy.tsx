@@ -790,8 +790,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles, instructions, autoMerge) => {
-              await model.action('settings', { profiles, instructions, autoMerge });
+            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
+              await model.action('settings', {
+                profiles,
+                instructions,
+                autoMerge,
+                forceDaddy,
+                applyWorkers,
+              });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -1321,15 +1327,17 @@ function SessionSettings({
   api: DaddyApi;
   board: DaddyBoard;
   onSave: (
-    profiles?: AgentProfiles,
+    profiles?: Partial<AgentProfiles>,
     instructions?: SessionInstructions,
     autoMerge?: boolean,
+    forceDaddy?: boolean,
+    applyWorkers?: boolean,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
-      worker: board.group.worker ?? board.group.daddy,
+      worker: board.workerDefault,
     }),
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
@@ -1340,6 +1348,8 @@ function SessionSettings({
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const [forceDaddy, setForceDaddy] = useState(false),
+    [applyWorkers, setApplyWorkers] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api);
   return (
     <form
@@ -1348,12 +1358,23 @@ function SessionSettings({
         event.preventDefault();
         if (importingInstructions) return;
         setBusy(true);
+        const changed: Partial<AgentProfiles> = {};
+        if (
+          forceDaddy ||
+          JSON.stringify(profiles.daddy) !== JSON.stringify(originalProfiles.current.daddy)
+        )
+          changed.daddy = profiles.daddy;
+        if (
+          applyWorkers ||
+          JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
+        )
+          changed.worker = profiles.worker;
         void onSave(
-          JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
-            ? undefined
-            : profiles,
+          Object.keys(changed).length ? changed : undefined,
           instructions,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          forceDaddy || undefined,
+          applyWorkers || undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1377,7 +1398,7 @@ function SessionSettings({
         </label>
       )}
       {(['daddy', 'worker'] as const).map((role) => {
-        const label = role === 'daddy' ? 'daddy' : t('New workers');
+        const label = role === 'daddy' ? 'daddy' : t('All workers');
         return (
           <fieldset key={role}>
             <legend>{label}</legend>
@@ -1388,6 +1409,33 @@ function SessionSettings({
               onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
               selectDefaultEffort
             />
+            {role === 'daddy' ? (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={forceDaddy}
+                  onChange={(e) => setForceDaddy(e.target.checked)}
+                />
+                {t('Apply now and restart the active daddy turn or review')}
+              </label>
+            ) : (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={
+                    applyWorkers ||
+                    JSON.stringify(profiles.worker) !==
+                      JSON.stringify(originalProfiles.current.worker)
+                  }
+                  onChange={(e) => setApplyWorkers(e.target.checked)}
+                  disabled={
+                    JSON.stringify(profiles.worker) !==
+                    JSON.stringify(originalProfiles.current.worker)
+                  }
+                />
+                {t('Apply this profile to all worker slots')}
+              </label>
+            )}
           </fieldset>
         );
       })}

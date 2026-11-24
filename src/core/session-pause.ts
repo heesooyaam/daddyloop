@@ -1,8 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { type Store } from './store.js';
-import { now, type ReviewGroup, type Task, type State, type Job } from './types.js';
+import {
+  now,
+  type ReviewGroup,
+  type Task,
+  type State,
+  type Job,
+  type AgentProfile,
+  sameAgentProfile,
+} from './types.js';
 
 interface PausedTask {
+  workerProfile?: AgentProfile;
   id: string;
   generation: number;
   state: State;
@@ -28,6 +37,7 @@ export function pauseSessionWork(store: Store, group: ReviewGroup, tasks: Task[]
       state: task.state,
       reason: task.reason,
       resumeState: task.resumeState,
+      workerProfile: task.agents?.worker,
       jobs: jobs.map((j) => j.id),
     });
     task.resumeState = task.state;
@@ -142,6 +152,14 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
         firstAttemptId: job.firstAttemptId ?? job.id,
         generation: task.generation,
         groupGeneration: group.generation,
+        profile:
+          job.role === 'reviewer'
+            ? group.daddy
+            : item.workerProfile &&
+                task.agents?.worker &&
+                !sameAgentProfile(item.workerProfile, task.agents.worker)
+              ? task.agents.worker
+              : job.profile,
         status: 'queued',
         startedAt: undefined,
         finishedAt: undefined,
@@ -165,6 +183,7 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
       store.saveDaddyJob({
         ...job,
         status: 'queued',
+        profile: group.daddy,
         generation: group.generation,
         finishedAt: undefined,
       });

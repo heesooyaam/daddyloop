@@ -2,14 +2,7 @@ import { commandHelp } from './telegram-commands.js';
 import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
-import {
-  AppError,
-  now,
-  type Event,
-  type ReviewGroup,
-  type Task,
-  type AgentProfiles,
-} from '../core/types.js';
+import { AppError, now, type Event, type ReviewGroup, type Task } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
 import { TelegramText } from './telegram-text.js';
@@ -655,21 +648,22 @@ export class TelegramWorkspace {
   }
   private async models(groupId: string, destination: Destination, role?: 'worker' | 'daddy') {
     const group = this.authorize(destination, groupId);
+    const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
     const text = new TelegramText()
       .add('🤖 ' + this.t('Models'), 'bold')
       .add('\n\ndaddy: ')
       .add(group.daddy.model ?? this.t('Engine configuration'), 'code')
       .add(' / ' + (group.daddy.effort ?? this.t('Default')))
-      .add('\n' + this.t('New workers') + ': ')
-      .add(group.worker?.model ?? this.t('Engine configuration'), 'code')
-      .add(' / ' + (group.worker?.effort ?? this.t('Default')));
+      .add('\n' + this.t('All workers') + ': ')
+      .add(defaults.model ?? this.t('Engine configuration'), 'code')
+      .add(' / ' + (defaults.effort ?? this.t('Default')));
     if (!role) {
       await this.api.send(destination, {
         ...text,
         buttons: [
           [
             { text: 'daddy', callback_data: `dad:models:${groupId}:daddy` },
-            { text: this.t('New workers'), callback_data: `dad:models:${groupId}:worker` },
+            { text: this.t('All workers'), callback_data: `dad:models:${groupId}:worker` },
           ],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
         ],
@@ -1114,7 +1108,7 @@ export class TelegramWorkspace {
       });
       return true;
     }
-    const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2}))?$/);
+    const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2})(:force)?)?$/);
     if (modelAction) {
       const key = 'dad-model:' + modelAction[1],
         row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(key);
@@ -1149,17 +1143,26 @@ export class TelegramWorkspace {
           ...text,
           buttons: action.model.efforts.map((effort, index) => [
             { text: effort, callback_data: `${key}:${index}` },
+            ...(action.role === 'daddy'
+              ? [
+                  {
+                    text: this.t('Apply now · {effort}', { effort }),
+                    callback_data: `${key}:${index}:force`,
+                  },
+                ]
+              : []),
           ]),
         });
       } else {
         const effort = action.model.efforts[Number(modelAction[2])];
         if (!effort) throw new Error('Unsupported reasoning effort');
-        const profiles: AgentProfiles = {
-          daddy: group.daddy,
-          worker: group.worker ?? group.daddy,
-        };
-        profiles[action.role] = { engine: action.model.engine, model: action.model.id, effort };
-        await this.daddy.settings(group.id, { profiles });
+        await this.daddy.settings(group.id, {
+          profiles: {
+            [action.role]: { engine: action.model.engine, model: action.model.id, effort },
+          },
+          forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
+          applyWorkers: action.role === 'worker',
+        });
         this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
         await this.models(group.id, destination);
       }

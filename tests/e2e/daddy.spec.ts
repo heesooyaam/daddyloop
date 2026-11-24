@@ -298,7 +298,7 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
-  await expect(page.getByLabel('Новые воркеры Модель')).toHaveValue('gpt-5.6-sol');
+  await expect(page.getByLabel('Все воркеры Модель')).toHaveValue('gpt-5.6-sol');
   const refreshed = page.waitForRequest((request) =>
     request.url().includes('/api/agents?refresh=1'),
   );
