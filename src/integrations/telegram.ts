@@ -1,3 +1,4 @@
+import { commandHelp, telegramCommands } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
 import { randomBytes, createHash } from 'node:crypto';
@@ -362,6 +363,9 @@ export class Telegram {
   private stopped = false;
   private controller?: AbortController;
   private polling?: Promise<void>;
+  private menuSetup?: Promise<void>;
+  private menuError?: string;
+  private menuController?: AbortController;
   private pollError?: string;
   private notices = Promise.resolve();
   private workspace?: TelegramWorkspace;
@@ -433,7 +437,8 @@ export class Telegram {
       paired: !!this.engine.store.setting('telegram.pairing'),
       delivery: this.api.delivery?.status(),
       group: this.workspace?.room(),
-      error: this.pollError ?? this.engine.store.setting('telegram.error') ?? null,
+      error:
+        this.pollError ?? this.menuError ?? this.engine.store.setting('telegram.error') ?? null,
     };
   }
   unpair() {
@@ -451,6 +456,8 @@ export class Telegram {
     this.api.delivery?.start();
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
+    this.menuController = new AbortController();
+    this.menuSetup = this.installCommandMenus(this.menuController.signal);
     this.currentUpdates();
     this.workspace?.start();
     const cleanup = lastScheduledCleanup(this.engine.store);
@@ -541,6 +548,11 @@ export class Telegram {
       }
       const text = message?.text?.trim();
       if (!text) return;
+      const help = /^\/help(?:@(\w+))?(?:\s+([\s\S]+))?$/i.exec(text);
+      if (help && (!help[1] || help[1].toLowerCase() === this.username.toLowerCase())) {
+        await this.api.send(chat.id, commandHelp(this.locale(), 'private', help[2]));
+        return;
+      }
       const language = text.match(/^\/language(?:\s+(en|ru))?$/i);
       if (language) {
         if (language[1]) setLocale(store, language[1].toLowerCase() as Locale);
@@ -798,6 +810,34 @@ export class Telegram {
       })
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
   }
+  private async installCommandMenus(signal: AbortSignal) {
+    for (const scope of ['private', 'group'] as const) {
+      for (const language of ['', 'ru', 'en'] as const) {
+        const commands = telegramCommands(language || 'en', scope);
+        let delayMs = 3000;
+        while (!signal.aborted) {
+          try {
+            await this.api.call(
+              'setMyCommands',
+              {
+                scope: { type: scope === 'private' ? 'all_private_chats' : 'all_group_chats' },
+                ...(language ? { language_code: language } : {}),
+                commands,
+              },
+              signal,
+            );
+            break;
+          } catch (error) {
+            if (signal.aborted) return;
+            this.menuError = redact(String(error));
+            await delay(delayMs, undefined, { signal }).catch(() => {});
+            delayMs = Math.min(delayMs * 2, 300000);
+          }
+        }
+      }
+    }
+    if (!signal.aborted) this.menuError = undefined;
+  }
   private async poll() {
     const store = this.engine.store;
     while (!this.stopped) {
@@ -832,6 +872,8 @@ export class Telegram {
   async stop() {
     this.stopped = true;
     this.controller?.abort();
+    this.menuController?.abort();
+    await this.menuSetup;
     await this.api.delivery?.stop();
     this.engine.store.changes.off('event', this.onEvent);
     await this.polling;

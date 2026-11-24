@@ -436,13 +436,22 @@ export class Engine {
       )
         return;
       const job = this.store.jobs(id).at(-1);
-      if (
-        !job ||
-        job.status !== 'failed' ||
-        job.generation !== task.generation ||
-        job.groupGeneration !== group.generation
-      )
-        return;
+      if (!job || job.groupGeneration !== group.generation) return;
+      const previous = task.ticketRepository;
+      const movedBase =
+        job.kind === 'review' &&
+        job.status === 'cancelled' &&
+        job.generation + 1 === task.generation &&
+        task.reason ===
+          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' &&
+        !!task.review &&
+        task.review.revision.head === task.revision?.head &&
+        task.review.revision.base !== task.revision.base &&
+        !!previous &&
+        previous.branch === task.pr?.branch &&
+        previous.baseBranch === task.pr.targetBranch &&
+        previous.cloneUrl === task.pr.cloneUrl;
+      if (!movedBase && (job.status !== 'failed' || job.generation !== task.generation)) return;
       const quota = job.errorCode === 'github_rate_limit' || legacyQuotaRead(job.error);
       if (
         quota &&
@@ -459,11 +468,11 @@ export class Engine {
         return;
       }
       if (
-        task.resumeState !== 'reviewing' ||
+        (!movedBase && task.resumeState !== 'reviewing') ||
         job.kind !== 'review' ||
         !task.review ||
         task.pendingFix ||
-        job.error !== task.reason
+        (!movedBase && job.error !== task.reason)
       )
         return;
       const context =
@@ -477,7 +486,10 @@ export class Engine {
         job.errorCode === 'stale_revision' &&
         job.error ===
           'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
-      if (!quota && !((context || timeout || staleStart) && autoMergeEnabled(this.store, task)))
+      if (
+        !quota &&
+        !((context || timeout || staleStart || movedBase) && autoMergeEnabled(this.store, task))
+      )
         return;
       const ref = prRef(task),
         provider = this.provider(ref);
@@ -805,6 +817,7 @@ export class Engine {
         previous = task.snapshot;
       this.invalidate(task, pr);
       if (hadUnpublished) {
+        if (handle) task.resumeState = 'reviewing';
         task.review = handle;
         task.snapshot = previous;
       }
@@ -1245,10 +1258,19 @@ export class Engine {
       return this.reconcileLocked(id);
     });
   }
-  async chat(id: string, role: 'author' | 'reviewer', text: string, actionId?: string) {
+  async chat(
+    id: string,
+    role: 'author' | 'reviewer',
+    text: string,
+    actionId?: string,
+    deferUntilPublished = false,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
-      if (role === 'author' && (task.pendingFix || task.state === 'awaiting_push')) {
+      if (
+        role === 'author' &&
+        (deferUntilPublished || task.pendingFix || task.state === 'awaiting_push')
+      ) {
         const key = actionId ?? randomUUID();
         this.store.transaction(() => {
           const pending = (task.deferredWorkerInstructions ??= []);

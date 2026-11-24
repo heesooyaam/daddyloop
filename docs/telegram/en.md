@@ -40,6 +40,8 @@ Each daddy session gets a topic. Send goals and tickets there. Workers report to
 
 ## Commands
 
+Send `/help` in the private chat or a group topic to see available commands and descriptions. Use `/help task` or `/help /worker` for syntax and options. In groups, `/help@your_bot task` also works. Telegram suggests commands for the current chat type when you type `/`. Russian Telegram clients receive Russian menu descriptions. Use `/language` to select the language for bot replies.
+
 | Where                                     | Commands                                                                                                                                                                                                                                                          |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/task`, `/queue`, `/workers`, `/worker`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
