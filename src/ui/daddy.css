@@ -502,7 +502,14 @@
   font: var(--type-caption);
   color: var(--muted);
 }
+.daddy-composer footer > .daddy-text-button {
+  align-self: center;
+}
+.daddy-composer footer > .daddy-text-button svg {
+  flex-shrink: 0;
+}
 .daddy-send {
+  flex-shrink: 0;
   width: 32px;
   height: 32px;
   flex-shrink: 0;
@@ -1300,6 +1307,22 @@
 .daddy-repository-summary > button {
   flex-shrink: 0;
   min-height: 36px;
+}
+.daddy-session-repository {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  font: var(--type-caption, 12px/1.5 sans-serif);
+}
+.daddy-session-repository dt {
+  color: var(--muted);
+}
+.daddy-session-repository dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.daddy-session-repository dd + dt {
+  margin-top: 6px;
 }
 .daddy-repository-override {
   display: flex;

@@ -62,8 +62,8 @@ function safeUrl(value: string) {
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
   const [usageEngine, setUsageEngine] = useState<string>();
-  const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
+  const [previewingRepository, setPreviewingRepository] = useState(false);
   const [returnToNew, setReturnToNew] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
@@ -120,6 +120,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const preparation = board?.group.workspacePreparation;
+  const repository = state.overrides[state.selected];
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -310,29 +312,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </span>
           </div>
         )}
-        {board?.group.workspacePreparation && !board.group.deletion && (
+        {preparation && preparation.state !== 'ready' && !board?.group.deletion && (
           <div
-            className={
-              board.group.workspacePreparation.state === 'error'
-                ? 'daddy-error'
-                : 'daddy-session-progress'
-            }
+            className={preparation.state === 'error' ? 'daddy-error' : 'daddy-session-progress'}
             role="status"
           >
             {t(
-              board.group.workspacePreparation.state === 'ready'
-                ? 'Session copy ready'
-                : board.group.workspacePreparation.state === 'error'
-                  ? 'Could not prepare the session copy'
-                  : 'Preparing the session copy',
+              preparation.state === 'error'
+                ? 'Could not prepare the session copy'
+                : 'Preparing the session copy',
             )}
-            {board.group.workspacePreparation.path && (
-              <code>{board.group.workspacePreparation.path}</code>
-            )}
-            {board.group.workspacePreparation.error && (
-              <span>{t(board.group.workspacePreparation.error)}</span>
-            )}
-            {board.group.workspacePreparation.state === 'error' && (
+            {preparation.error && <span>{t(preparation.error)}</span>}
+            {preparation.state === 'error' && (
               <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
             )}
           </div>
@@ -421,19 +412,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (!repositoryEditing) void model.send();
+                    if (!paused && modal !== 'settings') void model.send();
                   }}
                 >
-                  <WorkspaceFields
-                    key={board.group.id}
-                    api={model.api}
-                    workspace={board.workspace!}
-                    sessionId={board.group.id}
-                    onEditingChange={setRepositoryEditing}
-                    value={state.overrides[state.selected]}
-                    onChange={(value) => model.repository(value)}
-                    target="message"
-                  />
                   <textarea
                     aria-label={t('Message daddy')}
                     placeholder={t(
@@ -452,18 +433,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                         !event.nativeEvent.isComposing
                       ) {
                         event.preventDefault();
-                        if (!repositoryEditing) void model.send();
+                        event.currentTarget.form?.requestSubmit();
                       }
                     }}
                   />
                   <footer>
-                    <span>
-                      {repositoryEditing
-                        ? t('Apply or cancel folder settings before sending.')
-                        : board.workers.active
+                    {repository && !board.group.deletion ? (
+                      <button
+                        type="button"
+                        className="daddy-text-button"
+                        onClick={() => setModal('settings')}
+                      >
+                        <FolderGit2 size={15} />
+                        {t('Repository override for the next message')}
+                      </button>
+                    ) : (
+                      <span>
+                        {board.workers.active
                           ? t('Workers at work: {count}', { count: board.workers.active })
                           : t('You set the goal. daddy handles the headaches.')}
-                    </span>
+                      </span>
+                    )}
                     <button
                       type="submit"
                       className="daddy-send"
@@ -471,7 +461,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       disabled={
                         state.busy ||
                         paused ||
-                        repositoryEditing ||
+                        modal === 'settings' ||
                         !state.drafts[state.selected]?.trim()
                       }
                     >
@@ -684,8 +674,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         </Dialog>
       )}
       {modal === 'settings' && board && (
-        <Dialog title={t('Session settings')} onClose={() => setModal(null)}>
+        <Dialog
+          title={t('Session settings')}
+          onClose={() => setModal(null)}
+          closeDisabled={previewingRepository}
+        >
           <SessionSettings
+            key={board.group.id}
+            repository={repository}
+            onRepositoryChange={(value) => model.repository(value)}
+            onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
             onSave={async (profiles, instructions, autoMerge) => {
@@ -1211,11 +1209,73 @@ function WorkspaceManager({
     </div>
   );
 }
+function SessionRepository({
+  api,
+  board,
+  repository,
+  disabled,
+  onChange,
+  onEditingChange,
+  onPreviewingChange,
+}: {
+  api: DaddyApi;
+  board: DaddyBoard;
+  repository?: RepositorySelection;
+  disabled: boolean;
+  onChange: (value?: RepositorySelection) => void;
+  onEditingChange: (editing: boolean) => void;
+  onPreviewingChange: (previewing: boolean) => void;
+}) {
+  const { t } = useLocale();
+  const { workspace, group } = board;
+  const preparation = group.workspacePreparation;
+  if (!workspace) return null;
+
+  return (
+    <fieldset disabled={disabled}>
+      <legend>{t('Repository')}</legend>
+      <dl className="daddy-session-repository">
+        <dt>{t('Workspace source')}</dt>
+        <dd>
+          <code>
+            {workspace.repoPath}
+            {workspace.scope ? '/' + workspace.scope : ''}
+          </code>
+        </dd>
+        {workspace.base && <dd>{t('Starting branch: {branch}', { branch: workspace.base })}</dd>}
+        {preparation?.state === 'ready' && preparation.path && (
+          <>
+            <dt>{t('Session copy ready')}</dt>
+            <dd>
+              <code>{preparation.path}</code>
+            </dd>
+          </>
+        )}
+      </dl>
+      <WorkspaceFields
+        api={api}
+        workspace={workspace}
+        sessionId={group.id}
+        value={repository}
+        onChange={onChange}
+        onEditingChange={onEditingChange}
+        onPreviewingChange={onPreviewingChange}
+        target="message"
+      />
+    </fieldset>
+  );
+}
 function SessionSettings({
+  repository,
+  onRepositoryChange,
+  onPreviewingChange,
   api,
   board,
   onSave,
 }: {
+  repository?: RepositorySelection;
+  onRepositoryChange: (value?: RepositorySelection) => void;
+  onPreviewingChange: (previewing: boolean) => void;
   api: DaddyApi;
   board: DaddyBoard;
   onSave: (
@@ -1232,6 +1292,7 @@ function SessionSettings({
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
     ),
+    [editingFolder, setEditingFolder] = useState(false),
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
@@ -1239,12 +1300,13 @@ function SessionSettings({
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const { catalogue, load } = useAgentCatalogue(api);
+  const savingBlocked = busy || editingFolder || importingInstructions;
   return (
     <form
       className="daddy-form"
       onSubmit={(event) => {
         event.preventDefault();
-        if (importingInstructions) return;
+        if (savingBlocked) return;
         setBusy(true);
         void onSave(
           JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
@@ -1289,6 +1351,15 @@ function SessionSettings({
           </fieldset>
         );
       })}
+      <SessionRepository
+        api={api}
+        board={board}
+        repository={repository}
+        disabled={busy}
+        onChange={onRepositoryChange}
+        onEditingChange={setEditingFolder}
+        onPreviewingChange={onPreviewingChange}
+      />
       <InstructionFields
         api={api}
         value={instructions}
@@ -1309,7 +1380,10 @@ function SessionSettings({
           {t(error || catalogue.error!)}
         </p>
       )}
-      <button className="daddy-button primary" disabled={busy || importingInstructions}>
+      {editingFolder && (
+        <p className="daddy-muted">{t('Apply or cancel folder settings before saving.')}</p>
+      )}
+      <button className="daddy-button primary" disabled={savingBlocked}>
         {t('Save settings')}
       </button>
     </form>

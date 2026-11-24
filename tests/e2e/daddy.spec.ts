@@ -50,39 +50,102 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   ).toBeVisible();
   expect(errors).toEqual([]);
 });
-test('uses a one-request repository from a phone and resets the composer without changing workspace defaults', async ({
+test('sets a one-message repository in session settings and sends the next message with the default', async ({
   page,
 }) => {
   await login(page);
   await create(page, 'Per-task workspace', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
-  const fields = page.locator('.daddy-composer .daddy-workspace-fields');
-  await fields.getByRole('button', { name: 'Change folder for the next message' }).click();
+  const source = resolve('.daddyloop/e2e/fixture-repository');
   const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
-  await fields.getByLabel('Repository URL or server folder').fill(alternate);
-  await fields.getByRole('button', { name: 'Apply settings' }).click();
-  await expect(
-    fields.getByRole('button', { name: 'Change folder for the next message' }),
-  ).toBeVisible();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  const changeFolder = settings.getByRole('button', { name: 'Change folder for the next message' });
+  const close = settings.getByRole('button', { name: 'Close', exact: true });
+  const cancel = settings.getByRole('button', { name: 'Cancel', exact: true });
+  const save = settings.getByRole('button', { name: 'Save settings', exact: true });
+  const override = page.getByRole('button', { name: 'Repository override for the next message' });
+  await expect(page.getByText('Workspace source', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  await expect(settings.getByText(source, { exact: true })).toBeVisible();
+  await changeFolder.click();
+  await settings.getByLabel('Repository URL or server folder').fill(alternate);
+  let releasePreview!: () => void;
+  const pendingPreview = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  let onChecked!: (ok: boolean) => void;
+  const checkedPreview = new Promise<boolean>((resolve) => {
+    onChecked = resolve;
+  });
+  await page.route(
+    '**/api/workspaces/preview',
+    async (route) => {
+      const response = await route.fetch();
+      onChecked(response.ok());
+      await pendingPreview;
+      await route.fulfill({ response });
+    },
+    { times: 1 },
+  );
+  try {
+    await settings.getByRole('button', { name: 'Apply settings' }).click();
+    expect(await checkedPreview).toBe(true);
+    await expect(save).toBeDisabled();
+    await expect(close).toBeDisabled();
+    await expect(cancel).toBeEnabled();
+    await page.keyboard.press('Escape');
+    await expect(settings).toBeVisible();
+    await page.locator('.daddy-overlay').click({ position: { x: 2, y: 2 } });
+    await expect(settings).toBeVisible();
+  } finally {
+    releasePreview();
+  }
+  await expect(settings.getByText(alternate, { exact: true })).toBeVisible();
+  await expect(settings.getByText(source, { exact: true })).toBeVisible();
+  await expect(close).toBeEnabled();
+  await expect(save).toBeEnabled();
+  await changeFolder.click();
+  await expect(save).toBeDisabled();
+  await cancel.click();
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(settings).toHaveCount(0);
+  await expect(override).toBeVisible();
+
   const sent = page.waitForResponse(
     (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
   );
-  await page
-    .getByLabel('Message daddy')
-    .fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
+  const message = page.getByLabel('Message daddy');
+  await message.fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   const response = await sent;
   expect(response.status()).toBe(200);
+  expect(response.request().postDataJSON()).toMatchObject({ repository: { path: alternate } });
   const board = await response.json();
   expect(board.messages.at(-1).workspace.repoPath).toBe(alternate);
-  expect(board.workspace.repoPath).toBe(resolve('.daddyloop/e2e/fixture-repository'));
-  await expect(fields.locator('.daddy-repository-summary code')).toHaveText(
-    board.workspace.repoPath,
+  expect(board.workspace.repoPath).toBe(source);
+  await expect(override).toHaveCount(0);
+  await expect(message).toHaveValue('');
+
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  await expect(settings.getByText(source, { exact: true })).toBeVisible();
+  await expect(settings.getByText(alternate, { exact: true })).toHaveCount(0);
+  await settings.getByRole('button', { name: 'Close', exact: true }).click();
+
+  const sentWithDefault = page.waitForResponse(
+    (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
   );
-  await expect(fields.getByText('Only the next message uses this folder.')).toHaveCount(0);
+  await message.fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
+  await message.press('Enter');
+  const defaultResponse = await sentWithDefault;
+  expect(defaultResponse.status()).toBe(200);
+  expect(defaultResponse.request().postDataJSON()).not.toHaveProperty('repository');
+  const defaultBoard = await defaultResponse.json();
+  expect(defaultBoard.messages.at(-1).workspace.repoPath).toBe(source);
+  expect(defaultBoard.workspace.repoPath).toBe(source);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await expect(page.locator('.daddy-work-item')).toHaveCount(2);
+  await expect(page.locator('.daddy-work-item')).toHaveCount(3);
 });
 test('keeps separate conversation drafts when changing daddy sessions', async ({ page }) => {
   await login(page);

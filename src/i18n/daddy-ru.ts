@@ -145,6 +145,7 @@ export const daddyRu: Record<string, string> = {
   'Workspace folder': 'Папка воркспейса',
   'Starting branch: {branch}': 'Ветка: {branch}',
   'Change folder for the next message': 'Изменить папку для следующего сообщения',
+  'Repository override for the next message': 'Другой репозиторий для следующего сообщения',
   'Change folder for this session': 'Изменить папку для этой сессии',
   Change: 'Изменить',
   'Only the next message uses this folder.': 'Эта папка выбрана только для следующего сообщения.',
@@ -165,8 +166,8 @@ export const daddyRu: Record<string, string> = {
   'The branch daddy starts from. Leave it empty to use the repository default.':
     'С какой ветки папочка начнёт работу. Можно оставить пустым.',
   'Apply settings': 'Применить настройки',
-  'Apply or cancel folder settings before sending.':
-    'Примени или отмени настройки папки перед отправкой.',
+  'Apply or cancel folder settings before saving.':
+    'Примени или отмени настройки папки перед сохранением.',
   'Apply or cancel folder settings before starting the session.':
     'Примени или отмени настройки папки перед началом сессии.',
   'Tell daddy the goal, paste a ticket, or start with a question.':
