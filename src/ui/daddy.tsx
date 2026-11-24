@@ -140,8 +140,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         setInspect(undefined);
         setReturnToNew(false);
       });
-      const { selected, sessions } = model.snapshot();
-      if (id !== selected && sessions.some((session) => session.id === id)) void model.select(id);
+      model.selectFromReference(id);
       setLimitsPage(isLimitsPage());
       setMenu(false);
     };
@@ -203,8 +202,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.button !== 0)
       return;
     event.preventDefault();
-    if (event.currentTarget.href !== location.href)
+    if (event.currentTarget.href !== location.href) {
       history.pushState(null, '', event.currentTarget.href);
+      model.selectFromReference(sessionFromHash());
+    }
     setLimitsPage(isLimitsPage());
     setMenu(false);
   };
@@ -218,6 +219,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   };
   const paused = board?.group.daddyState === 'paused';
   const currentHistoryVersion = historyVersion.current;
+  const isCurrentHistory = () => currentHistoryVersion === historyVersion.current;
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -786,8 +788,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onDraft={setNewDraft}
             api={model.api}
             onCreate={async (workspaceId, message, title, repository, instructions) => {
-              const id = await model.create(workspaceId, message, title, repository, instructions);
-              if (!id) return;
+              const id = await model.create(
+                workspaceId,
+                message,
+                title,
+                repository,
+                instructions,
+                isCurrentHistory,
+              );
+              if (!id || !isCurrentHistory()) return;
               setNewDraft({});
               setModal(null);
               openChat(id);
@@ -809,7 +818,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             workspaces={state.workspaces}
             onSaved={async (workspace) => {
               await model.refresh();
-              if (returnToNew) {
+              if (returnToNew && isCurrentHistory()) {
                 setNewDraft((draft) => ({
                   ...draft,
                   workspaceId: workspace.id,
@@ -829,8 +838,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             board={board}
             onSave={async (profiles, instructions, autoMerge) => {
               await model.action('settings', { profiles, instructions, autoMerge }, board.group.id);
-              if (currentHistoryVersion === historyVersion.current && !model.snapshot().error)
-                setModal(null);
+              if (isCurrentHistory() && !model.snapshot().error) setModal(null);
             }}
           />
         </Dialog>
@@ -842,7 +850,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onQueued={(taskId) => {
-              if (currentHistoryVersion === historyVersion.current) {
+              if (isCurrentHistory()) {
                 setModal(null);
                 setInspect(taskId);
               }

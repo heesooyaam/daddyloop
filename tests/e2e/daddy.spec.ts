@@ -1,6 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { DaddyBoard } from '../../src/client/daddy.js';
+import type { Workspace } from '../../src/core/types.js';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -20,6 +22,16 @@ async function create(page: Page, title: string, issue: number) {
   await expect(page.getByText('Your workers share one daddy.', { exact: false })).toBeVisible({
     timeout: 20000,
   });
+}
+async function sessionFixture(page: Page, title: string) {
+  const workspaces = (await (await page.request.get('/api/workspaces')).json()) as Workspace[];
+  const workspace = workspaces.find(({ name }) => name === 'Fixture workspace');
+  const response = await page.request.post('/api/daddy/sessions', {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { workspaceId: workspace?.id, title },
+  });
+  expect(response.status()).toBe(201);
+  return ((await response.json()) as DaddyBoard).group;
 }
 test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,
@@ -290,6 +302,152 @@ test('keeps the limits history entry without a session ID when creating the firs
   await expect(page).toHaveURL(chatUrl);
   await expect(title).toBeVisible();
 });
+for (const open of ['select', 'create'] as const) {
+  test(`resolves the original chat from its short limits link after ${open}`, async ({ page }) => {
+    await login(page);
+    const a = await sessionFixture(page, 'Short limits origin');
+    const nextTitle = 'Chat opened from short limits';
+    if (open === 'select') await sessionFixture(page, nextTitle);
+    const shortLimits = `/limits#session/${a.id.slice(0, 8)}`;
+    const aUrl = `/#session/${a.id}`;
+    const back = page.getByRole('link', { name: 'Back to workspace', exact: true });
+    const message = page.getByLabel('Message daddy');
+    await page.goto(shortLimits);
+    await back.click();
+    await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+    await message.fill('Keep my original draft');
+    await page.goBack();
+    await expect(page).toHaveURL(shortLimits);
+    if (open === 'select') {
+      await page
+        .getByRole('navigation', { name: 'Sessions' })
+        .getByRole('button', { name: nextTitle })
+        .click();
+    } else {
+      await page.getByRole('button', { name: 'New session', exact: true }).click();
+      await page.getByLabel('Session name (optional)').fill(nextTitle);
+      await page.getByRole('button', { name: 'Start session', exact: true }).click();
+    }
+    await expect(page.getByRole('heading', { name: nextTitle, exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(shortLimits);
+    await back.click();
+    await expect(page).toHaveURL(aUrl);
+    await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+    await expect(message).toHaveValue('Keep my original draft');
+    const sent = page.waitForRequest(
+      (request) => request.method() === 'POST' && request.url().endsWith('/chat'),
+    );
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    expect(new URL((await sent).url()).pathname).toBe(`/api/daddy/sessions/${a.id}/chat`);
+  });
+}
+
+for (const save of ['session', 'workspace', 'workspace defaults'] as const) {
+  test(`a late ${save} save leaves the conversation and its settings open after Back`, async ({
+    page,
+  }) => {
+    await login(page);
+    const a = await sessionFixture(page, 'Chat restored while saving');
+    const aUrl = `/?fixture=late-save#session/${a.id}`;
+    const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
+    let endpoint = save === 'session' ? '/api/daddy/sessions' : '/api/workspaces';
+    const newName = 'Saved after going back ' + save;
+    if (save === 'workspace defaults') {
+      const workspace = await page.request.post(endpoint, {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { name: 'Workspace to edit', path: alternate },
+      });
+      expect(workspace.status()).toBe(201);
+      endpoint += `/${((await workspace.json()) as Workspace).id}/defaults`;
+    }
+    await page.goto(aUrl);
+    const draft = page.getByLabel('Message daddy');
+    await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+    await draft.fill('Draft in the restored chat');
+    await page.getByRole('link', { name: 'Limits', exact: true }).click();
+    await page.getByRole('button', { name: 'New session', exact: true }).click();
+    if (save === 'session') {
+      await page.getByLabel('Session name (optional)').fill(newName);
+    } else {
+      await page.getByRole('button', { name: 'Add another workspace', exact: true }).click();
+      if (save === 'workspace') {
+        await page.getByRole('button', { name: 'Add workspace', exact: true }).click();
+        await page.getByLabel('Repository URL or server folder', { exact: true }).fill(alternate);
+      } else {
+        await page
+          .getByRole('button', { name: 'Edit workspace Workspace to edit', exact: true })
+          .click();
+      }
+      await page.getByLabel('Workspace name', { exact: true }).fill(newName);
+    }
+    let release!: () => void, saved!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const responseReady = new Promise<void>((resolve) => {
+      saved = resolve;
+    });
+    await page.route(`**${endpoint}`, async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const response = await route.fetch();
+      saved();
+      await hold;
+      await route.fulfill({ response });
+    });
+    const settings = page.getByRole('dialog', { name: 'Session settings', exact: true });
+    try {
+      await page
+        .getByRole('button', {
+          name: save === 'session' ? 'Start session' : 'Save workspace',
+          exact: true,
+        })
+        .click();
+      await responseReady;
+      await page.goBack();
+      await expect(page).toHaveURL(aUrl);
+      await expect(draft).toHaveValue('Draft in the restored chat');
+      await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+      await expect(settings).toBeVisible();
+
+      const detail = page.waitForResponse(
+        (response) =>
+          response.request().method() === 'GET' &&
+          /\/api\/daddy\/sessions\/[a-f0-9-]+$/.test(response.url()),
+      );
+      const response = page.waitForResponse(
+        (response) =>
+          response.request().method() === 'POST' && new URL(response.url()).pathname === endpoint,
+      );
+      release();
+      expect((await response).ok()).toBe(true);
+      await (await detail).finished();
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+      expect(await settings.isVisible()).toBe(true);
+      await expect(page).toHaveURL(aUrl);
+      await settings.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(draft).toHaveValue('Draft in the restored chat');
+      if (save === 'session') {
+        await expect(
+          page.getByRole('navigation', { name: 'Sessions' }).getByRole('button', { name: newName }),
+        ).toBeVisible();
+      } else {
+        await page.getByRole('button', { name: /^Workspaces/ }).click();
+        await expect(
+          page.getByRole('button', { name: `Edit workspace ${newName}`, exact: true }),
+        ).toBeVisible();
+      }
+    } finally {
+      release();
+    }
+  });
+}
+
 test('shows quota remaining on a phone and requires confirmation before spending one reset', async ({
   page,
 }) => {

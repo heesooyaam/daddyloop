@@ -34,6 +34,15 @@ export interface DaddyClientState {
   busy: boolean;
   error?: string;
 }
+
+function resolveSessionId(sessions: DaddySession[], reference: string) {
+  if (!reference) return undefined;
+  const exact = sessions.find(({ id }) => id === reference);
+  if (exact) return exact.id;
+  const matches = sessions.filter(({ id }) => id.startsWith(reference));
+  return matches.length === 1 ? matches[0].id : undefined;
+}
+
 export class DaddyClient {
   private value: DaddyClientState = {
     sessions: [],
@@ -107,6 +116,10 @@ export class DaddyClient {
     this.update({ selected: id, board: undefined, error: undefined });
     await this.detail();
   }
+  selectFromReference(reference: string) {
+    const id = resolveSessionId(this.value.sessions, reference);
+    if (id && id !== this.value.selected) void this.select(id);
+  }
   private async detail() {
     const id = this.value.selected,
       sequence = ++this.sequence;
@@ -138,14 +151,7 @@ export class DaddyClient {
           this.api<DaddyStatus>('/status', undefined, this.controller.signal),
         ]);
         if (!current()) return;
-        let selected = this.value.selected;
-        if (selected && !/^[a-f0-9-]{36}$/.test(selected))
-          selected =
-            sessions.filter((group) => group.id.startsWith(selected)).length === 1
-              ? sessions.find((group) => group.id.startsWith(selected))!.id
-              : '';
-        if (selected && !sessions.some((session) => session.id === selected)) selected = '';
-        selected ||= sessions[0]?.id ?? '';
+        const selected = resolveSessionId(sessions, this.value.selected) ?? sessions[0]?.id ?? '';
         if (selected !== this.value.selected) this.sequence++;
         this.update({
           sessions,
@@ -226,6 +232,7 @@ export class DaddyClient {
     title?: string,
     repository?: RepositorySelection,
     instructions?: SessionInstructions,
+    selectOnSuccess: () => boolean = () => true,
   ) {
     if (this.value.busy) return;
     const input = {
@@ -248,7 +255,7 @@ export class DaddyClient {
       // A session list requested before creation may omit the new session.
       this.refreshGeneration++;
       this.refreshPending = undefined;
-      await this.select(board.group.id);
+      if (selectOnSuccess()) await this.select(board.group.id);
       await this.refresh();
       return board.group.id;
     } catch (error) {
