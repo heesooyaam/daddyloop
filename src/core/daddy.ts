@@ -17,6 +17,7 @@ import {
   prRef,
   sameRevision,
   type DaddyJob,
+  requestsHumanInput,
   type Event,
   type Workspace,
   type ResourceStatus,
@@ -1041,7 +1042,19 @@ export class Daddy {
         (result.question && !result.summary.includes(result.question)
           ? '\n\n' + result.question
           : '');
-      this.store.finishDaddyReply(group.id, redact(answer), job.id);
+      const blocked =
+        job.waitingTaskId && this.store.tasks(group.id).find((t) => t.id === job.waitingTaskId);
+      const alreadyAsked =
+        blocked &&
+        blocked.state === 'needs_input' &&
+        blocked.inputRequest &&
+        blocked.reason.trim() === (result.question || result.summary).trim();
+      this.store.finishDaddyReply(
+        group.id,
+        redact(answer),
+        job.id,
+        requestsHumanInput(result) && !alreadyAsked,
+      );
       job.status = result.status === 'incomplete' ? 'failed' : 'completed';
     } catch (error) {
       const capacity =

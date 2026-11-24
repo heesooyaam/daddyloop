@@ -2,6 +2,8 @@
 
 # Telegram: private chat and forum topics
 
+When daddy or a worker asks for a decision, the bot sends a new message with a mention of the paired owner and the question. It uses the session topic or the paired private chat. A plan awaiting approval also alerts the owner. Attention and All notifications include these mentions. Ordinary progress updates stay silent.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.

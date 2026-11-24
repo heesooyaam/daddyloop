@@ -2,7 +2,14 @@ import { commandHelp } from './telegram-commands.js';
 import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
-import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
+import {
+  AppError,
+  now,
+  type Event,
+  type ReviewGroup,
+  type Task,
+  type AgentProfiles,
+} from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
 import { TelegramText } from './telegram-text.js';
@@ -36,6 +43,7 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
+import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -48,7 +56,7 @@ import {
   taskReferenceId,
   workersCard,
 } from './telegram-tasks.js';
-type Pair = { chatId: number; userId: number };
+type Pair = { chatId: number; userId: number; ownerLabel?: string };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
 type Destination = { chatId: number; threadId?: number };
@@ -61,6 +69,12 @@ type RepoChoice = {
   expiresAt: string;
   creationExpiresAt?: string;
 };
+function taskRequestKey(task: Task) {
+  if (task.state === 'awaiting_plan_approval')
+    return `plan:${task.generation}:${task.revision?.head}`;
+  if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
+    return task.inputRequest.runId;
+}
 export class TelegramWorkspace {
   private pending = Promise.resolve();
   private stopped = false;
@@ -1863,7 +1877,46 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.error', null);
     this.store.setSetting(key, null);
   }
+  private async ownerMention(pair: Pair) {
+    let label = pair.ownerLabel;
+    if (!label) {
+      // Older pairings only recorded the bot name. The owner's private chat is authoritative.
+      try {
+        const user = await this.api.call<{ id: number; username?: string; first_name?: string }>(
+          'getChat',
+          { chat_id: pair.chatId },
+        );
+        if (user?.id === pair.userId && this.pair()?.userId === pair.userId) {
+          label = user.username ? '@' + user.username : user.first_name;
+          if (label)
+            this.store.setSetting('telegram.pairing', { ...this.pair(), ownerLabel: label });
+        }
+      } catch {
+        /* The numeric mention also works without a display name. */
+      }
+    }
+    return new TelegramText().add(label || this.t('Session owner'), 'text_link', {
+      url: `tg://user?id=${pair.userId}`,
+    });
+  }
+  private queueTaskRequest(task: Task, event: Event) {
+    const request = taskRequestKey(task);
+    if (!request || !task.groupId) return;
+    this.onEvent({
+      ...event,
+      taskId: task.groupId,
+      type: 'daddy.task_question',
+      data: { ...(event.data as object), taskId: task.id, request },
+    });
+  }
   onEvent(event: Event): boolean {
+    if (event.type === 'task.state') {
+      if (
+        ['needs_input', 'awaiting_plan_approval'].includes((event.data as { state: string }).state)
+      )
+        this.queueTaskRequest(this.store.getTask(event.taskId), event);
+      return false;
+    }
     if (!event.type.startsWith('daddy.')) return false;
     if (this.eventDeferred(event)) return true;
     if (
@@ -2005,32 +2058,43 @@ export class TelegramWorkspace {
         .catch((error) => this.deferEvent(event, error));
       return true;
     }
-    if (event.type !== 'daddy.message') return true;
+    if (event.type !== 'daddy.message' && event.type !== 'daddy.task_question') return true;
     this.pending = this.pending
       .then(async () => {
         if (this.eventDeferred(event)) return;
         const pair = this.pair();
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
-        const group = this.daddy.group(event.taskId),
-          message = this.store.messageById(
-            group.id,
-            (event.data as { messageId: string }).messageId,
-          );
-        if (!message || !['user', 'agent'].includes(message.sender)) return;
-        const topic = await this.ensureTopic(group);
-        if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
+        const group = this.daddy.group(event.taskId);
+        const { taskId, request, messageId } = event.data as {
+          taskId?: string;
+          request?: string;
+          messageId?: string;
+        };
+        const task = taskId ? this.store.getTask(taskId) : undefined;
+        const message = messageId ? this.store.messageById(group.id, messageId) : undefined;
+        if (task && (task.groupId !== group.id || !request || taskRequestKey(task) !== request))
           return;
+        if (!task && (!message || !['user', 'agent'].includes(message.sender))) return;
+        const prefs = notificationPreferences(this.store);
+        const answered =
+          message?.needsReply &&
+          this.store
+            .messages(group.id)
+            .some((entry) => entry.sender === 'user' && entry.at > message.at);
+        const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
+        if (task && !ping) return;
+        const topic = await this.ensureTopic(group);
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
           : { chatId: pair.chatId };
         if (
-          message.origin?.channel === 'telegram' &&
+          message?.origin?.channel === 'telegram' &&
           message.origin.chatId === destination.chatId &&
           message.origin.threadId === destination.threadId
         )
           return;
-        if (!topic && message.sender === 'agent') {
+        if (!topic && !ping && message?.sender === 'agent') {
           const job = message.runId
             ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
             : undefined;
@@ -2043,7 +2107,9 @@ export class TelegramWorkspace {
             }
           }
         }
-        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`;
+        const id = task
+          ? `telegram:question:${pair.userId}:${task.id}:${request}`
+          : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;
         if (
           ['sent', 'superseded'].includes(
             String(
@@ -2055,16 +2121,45 @@ export class TelegramWorkspace {
         this.store.db
           .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
           .run(id, 'pending', now());
-        const text = new TelegramText()
-          .add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold')
-          .add('\n\n');
-        if (message.sender === 'user') text.add(message.text);
-        else text.markdown(message.text);
-        const result = await this.api.send(destination, text, undefined, {
-          key: message.sender === 'agent' && message.runId ? `turn:${message.runId}` : id,
-          replace: message.sender === 'agent' && !!message.runId,
-          order: message.at,
-          final: message.phase !== 'progress',
+        const text = new TelegramText();
+        if (ping)
+          text
+            .append(await this.ownerMention(pair))
+            .add(' · ' + this.t('Your reply is needed') + '\n\n');
+        if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
+          return;
+        if (
+          task &&
+          (taskRequestKey(this.store.getTask(task.id)) !== request ||
+            !notificationPreferences(this.store).enabled)
+        )
+          return;
+        if (task) {
+          const worker = task.inputRequest?.role === 'author';
+          text
+            .add(worker ? this.t('Worker') : 'daddy', 'bold')
+            .add(' · ')
+            .add(taskReference(task), 'code')
+            .add('  ' + task.title + '\n\n')
+            .markdown(this.t(redact(task.reason)));
+        } else if (message) {
+          text.add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold').add('\n\n');
+          if (message.sender === 'user') text.add(message.text);
+          else text.markdown(message.text);
+        }
+        // An edit to a progress card does not send a fresh mention notification.
+        const replaceTurn = !ping && message?.sender === 'agent' && !!message.runId;
+        const card = task
+          ? {
+              ...text,
+              buttons: [[{ text: this.t('Open task'), callback_data: `dad:task:${task.id}` }]],
+            }
+          : text;
+        const result = await this.api.send(destination, card, undefined, {
+          key: replaceTurn ? `turn:${message!.runId}` : id,
+          replace: replaceTurn,
+          order: message?.at ?? event.at,
+          final: message?.phase !== 'progress',
           notificationId: id,
         });
         this.store.db
@@ -2086,6 +2181,14 @@ export class TelegramWorkspace {
         type: 'daddy.created',
         data: { retryAttempt },
         at: now(),
+      });
+    for (const task of this.store.tasks(group.id))
+      this.queueTaskRequest(task, {
+        id: retry ? -1 : 0,
+        at: now(),
+        taskId: task.id,
+        type: 'task.state',
+        data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
     const completedRuns = new Set(
