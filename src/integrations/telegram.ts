@@ -38,7 +38,7 @@ import {
 } from './telegram-meta.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const updateRetentionMs = 24 * 60 * 60 * 1000;
-type User = { id: number; is_bot?: boolean };
+type User = { id: number; is_bot?: boolean; username?: string; first_name?: string };
 type Chat = { id: number; type: string; title?: string; is_forum?: boolean };
 export interface Update {
   update_id: number;
@@ -64,7 +64,7 @@ export interface Update {
     message?: { chat: Chat; message_thread_id?: number; message_id?: number };
   };
 }
-type Pairing = { chatId: number; userId: number; username: string };
+type Pairing = { chatId: number; userId: number; username: string; ownerLabel?: string };
 function networkFailure(error: unknown) {
   const codes = new Set<string>();
   const visit = (value: unknown, depth = 0) => {
@@ -482,6 +482,11 @@ export class Telegram {
     const store = this.engine.store;
     const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    const sender = update.callback_query?.from ?? message?.from;
+    const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
+    const paired = this.paired();
+    if (paired && ownerLabel && sender?.id === paired.userId && paired.ownerLabel !== ownerLabel)
+      store.setSetting('telegram.pairing', { ...paired, ownerLabel });
     if (
       this.workspace &&
       (message?.voice ||
@@ -510,7 +515,7 @@ export class Telegram {
     const code = message?.text?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
     const expected = store.setting<{ hash: string; expiresAt: string }>('telegram.pairCode');
     if (code && expected && expected.expiresAt > now() && hash(code) === expected.hash) {
-      pair = { chatId: chat.id, userId: from.id, username: this.username };
+      pair = { chatId: chat.id, userId: from.id, username: this.username, ownerLabel };
       store.transaction(() => {
         store.setSetting('telegram.pairing', pair);
         store.setSetting('telegram.pairCode', null);

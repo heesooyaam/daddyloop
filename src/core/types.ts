@@ -207,6 +207,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  inputRequest?: { runId: string; role: Role; generation: number };
   resourcePause?: { generation: number; at: string };
   id: string;
   title: string;
@@ -293,6 +294,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  needsReply?: boolean;
   phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
   origin?: { channel: 'telegram'; chatId: number; threadId?: number };
@@ -339,6 +341,11 @@ export interface Job {
   actionId?: string;
   firstAttemptId?: string;
   notBefore?: string;
+}
+export function requestsHumanInput(result: AgentResult) {
+  return (
+    result.status === 'needs_input' || (result.status === 'incomplete' && !!result.question?.trim())
+  );
 }
 export interface AgentResult {
   status: 'completed' | 'needs_input' | 'incomplete';

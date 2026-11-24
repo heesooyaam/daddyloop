@@ -493,6 +493,9 @@ export const daddyRu: Record<string, string> = {
   'Waiting for assignment': 'Ждёт назначения',
   'Continuing the interrupted fix against confirmed published feedback.':
     'Воркер продолжает прерванное исправление по подтверждённым замечаниям.',
+  'Open task': 'Открыть задачу',
+  'Session owner': 'Владелец сессии',
+  'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':
     'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
   'The target branch advanced. Reviewing the updated change.':

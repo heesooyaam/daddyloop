@@ -326,7 +326,7 @@ export class Store {
     text: string,
     runId?: string,
     workspace?: Message['workspace'],
-    metadata?: Pick<Message, 'origin' | 'phase'>,
+    metadata?: Pick<Message, 'origin' | 'phase' | 'needsReply'>,
   ) {
     const message: Message = {
       id: randomUUID(),
@@ -351,7 +351,7 @@ export class Store {
       .get(id, taskId);
     return row ? JSON.parse(String(row.data)) : undefined;
   }
-  finishDaddyReply(groupId: string, text: string, runId: string) {
+  finishDaddyReply(groupId: string, text: string, runId: string, needsReply = false) {
     const row = this.db
       .prepare(
         "SELECT data FROM messages WHERE task_id=? AND json_extract(data,'$.runId')=? AND json_extract(data,'$.sender')='agent' ORDER BY rowid DESC LIMIT 1",
@@ -360,13 +360,17 @@ export class Store {
     const previous: Message | undefined = row ? JSON.parse(String(row.data)) : undefined;
     if (previous?.text.trim() === text.trim()) {
       previous.phase = 'final';
+      if (needsReply) previous.needsReply = true;
       this.db
         .prepare('UPDATE messages SET data=? WHERE id=?')
         .run(JSON.stringify(previous), previous.id);
       this.event(groupId, 'daddy.message', { messageId: previous.id, sender: 'agent' }, runId);
       return previous;
     }
-    return this.daddyMessage(groupId, 'agent', text, runId, undefined, { phase: 'final' });
+    return this.daddyMessage(groupId, 'agent', text, runId, undefined, {
+      phase: 'final',
+      ...(needsReply ? { needsReply: true } : {}),
+    });
   }
   getGroup(id: string): ReviewGroup {
     const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);

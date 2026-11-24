@@ -7,6 +7,7 @@ import {
   AppError,
   assertTaskVersion,
   type ExpectedTask,
+  requestsHumanInput,
   prRef,
   isTicket,
   type AgentProfiles,
@@ -233,7 +234,10 @@ export class Engine {
     });
     return task;
   }
-  private state(task: Task, state: State, reason: string) {
+  private state(task: Task, state: State, reason: string, request?: Job) {
+    task.inputRequest = request
+      ? { runId: request.id, role: request.role, generation: task.generation }
+      : undefined;
     task.state = state;
     task.reason = reason;
     this.store.saveTask(task);
@@ -1587,6 +1591,9 @@ export class Engine {
               task,
               'needs_input',
               result.question || result.summary || 'The ticket turn was incomplete',
+              requestsHumanInput(result) && result.checkedHead === task.revision?.head
+                ? job
+                : undefined,
             );
           } else if (reportReview) {
             task.resumeState = undefined;
@@ -1652,7 +1659,12 @@ export class Engine {
         ) {
           this.state(task, 'needs_input', 'The merged revision changed during verification');
         } else if (result.status !== 'completed') {
-          this.state(task, 'needs_input', result.question || result.summary);
+          this.state(
+            task,
+            'needs_input',
+            result.question || result.summary,
+            requestsHumanInput(result) ? job : undefined,
+          );
         } else if (
           result.disputedCommentIds?.length ||
           this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds)) ||
@@ -1721,6 +1733,7 @@ export class Engine {
           task,
           'needs_input',
           result.question || result.summary || 'Agent did not complete its work',
+          requestsHumanInput(result) ? job : undefined,
         );
         return;
       }
@@ -1814,6 +1827,7 @@ export class Engine {
             task,
             'needs_input',
             'Author disputes published findings; discuss them with the reviewer',
+            job,
           );
           return;
         }
