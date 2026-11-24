@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFileSync, existsSync } from 'node:fs';
 import { usageFixture } from './usage-fixture.mjs';
+const port = Number(process.env.DADDYLOOP_E2E_PORT ?? 4318);
 const dir = resolve('.daddyloop/e2e');
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 const key = join(dir, 'test-key.pem'),
@@ -268,18 +269,21 @@ const { app, worker } = await buildApp({
     ok: true,
     reasons: [],
   }),
-  config: configSchema.parse({ publicOrigin: 'https://localhost:4319', agents: fixtureProfiles }),
+  config: configSchema.parse({
+    publicOrigin: `https://localhost:${port + 1}`,
+    agents: fixtureProfiles,
+  }),
 });
 // The browser fixture keeps completed implementations local, with no native writes.
 worker.autoSubmit = undefined;
-await app.listen({ host: '127.0.0.1', port: 4318 });
+await app.listen({ host: '127.0.0.1', port });
 const proxy = https.createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },
   (req, res) => {
     const upstream = http.request(
       {
         hostname: '127.0.0.1',
-        port: 4318,
+        port,
         path: req.url,
         method: req.method,
         headers: req.headers,
@@ -297,7 +301,7 @@ const proxy = https.createServer(
     res.on('close', () => upstream.destroy());
   },
 );
-await new Promise((resolve) => proxy.listen(4319, '127.0.0.1', resolve));
+await new Promise((resolve) => proxy.listen(port + 1, '127.0.0.1', resolve));
 let stopping = false;
 async function stop() {
   if (stopping) return;

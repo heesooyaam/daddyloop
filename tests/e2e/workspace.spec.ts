@@ -2,10 +2,11 @@ import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 test('a paired phone uses HTTPS and remains connected after the laptop browser closes', async ({
   browser,
+  baseURL,
 }) => {
   const laptop = await browser.newContext();
   const token = readFileSync('.daddyloop/e2e/access-token', 'utf8').trim();
-  const response = await laptop.request.post('http://127.0.0.1:4318/api/pairings', {
+  const response = await laptop.request.post(new URL('/api/pairings', baseURL).toString(), {
     headers: { Authorization: `Bearer ${token}` },
     data: { name: 'Phone test', kind: 'web' },
   });
@@ -29,7 +30,7 @@ test('a paired phone uses HTTPS and remains connected after the laptop browser c
     await expect(page.getByRole('dialog')).toBeVisible();
     expect(
       (
-        await phone.request.get('https://localhost:4319/api/tasks', {
+        await phone.request.get(new URL('/api/tasks', url).toString(), {
           headers: { Origin: 'https://evil.example' },
         })
       ).status(),
