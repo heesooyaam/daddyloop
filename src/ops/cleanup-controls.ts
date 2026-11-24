@@ -39,7 +39,10 @@ export class CleanupControls {
     const next = cacheScheduleSchema.parse({ ...previous, ...patch });
     if (next.enabled && (!config.cache.auto || !this.scheduler.status().automaticCleanup))
       throw new AppError('cache_disabled', 'Enable automatic cache cleanup on the host first', 422);
-    if (next.diskPercent >= Math.min(this.pausePercent, config.resources.maxDiskPercent))
+    if (
+      next.enabled &&
+      next.diskPercent >= Math.min(this.pausePercent, config.resources.maxDiskPercent)
+    )
       throw new AppError(
         'cleanup_threshold',
         'The cleanup threshold must be lower than the pause threshold',

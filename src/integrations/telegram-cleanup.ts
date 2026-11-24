@@ -31,6 +31,7 @@ export function cleanupControlCard(locale: Locale, value: CleanupScheduleStatus)
     .add('\n' + t('Cleanup skill') + ' · ' + (value.skill ?? t('No cleanup skill')));
   if (value.running) text.add('\n' + t('Cleanup in progress'));
   if (value.lastCheckedAt) text.add('\n' + t('Last disk check') + ' · ' + value.lastCheckedAt);
+  if (value.nextCheckAt) text.add('\n' + t('Next disk check') + ' · ' + value.nextCheckAt);
   if (value.lastReport)
     text.add(
       '\n' +

@@ -61,6 +61,7 @@ export function CleanupPanel({ api }: { api: DaddyApi }) {
   const date = (value: string) => new Date(value).toLocaleString(locale);
   return (
     <form className="task-form" onSubmit={save} onChange={() => setSaved(false)}>
+      {!status && !error && <p role="status">{t('Loading…')}</p>}
       {error && (
         <p role="alert" className="daddy-field-error">
           {t(error)}
@@ -82,7 +83,7 @@ export function CleanupPanel({ api }: { api: DaddyApi }) {
               type="number"
               required
               min="1"
-              max="99.99"
+              max="100"
               step="any"
               value={percent}
               onChange={(e) => setPercent(e.target.value)}
