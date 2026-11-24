@@ -345,7 +345,9 @@ export class Engine {
     task = this.store.getTask(id);
     if (
       task.pendingFix ||
-      (task.state === 'awaiting_push' && task.pendingAuthorHead !== task.revision?.head)
+      (task.state === 'awaiting_push' &&
+        !!task.pendingAuthorHead &&
+        task.pendingAuthorHead !== task.revision?.head)
     ) {
       await this.checkSavedFix(task, pr);
       return task;
@@ -1196,7 +1198,17 @@ export class Engine {
     if (task.generation !== job.generation || task.state === 'paused') return;
     task.resumeState = task.state;
     if (job.role === 'reviewer') task.reviewFinished = false;
-    this.state(task, 'needs_input', redact(String(error)));
+    const reason = redact(String(error));
+    if (job.kind === 'fix' && task.pendingFix && task.pendingAuthorHead) {
+      task.resumeState = 'awaiting_push';
+      this.state(
+        task,
+        'needs_input',
+        `Saved fix ${task.pendingAuthorHead} is preserved. ${reason}`,
+      );
+    } else {
+      this.state(task, 'needs_input', reason);
+    }
     this.store.event(task.id, 'job.failed', { error: redact(String(error)) }, job.id);
   }
   defaultAgents(): AgentProfiles {
