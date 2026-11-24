@@ -147,12 +147,36 @@ export function sessionSettings(locale: Locale, board: ReturnType<Daddy['board']
   const t = translator(locale),
     id = board.group.id;
   return {
-    ...new TelegramText().add(t('Settings for this session'), 'bold').add('\n' + board.group.title),
+    ...new TelegramText()
+      .add(t('Settings for this session'), 'bold')
+      .add('\n' + board.group.title)
+      .add(
+        board.workspace.provider === 'github'
+          ? '\n' +
+              t(
+                'Includes already reviewed open PRs in this session. Task overrides take precedence.',
+              )
+          : '',
+      ),
     buttons: [
       [
         { text: t('Models'), callback_data: `dad:models:${id}` },
         { text: t('Worker pool'), callback_data: `dad:pool:${id}` },
       ],
+      ...(board.workspace.provider === 'github'
+        ? [
+            [
+              {
+                text: t(
+                  board.group.autoMerge
+                    ? 'Disable auto-merge for session'
+                    : 'Enable auto-merge for session',
+                ),
+                callback_data: `dad:sm:${id}:${board.group.autoMerge ? 'off' : 'on'}`,
+              },
+            ],
+          ]
+        : []),
       [{ text: t('Instructions for this session'), callback_data: `dad:instructions:${id}` }],
       [
         {

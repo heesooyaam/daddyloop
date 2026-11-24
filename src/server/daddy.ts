@@ -111,6 +111,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           .object({
             workerLimit: workerNumber.optional(),
             profiles: profilesSchema.optional(),
+            autoMerge: z.boolean().optional(),
             instructions: sessionInstructionsSchema.optional(),
           })
           .strict()
@@ -172,6 +173,20 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const result = await daddy.remove(id.parse(request.params.id), input.expectedGeneration);
     return reply.code(202).send(result);
   });
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/auto-merge',
+    async (request) => {
+      const { mode } = z
+        .object({ mode: z.enum(['on', 'off', 'inherit']) })
+        .strict()
+        .parse(request.body);
+      return daddy.taskAutoMerge(
+        id.parse(request.params.id),
+        id.parse(request.params.taskId),
+        mode,
+      );
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {
     const input = z
       .object({

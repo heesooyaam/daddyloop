@@ -106,6 +106,22 @@ describe('GitHub draft review contract', () => {
     expect(input.body).toBe(`${body}\n\n<!-- R1 -->`);
     expect(input.startSide).toBe('LEFT');
   });
+  it('keeps identically named checks from distinct GitHub workflows', async () => {
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return { head: { sha: revision.head }, base: { sha: revision.base }, state: 'open' };
+      if (path.includes('/status')) return { statuses: [] };
+      return {
+        check_runs: [
+          { name: 'test', check_suite: { id: 1 }, status: 'completed', conclusion: 'success' },
+          { name: 'test', check_suite: { id: 2 }, status: 'in_progress' },
+        ],
+      };
+    });
+    expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).checks).toBe(
+      'pending',
+    );
+  });
   it('does not infer success from a failed or stale CI run', async () => {
     const http = transport((path) => {
       if (path === '/repos/acme/service/pulls/12')
@@ -239,4 +255,19 @@ it('rejects malformed PR URLs, credentials and path traversal', () => {
   ])
     expect(() => parsePR(url)).toThrow();
   expect(parsePR('https://gitlab.com/a/b/c/-/merge_requests/1').repo).toBe('a/b/c');
+});
+
+it('uses a permitted merge method and submits exactly the reviewed head to GitHub', async () => {
+  const http = transport((path, method, body) => {
+    if (method === 'GET' && path === '/repos/acme/service')
+      return { allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: true };
+    expect([method, path, body]).toEqual([
+      'PUT',
+      '/repos/acme/service/pulls/12/merge',
+      { sha: revision.head, merge_method: 'rebase' },
+    ]);
+    return { merged: true, sha: 'merged-commit' };
+  });
+  const write = await new GitHubProvider('github.com', 'fake', http).prepareMerge(ref);
+  await expect(write(revision.head)).resolves.toBe('merged-commit');
 });

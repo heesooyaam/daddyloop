@@ -1,3 +1,4 @@
+import { pollAutoMerge } from '../core/auto-merge.js';
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
@@ -27,6 +28,7 @@ export class Worker {
   private ticking = false;
   private stopped = false;
   private lastPoll = 0;
+  private mergeRun?: Promise<void>;
   private tickDone: Promise<void> = Promise.resolve();
   private lastCleanup = 0;
   private lastArcRelease = 0;
@@ -351,6 +353,18 @@ export class Worker {
           this.track(job.taskId, running);
           void running.finally(() => this.pendingRuns.delete(running));
         } else break;
+      }
+      if (poll && !this.stopped && resources.ok && !this.mergeRun) {
+        const run = pollAutoMerge(this.engine, () => this.stopped)
+          .catch((error) => {
+            store.event('_system', 'automerge.error', { error: redact(String(error)) });
+          })
+          .finally(() => {
+            this.mergeRun = undefined;
+            this.pendingRuns.delete(run);
+          });
+        this.mergeRun = run;
+        this.pendingRuns.add(run);
       }
     } finally {
       this.ticking = false;

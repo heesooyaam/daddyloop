@@ -36,8 +36,14 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 ## Review and control
 
-The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. The user decides when to merge.
+The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
 
 Use the main daddy chat for instructions. Task reports show progress and offer plan approval when required. Plan approval checks the exact revision and generation again.
 
 `/pause` pauses the session; `/resume` resumes it. Closing the CLI/browser only disconnects the client. Stopping the service is different: interrupted work is recorded and must be resumed after inspection. See [operations](../operations/en.md).
+
+## Auto-merge on GitHub
+
+On the web or in Telegram, open the session settings to enable **Auto-merge GitHub PRs**. This includes existing reviewed open PRs and future tasks in that session. In a task card choose **Session default**, **On** or **Off**. An explicit task choice takes precedence.
+
+The service waits for a completed independent review, a published review with no outstanding findings, and passing CI on the current revision. GitHub checks the supplied head SHA and repository rules. The service prefers squash, then a merge commit, then rebase according to the repository’s allowed methods. The task card shows the outcome or why the merge is waiting.
