@@ -244,6 +244,8 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   fixingMergeConflict?: boolean;
+  conflictCheckpoint?: string;
+  deferredWorkerInstructions?: { id: string; text: string }[];
   pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<

@@ -187,3 +187,40 @@ it('recovers an earlier unconfirmed push by reading the PR without resending', a
     f.store.close();
   }
 });
+
+it('retains a worker message through push confirmation and delivers it once on the published revision', async () => {
+  const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+  try {
+    const original = f.task.pr!;
+    const native = vi.spyOn(f.provider, 'getPR').mockResolvedValue(original);
+    await f.engine.chat(f.task.id, 'author', 'Check the empty state too', 'command-one');
+    await f.engine.chat(f.task.id, 'author', 'Check the empty state too', 'command-one');
+    expect(f.store.messages(f.task.id)).toHaveLength(1);
+    await f.engine.deliverWorkerInstruction(f.task.id);
+    expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+    await f.engine.submitSavedFix(f.task.id, async () => {
+      native.mockResolvedValue({ ...original, head: savedHead });
+    });
+    await f.engine.review(f.task.id);
+    const review = f.store.claim()!;
+    await f.engine.completeJob(review, f.result({ checkedHead: savedHead }));
+    f.store.saveJob({ ...review, status: 'completed' });
+    await f.engine.publish(f.task.id);
+    await Promise.all([
+      f.engine.deliverWorkerInstruction(f.task.id),
+      f.engine.deliverWorkerInstruction(f.task.id),
+    ]);
+    const job = f.store.claim()!;
+    expect(job).toMatchObject({
+      kind: 'chat',
+      input: 'Check the empty state too',
+      generation: f.store.getTask(f.task.id).generation,
+    });
+    await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
+    f.store.saveJob({ ...job, status: 'completed' });
+    await f.engine.deliverWorkerInstruction(f.task.id);
+    expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});
