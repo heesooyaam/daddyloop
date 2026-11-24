@@ -12,6 +12,7 @@ import {
 
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
+  targetAdvanced?(ref: PRRef, before: string, after: string): Promise<boolean>;
   prepareMerge?(ref: PRRef): Promise<(expectedHead: string) => Promise<string>>;
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
   createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;

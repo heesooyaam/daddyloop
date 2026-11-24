@@ -61,6 +61,18 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     );
     const acceptCompletion = (turn: Record<string, unknown>) => {
       if (turn.status !== 'completed') {
+        if (
+          (turn.error as { codexErrorInfo?: unknown } | null)?.codexErrorInfo ===
+          'contextWindowExceeded'
+        ) {
+          rejectDone(
+            new AppError(
+              'context_window_exceeded',
+              'Codex reached the context limit for this thread.',
+            ),
+          );
+          return;
+        }
         rejectDone(
           new AppError(
             'incomplete_turn',

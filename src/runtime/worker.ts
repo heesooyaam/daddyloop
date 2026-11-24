@@ -1,5 +1,5 @@
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
-import type { Engine } from '../core/engine.js';
+import { staleConflictPreparation, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
@@ -184,8 +184,19 @@ export class Worker {
       const poll = Date.now() - this.lastPoll > this.pollMs;
       if (poll) {
         this.lastPoll = Date.now();
-        for (const task of store.tasks())
+        for (const task of store.tasks()) {
           if (
+            task.state === 'needs_input' &&
+            task.resumeState === 'reviewing' &&
+            autoMergeEnabled(store, task)
+          ) {
+            try {
+              await this.engine.retryExhaustedReview(task.id);
+            } catch (error) {
+              store.event(task.id, 'review.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          } else if (
             [
               'awaiting_publication',
               'awaiting_push',
@@ -193,7 +204,8 @@ export class Worker {
               'awaiting_plan_approval',
               'reviewing',
               'fixing',
-            ].includes(task.state)
+            ].includes(task.state) ||
+            (staleConflictPreparation(task) && autoMergeEnabled(store, task))
           ) {
             try {
               await this.engine.reconcile(task.id);
@@ -204,6 +216,7 @@ export class Worker {
               });
             }
           }
+        }
       }
       if (this.stopped) return;
       if (this.autoSubmit && resources.ok)
@@ -596,6 +609,7 @@ export class Worker {
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       job.status = capacity ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
+      if (error instanceof AppError) job.errorCode = error.code;
       if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {

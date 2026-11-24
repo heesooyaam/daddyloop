@@ -538,6 +538,12 @@ export const daddyRu: Record<string, string> = {
     'Автослияние выключено. Исправление конфликта сохранено и ожидает отправки.',
   'Enable auto-merge before resuming conflict resolution.':
     'Для продолжения исправления конфликта включи автослияние.',
+  'Reviewer context was full. Restarting the independent review.':
+    'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Checking GitHub auto-merge': 'Проверяется автослияние PR',
+  'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'Draft PR: mark it ready for review on GitHub':
+    'PR в черновике. Отметь его готовым к ревью в GitHub',
   'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
   'Waiting for a published review with no outstanding findings':
     'Ожидает публикации ревью с закрытыми замечаниями',

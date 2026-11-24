@@ -33,7 +33,7 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
-import { autoMergeSettings } from '../core/auto-merge.js';
+import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -460,7 +460,11 @@ export class TelegramWorkspace {
   }
   private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
     const group = this.authorize(destination, groupId);
-    const tasks = taskActivity(this.store.tasks(groupId).reverse(), this.store.activeJobs());
+    const tasks = taskActivity(
+      this.store.tasks(groupId).reverse(),
+      this.store.activeJobs(),
+      (task) => autoMergeStatus(task, autoMergeSettings(this.store, group, task)),
+    );
     const locale = this.locale();
     await this.api.send(
       destination,

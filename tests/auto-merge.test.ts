@@ -131,6 +131,58 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await f.engine.review(f.task.id, true);
+      const job = f.store.claim()!;
+      job.threadId = 'codex:old';
+      const group = f.store.getGroup(f.group.id);
+      group.reviewerThreadId = job.threadId;
+      group.daddyThreadId = 'codex:coordinator';
+      f.store.saveGroup(group);
+      const failure = new AppError(
+        'incomplete_turn',
+        'Codex turn failed: {"codexErrorInfo":"contextWindowExceeded"}',
+      );
+      f.engine.failJob(job, failure);
+      f.store.saveJob({ ...job, status: 'failed', error: String(failure) });
+      const old = f.store.getTask(f.task.id);
+      const key = 'demo-review:' + old.review!.id;
+      const draft = await f.provider.getReview(prRef(old), old.review!);
+      const tip = 'd'.repeat(40);
+      f.setRemote({ base: tip, start: tip });
+      f.store.setSetting(key, { ...draft, body: 'Private review notes' });
+      await f.engine.retryExhaustedReview(old.id);
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      f.store.setSetting(key, {
+        ...draft,
+        body: `Review in progress.\n\n<!-- ${old.review!.marker} -->`,
+      });
+      await Promise.all([
+        f.engine.retryExhaustedReview(old.id),
+        f.engine.retryExhaustedReview(old.id),
+      ]);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        reviewFinished: false,
+        review: { id: old.review!.id, revision: { base: tip } },
+      });
+      expect(f.store.getGroup(group.id).daddyThreadId).toBe('codex:coordinator');
+      expect(f.store.getGroup(group.id).reviewerThreadId).toBeUndefined();
+      const retry = f.store.claim()!;
+      expect(retry.freshContextRetry).toBe(true);
+      f.engine.failJob(retry, failure);
+      f.store.saveJob({ ...retry, status: 'failed', error: String(failure) });
+      await f.engine.retryExhaustedReview(old.id);
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      expect(f.send).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
   it('assigns one conflict repair, pushes a two-parent commit, then requires fresh review and CI', async () => {
     const fixture = daddyFixture();
     try {
@@ -194,13 +246,25 @@ describe('opt-in GitHub merging', () => {
         timeout: 5000,
       });
       const saved = f.store.getTask(task.id).pendingAuthorHead!;
+      // Another PR landed while the worker was resolving the pinned conflict.
+      const newerBase = await commit('later upstream');
+      const targetAdvanced = vi.fn(
+        async (_ref: unknown, before: string, after: string) =>
+          before === base && after === newerBase,
+      );
+      Object.assign(f.provider, { targetAdvanced });
+      f.setRemote({ base: newerBase, start: newerBase });
       await f.engine.submitSavedFix(task.id, async (current, sha) => {
         await f.checkouts.pushSavedFix(current, sha);
         expect(await git(['rev-parse', 'refs/heads/feature'], remoteRepo)).toBe(saved);
         expect(await git(['show', '-s', '--format=%P', saved], remoteRepo)).toBe(head + ' ' + base);
         f.setRemote({ head: saved, mergeConflict: false, mergeable: true, checks: 'pending' });
       });
-      expect(f.store.getTask(task.id).state).toBe('queued');
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'queued',
+        revision: { base: newerBase, head: saved },
+      });
+      expect(targetAdvanced).toHaveBeenCalled();
       await f.poll();
       expect(f.send).not.toHaveBeenCalled();
       await f.engine.review(task.id);

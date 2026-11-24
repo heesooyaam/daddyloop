@@ -119,11 +119,13 @@ describe('GitHub draft review contract', () => {
         if (path.includes('/pulls/'))
           return {
             head: { sha: revision.head },
-            base: { sha: revision.base },
+            base: { sha: revision.base, ref: 'main' },
             state: 'open',
             mergeable,
             mergeable_state: state,
           };
+        if (path === '/repos/acme/service/git/ref/heads/main')
+          return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
         return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
       });
       expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).mergeConflict).toBe(
@@ -131,10 +133,41 @@ describe('GitHub draft review contract', () => {
       );
     },
   );
+  it('pins an open PR to the live target ref and keeps the historical base after closure', async () => {
+    const tip = 'c'.repeat(40);
+    let state = 'open';
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return {
+          head: { sha: revision.head },
+          base: { ref: 'release/v1', sha: revision.base },
+          state,
+          merged: state === 'closed',
+        };
+      if (path.endsWith('/git/ref/heads/release/v1'))
+        return { ref: 'refs/heads/release/v1', object: { type: 'commit', sha: tip } };
+      return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+    });
+    const github = new GitHubProvider('github.com', 'fake', http);
+    expect(await github.getPR(ref)).toMatchObject({ base: tip, start: tip, head: revision.head });
+    state = 'closed';
+    expect(await github.getPR(ref)).toMatchObject({
+      base: revision.base,
+      start: revision.base,
+      state: 'merged',
+    });
+    expect(http.mock.calls.filter(([url]) => String(url).includes('/git/ref/'))).toHaveLength(1);
+  });
   it('keeps identically named checks from distinct GitHub workflows', async () => {
     const http = transport((path) => {
       if (path.includes('/pulls/'))
-        return { head: { sha: revision.head }, base: { sha: revision.base }, state: 'open' };
+        return {
+          head: { sha: revision.head },
+          base: { sha: revision.base, ref: 'main' },
+          state: 'open',
+        };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
       if (path.includes('/status')) return { statuses: [] };
       return {
         check_runs: [
@@ -161,6 +194,8 @@ describe('GitHub draft review contract', () => {
           base: { sha: revision.base, ref: 'main' },
           state: 'open',
         };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
       if (path.includes('/status')) return { statuses: [{ context: 'unit', state: 'failure' }] };
       return {
         check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
