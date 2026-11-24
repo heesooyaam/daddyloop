@@ -48,6 +48,7 @@ export class DaddyClient {
   private timer?: ReturnType<typeof setInterval>;
   private controller = new AbortController();
   private refreshPending?: Promise<void>;
+  private refreshGeneration = 0;
   private usagePending?: Promise<void>;
   private sequence = 0;
   private epoch = 0;
@@ -125,7 +126,8 @@ export class DaddyClient {
     if (this.stopped) return Promise.resolve();
     if (this.refreshPending) return this.refreshPending;
     this.refreshUsage();
-    const epoch = this.epoch;
+    const generation = ++this.refreshGeneration;
+    const current = () => !this.stopped && generation === this.refreshGeneration;
     this.refreshPending = (async () => {
       try {
         const [sessions, workspaces, status] = await Promise.all([
@@ -133,7 +135,7 @@ export class DaddyClient {
           this.api<Workspace[]>('/workspaces', undefined, this.controller.signal),
           this.api<DaddyStatus>('/status', undefined, this.controller.signal),
         ]);
-        if (this.stopped || epoch !== this.epoch) return;
+        if (!current()) return;
         let selected = this.value.selected;
         if (selected && !/^[a-f0-9-]{36}$/.test(selected))
           selected =
@@ -153,25 +155,26 @@ export class DaddyClient {
         });
         await this.detail();
       } catch (error) {
-        if (!this.stopped && epoch === this.epoch)
-          this.update({ error: (error as Error).message, connected: false });
+        if (current()) this.update({ error: (error as Error).message, connected: false });
       }
     })().finally(() => {
-      if (epoch === this.epoch) this.refreshPending = undefined;
+      if (generation === this.refreshGeneration) this.refreshPending = undefined;
     });
     return this.refreshPending;
   }
   private refreshUsage() {
     if (this.usagePending || this.stopped) return;
     const epoch = this.epoch;
+    const previous = this.value.usage;
+    const current = () => !this.stopped && epoch === this.epoch && this.value.usage === previous;
     const pending = this.api<UsageView>('/usage', undefined, this.controller.signal)
       .then((usage) => {
-        if (!this.stopped && epoch === this.epoch) this.update({ usage });
+        if (current()) this.update({ usage });
       })
       .catch(() => {
-        if (!this.stopped && epoch === this.epoch && this.value.usage)
+        if (current() && previous)
           this.update({
-            usage: { agents: this.value.usage.agents.map((agent) => ({ ...agent, stale: true })) },
+            usage: { agents: previous.agents.map((agent) => ({ ...agent, stale: true })) },
           });
       })
       .finally(() => {
@@ -204,8 +207,12 @@ export class DaddyClient {
         this.controller.signal,
       );
       this.creation = undefined;
+      // A session list requested before creation may omit the new session.
+      this.refreshGeneration++;
+      this.refreshPending = undefined;
       await this.select(board.group.id);
       await this.refresh();
+      return board.group.id;
     } catch (error) {
       if (!this.stopped) this.update({ error: (error as Error).message });
       throw error;

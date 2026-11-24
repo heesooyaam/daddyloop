@@ -69,7 +69,7 @@ To choose another installed executable on the service host, use `daddy runtime u
 
 ## Limits
 
-The strip above the conversation shows each agent's quotas on desktop and phone. Click the provider or a period card for details and refresh. Unknown or stale readings are labelled. Additional credits are a separate payment balance; zero credits do not mean the included quota is exhausted. Zero balances stay in details unless credits are the only reported allowance.
+The gauge in the workspace header shows the lowest reported remaining quota per provider on hover or keyboard focus. Select the gauge to see all periods. Open the **Agent limits** page from there to switch providers, refresh readings or use an available reset. Unknown and stale readings are labelled. Providers report additional credits as a separate payment balance. The limits page includes zero balances, too.
 
 - **Codex:** reads account quotas from the selected CLI, cached for one minute. Returned windows, reset times, plan and extra model buckets are preserved. A weekly-only plan shows only a week; Spark or other model quotas appear separately when reported. Agents using the same account share its quota.
 - **Claude:** displays provider `rate_limit_event` observations, stale after two minutes. Refresh cannot fetch an unsupported account-quota endpoint. Last-turn tokens and estimated API cost are activity data, not an account balance. Missing quota data remains unknown. This adapter does not expose a quota reset.
