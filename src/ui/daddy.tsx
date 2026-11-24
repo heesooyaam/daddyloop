@@ -15,6 +15,10 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Plus,
@@ -67,6 +71,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [returnToNew, setReturnToNew] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [tasksCollapsed, setTasksCollapsed] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
   );
@@ -163,6 +169,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
+  const tasksToggleLabel = t(
+    tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
+  );
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -302,6 +312,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           >
             <Menu size={20} />
           </button>
+          <button
+            className="daddy-icon daddy-sessions-toggle"
+            aria-label={sessionsToggleLabel}
+            title={sessionsToggleLabel}
+            aria-controls="daddy-sidebar"
+            aria-expanded={!sessionsCollapsed}
+            onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
+          >
+            {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
               {board?.workspace?.name ?? 'daddyloop'}
@@ -339,6 +359,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </button>
               )}
             </div>
+          )}
+          {board && (
+            <button
+              className="daddy-icon daddy-tasks-toggle"
+              aria-label={tasksToggleLabel}
+              title={tasksToggleLabel}
+              aria-controls="daddy-tasks-panel"
+              aria-expanded={!tasksCollapsed}
+              onClick={() => setTasksCollapsed((collapsed) => !collapsed)}
+            >
+              {tasksCollapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
+            </button>
           )}
         </header>
         <UsageStrip
@@ -414,11 +446,21 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
-              <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>
+              <button
+                className={pane === 'chat' ? 'active' : ''}
+                aria-controls="daddy-chat-panel"
+                aria-pressed={pane === 'chat'}
+                onClick={() => setPane('chat')}
+              >
                 <MessageSquare size={15} />
                 daddy
               </button>
-              <button className={pane === 'tasks' ? 'active' : ''} onClick={() => setPane('tasks')}>
+              <button
+                className={pane === 'tasks' ? 'active' : ''}
+                aria-controls="daddy-tasks-panel"
+                aria-pressed={pane === 'tasks'}
+                onClick={() => setPane('tasks')}
+              >
                 <Users size={15} />
                 {t('Tasks')}
                 <span>{board.tasks.length}</span>
@@ -426,6 +468,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
             <div className="daddy-workspace">
               <section
+                id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
@@ -541,7 +584,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   )}
                 </div>
               </section>
-              <aside className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}>
+              <aside
+                id="daddy-tasks-panel"
+                className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
+              >
                 <div className="daddy-board-header">
                   <div>
                     <span className="daddy-eyebrow">{t('Your team')}</span>
