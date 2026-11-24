@@ -5,7 +5,7 @@ import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type Task } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
-import { TelegramText } from './telegram-text.js';
+import { TelegramText, safeLink } from './telegram-text.js';
 import {
   daddyHome,
   workspacePicker,
@@ -36,7 +36,7 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
-import { taskReference } from '../core/task-activity.js';
+import { draftInspectionRequired, taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -64,7 +64,9 @@ type RepoChoice = {
 };
 function taskRequestKey(task: Task) {
   if (task.state === 'awaiting_plan_approval')
-    return `plan:${task.generation}:${task.revision?.head}`;
+    return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
+  if (task.state === 'needs_input' && task.reason === draftInspectionRequired && task.review)
+    return 'inspect-draft:' + task.review.id;
   if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
     return task.inputRequest.runId;
 }
@@ -2152,10 +2154,16 @@ export class TelegramWorkspace {
         }
         // An edit to a progress card does not send a fresh mention notification.
         const replaceTurn = !ping && message?.sender === 'agent' && !!message.runId;
+        const url = task && task.ref.kind !== 'ticket' && safeLink(task.ref.url);
         const card = task
           ? {
               ...text,
-              buttons: [[{ text: this.t('Open task'), callback_data: `dad:task:${task.id}` }]],
+              buttons: [
+                [
+                  { text: this.t('Open task'), callback_data: `dad:task:${task.id}` },
+                  ...(url ? [{ text: 'PR', url }] : []),
+                ],
+              ],
             }
           : text;
         const result = await this.api.send(destination, card, undefined, {

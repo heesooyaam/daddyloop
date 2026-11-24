@@ -1,3 +1,4 @@
+import { draftInspectionRequired } from './task-activity.js';
 import { legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
@@ -397,11 +398,7 @@ export class Engine {
       !provider.discardSupersededDraft ||
       (archived && archived.body !== body)
     ) {
-      this.state(
-        task,
-        'needs_input',
-        'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
-      );
+      this.state(task, 'needs_input', draftInspectionRequired);
       return false;
     }
     if (!archived)
@@ -533,8 +530,7 @@ export class Engine {
         job.generation + 1 === task.generation &&
         (task.reason ===
           'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
-          task.reason ===
-            'Inspect the old review draft: it contains changes that daddy cannot safely replace.') &&
+          task.reason === draftInspectionRequired) &&
         !!task.review &&
         task.review.revision.head === task.revision?.head &&
         task.review.revision.base !== task.revision.base &&
@@ -617,12 +613,7 @@ export class Engine {
         (restarted || !sameRevision(task.review.revision, pr)) &&
         !(await this.canCarryDraft(task, pr, draft))
       ) {
-        if (!context)
-          this.state(
-            task,
-            'needs_input',
-            'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
-          );
+        if (!context) this.state(task, 'needs_input', draftInspectionRequired);
         return;
       }
       const currentGroup = this.store.getGroup(task.groupId);
@@ -786,6 +777,27 @@ export class Engine {
     );
   }
 
+  private recordedAgentResult(taskId: string, runId: string): AgentResult | undefined {
+    const result = this.store.db
+      .prepare(
+        "SELECT json_extract(data,'$.text') AS text FROM events WHERE task_id=? AND run_id=? AND type='runtime.item' AND json_extract(data,'$.type')='agentMessage' AND json_extract(data,'$.phase')='final_answer' ORDER BY id DESC LIMIT 1",
+      )
+      .get(taskId, runId);
+    if (typeof result?.text !== 'string') return;
+    try {
+      const value = JSON.parse(result.text);
+      if (
+        value &&
+        typeof value.summary === 'string' &&
+        typeof value.checkedHead === 'string' &&
+        (value.question == null || typeof value.question === 'string')
+      )
+        return value;
+    } catch {
+      /* Earlier agents could leave plain text instead of a structured result. */
+    }
+  }
+
   async recoverInterruptedFix(id: string, checkpoint: (task: Task) => Promise<string>) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -854,18 +866,7 @@ export class Engine {
         return;
       }
       if (job.status !== 'completed' || !autoMergeEnabled(this.store, task)) return;
-      const item = this.store.db
-        .prepare(
-          "SELECT json_extract(data,'$.text') AS text FROM events WHERE task_id=? AND run_id=? AND type='runtime.item' AND json_extract(data,'$.type')='agentMessage' AND json_extract(data,'$.phase')='final_answer' ORDER BY id DESC LIMIT 1",
-        )
-        .get(id, job.id);
-      if (typeof item?.text !== 'string') return;
-      let result: AgentResult;
-      try {
-        result = JSON.parse(item.text);
-      } catch {
-        return;
-      }
+      const result = this.recordedAgentResult(task.id, job.id);
       if (
         result?.status !== 'incomplete' ||
         result.summary !== task.reason ||
@@ -2023,6 +2024,20 @@ export class Engine {
     });
   }
   recoverInterruptedJobs() {
+    for (const task of this.store.tasks()) {
+      if (task.state !== 'needs_input' || task.inputRequest) continue;
+      const job = this.store.jobs(task.id).at(-1);
+      if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;
+      const result = this.recordedAgentResult(task.id, job.id);
+      if (
+        result &&
+        requestsHumanInput(result) &&
+        result.checkedHead === task.revision?.head &&
+        (result.question || result.summary) === task.reason
+      ) {
+        this.state(task, 'needs_input', task.reason, job);
+      }
+    }
     for (const task of this.store.tasks())
       if (task.state === 'submitting')
         this.state(

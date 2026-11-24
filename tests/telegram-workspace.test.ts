@@ -857,10 +857,22 @@ it.each(['private', 'topic'])(
       const setting = f.store.getTask(task.id);
       f.store.saveTask({ ...setting, inputRequest: undefined, reason: 'Server restarted' });
       f.store.event(task.id, 'task.state', { state: 'needs_input' });
+      const source = 'https://github.com/test/repo/pull/7';
+      f.store.saveTask({
+        ...setting,
+        ref: { provider: 'github', host: 'github.com', repo: 'test/repo', number: 7, url: source },
+        review: { id: 'old-draft', marker: 'test', revision: setting.revision! },
+        inputRequest: undefined,
+        reason:
+          'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
+      });
+      bot.replay();
+      await vi.waitFor(() => expect(mentions()).toHaveLength(3));
+      expect(mentions()[2].card.buttons[0]).toContainEqual({ text: 'PR', url: source });
       f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
       f.store.finishDaddyReply(group.id, 'Muted request', 'another-run', true);
       await bot.stop();
-      expect(mentions()).toHaveLength(2);
+      expect(mentions()).toHaveLength(3);
     } finally {
       f.store.changes.off('event', listener);
       await bot.stop();
