@@ -1173,6 +1173,7 @@
   .daddy-sidebar.open {
     visibility: visible;
     transform: translateX(0);
+    transition-property: transform;
   }
   .daddy-shade {
     display: block;
@@ -1762,9 +1763,6 @@ body {
 .daddy-button.primary:hover,
 .daddy-send:hover {
   background: var(--primary-hover);
-}
-.daddy-theme-toggle {
-  flex-shrink: 0;
 }
 .login-page > .daddy-theme-toggle {
   position: absolute;

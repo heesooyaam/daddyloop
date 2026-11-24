@@ -1,5 +1,6 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore, type MouseEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { KeyboardEvent, MouseEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -54,6 +55,7 @@ import { profileText, taskReference, taskStatus } from '../core/task-activity.js
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const sidebarMedia = '(max-width: 850px)';
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -122,8 +124,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
     chatScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const media = matchMedia(sidebarMedia);
+    const resize = () => {
+      setNarrowLayout(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    resize();
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+  useLayoutEffect(() => {
+    if (menu) firstMenuItem.current?.focus();
+    else if (wasMenuOpen.current) menuButton.current?.focus();
+    wasMenuOpen.current = menu;
+  }, [menu]);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -158,6 +179,28 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     const chat = chatScroll.current;
     if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!menu || !event.currentTarget.contains(event.target as Node)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenu(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length,
+    );
+    const from = event.shiftKey ? items[0] : items.at(-1);
+    const to = event.shiftKey ? items.at(-1) : items[0];
+    if (event.target === from) {
+      event.preventDefault();
+      to?.focus();
+    }
+  };
   const openChat = (id: string) => {
     if (isLimitsPage()) {
       history.pushState(null, '', `/#session/${id}`);
@@ -213,6 +256,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       <aside
         id="daddy-sessions-panel"
         className={`daddy-sidebar${menu ? ' open' : ''}${sessionsCollapsed ? ' collapsed' : ''}`}
+        inert={narrowLayout && !menu}
+        onKeyDown={onMenuKeyDown}
       >
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
@@ -221,7 +266,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </span>
         </div>
         <p className="daddy-kicker">{t('daddy will handle it.')}</p>
-        <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
+        <button
+          ref={firstMenuItem}
+          className="daddy-button primary new-session"
+          onClick={() => setModal('new')}
+        >
           <Plus size={17} />
           {t('New session')}
         </button>
@@ -296,6 +345,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <Gauge size={17} aria-hidden="true" />
             {t('Limits')}
           </a>
+          <ThemeButton showLabel />
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -317,11 +367,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <button
           className="daddy-shade"
           aria-label={t('Close menu')}
+          tabIndex={-1}
           onClick={() => setMenu(false)}
         />
       )}
       {limitsPage && (
-        <main className="daddy-main daddy-limits-page">
+        <main className="daddy-main daddy-limits-page" inert={menu}>
           <div className="daddy-limits-content">
             <a className="daddy-limits-back" href={chatHref} onClick={navigate}>
               <ArrowLeft size={16} aria-hidden="true" />
@@ -339,7 +390,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </div>
         </main>
       )}
-      <main className="daddy-main" hidden={limitsPage}>
+      <main className="daddy-main" hidden={limitsPage} inert={menu}>
         <header className="daddy-topbar">
           <button
             className="daddy-icon daddy-sessions-toggle"
@@ -352,6 +403,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
           <button
+            ref={menuButton}
             className="daddy-icon mobile-menu"
             aria-label={t('Sessions')}
             aria-controls="daddy-sessions-panel"
@@ -364,9 +416,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
               {board?.workspace?.name ?? 'daddyloop'}
             </span>
-            <h1 ref={chatHeading} tabIndex={-1} title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
+            <h1 ref={chatHeading} tabIndex={-1} title={board?.group.title}>
+              {board?.group.title ?? t('Your dashboard')}
+            </h1>
           </div>
-          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button

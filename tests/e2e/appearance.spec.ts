@@ -8,15 +8,23 @@ async function login(page: Page) {
   await page.getByRole('button', { name: 'Connect to workspace' }).click();
   await expect(page.locator('.daddy-app')).toBeVisible();
 }
-test('offers eight readable themes, preserves drafts and remembers a browser choice', async ({
-  page,
-}) => {
-  await login(page);
+async function createSession(page: Page, name: string) {
   await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await page.getByLabel('Session name (optional)').fill('Theme draft');
+  await page.getByLabel('Session name (optional)').fill(name);
   await page.getByLabel('What should daddy do?').fill('Keep this conversation open');
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+}
+test('offers eight readable themes in general settings and preserves drafts', async ({ page }) => {
+  await login(page);
+  await createSession(page, 'Theme draft');
   await page.getByLabel('Message daddy').fill('Keep this draft while changing colors');
+  const themeButton = page
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: 'Change theme', exact: true });
+  await expect(
+    page.locator('.daddy-topbar').getByRole('button', { name: 'Change theme', exact: true }),
+  ).toHaveCount(0);
   const writes: string[] = [];
   page.on('request', (request) => {
     if (request.method() === 'POST') writes.push(request.url());
@@ -31,7 +39,7 @@ test('offers eight readable themes, preserves drafts and remembers a browser cho
     'Forest',
     'Plum',
   ]) {
-    await page.getByRole('button', { name: 'Change theme' }).click();
+    await themeButton.click();
     await expect(page.getByRole('radio')).toHaveCount(9);
     await page.getByRole('radio', { name, exact: true }).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', name.toLowerCase());
@@ -67,11 +75,88 @@ test('offers eight readable themes, preserves drafts and remembers a browser cho
   await expect(page.getByLabel('Message daddy')).toHaveValue(
     'Keep this draft while changing colors',
   );
-  await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'plum');
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('button', { name: 'Agent limits' })).toBeVisible();
+});
+test('opens the palette and switches sessions in a short desktop window', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 540 });
+  await login(page);
+  await createSession(page, 'First desktop theme session');
+  await createSession(page, 'Second desktop theme session');
+
+  await page
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: 'Change theme', exact: true })
+    .click();
+  const palette = page.getByRole('dialog', { name: 'Make yourself at home' });
+  await expect(palette).toBeVisible();
+  await palette.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await page
+    .getByRole('navigation', { name: 'Sessions' })
+    .getByRole('button', { name: /First desktop theme session/ })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'First desktop theme session', exact: true }),
+  ).toBeVisible();
+});
+test('opens the palette from the mobile sidebar and keeps the choice across sessions and reloads', async ({
+  page,
+}) => {
+  await login(page);
+  await createSession(page, 'First theme session');
+  await createSession(page, 'Second theme session');
+  await page.setViewportSize({ width: 390, height: 500 });
+
+  const menu = page.getByRole('button', { name: 'Sessions', exact: true });
+  const sidebar = page.locator('#daddy-sessions-panel');
+  const firstItem = sidebar.getByRole('button', { name: 'New session', exact: true });
+  const lastItem = sidebar.getByRole('combobox', { name: 'Language' });
+  const themeButton = sidebar
+    .locator('.daddy-sidebar-bottom')
+    .getByRole('button', { name: 'Change theme', exact: true });
+  const palette = page.getByRole('dialog', { name: 'Make yourself at home' });
+  const theme = palette.getByRole('radio', { name: 'Plum', exact: true });
+  const html = page.locator('html');
+
+  await expect(themeButton).toBeHidden();
+  await menu.press('Enter');
+  await expect(firstItem).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(lastItem).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(firstItem).toBeFocused();
+  const controls = await sidebar.locator('button, a[href], select').count();
+  for (let step = 0; step < controls; step++) {
+    await page.keyboard.press('Tab');
+    await expect(sidebar.locator(':focus')).toHaveCount(1);
+    if (await themeButton.evaluate((button) => button.matches(':focus'))) break;
+  }
+  await expect(themeButton).toBeFocused();
+  await page.keyboard.press('Enter');
+  await theme.click();
+  await expect(html).toHaveAttribute('data-theme', 'plum');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(palette).toBeHidden();
+  await expect(themeButton).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeFocused();
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
+
+  await page.keyboard.press('Enter');
+  await page
+    .getByRole('navigation', { name: 'Sessions' })
+    .getByRole('button', { name: /First theme session/ })
+    .click();
+  const activeSession = page.getByRole('heading', { name: 'First theme session', exact: true });
+  await expect(activeSession).toBeVisible();
+  await expect(html).toHaveAttribute('data-theme', 'plum');
+  await page.reload();
+  await expect(activeSession).toBeVisible();
+  await expect(html).toHaveAttribute('data-theme', 'plum');
+  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+  await menu.click();
+  await themeButton.click();
+  await expect(theme).toHaveAttribute('aria-checked', 'true');
 });
 test('follows system appearance and allows selecting a theme before login', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
