@@ -3,7 +3,7 @@ import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, staleConflictPreparation, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
-import { redact } from '../core/security.js';
+import { redact, redactEvent } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
@@ -680,13 +680,7 @@ export class Worker {
             job.id,
           );
         },
-        onEvent: (type, data) =>
-          store.event(
-            job.taskId,
-            type,
-            typeof data === 'string' ? redact(data) : JSON.parse(redact(JSON.stringify(data))),
-            job.id,
-          ),
+        onEvent: (type, data) => store.event(job.taskId, type, redactEvent(data), job.id),
         onTool: async (name, args, callId) => {
           try {
             return await this.engine.broker.call(job, name, args, callId);
