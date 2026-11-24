@@ -931,6 +931,21 @@ Object.assign(ru, {
     'Проверь сохранённые изменения воркера перед проверкой слияния',
   'Verify merge': 'Проверить слияние',
   'Checking the merged result': 'daddy проверяет результат слияния',
+  'Recovered saved fix {head}; checking the PR before submission.':
+    'Восстановлен сохранённый коммит {head}. Сверяем PR перед отправкой.',
+  'Resume submission of saved fix {head} before review.':
+    'Перед ревью возобнови отправку сохранённого коммита {head}.',
+  'Resuming submission of the saved fix': 'Возобновляем отправку сохранённого исправления',
+  'Wait for submission of saved fix {head} before starting another turn.':
+    'Дождись отправки сохранённого коммита {head} перед следующим ходом.',
+  'Saved fix {head} is on the PR. Inspect the earlier draft review {id} before starting another review.':
+    'Исправление {head} уже в PR. Перед новым ревью проверь черновик {id} для предыдущей версии.',
+  'Inspect the earlier draft review {id} before reviewing {head}.':
+    'Перед проверкой коммита {head} проверь черновик ревью {id} на предыдущей версии.',
+  'Submission of saved fix {head} is unconfirmed; the PR still shows {remote}. Inspect the outcome and resume to retry this exact commit.':
+    'Отправка коммита {head} не подтверждена. В PR виден {remote}. Проверь результат и возобнови задачу для повторной отправки.',
+  'Saved fix {head} is preserved. PR is {state} at {remote} (base {base}, target {target}); expected {original} (base {expectedBase}, target {expectedTarget}). Inspect the target and submission outcome.':
+    'Сохранён коммит {head}. PR в состоянии {state} на {remote} (база {base}, ветка {target}). Ожидался {original} (база {expectedBase}, ветка {expectedTarget}). Проверь цель и результат отправки.',
   'daddy verified the merged result': 'daddy проверил результат слияния',
   'Choose an idle task that needs attention':
     'Выбери остановившуюся задачу, которая требует внимания',
