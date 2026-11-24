@@ -115,7 +115,12 @@ function pendingMerge(store: Store, task: Task) {
 }
 
 function enabled(store: Store, task: Task) {
-  return reviewed(task) && !store.busy(task.id) && autoMergeEnabled(store, task);
+  return (
+    reviewed(task) &&
+    !task.deferredWorkerInstructions?.length &&
+    !store.busy(task.id) &&
+    autoMergeEnabled(store, task)
+  );
 }
 
 export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {

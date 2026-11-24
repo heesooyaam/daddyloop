@@ -400,6 +400,7 @@ export class Engine {
     task.revision = pr ? revisionOf(pr) : undefined;
     task.verifiedMerge = undefined;
     task.fixingMergeConflict = undefined;
+    task.conflictCheckpoint = undefined;
     this.store.event(task.id, 'revision.changed', {
       revision: task.revision,
       generation: task.generation,
@@ -622,6 +623,91 @@ export class Engine {
     });
     return true;
   }
+  private async handOffIncompleteFix(
+    task: Task,
+    result: AgentResult,
+    pr: PullRequest,
+    checkpoint: (task: Task) => Promise<string>,
+  ) {
+    if (
+      result.status !== 'incomplete' ||
+      result.question?.trim() ||
+      result.disputedCommentIds?.length ||
+      !task.revision ||
+      result.checkedHead !== pr.head ||
+      task.revision.head !== pr.head ||
+      !pr.mergeConflict ||
+      pr.draft !== false ||
+      !sameOpenTarget(task.pr, pr) ||
+      !autoMergeEnabled(this.store, task) ||
+      task.fixingMergeConflict ||
+      task.pendingFix ||
+      !task.authorWorktree ||
+      task.snapshot?.status !== 'published' ||
+      !task.reviewFinished
+    )
+      return false;
+    const saved = await checkpoint(task);
+    this.store.transaction(() => {
+      this.invalidate(task, pr, false);
+      task.conflictCheckpoint = saved;
+      this.enqueueConflictRepair(task);
+      this.store.event(task.id, 'author.conflict_checkpoint', {
+        head: saved,
+        revision: task.revision,
+      });
+    });
+    return true;
+  }
+
+  async recoverIncompleteFix(id: string, checkpoint: (task: Task) => Promise<string>) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (
+        task.state !== 'needs_input' ||
+        task.resumeState !== 'fixing' ||
+        task.pendingFix ||
+        task.fixingMergeConflict ||
+        this.store.busy(id) ||
+        !autoMergeEnabled(this.store, task)
+      )
+        return;
+      const job = this.store.jobs(id).at(-1);
+      if (
+        !job ||
+        job.kind !== 'fix' ||
+        job.generation !== task.generation ||
+        job.status !== 'completed'
+      )
+        return;
+      const item = this.store.db
+        .prepare(
+          "SELECT json_extract(data,'$.text') AS text FROM events WHERE task_id=? AND run_id=? AND type='runtime.item' AND json_extract(data,'$.type')='agentMessage' AND json_extract(data,'$.phase')='final_answer' ORDER BY id DESC LIMIT 1",
+        )
+        .get(id, job.id);
+      if (typeof item?.text !== 'string') return;
+      let result: AgentResult;
+      try {
+        result = JSON.parse(item.text);
+      } catch {
+        return;
+      }
+      if (
+        result?.status !== 'incomplete' ||
+        result.summary !== task.reason ||
+        result.question ||
+        result.checkedHead !== task.revision?.head
+      )
+        return;
+      await this.handOffIncompleteFix(
+        task,
+        result,
+        await this.provider(prRef(task)).getPR(prRef(task)),
+        checkpoint,
+      );
+    });
+  }
+
   private enqueueConflictRepair(task: Task) {
     task.fixingMergeConflict = true;
     this.state(task, 'fixing', 'Worker assigned to resolve the GitHub merge conflict');
@@ -1162,6 +1248,22 @@ export class Engine {
   async chat(id: string, role: 'author' | 'reviewer', text: string, actionId?: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (role === 'author' && (task.pendingFix || task.state === 'awaiting_push')) {
+        const key = actionId ?? randomUUID();
+        this.store.transaction(() => {
+          const pending = (task.deferredWorkerInstructions ??= []);
+          if (
+            this.store.db
+              .prepare('SELECT id FROM messages WHERE id=? AND task_id=?')
+              .get('deferred:' + id + ':' + key, id)
+          )
+            return;
+          pending.push({ id: key, text });
+          this.store.message(id, role, 'user', text, undefined, 'deferred:' + id + ':' + key);
+          this.store.saveTask(task);
+        });
+        return task;
+      }
       if (task.pendingFix || task.state === 'awaiting_push')
         throw new AppError(
           'fix_pending',
@@ -1177,6 +1279,29 @@ export class Engine {
         this.store.enqueue(task, role, 'chat', text, actionId);
       });
       return task;
+    });
+  }
+  async deliverWorkerInstruction(id: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id),
+        next = task.deferredWorkerInstructions?.[0];
+      if (
+        !next ||
+        this.store.busy(id) ||
+        task.pendingFix ||
+        task.pr?.state !== 'open' ||
+        ![
+          'complete',
+          'awaiting_merge',
+          'awaiting_checks',
+          'awaiting_plan_approval',
+          'fixing',
+        ].includes(task.state) ||
+        task.snapshot?.status !== 'published' ||
+        !sameRevision(task.snapshot.revision, task.revision)
+      )
+        return;
+      this.store.enqueue(task, 'author', 'chat', next.text, next.id);
     });
   }
   async completeJob(job: Job, result: AgentResult, saveFix?: (task: Task) => Promise<string>) {
@@ -1331,6 +1456,21 @@ export class Engine {
         );
         return;
       }
+      if (
+        job.kind === 'fix' &&
+        saveFix &&
+        (await this.handOffIncompleteFix(task, result, pr, saveFix))
+      )
+        return;
+      if (
+        job.kind === 'chat' &&
+        job.actionId &&
+        sameRevision(task.revision, pr) &&
+        task.deferredWorkerInstructions
+      )
+        task.deferredWorkerInstructions = task.deferredWorkerInstructions.filter(
+          (entry) => entry.id !== job.actionId,
+        );
       if (result.status !== 'completed') {
         task.resumeState = task.state;
         if (job.role === 'reviewer') task.reviewFinished = false;

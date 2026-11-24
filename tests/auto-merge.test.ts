@@ -330,6 +330,42 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      const task = f.store.getTask(f.task.id);
+      task.state = 'fixing';
+      task.authorWorktree = f.dir;
+      f.store.saveTask(task);
+      saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
+      f.setRemote({ mergeable: false, mergeConflict: true });
+      const job = f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
+      f.store.claim();
+      const save = vi.fn(async () => 'c'.repeat(40));
+      await f.engine.completeJob(
+        job,
+        {
+          status: 'incomplete',
+          summary: 'Integration blocked on conflict',
+          checkedHead: task.revision!.head,
+        },
+        save,
+      );
+      f.store.saveJob({ ...job, status: 'completed' });
+      expect(save).toHaveBeenCalledOnce();
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'fixing',
+        fixingMergeConflict: true,
+        conflictCheckpoint: 'c'.repeat(40),
+      });
+      expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      expect(f.daddy.board(f.group.id).workers.slots[0].taskId).toBe(task.id);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('assigns one conflict repair, pushes a two-parent commit, then requires fresh review and CI', async () => {
     const fixture = daddyFixture();
     try {

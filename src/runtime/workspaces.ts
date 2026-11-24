@@ -232,8 +232,10 @@ export class Workspaces {
         'A GitHub PR working copy is required to resolve conflicts',
       );
     const cwd = task.authorWorktree;
-    const { head, base } = task.revision;
+    const { base } = task.revision;
+    const head = task.conflictCheckpoint ?? task.revision.head;
     const run = (args: string[]) => git(args, cwd, {}, signal);
+    await run(['merge-base', '--is-ancestor', task.revision.head, head]);
     const current = await run(['rev-parse', 'HEAD']);
     const merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
     if (!merging && current !== head && (await this.savedConflictMerge(cwd, head, base, signal)))
@@ -297,12 +299,17 @@ export class Workspaces {
     if (task.fixingMergeConflict) {
       if (
         !merging &&
-        (await this.savedConflictMerge(cwd, task.revision.head, task.revision.base, signal))
+        (await this.savedConflictMerge(
+          cwd,
+          task.conflictCheckpoint ?? task.revision.head,
+          task.revision.base,
+          signal,
+        ))
       )
         return run(['rev-parse', 'HEAD']);
       if (
         merging !== task.revision.base ||
-        (await run(['rev-parse', 'HEAD'])) !== task.revision.head
+        (await run(['rev-parse', 'HEAD'])) !== (task.conflictCheckpoint ?? task.revision.head)
       )
         throw new AppError(
           'merge_target_changed',

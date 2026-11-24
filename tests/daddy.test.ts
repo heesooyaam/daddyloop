@@ -6,6 +6,35 @@ import { profiles, ticketInput } from './planning-fixture.js';
 import { taskCard } from '../src/integrations/telegram-tasks.js';
 afterEach(() => vi.restoreAllMocks());
 
+it('imports the declared sub-issue and keeps unrelated links as references', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  try {
+    const child = ticketInput(57);
+    vi.spyOn(f.tickets.reader, 'read').mockResolvedValue({ ref: child.ref, source: child.source });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: `Child task\nТикет GitHub — ${child.source.url}\nSee https://github.com/test/repo/issues/51 for background`,
+      requestId: 'subissue-57',
+    });
+    expect(task.source).toMatchObject({ kind: 'github_issue', url: child.source.url });
+    expect(task.state).toBe('implementing');
+    expect(
+      (
+        await f.daddy.createTask(group.id, {
+          requirements: child.source.url,
+          requestId: 'same-issue',
+        })
+      ).id,
+    ).toBe(task.id);
+    const local = await f.daddy.createTask(group.id, {
+      requirements: `Look at ${child.source.url} as an example`,
+      requestId: 'reference',
+    });
+    expect(local.source?.kind).toBe('local');
+  } finally {
+    await f.close();
+  }
+});
 it('reviews a report without code changes before daddy dispatches follow-up work', async () => {
   const f = daddyFixture();
   const subIssue = ticketInput(56);
