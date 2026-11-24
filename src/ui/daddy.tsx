@@ -110,7 +110,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null);
+    chatScroll = useRef<HTMLDivElement>(null);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -126,7 +126,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     );
   }, [state.selected]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const chat = chatScroll.current;
+    if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
   const choose = (id: string) => {
     void model.select(id);
@@ -273,8 +274,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <Menu size={20} />
           </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
+            <span className="daddy-eyebrow" title={board?.workspace?.name}>
+              {board?.workspace?.name ?? 'daddyloop'}
+            </span>
+            <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
           <ThemeButton />
           {board && (
@@ -389,12 +392,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 <span>{board.tasks.length}</span>
               </button>
             </div>
-            <div className="daddy-workspace">
+            <div className="daddy-workspace" data-pane={pane}>
               <section
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
-                <div className="daddy-chat-scroll">
+                <div className="daddy-chat-scroll" ref={chatScroll}>
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
@@ -437,7 +440,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       {t('daddy is working')}
                     </div>
                   )}
-                  <div ref={end} />
                 </div>
                 <form
                   className="daddy-composer"

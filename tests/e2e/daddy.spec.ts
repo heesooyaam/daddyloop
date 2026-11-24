@@ -280,6 +280,19 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await page.keyboard.press('Escape');
     await list.evaluate((element) => (element.scrollTop = 0));
   }
+
+  await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  const first = cards.first();
+  const title = first.locator('.daddy-work-heading strong');
+  await expect(title).toHaveCSS('font-size', '17.5px');
+  await expect(title).toHaveCSS('line-height', '24.5px');
+  await expect(title).toHaveCSS('-webkit-line-clamp', '2');
+  await expect(first.locator('.daddy-work-state')).toHaveCSS('font-size', '15px');
+  await expect(first).toBeInViewport({ ratio: 1 });
+
+  await list.hover();
+  await page.mouse.wheel(0, 1800);
+  await expect(cards.last()).toBeInViewport({ ratio: 1 });
 });
 test('shows message send errors without scrolling on short screens', async ({ page }) => {
   const message = 'The server is temporarily unavailable';
