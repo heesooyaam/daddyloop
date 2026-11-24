@@ -1439,6 +1439,7 @@ export class Daddy {
               'author',
               options.instruction!,
               actionId,
+              true,
             );
             return {
               taskId: task.id,

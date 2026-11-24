@@ -1245,10 +1245,19 @@ export class Engine {
       return this.reconcileLocked(id);
     });
   }
-  async chat(id: string, role: 'author' | 'reviewer', text: string, actionId?: string) {
+  async chat(
+    id: string,
+    role: 'author' | 'reviewer',
+    text: string,
+    actionId?: string,
+    deferUntilPublished = false,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
-      if (role === 'author' && (task.pendingFix || task.state === 'awaiting_push')) {
+      if (
+        role === 'author' &&
+        (deferUntilPublished || task.pendingFix || task.state === 'awaiting_push')
+      ) {
         const key = actionId ?? randomUUID();
         this.store.transaction(() => {
           const pending = (task.deferredWorkerInstructions ??= []);
