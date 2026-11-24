@@ -1,5 +1,5 @@
 import type { Engine } from '../core/engine.js';
-import type { Job, ResourceStatus } from '../core/types.js';
+import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
@@ -91,6 +91,7 @@ export class Worker {
   }
   start() {
     this.engine.recoverInterruptedJobs();
+    this.engine.recoverLostFixes();
     this.engine.recoverReviewRoundLimits();
     this.timer = setInterval(() => {
       void this.tick().catch((error) =>
@@ -536,30 +537,27 @@ export class Worker {
           store.saveTask(latest);
         }
       }
-      if (
-        !abort.signal.aborted &&
-        task.generation === job.generation &&
-        job.kind === 'fix' &&
-        result.status === 'completed' &&
-        !result.disputedCommentIds?.length &&
-        result.checkedHead === task.revision?.head
-      ) {
-        if (demo) await new DemoProvider(store).advance(prRef(task));
-        else {
-          const head = await this.workspaces.commitFix(
-            task,
-            `Address review feedback (round ${task.round})`,
-            abort.signal,
-          );
-          const latest = store.getTask(task.id);
-          if (latest.generation === job.generation && !abort.signal.aborted) {
-            latest.pendingAuthorHead = head;
-            store.saveTask(latest);
-          }
-          store.event(task.id, 'author.fixes_saved', { head }, job.id);
-        }
+      if (!abort.signal.aborted) {
+        if (
+          demo &&
+          job.kind === 'fix' &&
+          result.status === 'completed' &&
+          !result.disputedCommentIds?.length &&
+          result.checkedHead === task.revision?.head &&
+          task.generation === job.generation
+        )
+          await new DemoProvider(store).advance(prRef(task));
+        const saveFix =
+          !demo && job.kind === 'fix'
+            ? (current: Task) =>
+                this.workspaces.commitFix(
+                  current,
+                  `Address review feedback (round ${current.round})`,
+                  abort.signal,
+                )
+            : undefined;
+        await this.engine.completeJob(job, result, saveFix);
       }
-      if (!abort.signal.aborted) await this.engine.completeJob(job, result);
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
       const capacity =

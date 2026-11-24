@@ -180,6 +180,8 @@ The service publishes a completed review and pushes the saved commit automatical
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
+The worker records a saved correction and its starting revision under the task lock. The service submits that exact commit and verifies the PR head before starting another review. A changed target or an unconfirmed submission leaves the task waiting with the saved commit ID. Earlier native drafts stay available for inspection.
+
 ## 5. Which runs can work in parallel
 
 **One task has at most one active agent run.** While a worker implements “Fix search,” a second run for that task waits. Another task — such as updating documentation — can run alongside it.
