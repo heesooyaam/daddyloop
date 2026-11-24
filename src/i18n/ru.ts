@@ -935,6 +935,8 @@ Object.assign(ru, {
     'Восстановлен сохранённый коммит {head}. Сверяем PR перед отправкой.',
   'Resume submission of saved fix {head} before review.':
     'Перед ревью возобнови отправку сохранённого коммита {head}.',
+  'Waiting for the PR to confirm saved fix {head}.':
+    'Ждём, когда PR покажет сохранённый коммит {head}.',
   'Resuming submission of the saved fix': 'Возобновляем отправку сохранённого исправления',
   'Wait for submission of saved fix {head} before starting another turn.':
     'Дождись отправки сохранённого коммита {head} перед следующим ходом.',
