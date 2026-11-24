@@ -159,6 +159,8 @@ export interface Revision {
 export interface PullRequest extends Revision {
   draft?: boolean;
   mergeable?: boolean | null;
+  mergeConflict?: boolean;
+  targetCloneUrl?: string;
   mergeCommit?: string;
   title: string;
   body: string;
@@ -240,6 +242,7 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  fixingMergeConflict?: boolean;
   pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<

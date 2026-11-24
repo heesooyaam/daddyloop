@@ -106,6 +106,31 @@ describe('GitHub draft review contract', () => {
     expect(input.body).toBe(`${body}\n\n<!-- R1 -->`);
     expect(input.startSide).toBe('LEFT');
   });
+  it.each([
+    [false, 'dirty', true],
+    [null, 'unknown', false],
+    [true, 'blocked', false],
+    [true, 'behind', false],
+    [true, 'unstable', false],
+  ] as const)(
+    'distinguishes GitHub conflict from other merge blockers (%s, %s)',
+    async (mergeable, state, conflict) => {
+      const http = transport((path) => {
+        if (path.includes('/pulls/'))
+          return {
+            head: { sha: revision.head },
+            base: { sha: revision.base },
+            state: 'open',
+            mergeable,
+            mergeable_state: state,
+          };
+        return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+      });
+      expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).mergeConflict).toBe(
+        conflict,
+      );
+    },
+  );
   it('keeps identically named checks from distinct GitHub workflows', async () => {
     const http = transport((path) => {
       if (path.includes('/pulls/'))

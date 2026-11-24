@@ -1,4 +1,4 @@
-import { pollAutoMerge } from '../core/auto-merge.js';
+import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import type { Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
@@ -405,6 +405,20 @@ export class Worker {
         (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
+      const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
+      if (
+        repairingConflict &&
+        (!autoMergeEnabled(store, task) ||
+          startingPR?.state !== 'open' ||
+          startingPR.draft !== false ||
+          startingPR.branch !== task.pr?.branch ||
+          startingPR.targetBranch !== task.pr.targetBranch ||
+          startingPR.cloneUrl !== task.pr.cloneUrl)
+      )
+        throw new AppError(
+          'conflict_repair_unavailable',
+          'Check the PR branches and auto-merge setting before resuming conflict resolution.',
+        );
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir
@@ -465,7 +479,9 @@ export class Worker {
       if (isTicket(task)) task.revision = prepared.revision;
       if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
-      if (job.kind === 'fix') {
+      if (repairingConflict) {
+        await this.workspaces.prepareConflict(task, abort.signal);
+      } else if (job.kind === 'fix') {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
@@ -566,7 +582,9 @@ export class Worker {
             ? (current: Task) =>
                 this.workspaces.commitFix(
                   current,
-                  `Address review feedback (round ${current.round})`,
+                  repairingConflict
+                    ? 'Resolve conflict with the target branch'
+                    : `Address review feedback (round ${current.round})`,
                   abort.signal,
                 )
             : undefined;

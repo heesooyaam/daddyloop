@@ -40,6 +40,10 @@ export function taskActivity(tasks: Task[], jobs: Job[]): TaskActivity[] {
 }
 
 export function activityStatus({ task, job }: TaskActivity) {
+  if (task.fixingMergeConflict && task.state === 'fixing')
+    return job?.status === 'queued'
+      ? 'Waiting for a worker to resolve the merge conflict'
+      : 'Resolving the merge conflict';
   if (
     task.workerReport &&
     task.state === 'reviewing' &&
