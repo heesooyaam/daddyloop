@@ -38,6 +38,7 @@ import { Telegram, connectTelegram } from '../integrations/telegram.js';
 import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
 import { pruneCacheTarget } from '../ops/cache-targets.js';
+import { CleanupControls } from '../ops/cleanup-controls.js';
 import { ScheduledCleanup } from '../ops/scheduled-cleanup.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../modules/repositories/tickets.js';
@@ -264,7 +265,8 @@ export async function buildApp(options: ServerOptions) {
   const schedule = config.cache.schedule ?? cacheScheduleSchema.parse({});
   const pausePercent = options.maxDiskPercent ?? config.resources.maxDiskPercent;
   const scheduledCleanup = new ScheduledCleanup(store, schedule, {
-    allowed: config.cache.auto && schedule.diskPercent < pausePercent,
+    allowed: config.cache.auto,
+    pausePercent,
     measure: options.resourceCheck ?? (() => diskResources(dataDir)),
     canPlan: () => {
       const status = getResources();
@@ -304,6 +306,15 @@ export async function buildApp(options: ServerOptions) {
       })),
     ],
   });
+  const cleanupControls = new CleanupControls(
+    scheduledCleanup,
+    pausePercent,
+    () => options.config ?? loadConfig(),
+    (next) => {
+      if (options.config) options.config.cache = next.cache;
+      else saveConfig(next);
+    },
+  );
   checkouts.protectSources(() =>
     [
       ...workspaces.list(),
@@ -502,7 +513,8 @@ export async function buildApp(options: ServerOptions) {
   });
   app.get('/api/devices', async () => access.devices());
   app.get('/api/cache', async () => cache.prune(false));
-  app.get('/api/cache/schedule', async () => ({ ...scheduledCleanup.status(), pausePercent }));
+  app.get('/api/cache/schedule', async () => cleanupControls.status());
+  app.post('/api/cache/schedule', async (request) => cleanupControls.update(request.body));
   app.post('/api/cache/prune', async (request) => {
     const { apply } = z
       .object({ apply: z.boolean().default(false) })
@@ -787,6 +799,7 @@ export async function buildApp(options: ServerOptions) {
           if (!instance || telegramController.signal.aborted) return;
           telegram = instance;
           telegram.configure({
+            cleanup: cleanupControls,
             catalogue,
             updates,
             updaters,

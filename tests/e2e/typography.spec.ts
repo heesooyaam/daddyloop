@@ -71,7 +71,10 @@ for (const locale of ['en', 'ru'] as const) {
     await page.getByRole('button', { name: t('New session'), exact: true }).click();
     await page.getByLabel(t('Session name (optional)')).fill(title);
     await page.getByLabel(t('What should daddy do?')).fill(message);
-    await page.getByRole('button', { name: t('Start session'), exact: true }).click();
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: t('Start session'), exact: true })
+      .click();
     const heading = page.getByRole('heading', { name: title, exact: true });
     await expect(heading).toBeVisible();
 
@@ -108,8 +111,11 @@ for (const locale of ['en', 'ru'] as const) {
         const chatText = chat.getByText(message, { exact: true });
         await expectType(chatText, 16, 400, 25.6);
         await page.locator('.daddy-chat-scroll').scrollIntoViewIfNeeded();
-        await chatText.scrollIntoViewIfNeeded();
-        await expect(chatText).toBeInViewport({ ratio: 0.99 });
+        // A fixture reply can scroll the conversation between the scroll and the measurement.
+        await expect(async () => {
+          await chatText.scrollIntoViewIfNeeded();
+          await expect(chatText).toBeInViewport({ ratio: 0.99, timeout: 500 });
+        }).toPass({ timeout: 5000 });
         await expectType(chat.locator('time'), 12, 400, 18);
         await expectType(page.getByRole('textbox', { name: t('Message daddy') }), 16, 400, 25.6);
         const composerHint = page.locator('.daddy-composer-note');

@@ -228,3 +228,22 @@ test('persists GitHub auto-merge for a session and a single task override', asyn
   await mode.selectOption('inherit');
   await expect(mode).toHaveValue('inherit');
 });
+
+test('changes the host cleanup schedule from the web sidebar', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  const panel = page.getByRole('dialog');
+  await panel.getByLabel('Enable scheduled cleanup').check();
+  await panel.getByLabel('Cleanup threshold (%)').fill('89');
+  await panel.getByLabel('Check interval (minutes)').fill('45');
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
+  await page.reload();
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  await expect(panel.getByLabel('Enable scheduled cleanup')).toBeChecked();
+  await expect(panel.getByLabel('Cleanup threshold (%)')).toHaveValue('89');
+  await expect(panel.getByLabel('Check interval (minutes)')).toHaveValue('45');
+  await panel.getByLabel('Enable scheduled cleanup').uncheck();
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
+});

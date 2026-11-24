@@ -1,3 +1,5 @@
+import type { CleanupControls } from '../ops/cleanup-controls.js';
+import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
 import { randomBytes, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
@@ -367,6 +369,7 @@ export class Telegram {
     catalogue: Catalogue;
     updates: UpdateMonitor;
     updaters?: RuntimeUpdaters;
+    cleanup?: CleanupControls;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
     voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
@@ -375,6 +378,7 @@ export class Telegram {
     catalogue: Catalogue;
     updates: UpdateMonitor;
     updaters?: RuntimeUpdaters;
+    cleanup?: CleanupControls;
     daddy?: Daddy;
     usage?: import('../core/usage.js').UsageBackend;
     voice?: { dataDir: string; speech: Speech; resources: () => ResourceStatus };
@@ -516,6 +520,15 @@ export class Telegram {
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
+    const cleanup = message?.text?.trim().match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
+    if (cleanup && (!cleanup[1] || cleanup[1].toLowerCase() === this.username.toLowerCase())) {
+      try {
+        await this.showCleanup(chat.id, cleanupCommand(cleanup[2]));
+      } catch (error) {
+        await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
+      }
+      return;
+    }
     if (await this.workspace?.handle(update)) return;
     try {
       if (callback) {
@@ -583,7 +596,21 @@ export class Telegram {
       await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
   }
+  private async showCleanup(chatId: number, patch?: Record<string, unknown>) {
+    const control = this.integrations?.cleanup;
+    if (!control) throw new Error('Disk cleanup is unavailable');
+    const status = patch ? await control.update(patch) : control.status();
+    await this.api.send(chatId, cleanupControlCard(this.locale(), status));
+  }
+
   private async navigate(data: string, chatId: number): Promise<boolean> {
+    if (['cleanup:show', 'cleanup:on', 'cleanup:off'].includes(data)) {
+      await this.showCleanup(
+        chatId,
+        data === 'cleanup:show' ? undefined : { enabled: data === 'cleanup:on' },
+      );
+      return true;
+    }
     if (data.startsWith('u:')) {
       const match = /^u:([a-z][a-z0-9-]{0,31}):(install|rollback|c)(?::([A-Za-z0-9_-]{24}))?$/.exec(
         data,

@@ -43,7 +43,9 @@ Each daddy session gets a topic. Send goals and tickets there. Workers report to
 | Where                                     | Commands                                                                                                                                                                                                                                                          |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/task`, `/queue`, `/workers`, `/worker`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
-| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                                                                                      |
+| Private chat                              | `/group`, `/updates`, `/web`, `/cleanup`                                                                                                                                                                                                                          |
+
+In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enable cleanup and check its threshold, skill and most recent result here. See [operations](../operations/en.md) for the settings.
 
 `/web` creates a browser login link after [permanent HTTPS access](../web/en.md) is configured. CLI updates and account confirmations stay in the private chat. Work continues when the phone and laptop are offline.
 

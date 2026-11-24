@@ -8,6 +8,7 @@ import {
   CircleCheck,
   Folder,
   FolderGit2,
+  HardDrive,
   GitPullRequest,
   LoaderCircle,
   Menu,
@@ -29,6 +30,7 @@ import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
+import { CleanupPanel } from './cleanup.js';
 import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
@@ -74,6 +76,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'settings'
       | 'updates'
       | 'notifications'
+      | 'cleanup'
       | 'limits'
       | 'presets'
       | 'delete'
@@ -187,6 +190,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <FolderGit2 size={17} />
             {t('Workspaces')}
             <span>{state.workspaces.length}</span>
+          </button>
+          <button onClick={() => setModal('cleanup')}>
+            <HardDrive size={17} />
+            {t('Disk cleanup')}
           </button>
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
@@ -751,6 +758,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       {modal === 'limits' && (
         <Dialog title={t('Limits')} onClose={() => setModal(null)}>
           <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
+        </Dialog>
+      )}
+      {modal === 'cleanup' && (
+        <Dialog title={t('Disk cleanup')} onClose={() => setModal(null)}>
+          <CleanupPanel api={api} />
         </Dialog>
       )}
       {modal === 'notifications' && (
