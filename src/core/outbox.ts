@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../providers/github-quota.js';
 import { createHash } from 'node:crypto';
 import { AppError } from './types.js';
 import type { Store } from './store.js';
@@ -13,6 +14,7 @@ export class Outbox {
     input: unknown,
     write: () => Promise<T>,
     recover: () => Promise<{ found: true; value: T } | { found: false }>,
+    refused?: (error: unknown) => boolean,
   ): Promise<T> {
     if (this.active.has(id))
       throw new AppError('operation_busy', 'This operation is already running');
@@ -47,7 +49,11 @@ export class Outbox {
         this.store.event(taskId, 'operation.completed', { operationId: id });
         return result;
       } catch (error) {
-        this.store.event(taskId, 'operation.uncertain', {
+        const definitive =
+          (error instanceof GitHubQuotaError && error.refusedWrite) || refused?.(error) === true;
+        if (definitive)
+          this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
+        this.store.event(taskId, definitive ? 'operation.refused' : 'operation.uncertain', {
           operationId: id,
           error: redact(String(error)),
         });

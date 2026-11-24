@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../src/providers/github-quota.js';
 import { it, expect, vi } from 'vitest';
 import { fixture } from './helpers.js';
 import { Worker } from '../src/runtime/worker.js';
@@ -173,6 +174,34 @@ it('emits an attention milestone when a native review cannot start', async () =>
         ),
     ).toBe(true);
     expect(runtime.run).not.toHaveBeenCalled();
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
+it('finishes the saved result after a throttled verification read without restarting the agent', async () => {
+  const f = await fixture(),
+    runtime = new DemoRuntime();
+  const agent = vi.spyOn(runtime, 'run').mockImplementation(async () => {
+    vi.spyOn(f.provider, 'getPR').mockRejectedValueOnce(new GitHubQuotaError(Date.now() + 60_000));
+    return f.result();
+  });
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+  try {
+    await worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.jobs()[0]).toMatchObject({
+        status: 'queued',
+        deferredResult: { status: 'completed' },
+      }),
+    );
+    const job = f.store.jobs()[0];
+    f.store.saveJob({ ...job, notBefore: undefined });
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
+    expect(agent).toHaveBeenCalledTimes(1);
+    expect(f.store.messages(f.task.id)).toHaveLength(1);
   } finally {
     await worker.stop();
     f.store.close();

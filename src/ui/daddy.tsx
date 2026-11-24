@@ -8,6 +8,7 @@ import {
   CircleCheck,
   Folder,
   FolderGit2,
+  HardDrive,
   GitPullRequest,
   LoaderCircle,
   Menu,
@@ -29,6 +30,7 @@ import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
+import { CleanupPanel } from './cleanup.js';
 import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
@@ -100,6 +102,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'settings'
       | 'updates'
       | 'notifications'
+      | 'cleanup'
       | 'limits'
       | 'presets'
       | 'delete'
@@ -222,6 +225,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <FolderGit2 size={17} />
             {t('Workspaces')}
             <span>{state.workspaces.length}</span>
+          </button>
+          <button onClick={() => setModal('cleanup')}>
+            <HardDrive size={17} />
+            {t('Disk cleanup')}
           </button>
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
@@ -687,8 +694,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles, instructions) => {
-              await model.action('settings', { profiles, instructions });
+            onSave={async (profiles, instructions, autoMerge) => {
+              await model.action('settings', { profiles, instructions, autoMerge });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -766,6 +773,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
+      {modal === 'cleanup' && (
+        <Dialog title={t('Disk cleanup')} onClose={() => setModal(null)}>
+          <CleanupPanel api={api} />
+        </Dialog>
+      )}
       {modal === 'notifications' && (
         <Dialog title={t('Notifications and Telegram')} onClose={() => setModal(null)}>
           <div className="daddy-telegram-setup">
@@ -794,7 +806,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => void model.refresh()} />
+          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
         </Dialog>
       )}
     </div>
@@ -1219,7 +1231,11 @@ function SessionSettings({
 }: {
   api: DaddyApi;
   board: DaddyBoard;
-  onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
+  onSave: (
+    profiles?: AgentProfiles,
+    instructions?: SessionInstructions,
+    autoMerge?: boolean,
+  ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
@@ -1232,6 +1248,8 @@ function SessionSettings({
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
+  const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const { catalogue, load } = useAgentCatalogue(api);
   return (
@@ -1246,11 +1264,29 @@ function SessionSettings({
             ? undefined
             : profiles,
           instructions,
+          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
       }}
     >
+      {board.workspace.provider === 'github' && (
+        <label className="daddy-toggle">
+          <input
+            type="checkbox"
+            checked={autoMerge}
+            onChange={(event) => setAutoMerge(event.target.checked)}
+          />
+          <span>
+            {t('Auto-merge GitHub PRs')}
+            <small className="daddy-muted">
+              {t(
+                'Includes already reviewed open PRs in this session. Task overrides take precedence.',
+              )}
+            </small>
+          </span>
+        </label>
+      )}
       {(['daddy', 'worker'] as const).map((role) => {
         const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
@@ -1301,7 +1337,7 @@ function TaskReport({
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
-  onChange: () => void;
+  onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
@@ -1365,12 +1401,57 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? value.task.reason)}</p>
+          {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
+            <label className="daddy-pool-control">
+              {t('Auto-merge GitHub PRs')}
+              <select
+                value={live.autoMerge.mode}
+                disabled={busy || !!board.group.deletion}
+                onChange={async (event) => {
+                  const mode = event.target.value;
+                  setBusy(true);
+                  setError('');
+                  try {
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await onChange();
+                  } catch (error) {
+                    setError((error as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <option value="inherit">
+                  {t(
+                    board.group.autoMerge
+                      ? 'Use session setting (on)'
+                      : 'Use session setting (off)',
+                  )}
+                </option>
+                <option value="on">{t('On for this task')}</option>
+                <option value="off">{t('Off for this task')}</option>
+              </select>
+            </label>
+          )}
+          {live?.autoMerge.result &&
+            (live.autoMerge.enabled || live.autoMerge.result.state !== 'waiting') && (
+              <p>{t(live.autoMerge.result.message)}</p>
+            )}
           {prUrl && (
             <a className="daddy-button outline" href={prUrl} target="_blank" rel="noreferrer">
               <GitPullRequest size={16} />
               {t('Open native review')}
               <ArrowUpRight size={15} />
             </a>
+          )}
+          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+            <button
+              className="daddy-button outline"
+              disabled={busy}
+              onClick={() => void action('verify-merge')}
+            >
+              {t('Verify merge')}
+            </button>
           )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button
