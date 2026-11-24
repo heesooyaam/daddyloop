@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 async function login(page: Page) {
@@ -171,32 +171,61 @@ test('Escape in the folder browser returns to the session settings draft', async
   const path = settings.getByLabel('Repository URL or server folder');
   const draft = resolve('.daddyloop/e2e/fixture-repository-alternate');
   await path.fill(draft);
-
-  let release!: () => void;
-  const pending = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await page.route('**/api/workspaces/directories?*', async (route) => {
-    await pending;
-    await route.continue().catch(() => {});
-  });
-  try {
-    const requested = page.waitForRequest(/\/api\/workspaces\/directories\?path=/);
-    await settings.getByRole('button', { name: 'Browse server folders' }).press('Enter');
-    await requested;
-    await page.keyboard.press('Escape');
-    await expect(
-      settings.getByRole('region', { name: 'Choose a folder on this server' }),
-    ).toHaveCount(0);
+  const browse = settings.getByRole('button', { name: 'Browse server folders' });
+  const browser = settings.getByRole('region', { name: 'Choose a folder on this server' });
+  const expectSettingsDraft = async () => {
+    await expect(browser).toHaveCount(0);
     await expect(settings).toBeVisible();
     await expect(path).toBeFocused();
     await expect(path).toHaveValue(draft);
     await expect(autoMerge).toBeChecked();
-    await page.keyboard.press('Escape');
-    await expect(settings).toHaveCount(0);
-  } finally {
-    release();
+  };
+
+  const cancelWhileLoading = async (trigger: Locator) => {
+    const address = /\/api\/workspaces\/directories\?path=/;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(
+      address,
+      async (route) => {
+        await pending;
+        await route.continue().catch(() => {});
+      },
+      { times: 1 },
+    );
+    try {
+      const requested = page.waitForRequest(address);
+      await trigger.press('Enter');
+      await requested;
+      await expect(browser.getByRole('status')).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expectSettingsDraft();
+    } finally {
+      release();
+    }
+  };
+  await cancelWhileLoading(browse);
+  await browse.press('Enter');
+  await cancelWhileLoading(browser.getByRole('button', { name: 'Open folder src', exact: true }));
+
+  for (const name of ['Open folder src', 'Parent folder', 'All server folders', 'Open folder']) {
+    await test.step(name, async () => {
+      await browse.press('Enter');
+      await expect(browser.getByRole('button', { name: 'Select this folder' })).toBeEnabled();
+      const directory = browser.getByLabel('Server directory');
+      if (name === 'Open folder') await directory.fill(`${draft}/missing`);
+      const read = page.waitForResponse(/\/api\/workspaces\/directories(?:\?|$)/);
+      await browser.getByRole('button', { name, exact: true }).press('Enter');
+      expect((await read).ok()).toBe(name !== 'Open folder');
+      await expect(directory).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expectSettingsDraft();
+    });
   }
+  await page.keyboard.press('Escape');
+  await expect(settings).toHaveCount(0);
 });
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,

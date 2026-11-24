@@ -800,6 +800,7 @@ export const daddyRu: Record<string, string> = {
   'Session copy ready': 'Копия для сессии готова',
   'Preparing the session copy': 'Готовлю копию для сессии',
   'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
+  'Error details': 'Подробности ошибки',
   'Session deletion stopped; working copies were preserved':
     'Удаление остановлено. Рабочие копии сохранены.',
   'Saving results and removing session copies': 'Сохраняю результаты и убираю копии сессии',

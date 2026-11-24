@@ -772,9 +772,8 @@
   padding: 10px 6px;
 }
 .daddy-error {
-  display: flex;
-  gap: 12px;
-  align-items: center;
+  display: grid;
+  gap: 6px;
   padding: 11px 24px;
   font: var(--type-body);
   background: var(--danger-bg);
@@ -782,12 +781,27 @@
   border-bottom: 1px solid var(--danger);
   overflow-wrap: anywhere;
 }
-.daddy-error button {
-  margin-left: auto;
+.daddy-error-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+.daddy-error-heading button {
   border: 0;
   background: transparent;
   text-decoration: underline;
   color: inherit;
+  white-space: nowrap;
+}
+.daddy-error-details summary {
+  cursor: pointer;
+}
+.daddy-error-details pre {
+  margin: 4px 0 0;
+  font: var(--type-caption);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
 }
 .daddy-overlay {
   position: fixed;
@@ -2350,10 +2364,4 @@ body {
   height: 16px;
   margin: 2px 0 0;
   accent-color: var(--accent);
-}
-
-.daddy-resource-wait {
-  display: grid;
-  gap: 6px;
-  overflow-wrap: anywhere;
 }

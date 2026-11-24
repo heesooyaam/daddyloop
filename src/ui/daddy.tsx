@@ -164,6 +164,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   };
   const paused = board?.group.daddyState === 'paused';
   const preparation = board?.group.workspacePreparation;
+  const deletion = board?.group.deletion;
   const repository = state.overrides[state.selected];
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
@@ -344,47 +345,37 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           )}
         </header>
         {state.error && (
-          <div className="daddy-error" role="alert">
-            {t(state.error)}
-            <button onClick={() => void model.refresh()}>{t('Retry')}</button>
-          </div>
+          <SessionError role="alert" error={state.error} onRetry={() => void model.refresh()} />
         )}
-        {preparation && preparation.state !== 'ready' && !board?.group.deletion && (
-          <div
-            className={preparation.state === 'error' ? 'daddy-error' : 'daddy-session-progress'}
-            role="status"
-          >
-            {t(
-              preparation.state === 'error'
-                ? 'Could not prepare the session copy'
-                : 'Preparing the session copy',
-            )}
-            {preparation.error && <span>{t(preparation.error)}</span>}
-            {preparation.state === 'error' && (
-              <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
-            )}
-          </div>
-        )}
-        {board?.group.deletion && (
-          <div
-            className={
-              board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
-            }
-            role="status"
-          >
-            {t(
-              board.group.deletion.state === 'error'
-                ? 'Session deletion stopped; working copies were preserved'
-                : 'Saving results and removing session copies',
-            )}
-            {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
-            {board.group.deletion.state === 'error' && (
-              <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
-            )}
-          </div>
-        )}
+        {preparation &&
+          preparation.state !== 'ready' &&
+          !deletion &&
+          (preparation.state === 'error' ? (
+            <SessionError
+              title="Could not prepare the session copy"
+              error={preparation.error}
+              onRetry={() => void model.action('resume')}
+            />
+          ) : (
+            <div className="daddy-session-progress" role="status">
+              {t('Preparing the session copy')}
+            </div>
+          ))}
+        {deletion &&
+          (deletion.state === 'error' ? (
+            <SessionError
+              title="Session deletion stopped; working copies were preserved"
+              error={deletion.error}
+              retry="Retry deletion"
+              onRetry={() => setModal('delete')}
+            />
+          ) : (
+            <div className="daddy-session-progress" role="status">
+              {t('Saving results and removing session copies')}
+            </div>
+          ))}
         {board?.group.resourceWait && (
-          <div className="daddy-error daddy-resource-wait" role="status">
+          <div className="daddy-error" role="status">
             <strong>{t('Waiting for server resources')}</strong>
             <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
             <span>
@@ -853,6 +844,43 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     </div>
   );
 }
+function SessionError({
+  title,
+  error = '',
+  role = 'status',
+  retry = 'Retry',
+  onRetry,
+}: {
+  title?: string;
+  error?: string;
+  role?: 'alert' | 'status';
+  retry?: string;
+  onRetry: () => void;
+}) {
+  const { t } = useLocale();
+  const reason = t(error);
+  const showDetails = reason.length > 100 || /[\r\n]/.test(reason);
+  const heading = title ? t(title) : showDetails ? t('Request failed') : reason;
+  return (
+    <div className="daddy-error" role={role}>
+      <div className="daddy-error-heading">
+        <span>{heading}</span>
+        <button type="button" onClick={onRetry}>
+          {t(retry)}
+        </button>
+      </div>
+      {showDetails ? (
+        <details key={error} className="daddy-error-details">
+          <summary>{t('Error details')}</summary>
+          <pre>{reason}</pre>
+        </details>
+      ) : (
+        title && reason && <span>{reason}</span>
+      )}
+    </div>
+  );
+}
+
 interface NewSessionDraft {
   instructions?: SessionInstructions;
   workspaceId?: string;

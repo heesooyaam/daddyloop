@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import type { ReviewGroup } from '../../src/core/types.js';
 import { translator } from '../../src/i18n/index.js';
@@ -149,8 +149,11 @@ for (const locale of ['en', 'ru'] as const) {
   }) => {
     const t = translator(locale);
     const title = `Resource status fixture (${locale})`;
-    const error = 'Fixture: server operation failed';
-    const failure = { status: 503, json: { error: { message: error } } };
+    const path = `/fixtures/${'unavailable-repository-'.repeat(10)}removed`;
+    const error = `git -C ${path} rev-parse --show-toplevel\nfatal: cannot change to '${path}': No such file or directory`;
+    const sendError = `ENOENT: no such file or directory, chdir '/fixtures' -> '${path}'`;
+    const failure = { status: 503, json: { error: { message: sendError } } };
+    const copyFailure = { state: 'error', error } as const;
     type StatusFields = Pick<ReviewGroup, 'workspacePreparation' | 'deletion' | 'daddyState'>;
     let status: StatusFields = {};
     let failLoad = false;
@@ -207,6 +210,29 @@ for (const locale of ['en', 'ru'] as const) {
     await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
 
     const resource = page.getByText(t('Waiting for server resources'), { exact: true });
+    const expectRetry = async (notice: Locator, label: string) => {
+      const button = notice.getByRole('button', { name: t(label), exact: true });
+      await expect(button).toBeInViewport({ ratio: 0.99 });
+      expect(
+        await button.evaluate((element) => {
+          const text = document.createRange();
+          text.selectNodeContents(element);
+          return text.getClientRects().length;
+        }),
+      ).toBe(1);
+    };
+    const expectFullReason = async (notice: Locator, reason: string) => {
+      const details = notice.getByText(t('Error details'), { exact: true });
+      const diagnosis = notice.locator('pre');
+      await expect(diagnosis).toBeHidden();
+      await details.click();
+      await expect(diagnosis).toBeVisible();
+      expect(await diagnosis.textContent()).toBe(reason);
+      expect(
+        await diagnosis.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      ).toBe(true);
+      await details.click();
+    };
     const cases: { status: StatusFields; notice: string; retry?: string }[] = [
       {
         status: { workspacePreparation: { state: 'pending' } },
@@ -217,7 +243,12 @@ for (const locale of ['en', 'ru'] as const) {
         notice: 'Preparing the session copy',
       },
       {
-        status: { daddyState: 'paused', workspacePreparation: { state: 'error', error } },
+        status: { workspacePreparation: copyFailure },
+        notice: 'Could not prepare the session copy',
+        retry: 'Retry',
+      },
+      {
+        status: { daddyState: 'paused', workspacePreparation: copyFailure },
         notice: 'Could not prepare the session copy',
         retry: 'Retry',
       },
@@ -237,9 +268,9 @@ for (const locale of ['en', 'ru'] as const) {
     ];
     const viewports = [
       [667, 375],
-      [320, 540],
       [390, 540],
       [844, 390],
+      [320, 540],
     ];
     for (const example of cases) {
       status = example.status;
@@ -251,12 +282,7 @@ for (const locale of ['en', 'ru'] as const) {
           await page.setViewportSize({ width, height });
           await expect(notice).toBeInViewport({ ratio: 0.99 });
           await expect(resource).toBeInViewport({ ratio: 0.99 });
-          if (example.retry) {
-            await expect(page.getByText(error, { exact: true })).toBeInViewport({ ratio: 0.99 });
-            await expect(
-              page.getByRole('button', { name: t(example.retry), exact: true }),
-            ).toBeInViewport({ ratio: 0.99 });
-          }
+          if (example.retry) await expectRetry(notice, example.retry);
           expect(
             await page.evaluate(
               () => !window.scrollY && !document.querySelector('main')?.scrollTop,
@@ -264,9 +290,10 @@ for (const locale of ['en', 'ru'] as const) {
           ).toBe(true);
         });
       }
+      if (example.retry) await expectFullReason(notice, error);
     }
 
-    status = {};
+    status = { workspacePreparation: copyFailure };
     await page.setViewportSize({ width: 1024, height: 900 });
     await page.reload();
     await expect(
@@ -280,17 +307,24 @@ for (const locale of ['en', 'ru'] as const) {
     await page.route('**/api/daddy/sessions/*/chat', (route) => route.fulfill(failure));
     await page.getByLabel(t('Message daddy')).fill('Fixture message');
     await page.getByRole('button', { name: t('Send message'), exact: true }).click();
-    await page.setViewportSize({ width: 667, height: 375 });
-    const alert = page.getByRole('alert').filter({ hasText: error });
-    const retry = alert.getByRole('button', { name: t('Retry'), exact: true });
-    await expect(alert).toBeInViewport({ ratio: 0.99 });
-    await expect(retry).toBeInViewport({ ratio: 0.99 });
-    await expect(resource).toBeInViewport({ ratio: 0.99 });
+    const alert = page.getByRole('alert').filter({ hasText: t('Request failed') });
+    const copy = page
+      .getByRole('status')
+      .filter({ hasText: t('Could not prepare the session copy') });
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await expectRetry(alert, 'Retry');
+      await expectRetry(copy, 'Retry');
+      await expect(resource).toBeInViewport({ ratio: 0.99 });
+      expect(
+        await page.evaluate(() => !window.scrollY && !document.querySelector('main')?.scrollTop),
+      ).toBe(true);
+    }
+    await expectFullReason(alert, sendError);
 
     failLoad = true;
     await page.reload();
-    await expect(alert).toBeInViewport({ ratio: 0.99 });
-    await expect(retry).toBeInViewport({ ratio: 0.99 });
+    await expectRetry(alert, 'Retry');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
