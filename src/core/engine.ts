@@ -39,6 +39,15 @@ const oldPublishedReviewLimit =
 const noFixChanges =
   'Author made no code changes; independent verification of the decisions is next';
 
+function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+  return (
+    current.state === 'open' &&
+    current.branch === expected?.branch &&
+    current.targetBranch === expected.targetBranch &&
+    current.cloneUrl === expected.cloneUrl
+  );
+}
+
 export class Engine {
   readonly broker: Broker;
   private locks = new Map<string, Promise<unknown>>();
@@ -201,7 +210,10 @@ export class Engine {
         this.store.transaction(() => this.queueReportReview(task));
         return task;
       }
-      if (task.pendingFix || task.state === 'awaiting_push')
+      if (
+        (task.pendingFix && task.pendingAuthorHead !== task.revision?.head) ||
+        task.state === 'awaiting_push'
+      )
         throw new AppError(
           'fix_pending',
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
@@ -209,6 +221,10 @@ export class Engine {
       const provider = this.provider(prRef(task));
       const pr = await provider.getPR(prRef(task));
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
+      if (task.pendingFix && (!sameRevision(task.revision, pr) || !sameOpenTarget(task.pr, pr))) {
+        this.holdSavedFix(task, pr);
+        return task;
+      }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       if (
         task.review &&
@@ -242,6 +258,7 @@ export class Engine {
       await this.broker.ensureReview(task);
       task.reviewFinished = false;
       this.store.transaction(() => {
+        task.pendingFix = undefined;
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
@@ -308,6 +325,7 @@ export class Engine {
       task.revision = revisionOf(pr);
       task.pr = pr;
       task.verifiedMerge = undefined;
+      task.pendingFix = undefined;
       task.reviewerThreadId = undefined;
       this.state(task, 'reviewing', 'Checking the merged result');
       this.store.enqueue(
@@ -445,11 +463,12 @@ export class Engine {
       task.pendingFix = { revision: original };
       this.store.saveTask(task);
     }
-    const sameTarget =
-      pr.state === 'open' &&
-      pr.branch === task.pr?.branch &&
-      pr.targetBranch === task.pr.targetBranch &&
-      pr.cloneUrl === task.pr.cloneUrl;
+    const sameTarget = sameOpenTarget(task.pr, pr);
+    if (task.revision?.head === head) {
+      if (!sameTarget || !sameRevision(task.revision, pr)) this.holdSavedFix(task, pr);
+      else if (resume) this.state(task, 'queued', 'New revision is ready for review');
+      return false;
+    }
     if (
       sameTarget &&
       pr.head === head &&
@@ -463,7 +482,6 @@ export class Engine {
           : undefined;
       this.store.transaction(() => {
         this.invalidate(task, pr, false);
-        task.pendingFix = undefined;
         task.pendingAuthorHead = head;
         if (old && (snapshot?.status === 'draft' || snapshot?.status === 'partial')) {
           task.review = old;
@@ -489,13 +507,18 @@ export class Engine {
       );
       return false;
     }
+    this.holdSavedFix(task, pr);
+    return false;
+  }
+
+  private holdSavedFix(task: Task, pr: PullRequest) {
+    const original = task.revision!;
     task.resumeState = 'awaiting_push';
     this.state(
       task,
       'needs_input',
-      `Saved fix ${head} is preserved. PR is ${pr.state} at ${pr.head} (base ${pr.base}, target ${pr.targetBranch}); expected ${original.head} (base ${original.base}, target ${task.pr?.targetBranch}). Inspect the target and submission outcome.`,
+      `Saved fix ${task.pendingAuthorHead} is preserved. PR is ${pr.state} at ${pr.head} (base ${pr.base}, target ${pr.targetBranch}); expected ${original.head} (base ${original.base}, target ${task.pr?.targetBranch}). Inspect the target and submission outcome.`,
     );
-    return false;
   }
 
   async submitSavedFix(id: string, push: (task: Task, head: string) => Promise<void>) {

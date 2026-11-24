@@ -121,3 +121,26 @@ it('recovers the legacy no-change transition and keeps the obsolete native draft
     f.store.close();
   }
 });
+
+it('holds a confirmed fix if the PR moves again before review is queued', async () => {
+  const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+  try {
+    const pr = f.task.pr!;
+    const getPR = vi.spyOn(f.provider, 'getPR').mockResolvedValue(pr);
+    await f.engine.submitSavedFix(f.task.id, async () => {
+      getPR.mockResolvedValue({ ...pr, head: savedHead });
+    });
+    getPR.mockResolvedValue({ ...pr, head: 'c'.repeat(40) });
+    await f.engine.review(f.task.id);
+    const t = f.store.getTask(f.task.id);
+    expect(t).toMatchObject({
+      state: 'needs_input',
+      pendingAuthorHead: savedHead,
+      revision: { head: savedHead },
+    });
+    expect(t.reason).toContain(savedHead);
+    expect(f.store.jobs(f.task.id)).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});
