@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
 import type { Store } from '../core/store.js';
 import type { DaddyJob, Job, ReviewGroup, State } from '../core/types.js';
 import { redact } from '../core/security.js';
@@ -7,7 +8,13 @@ import { translator, type Locale } from '../i18n/index.js';
 import type { TelegramApi } from './telegram.js';
 import type { TelegramDestination } from './telegram-delivery.js';
 import { TelegramText } from './telegram-text.js';
-import { activityStatus, taskActivity, taskReference, taskStatus } from '../core/task-activity.js';
+import {
+  activityStatus,
+  outstandingActivity,
+  taskActivity,
+  taskReference,
+  taskStatus,
+} from '../core/task-activity.js';
 
 const activeStates = new Set<State>([
   'implementing',
@@ -58,7 +65,11 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     group.workspacePreparation?.state !== 'error' &&
     (preparing || !!activeTask || turns.length > 0 || workers.length > 0);
   const attention = tasks.find((task) => task.state === 'needs_input');
-  const unfinished = tasks.find((task) => task.state !== 'complete');
+  const outstanding = taskActivity([...tasks].reverse(), workers, (task) =>
+    task.state === 'complete'
+      ? autoMergeStatus(task, autoMergeSettings(store, group, task))
+      : undefined,
+  ).filter(outstandingActivity);
   let label = 'No work in progress';
   if (group.deletion) label = 'Saving results and removing session copies';
   else if (group.daddyState === 'paused') label = 'Paused';
@@ -78,20 +89,18 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
   else if (attention && store.jobs(attention.id).at(-1)?.status === 'failed')
     label = 'Agent run failed';
   else if (group.daddyState === 'needs_input' || attention) label = 'Action needed';
-  else if (unfinished) label = taskStatus(unfinished.state, false);
+  else if (outstanding[0]) label = activityStatus(outstanding[0]);
   else if (tasks.length) label = 'All tasks complete';
   else if (store.daddyJobs(group.id).at(-1)?.status === 'completed') label = 'Request finished';
   return {
     active,
     label,
     running,
-    tasks: taskActivity(tasks.reverse(), workers)
-      .filter(({ task }) => task.state !== 'complete')
-      .map((item) => ({
-        id: taskReference(item.task),
-        title: clipTitle(item.task.title, 80),
-        label: activityStatus(item),
-      })),
+    tasks: outstanding.map((item) => ({
+      id: taskReference(item.task),
+      title: clipTitle(item.task.title, 80),
+      label: activityStatus(item),
+    })),
     attention: attention?.title,
     resources: label === 'Waiting for server resources' ? group.resourceWait?.reasons : undefined,
   };

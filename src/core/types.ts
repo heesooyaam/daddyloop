@@ -315,6 +315,8 @@ export interface Job {
   generation: number;
   role: Role;
   kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
+  freshContextRetry?: boolean;
+  errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;
   groupGeneration?: number;

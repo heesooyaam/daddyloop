@@ -36,6 +36,13 @@ export function autoMergeSettings(store: Store, group: ReviewGroup, task: Task) 
   };
 }
 
+export function autoMergeStatus(task: Task, settings: ReturnType<typeof autoMergeSettings>) {
+  if (task.state !== 'complete') return;
+  if (settings.result?.state === 'merged') return settings.result.message;
+  if (settings.enabled && task.pr?.state === 'open')
+    return settings.result?.message ?? 'Checking GitHub auto-merge';
+}
+
 export function setTaskMergeMode(
   store: Store,
   group: ReviewGroup,
@@ -148,6 +155,8 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
         if (store.db.prepare("SELECT 1 FROM operations WHERE id=? AND status='pending'").get(key))
           return record('uncertain', 'Waiting for GitHub to confirm the previous merge request');
         if (!enabled(store, store.getTask(task.id))) return;
+        if (pr.draft === true)
+          return record('waiting', 'Draft PR: mark it ready for review on GitHub');
         if (!sameRevision(revision, pr) || (pr.mergeConflict && pr.draft === false)) return true;
         if (
           !task.reviewFinished ||
@@ -162,6 +171,7 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
         )
           return record('waiting', 'Waiting for a completed review of this revision');
         if (pr.checks !== 'passing') return record('waiting', 'Waiting for passing CI');
+        if (pr.mergeable === null) return record('waiting', 'GitHub is calculating mergeability');
         if (pr.draft !== false || pr.mergeable !== true)
           return record('waiting', 'Waiting for GitHub to allow this PR to merge');
         const review = await provider.getReview(ref, task.review);

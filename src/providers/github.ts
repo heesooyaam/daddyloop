@@ -74,11 +74,12 @@ export class GitHubProvider implements ReviewProvider {
       mergeable_state?: string;
       merge_commit_sha?: string;
     }>('GET', path(ref));
-    const [status, checks] = await Promise.all([
+    const [status, checks, base] = await Promise.all([
       this.http.request<{
         statuses: { context: string; state: string; target_url?: string }[];
       }>('GET', `/repos/${ref.repo}/commits/${pr.head.sha}/status?per_page=100`),
       this.getChecks(ref, pr.head.sha),
+      pr.state === 'open' && !pr.merged ? this.targetHead(ref, pr.base.ref) : pr.base.sha,
     ]);
     // The combined status endpoint only exposes one page of contexts. Read all statuses
     // and keep the latest status per context, including reruns of previously failed jobs.
@@ -113,12 +114,12 @@ export class GitHubProvider implements ReviewProvider {
     return {
       head: pr.head.sha,
       draft: pr.draft,
-      mergeable: pr.mergeable === true && pr.mergeable_state === 'clean',
+      mergeable: pr.mergeable == null ? null : pr.mergeable && pr.mergeable_state === 'clean',
       mergeConflict: pr.mergeable === false && pr.mergeable_state === 'dirty',
       targetCloneUrl: pr.base.repo?.clone_url,
       mergeCommit: pr.merged ? pr.merge_commit_sha : undefined,
-      base: pr.base.sha,
-      start: pr.base.sha,
+      base,
+      start: base,
       title: pr.title,
       body: pr.body ?? '',
       branch: pr.head.ref,
@@ -134,6 +135,29 @@ export class GitHubProvider implements ReviewProvider {
             ? 'pending'
             : 'passing',
     };
+  }
+  private async targetHead(ref: PRRef, branch: string) {
+    // pulls/{number}.base.sha can remain at the PR creation commit after the branch advances.
+    const name = branch.split('/').map(encodeURIComponent).join('/');
+    const value = await this.http.request<{ ref: string; object: { type: string; sha: string } }>(
+      'GET',
+      `/repos/${ref.repo}/git/ref/heads/${name}`,
+    );
+    if (
+      value.ref !== 'refs/heads/' + branch ||
+      value.object?.type !== 'commit' ||
+      !/^[a-f0-9]{40,64}$/.test(value.object.sha)
+    )
+      throw new AppError('invalid_target_ref', 'GitHub did not confirm the target branch commit');
+    return value.object.sha;
+  }
+  async targetAdvanced(ref: PRRef, before: string, after: string) {
+    if (![before, after].every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) return false;
+    const comparison = await this.http.request<{
+      status: string;
+      merge_base_commit: { sha: string };
+    }>('GET', `/repos/${ref.repo}/compare/${before}...${after}?per_page=1`);
+    return comparison.status === 'ahead' && comparison.merge_base_commit?.sha === before;
   }
   async prepareMerge(ref: PRRef) {
     const repo = await this.http.request<{

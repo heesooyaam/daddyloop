@@ -10,6 +10,7 @@ import {
 } from '../core/types.js';
 import {
   activityStatus,
+  outstandingActivity,
   profileText,
   taskReference,
   type TaskActivity,
@@ -86,7 +87,7 @@ export function queueButtons(groupId: string, locale: Locale) {
 export function queueCard(locale: Locale, groupId: string, activity: TaskActivity[]): TelegramCard {
   const t = translator(locale);
   const text = new TelegramText().add(t('Task queue'), 'bold');
-  const tasks = activity.filter(({ task }) => task.state !== 'complete');
+  const tasks = activity.filter(outstandingActivity);
   const buttons: NonNullable<TelegramCard['buttons']> = [];
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
   for (const item of tasks) {

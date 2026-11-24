@@ -1,6 +1,11 @@
 import type { ResourceRecovery } from './resource-recovery.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { autoMergeSettings, sessionAutoMerge, setTaskMergeMode } from './auto-merge.js';
+import {
+  autoMergeSettings,
+  autoMergeStatus,
+  sessionAutoMerge,
+  setTaskMergeMode,
+} from './auto-merge.js';
 import type { AutoMergeMode } from './types.js';
 import { titleFromGoal } from './session-title.js';
 import { translator } from '../i18n/index.js';
@@ -219,12 +224,13 @@ export class Daddy {
         .map(({ task }) => task.id),
       tasks: tasks.map((task) => {
         const item = activeByTask.get(task.id)!;
+        const autoMerge = autoMergeSettings(this.store, group, task);
         return {
           id: task.id,
           title: task.title,
           state: task.state,
-          statusLabel: activityStatus(item),
-          autoMerge: autoMergeSettings(this.store, group, task),
+          statusLabel: autoMergeStatus(task, autoMerge) ?? activityStatus(item),
+          autoMerge,
           reason: task.reason,
           workspaceId: task.workspaceId,
           repoPath: task.repoPath,
