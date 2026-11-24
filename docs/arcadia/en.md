@@ -25,11 +25,15 @@ Install the supported Arcanum CLI from the internal npm registry. The similarly 
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-The helper is part of the corporate `arcadia-mounts` skill. Install [SkillStore](https://skillstore.yandex-team.ru/install/instruction.md), then install the skill into the Codex skill directory:
+The helper is part of the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
 
 ```bash
-bash ~/.agents/skills/store/scripts/store.sh install arcadia-mounts --agent codex
+SKILLS_DIR="$HOME/.codex/skills"
+bash ~/.skillstore/store-install.sh --download-only --target-dir "$SKILLS_DIR"
+bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "$SKILLS_DIR"
 ```
+
+If SkillStore is already installed, skip `--download-only` and set `SKILLS_DIR` to the directory previously passed as `--target-dir`.
 
 `daddy arcadia setup` finds the helper on `PATH` and in the standard skill directories. You can also pass its exact path with `--lease-helper`. daddyloop invokes the helper through Bash, so it does not need an executable bit.
 

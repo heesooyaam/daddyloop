@@ -25,11 +25,15 @@ daddy init --yes --no-service --modules codex,github,arcadia
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-Helper входит в корпоративный навык `arcadia-mounts`. Установи [SkillStore](https://skillstore.yandex-team.ru/install/instruction.md), затем сам навык в каталог навыков Codex:
+Helper входит в корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
 
 ```bash
-bash ~/.agents/skills/store/scripts/store.sh install arcadia-mounts --agent codex
+SKILLS_DIR="$HOME/.codex/skills"
+bash ~/.skillstore/store-install.sh --download-only --target-dir "$SKILLS_DIR"
+bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "$SKILLS_DIR"
 ```
+
+Если SkillStore уже установлен, пропусти `--download-only` и укажи в `SKILLS_DIR` тот каталог, который раньше передавал как `--target-dir`.
 
 `daddy arcadia setup` находит helper в `PATH` и в стандартных каталогах навыков. Также можно передать его точный путь через `--lease-helper`. Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
 
