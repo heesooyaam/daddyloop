@@ -417,6 +417,7 @@ export class Daddy {
     trigger: DaddyJob['trigger'],
     input: string,
     workspace?: Workspace,
+    waitingTaskId?: string,
   ) {
     if (group.daddyState !== 'active') return;
     const queued = this.store
@@ -438,6 +439,7 @@ export class Daddy {
     if (pending) {
       if (trigger === 'user') {
         pending.trigger = trigger;
+        delete pending.waitingTaskId;
         pending.input = (pending.input + '\n' + input).slice(-20000);
         this.store.saveDaddyJob(pending);
       }
@@ -448,6 +450,7 @@ export class Daddy {
       groupId: group.id,
       generation: group.generation,
       trigger,
+      waitingTaskId,
       input,
       profile: group.daddy,
       instructions: structuredClone(effectiveInstructions(group.instructions, 'daddy')),
@@ -725,6 +728,7 @@ export class Daddy {
       'worker',
       `Task ${task.id} changed: ${task.state}. Read its report, decide the next action, and continue independently.`,
       task.workspaceId ? this.availableWorkspaces(group).get(task.workspaceId) : undefined,
+      task.state === 'needs_input' ? task.id : undefined,
     );
   };
   start() {
@@ -1031,7 +1035,11 @@ export class Daddy {
       });
       const current = this.active(job, controller.signal);
       current.summary = result.summary;
-      if (result.status !== 'completed') current.daddyState = 'needs_input';
+      // A question about an already blocked task stays visible in the session.
+      // Other workers can still notify daddy while its owner considers that question.
+      const taskQuestion =
+        job.trigger === 'worker' && !!job.waitingTaskId && result.status === 'needs_input';
+      if (result.status !== 'completed' && !taskQuestion) current.daddyState = 'needs_input';
       this.store.saveGroup(current);
       const answer =
         result.summary +

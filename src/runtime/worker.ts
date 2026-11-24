@@ -229,7 +229,7 @@ export class Worker {
             task.ref.provider === 'github'
           ) {
             try {
-              await this.engine.recoverIncompleteFix(task.id, (t) =>
+              await this.engine.recoverInterruptedFix(task.id, (t) =>
                 this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
               );
             } catch (error) {
@@ -509,7 +509,11 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (startingPR && !sameRevision(startingPR, task.revision)) {
+      if (
+        startingPR &&
+        !sameRevision(startingPR, task.revision) &&
+        !(job.kind === 'fix' && (await this.engine.publishedFixBaseAdvanced(task, startingPR)))
+      ) {
         if (
           job.kind === 'review' &&
           task.ref.provider === 'github' &&
