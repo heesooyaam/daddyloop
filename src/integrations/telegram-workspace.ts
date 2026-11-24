@@ -33,6 +33,7 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
+import { autoMergeSettings } from '../core/auto-merge.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -479,7 +480,11 @@ export class TelegramWorkspace {
     const task = this.daddy.task(groupId, taskId);
     const [activity] = taskActivity([task], this.store.activeJobs(taskId));
     const slot = workerSlots(this.store, group).find((item) => item.taskId === taskId);
-    await this.api.send(destination, taskCard(this.locale(), activity!, slot));
+    const merge =
+      group.workspace?.provider === 'github' && task.ref.provider === 'github'
+        ? autoMergeSettings(this.store, group, task)
+        : undefined;
+    await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge));
   }
   private async taskCommand(
     command: string,
@@ -1019,6 +1024,23 @@ export class TelegramWorkspace {
     const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})$/);
     if (queue) {
       await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
+      return true;
+    }
+    const sessionMerge = /^dad:sm:([a-f0-9-]{36}):(on|off)$/.exec(data);
+    if (sessionMerge) {
+      const id = sessionMerge[1]!;
+      this.authorize(destination, id);
+      const board = await this.daddy.settings(id, { autoMerge: sessionMerge[2] === 'on' });
+      await this.api.send(destination, sessionSettings(this.locale(), board));
+      return true;
+    }
+    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
+    if (taskMerge) {
+      const task = this.store.getTask(taskMerge[1]!);
+      if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, task.groupId);
+      this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
+      await this.showTask(task.groupId, task.id, destination);
       return true;
     }
     const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);

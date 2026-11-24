@@ -69,6 +69,9 @@ export class GitHubProvider implements ReviewProvider {
       base: { sha: string; ref: string };
       state: string;
       merged: boolean;
+      draft: boolean;
+      mergeable: boolean | null;
+      mergeable_state?: string;
       merge_commit_sha?: string;
     }>('GET', path(ref));
     const [status, checks] = await Promise.all([
@@ -95,18 +98,22 @@ export class GitHubProvider implements ReviewProvider {
           status: item.state,
           url: item.target_url,
         });
-    for (const item of checks)
-      if (!latest.has(`check:${item.name}`))
-        latest.set(`check:${item.name}`, {
+    for (const item of checks) {
+      const key = `check:${item.check_suite?.id ?? ''}:${item.name}`;
+      if (!latest.has(key))
+        latest.set(key, {
           name: item.name,
           status: item.status === 'completed' ? (item.conclusion ?? 'failure') : 'pending',
           url: item.html_url,
         });
+    }
     const details = [...latest.values()];
     const passing = new Set(['success', 'neutral', 'skipped']);
     const pending = new Set(['pending', 'queued', 'in_progress', 'waiting', 'requested']);
     return {
       head: pr.head.sha,
+      draft: pr.draft,
+      mergeable: pr.mergeable === true && pr.mergeable_state === 'clean',
       mergeCommit: pr.merged ? pr.merge_commit_sha : undefined,
       base: pr.base.sha,
       start: pr.base.sha,
@@ -126,8 +133,48 @@ export class GitHubProvider implements ReviewProvider {
             : 'passing',
     };
   }
+  async prepareMerge(ref: PRRef) {
+    const repo = await this.http.request<{
+      allow_squash_merge: boolean;
+      allow_merge_commit: boolean;
+      allow_rebase_merge: boolean;
+    }>('GET', `/repos/${ref.repo}`);
+    const method = repo.allow_squash_merge
+      ? 'squash'
+      : repo.allow_merge_commit
+        ? 'merge'
+        : repo.allow_rebase_merge
+          ? 'rebase'
+          : undefined;
+    if (!method)
+      throw new AppError(
+        'merge_method_missing',
+        'No merge method is available for this repository',
+      );
+    return async (expectedHead: string) => {
+      let result: { merged: boolean; sha: string };
+      try {
+        result = await this.http.request<typeof result>('PUT', `${path(ref)}/merge`, {
+          sha: expectedHead,
+          merge_method: method,
+        });
+      } catch (error) {
+        if (error instanceof AppError)
+          throw new AppError(
+            error.code,
+            'GitHub did not confirm the merge request',
+            error.statusCode,
+          );
+        throw error;
+      }
+      if (!result.merged || !result.sha)
+        throw new AppError('merge_unconfirmed', 'GitHub has not confirmed the merge');
+      return result.sha;
+    };
+  }
   private async getChecks(ref: PRRef, head: string) {
     const result: {
+      check_suite?: { id: number };
       name: string;
       status: string;
       conclusion: string | null;

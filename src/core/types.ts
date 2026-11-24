@@ -74,6 +74,7 @@ export interface TicketSource {
   comments?: { id: string; author: string; body: string }[];
 }
 export type PRTask = Task & { ref: PRRef };
+export type AutoMergeMode = 'inherit' | 'on' | 'off';
 export interface ReviewGroup {
   titleSource?: 'placeholder' | 'goal' | 'manual';
   resourceWait?: { reasons: string[]; since: string; state: 'waiting' | 'repairing' | 'blocked' };
@@ -156,6 +157,8 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  draft?: boolean;
+  mergeable?: boolean | null;
   mergeCommit?: string;
   title: string;
   body: string;
