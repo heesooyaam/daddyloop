@@ -332,6 +332,7 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scroll-behavior: smooth;
   padding: 28px 0 25px;
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
@@ -1080,7 +1081,7 @@
   display: none;
 }
 @media (width > 850px) {
-  .daddy-sidebar.collapsed {
+  .daddy-app:has(.daddy-sessions-toggle[aria-expanded='false']) > .daddy-sidebar {
     display: none;
   }
 }
@@ -1157,6 +1158,7 @@
   .daddy-sidebar.open {
     visibility: visible;
     transform: translateX(0);
+    transition-property: transform;
   }
   .daddy-shade {
     display: block;

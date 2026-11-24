@@ -131,6 +131,24 @@ test('collapses each side panel independently and keeps the current conversation
   const hideTasks = page.getByRole('button', { name: 'Hide workers and tasks panel' });
   const showTasks = page.getByRole('button', { name: 'Show workers and tasks panel' });
   const openSessions = page.getByRole('button', { name: 'Sessions', exact: true });
+  const sidebarId = await page.locator('.daddy-sidebar').getAttribute('id');
+  expect(sidebarId).toBeTruthy();
+  expect(await hideSessions.getAttribute('aria-controls')).toBe(sidebarId);
+  const openSessionsWithKeyboard = async () => {
+    expect(await openSessions.getAttribute('aria-controls')).toBe(sidebarId);
+    const first = page.getByRole('button', { name: 'New session', exact: true });
+    const last = page.getByRole('combobox', { name: 'Language', exact: true });
+    await openSessions.press('Enter');
+    await expect(first).toBeFocused();
+    await expect(page.locator('.daddy-main')).toHaveAttribute('inert', '');
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(openSessions).toBeFocused();
+    await page.keyboard.press('Enter');
+  };
   const openTaskReport = async (number: number) => {
     const title = `Ticket fixture ${number}`;
     await page.getByRole('button', { name: new RegExp(title) }).click({ timeout: 5000 });
@@ -162,7 +180,7 @@ test('collapses each side panel independently and keeps the current conversation
   await expect(sessions).toBeHidden();
   await showTasks.click();
   await expect(workers).toBeVisible();
-  await openSessions.click();
+  await openSessionsWithKeyboard();
   await sessions
     .getByRole('button', { name: /^Another panel layout session/ })
     .click({ timeout: 5000 });
@@ -175,7 +193,7 @@ test('collapses each side panel independently and keeps the current conversation
 
   await page.setViewportSize({ width: 390, height: 540 });
   await expect(sessions).toBeHidden();
-  await openSessions.click();
+  await openSessionsWithKeyboard();
   await expect(sessions).toBeVisible();
   await session.click();
   await expect(sessions).toBeHidden();

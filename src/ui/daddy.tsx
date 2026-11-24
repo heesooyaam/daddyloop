@@ -1,5 +1,6 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -51,6 +52,7 @@ import { profileText, taskReference, taskStatus } from '../core/task-activity.js
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const sidebarMedia = '(max-width: 850px)';
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -89,8 +91,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null);
+    chatScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const media = matchMedia(sidebarMedia);
+    const resize = () => {
+      setNarrowLayout(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    resize();
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+  useLayoutEffect(() => {
+    if (menu) firstMenuItem.current?.focus();
+    else if (wasMenuOpen.current) menuButton.current?.focus();
+    wasMenuOpen.current = menu;
+  }, [menu]);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -106,8 +127,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     );
   }, [state.selected]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const chat = chatScroll.current;
+    if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!menu || !event.currentTarget.contains(event.target as Node)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenu(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length,
+    );
+    const from = event.shiftKey ? items[0] : items.at(-1);
+    const to = event.shiftKey ? items.at(-1) : items[0];
+    if (event.target === from) {
+      event.preventDefault();
+      to?.focus();
+    }
+  };
   const choose = (id: string) => {
     void model.select(id);
     setMenu(false);
@@ -135,8 +179,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   return (
     <div className="daddy-app">
       <aside
-        id="daddy-sessions-panel"
-        className={`daddy-sidebar${menu ? ' open' : ''}${sessionsCollapsed ? ' collapsed' : ''}`}
+        id="daddy-sidebar"
+        className={'daddy-sidebar' + (menu ? ' open' : '')}
+        inert={narrowLayout && !menu}
+        onKeyDown={onMenuKeyDown}
       >
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
@@ -145,7 +191,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </span>
         </div>
         <p className="daddy-kicker">{t('daddy will handle it.')}</p>
-        <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
+        <button
+          ref={firstMenuItem}
+          className="daddy-button primary new-session"
+          onClick={() => setModal('new')}
+        >
           <Plus size={17} />
           {t('New session')}
         </button>
@@ -238,29 +288,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <button
           className="daddy-shade"
           aria-label={t('Close menu')}
+          tabIndex={-1}
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main">
+      <main className="daddy-main" inert={menu}>
         <header className="daddy-topbar">
+          <button
+            ref={menuButton}
+            className="daddy-icon mobile-menu"
+            aria-label={t('Sessions')}
+            aria-controls="daddy-sidebar"
+            aria-expanded={menu}
+            onClick={() => setMenu(!menu)}
+          >
+            <Menu size={20} />
+          </button>
           <button
             className="daddy-icon daddy-sessions-toggle"
             aria-label={sessionsToggleLabel}
             title={sessionsToggleLabel}
-            aria-controls="daddy-sessions-panel"
+            aria-controls="daddy-sidebar"
             aria-expanded={!sessionsCollapsed}
             onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
           >
             {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
-          </button>
-          <button
-            className="daddy-icon mobile-menu"
-            aria-label={t('Sessions')}
-            aria-controls="daddy-sessions-panel"
-            aria-expanded={menu}
-            onClick={() => setMenu((open) => !open)}
-          >
-            <Menu size={20} />
           </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
@@ -411,7 +463,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
-                <div className="daddy-chat-scroll">
+                <div className="daddy-chat-scroll" ref={chatScroll}>
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
@@ -454,7 +506,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       {t('daddy is working')}
                     </div>
                   )}
-                  <div ref={end} />
                 </div>
                 <form
                   className="daddy-composer"
