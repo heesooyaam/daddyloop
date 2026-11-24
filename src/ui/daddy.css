@@ -44,6 +44,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 .daddy-brand {
   display: flex;
@@ -135,7 +136,8 @@
   letter-spacing: 0;
 }
 .daddy-session-list {
-  min-height: 0;
+  /* Leave room for a row when the sidebar itself needs to scroll. */
+  min-height: 4.5rem;
   overflow: auto;
   flex: 1;
 }
@@ -268,6 +270,7 @@
 }
 .daddy-topbar {
   display: flex;
+  flex-shrink: 0;
   min-height: 86px;
   padding: 22px 33px 19px;
   border-bottom: 1px solid var(--line);
@@ -567,7 +570,12 @@
   padding: 26px 22px 20px;
   border-left: 1px solid var(--line);
   min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
   background: var(--panel);
+}
+.daddy-board > * {
+  flex-shrink: 0;
 }
 .daddy-board-header {
   display: flex;
@@ -620,11 +628,6 @@
 .daddy-board > .daddy-section-label {
   margin-left: 0;
   margin-right: 0;
-}
-.daddy-work-items {
-  overflow: auto;
-  min-height: 0;
-  scrollbar-width: thin;
 }
 .daddy-work-item {
   display: block;
@@ -1086,6 +1089,11 @@
     display: none;
   }
 }
+@media (width <= 650px) {
+  .daddy-tasks-toggle {
+    display: none;
+  }
+}
 @media (min-width: 1450px) {
   .daddy-conversation {
     padding-left: 55px;
@@ -1176,11 +1184,8 @@
   }
 }
 @media (max-width: 650px) {
-  .daddy-tasks-toggle {
-    display: none;
-  }
-  .daddy-app {
-    font-size: 13px;
+  .daddy-main {
+    overflow-y: auto;
   }
   .daddy-topbar {
     min-height: 68px;
@@ -1222,7 +1227,8 @@
     background: var(--panel);
   }
   .daddy-workspace {
-    min-height: 0;
+    /* Keep room for messages when the session status and title wrap. */
+    min-height: 26rem;
   }
   .daddy-conversation {
     width: 100%;
@@ -1262,9 +1268,6 @@
     width: 100%;
     border: 0;
     padding: 24px 20px;
-  }
-  .daddy-board .daddy-work-items {
-    flex: 1;
   }
   .mobile-hidden {
     display: none;

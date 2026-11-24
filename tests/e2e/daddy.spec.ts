@@ -130,6 +130,14 @@ test('collapses each side panel independently and keeps the current conversation
   const showSessions = page.getByRole('button', { name: 'Show sessions panel' });
   const hideTasks = page.getByRole('button', { name: 'Hide workers and tasks panel' });
   const showTasks = page.getByRole('button', { name: 'Show workers and tasks panel' });
+  const openSessions = page.getByRole('button', { name: 'Sessions', exact: true });
+  const openTaskReport = async (number: number) => {
+    const title = `Ticket fixture ${number}`;
+    await page.getByRole('button', { name: new RegExp(title) }).click({ timeout: 5000 });
+    const report = page.getByRole('dialog', { name: 'Work item' });
+    await expect(report.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    await report.getByRole('button', { name: 'Close', exact: true }).click();
+  };
 
   await hideSessions.press('Enter');
   await expect(sessions).toBeHidden();
@@ -150,27 +158,31 @@ test('collapses each side panel independently and keeps the current conversation
   const bothCollapsedWidth = await chatWidth();
   expect(bothCollapsedWidth).toBeGreaterThan(leftCollapsedWidth);
 
-  await page.setViewportSize({ width: 768, height: 900 });
+  await page.setViewportSize({ width: 844, height: 390 });
   await expect(sessions).toBeHidden();
   await showTasks.click();
   await expect(workers).toBeVisible();
+  await openSessions.click();
+  await sessions
+    .getByRole('button', { name: /^Another panel layout session/ })
+    .click({ timeout: 5000 });
+  await expect(
+    page.getByRole('heading', { name: 'Another panel layout session', exact: true }),
+  ).toBeVisible();
+  await openTaskReport(issue + 1);
   await hideTasks.click();
   await expect(workers).toBeHidden();
-  await checkConversation();
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  const mobileSessions = page.getByRole('button', { name: 'Sessions', exact: true });
+  await page.setViewportSize({ width: 390, height: 540 });
   await expect(sessions).toBeHidden();
-  await mobileSessions.click();
+  await openSessions.click();
   await expect(sessions).toBeVisible();
   await session.click();
   await expect(sessions).toBeHidden();
   const tabs = page.locator('.daddy-mobile-tabs');
   await tabs.getByRole('button', { name: /Tasks/ }).click();
   await expect(workers).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: new RegExp(`Ticket fixture ${issue}`) }),
-  ).toBeVisible();
+  await openTaskReport(issue);
   await expect(chat).toBeHidden();
   await tabs.getByRole('button', { name: 'daddy' }).click();
   await checkConversation();
