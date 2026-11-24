@@ -303,10 +303,22 @@
 .daddy-icon:hover {
   background: var(--accent);
 }
+.daddy-session-overview {
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+}
+.daddy-session-overview:focus-visible,
+.daddy-session-error-reason:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 .daddy-workspace {
   display: flex;
   flex: 1;
-  min-height: 0;
+  /* Leave room for the task actions and a full card before the overview scrolls. */
+  min-block-size: min(18rem, 60dvh);
   min-width: 0;
 }
 .daddy-conversation {
@@ -349,12 +361,6 @@
   font-weight: var(--weight-semibold);
   letter-spacing: -2px;
   padding-right: 2px;
-}
-.daddy-avatar.small {
-  width: 27px;
-  height: 27px;
-  font-size: 20px;
-  border-radius: 8px;
 }
 .daddy-chat-intro strong {
   font: var(--type-item);
@@ -561,44 +567,48 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 26px 22px 20px;
+  padding: 8px 22px 2px;
   border-left: 1px solid var(--line);
   min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
   background: var(--panel);
 }
-.daddy-board > * {
-  flex-shrink: 0;
-}
-.daddy-board-header {
+.daddy-board-controls {
   display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.daddy-board-controls > .daddy-button {
+  flex: 1 auto;
+  gap: 5px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+.daddy-pool-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.daddy-board-heading {
+  display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 18px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font: var(--type-caption);
 }
-.daddy-board-header h2 {
-  font: var(--type-section);
-  letter-spacing: -0.4px;
-  margin: 5px 0;
-}
-.daddy-pool-count {
-  font: var(--type-title);
-  font-family: var(--font-mono);
-  color: var(--accent-ink);
-  white-space: nowrap;
-}
-.daddy-pool-count small {
-  font: var(--type-section);
-  font-family: var(--font-mono);
-  color: var(--accent-ink);
+.daddy-board-heading h2 {
+  color: var(--ink);
+  font: var(--type-item);
+  margin: 0;
 }
 .daddy-pool-control {
   display: flex;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
   font: var(--type-label);
   color: var(--muted);
 }
@@ -613,11 +623,16 @@
 .daddy-pool-hint {
   font: var(--type-help);
   color: var(--muted);
-  margin: 10px 0 28px;
+  margin: 6px 0 12px;
 }
-.daddy-board > .daddy-section-label {
-  margin-left: 0;
-  margin-right: 0;
+.daddy-work-items {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  margin-inline: -4px;
+  scrollbar-width: thin;
 }
 .daddy-work-item {
   display: block;
@@ -642,60 +657,83 @@
   color: var(--muted);
   margin-bottom: 9px;
 }
+.daddy-work-items .daddy-work-item {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+}
+.daddy-work-items .daddy-work-item:hover {
+  background: var(--accent);
+}
+.daddy-work-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.daddy-work-heading strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font: var(--type-item);
+}
+.daddy-work-heading svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
 .daddy-work-state {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   font: var(--type-status);
   color: var(--muted);
 }
-.daddy-work-state svg,
-.daddy-work-dot {
+.daddy-work-state > * {
   flex-shrink: 0;
 }
 .daddy-work-item.complete .daddy-work-state {
   color: var(--success);
 }
 .daddy-work-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
+  margin-inline: 4px;
   border-radius: 50%;
-  background: var(--panel);
+  background: currentColor;
 }
 .daddy-work-item > strong {
   font: var(--type-item);
   display: block;
 }
-.daddy-work-item footer {
+.daddy-work-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
+  min-width: 0;
   color: var(--muted);
   font: var(--type-caption);
-  margin-top: 10px;
+}
+.daddy-work-meta > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.daddy-work-meta > svg {
+  flex-shrink: 0;
 }
 .daddy-work-item > small {
   color: var(--muted);
   display: block;
   margin-top: 7px;
 }
-.daddy-board-controls {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
-.daddy-board-controls > .daddy-button {
-  flex: 1 auto;
-  min-height: 35px;
-}
-.daddy-work-id {
-  display: block;
-  color: var(--muted);
-  font: var(--type-caption);
-  font-family: var(--font-mono);
-  margin-top: 4px;
+.daddy-work-items .daddy-work-item > small {
+  margin: 0;
 }
 .daddy-worker-list {
   list-style: none;
@@ -712,21 +750,6 @@
   gap: 8px;
   font: var(--type-caption);
   color: var(--muted);
-}
-.daddy-board-bottom {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: auto;
-  padding-top: 23px;
-  color: var(--muted);
-  font: var(--type-caption);
-}
-.daddy-board-bottom small {
-  display: block;
-  color: var(--muted);
-  margin-top: 5px;
-  overflow-wrap: anywhere;
 }
 .daddy-welcome {
   flex: 1;
@@ -781,6 +804,17 @@
   color: var(--danger);
   border-bottom: 1px solid var(--danger);
   overflow-wrap: anywhere;
+}
+.daddy-main > .daddy-error {
+  flex-shrink: 0;
+}
+.daddy-session-error-reason {
+  /* Long diagnostics can scroll without pushing the action or a task card out of view. */
+  max-block-size: 4.5em;
+  line-height: 1.5;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
 }
 .daddy-error button {
   margin-left: auto;
@@ -1009,6 +1043,7 @@
 .daddy-task-report h3 {
   font: var(--type-title);
   margin: 0 0 11px;
+  overflow-wrap: anywhere;
 }
 .daddy-status-pill {
   display: inline-block;
@@ -1180,6 +1215,7 @@
   }
   .daddy-mobile-tabs {
     display: flex;
+    flex-shrink: 0;
     padding: 0 14px;
     border-bottom: 1px solid var(--line);
   }
@@ -1206,9 +1242,11 @@
     border-radius: 3px;
     background: var(--panel);
   }
-  .daddy-workspace {
-    /* Keep room for messages when the session status and title wrap. */
-    min-height: 26rem;
+  .daddy-workspace[data-pane='chat'] {
+    min-block-size: min(26rem, 60dvh);
+  }
+  .daddy-workspace[data-pane='tasks'] {
+    min-block-size: min(14rem, 60dvh);
   }
   .daddy-conversation {
     width: 100%;
@@ -1239,7 +1277,7 @@
   .daddy-board {
     width: 100%;
     border: 0;
-    padding: 24px 20px;
+    padding-inline: 15px;
   }
   .mobile-hidden {
     display: none;
@@ -2343,6 +2381,11 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+}
+.daddy-main > .daddy-session-progress {
+  flex-shrink: 0;
+  margin-block: 6px;
+  padding-block: 6px;
 }
 .daddy-session-progress code {
   font: var(--type-caption);

@@ -382,6 +382,7 @@ export const daddyRu: Record<string, string> = {
   'Close menu': 'Закрыть меню',
   'What are we building?': 'Что будем делать?',
   'Session settings': 'Настройки сессии',
+  'Session overview': 'Сведения о сессии',
   'Conversation with daddy': 'Разговор с daddy',
   'Leave the job with daddy. I’ll get it moving and check the result myself.':
     'Оставь дело папочке. Запущу работу и сам проверю результат.',
@@ -617,6 +618,7 @@ export const daddyRu: Record<string, string> = {
   'This worker has changed tasks. Open its settings again.':
     'Воркер уже сменил задачу. Открой его настройки заново.',
   'Queue task': 'Поставить в очередь',
+  'Queue a task': 'В очередь',
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',

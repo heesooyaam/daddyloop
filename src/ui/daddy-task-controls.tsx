@@ -138,10 +138,14 @@ export function QueueTaskForm({
 export function WorkerControls({
   api,
   board,
+  busy,
+  onLimitChange,
   onChange,
 }: {
   api: DaddyApi;
   board: DaddyBoard;
+  busy: boolean;
+  onLimitChange: (limit: number) => void;
   onChange: () => Promise<void>;
 }) {
   const { t } = useLocale();
@@ -160,39 +164,63 @@ export function WorkerControls({
       />
     );
   return (
-    <ul className="daddy-worker-list">
-      {board.workers.slots.map((slot) => {
-        const task = board.tasks.find(({ id }) => id === slot.taskId);
-        const configured = slot.profile ?? board.workerDefault;
-        const profile = task?.worker ?? configured;
-        return (
-          <li key={slot.number}>
-            <button
-              className="daddy-work-item"
-              type="button"
-              onClick={() => setEditing(slot)}
-              disabled={!!board.group.deletion}
-              aria-label={t('Configure worker {number}', { number: slot.number })}
-            >
-              <div>
-                <strong>{t('Worker {number}', { number: slot.number })}</strong>
-                <Settings2 size={16} />
-              </div>
-              <strong>{profileText(profile)}</strong>
-              {task && (
-                <small>
-                  {taskReference(task)} · {task.title}
-                </small>
-              )}
-              <small>{t(task?.statusLabel ?? 'Free')}</small>
-              {!sameAgentProfile(profile, configured) && (
-                <small>{t('Next task · {profile}', { profile: profileText(configured) })}</small>
-              )}
-            </button>
-          </li>
-        );
-      })}
-    </ul>
+    <>
+      <label className="daddy-pool-control">
+        {t('Maximum workers')}
+        <select
+          value={board.workers.target}
+          disabled={busy || !!board.group.deletion}
+          onChange={(event) => onLimitChange(Number(event.target.value))}
+        >
+          {[1, 2, 3, 4, 5, 6, 7, 8].map((number) => (
+            <option key={number} value={number}>
+              {number}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="daddy-pool-hint" role="status">
+        {t(
+          board.workers.pending
+            ? 'Pool: {limit} → {target}. Changes apply in the background.'
+            : 'Pool: {limit}. Occupied by tasks: {occupied}.',
+          board.workers,
+        )}
+      </p>
+      <ul className="daddy-worker-list">
+        {board.workers.slots.map((slot) => {
+          const task = board.tasks.find(({ id }) => id === slot.taskId);
+          const configured = slot.profile ?? board.workerDefault;
+          const profile = task?.worker ?? configured;
+          return (
+            <li key={slot.number}>
+              <button
+                className="daddy-work-item"
+                type="button"
+                onClick={() => setEditing(slot)}
+                disabled={!!board.group.deletion}
+                aria-label={t('Configure worker {number}', { number: slot.number })}
+              >
+                <div>
+                  <strong>{t('Worker {number}', { number: slot.number })}</strong>
+                  <Settings2 size={16} />
+                </div>
+                <strong>{profileText(profile)}</strong>
+                {task && (
+                  <small>
+                    {taskReference(task)} · {task.title}
+                  </small>
+                )}
+                <small>{t(task?.statusLabel ?? 'Free')}</small>
+                {!sameAgentProfile(profile, configured) && (
+                  <small>{t('Next task · {profile}', { profile: profileText(configured) })}</small>
+                )}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </>
   );
 }
 

@@ -63,6 +63,32 @@ function safeUrl(value: string) {
     return;
   }
 }
+function SessionMaintenanceError({
+  title,
+  reason,
+  retryLabel,
+  onRetry,
+}: {
+  title: string;
+  reason?: string;
+  retryLabel: string;
+  onRetry: () => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="daddy-error" role="alert">
+      <div>
+        <strong>{t(title)}</strong>
+        {reason && (
+          <div className="daddy-session-error-reason" tabIndex={0}>
+            {t(reason)}
+          </div>
+        )}
+      </div>
+      <button onClick={onRetry}>{t(retryLabel)}</button>
+    </div>
+  );
+}
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
   const [usageEngine, setUsageEngine] = useState<string>();
@@ -126,12 +152,20 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
-  const preparation = board?.group.workspacePreparation;
   const repository = state.overrides[state.selected];
   const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
   const tasksToggleLabel = t(
     tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
   );
+  const resourceWait = board?.group.resourceWait;
+  const deletion = board?.group.deletion;
+  const preparation = deletion ? undefined : board?.group.workspacePreparation;
+  const deleting = deletion?.state === 'pending' || deletion?.state === 'running';
+  const preparing =
+    preparation?.state === 'preparing' || (preparation?.state === 'pending' && !paused);
+  const draft = state.drafts[state.selected] ?? '';
+  const messageDisabled = paused || !!deletion;
+  const canSend = !messageDisabled && modal !== 'settings' && !state.busy && !!draft.trim();
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -324,24 +358,39 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </button>
           )}
         </header>
-        <UsageStrip
-          usage={state.usage}
-          connected={state.connected}
-          onDetails={(engine) => {
-            setUsageEngine(engine);
-            setModal('limits');
-          }}
-        />
-        {state.error && (
+        {state.error && (modal !== 'workers' || !board) && (
           <div className="daddy-error" role="alert">
             {t(state.error)}
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
           </div>
         )}
-        {board?.group.resourceWait && (
+        {preparation?.state === 'error' && (
+          <SessionMaintenanceError
+            title="Could not prepare the session copy"
+            reason={preparation.error}
+            retryLabel="Retry"
+            onRetry={() => void model.action('resume')}
+          />
+        )}
+        {deletion?.state === 'error' && (
+          <SessionMaintenanceError
+            title="Session deletion stopped; working copies were preserved"
+            reason={deletion.error}
+            retryLabel="Retry deletion"
+            onRetry={() => setModal('delete')}
+          />
+        )}
+        {resourceWait && (
           <div className="daddy-error daddy-resource-wait" role="status">
-            <strong>{t('Waiting for server resources')}</strong>
-            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
+            <div>
+              <strong>{t('Waiting for server resources')}</strong>
+              {resourceWait.reasons.length > 0 && (
+                <>
+                  {' · '}
+                  <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
+                </>
+              )}
+            </div>
             <span>
               {t(
                 'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
@@ -349,40 +398,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </span>
           </div>
         )}
-        {preparation && preparation.state !== 'ready' && !board?.group.deletion && (
-          <div
-            className={preparation.state === 'error' ? 'daddy-error' : 'daddy-session-progress'}
-            role="status"
-          >
+        {(preparing || deleting) && (
+          <div className="daddy-session-progress" role="status">
             {t(
-              preparation.state === 'error'
-                ? 'Could not prepare the session copy'
+              deleting
+                ? 'Saving results and removing session copies'
                 : 'Preparing the session copy',
             )}
-            {preparation.error && <span>{t(preparation.error)}</span>}
-            {preparation.state === 'error' && (
-              <button onClick={() => void model.action('resume')}>{t('Retry')}</button>
-            )}
           </div>
         )}
-        {board?.group.deletion && (
-          <div
-            className={
-              board.group.deletion.state === 'error' ? 'daddy-error' : 'daddy-session-progress'
-            }
-            role="status"
-          >
-            {t(
-              board.group.deletion.state === 'error'
-                ? 'Session deletion stopped; working copies were preserved'
-                : 'Saving results and removing session copies',
-            )}
-            {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
-            {board.group.deletion.state === 'error' && (
-              <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
-            )}
-          </div>
-        )}
+        <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
+          <UsageStrip
+            usage={state.usage}
+            connected={state.connected}
+            onDetails={(engine) => {
+              setUsageEngine(engine);
+              setModal('limits');
+            }}
+          />
+        </section>
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
@@ -406,7 +440,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 <span>{board.tasks.length}</span>
               </button>
             </div>
-            <div className="daddy-workspace">
+            <div className="daddy-workspace" data-pane={pane}>
               <section
                 id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
@@ -460,18 +494,22 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (!paused && modal !== 'settings') void model.send();
+                    if (canSend) void model.send();
                   }}
                 >
                   <textarea
                     aria-label={t('Message daddy')}
-                    placeholder={t(
-                      paused
-                        ? 'Resume daddy to continue'
-                        : 'A task, a ticket, a voice note. daddy’s listening.',
-                    )}
-                    value={state.drafts[state.selected] ?? ''}
-                    disabled={paused}
+                    placeholder={
+                      deletion
+                        ? undefined
+                        : t(
+                            paused
+                              ? 'Resume daddy to continue'
+                              : 'A task, a ticket, a voice note. daddy’s listening.',
+                          )
+                    }
+                    value={draft}
+                    disabled={messageDisabled}
                     rows={3}
                     onChange={(event) => model.draft(event.target.value)}
                     onKeyDown={(event) => {
@@ -506,134 +544,103 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       type="submit"
                       className="daddy-send"
                       aria-label={t('Send message')}
-                      disabled={
-                        state.busy ||
-                        paused ||
-                        modal === 'settings' ||
-                        !state.drafts[state.selected]?.trim()
-                      }
+                      disabled={!canSend}
                     >
                       <Send size={17} />
                     </button>
                   </footer>
                 </form>
-                <div className="daddy-composer-note">
-                  {t(
-                    'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
-                  )}
-                </div>
+                {!deletion && (
+                  <div className="daddy-composer-note">
+                    {t(
+                      'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
+                    )}
+                  </div>
+                )}
               </section>
               <aside
                 id="daddy-tasks-panel"
                 className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
+                aria-labelledby="daddy-task-heading"
               >
-                <div className="daddy-board-header">
-                  <div>
-                    <span className="daddy-eyebrow">{t('Your team')}</span>
-                    <h2>{t('Worker pool')}</h2>
-                  </div>
-                  <span className="daddy-pool-count">
-                    {board.workers.active}
-                    <small>/{board.workers.limit}</small>
-                  </span>
-                </div>
-                <label className="daddy-pool-control">
-                  {t('Maximum workers')}
-                  <select
-                    aria-label={t('Maximum workers')}
-                    value={board.workers.target}
-                    disabled={state.busy}
-                    onChange={(event) =>
-                      void model.action('settings', { workerLimit: Number(event.target.value) })
-                    }
-                  >
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((number) => (
-                      <option key={number} value={number}>
-                        {number}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="daddy-pool-hint" role="status">
-                  {t(
-                    board.workers.pending
-                      ? 'Pool: {limit} → {target}. Changes apply in the background.'
-                      : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-                    board.workers,
-                  )}
-                </p>
                 <div className="daddy-board-controls">
-                  <button className="daddy-button outline" onClick={() => setModal('workers')}>
-                    <Users size={15} />
+                  <button
+                    className="daddy-button outline"
+                    aria-haspopup="dialog"
+                    onClick={() => setModal('workers')}
+                  >
                     {t('Workers')}
+                    <span className="daddy-pool-count">
+                      {board.workers.active}/{board.workers.limit}
+                      {board.workers.pending && ` → ${board.workers.target}`}
+                    </span>
                   </button>
                   <button
                     className="daddy-button primary"
+                    aria-haspopup="dialog"
                     onClick={() => setModal('queue-task')}
                     disabled={paused || !!board.group.deletion}
                   >
                     <Plus size={15} />
-                    {t('Queue task')}
+                    {t('Queue a task')}
                   </button>
                 </div>
-                <div className="daddy-section-label">
-                  {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                <div className="daddy-board-heading">
+                  <h2 id="daddy-task-heading">
+                    {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                  </h2>
                   <span>
                     {board.tasks.filter((task) => task.state === 'complete').length}/
                     {board.tasks.length}
                   </span>
                 </div>
                 <div className="daddy-work-items">
-                  {workItems?.map((task) => (
-                    <button
-                      key={task.id}
-                      className={'daddy-work-item ' + task.state}
-                      onClick={() => setInspect(task.id)}
-                    >
-                      <div>
+                  {workItems?.map((task) => {
+                    const workspaceName =
+                      state.workspaces.find((workspace) => workspace.id === task.workspaceId)
+                        ?.name ?? board.workspace?.name;
+                    return (
+                      <button
+                        key={task.id}
+                        className={'daddy-work-item ' + task.state}
+                        title={task.title}
+                        aria-haspopup="dialog"
+                        onClick={() => setInspect(task.id)}
+                      >
+                        <span className="daddy-work-heading">
+                          <strong>{task.title}</strong>
+                          <MoreHorizontal size={17} aria-hidden="true" />
+                        </span>
                         <span className="daddy-work-state">
                           {task.state === 'complete' ? (
-                            <CircleCheck size={15} />
+                            <CircleCheck size={14} aria-hidden="true" />
                           ) : task.running ? (
-                            <LoaderCircle className="spin" size={15} />
+                            <LoaderCircle className="spin" size={14} aria-hidden="true" />
                           ) : (
-                            <span className="daddy-work-dot" />
+                            <span className="daddy-work-dot" aria-hidden="true" />
                           )}
                           {t(task.statusLabel)}
                         </span>
-                        <MoreHorizontal size={17} />
-                      </div>
-                      <strong>{task.title}</strong>
-                      <code className="daddy-work-id">{taskReference(task)}</code>
-                      <footer>
-                        <span>
-                          {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
-                            ?.name ?? board.workspace?.name}
+                        <span className="daddy-work-meta">
+                          <code>{taskReference(task)}</code>
+                          <span title={workspaceName}>{workspaceName}</span>
+                          {task.ref.kind !== 'ticket' && (
+                            <GitPullRequest size={14} aria-hidden="true" />
+                          )}
                         </span>
-                        {task.ref.kind !== 'ticket' && <GitPullRequest size={14} />}
-                      </footer>
-                      {task.dependsOn.length > 0 && (
-                        <small>
-                          {t('Prerequisites: {count}', { count: task.dependsOn.length })}
-                        </small>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                {!board.tasks.length && (
-                  <p className="daddy-empty-small">
-                    {t('The crew is ready. Give daddy something to handle.')}
-                  </p>
-                )}
-                <div className="daddy-board-bottom">
-                  <span className="daddy-avatar small">d.</span>
-                  <span>
-                    {t('One daddy. Shared context.')}
-                    <small>
-                      {board.group.daddy.model ?? t('Engine configuration')}{' '}
-                      {board.group.daddy.effort && '· ' + board.group.daddy.effort}
-                    </small>
-                  </span>
+                        {task.dependsOn.length > 0 && (
+                          <small>
+                            {t('Prerequisites: {count}', { count: task.dependsOn.length })}
+                          </small>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {!board.tasks.length && (
+                    <p className="daddy-empty-small">
+                      {t('The crew is ready. Give daddy something to handle.')}
+                    </p>
+                  )}
                 </div>
               </aside>
             </div>
@@ -760,10 +767,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'workers' && board && (
         <Dialog title={t('Workers')} onClose={() => setModal(null)}>
+          {state.error && (
+            <p className="daddy-field-error" role="alert">
+              {t(state.error)}
+            </p>
+          )}
           <WorkerControls
             key={board.group.id}
             api={api}
             board={board}
+            busy={state.busy}
+            onLimitChange={(workerLimit) => void model.action('settings', { workerLimit })}
             onChange={() => model.refresh()}
           />
         </Dialog>
