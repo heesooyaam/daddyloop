@@ -75,6 +75,7 @@ export function FolderBrowser({
           type="button"
           className="daddy-icon"
           aria-label={t('Close folder browser')}
+          autoFocus
           onClick={onCancel}
         >
           <X size={17} />

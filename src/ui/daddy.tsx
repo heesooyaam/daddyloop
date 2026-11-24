@@ -343,29 +343,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
           )}
         </header>
-        <UsageStrip
-          usage={state.usage}
-          connected={state.connected}
-          onDetails={(engine) => {
-            setUsageEngine(engine);
-            setModal('limits');
-          }}
-        />
         {state.error && (
           <div className="daddy-error" role="alert">
             {t(state.error)}
             <button onClick={() => void model.refresh()}>{t('Retry')}</button>
-          </div>
-        )}
-        {board?.group.resourceWait && (
-          <div className="daddy-error daddy-resource-wait" role="status">
-            <strong>{t('Waiting for server resources')}</strong>
-            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
-            <span>
-              {t(
-                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-              )}
-            </span>
           </div>
         )}
         {preparation && preparation.state !== 'ready' && !board?.group.deletion && (
@@ -402,6 +383,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             )}
           </div>
         )}
+        {board?.group.resourceWait && (
+          <div className="daddy-error daddy-resource-wait" role="status">
+            <strong>{t('Waiting for server resources')}</strong>
+            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
+            <span>
+              {t(
+                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+              )}
+            </span>
+          </div>
+        )}
+        <UsageStrip
+          usage={state.usage}
+          connected={state.connected}
+          onDetails={(engine) => {
+            setUsageEngine(engine);
+            setModal('limits');
+          }}
+        />
         {board ? (
           <>
             <div className="daddy-mobile-tabs">

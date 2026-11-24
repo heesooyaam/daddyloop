@@ -159,6 +159,45 @@ test('keeps separate conversation drafts when changing daddy sessions', async ({
   await page.locator('.daddy-session').filter({ hasText: 'Second draft session' }).click();
   await expect(page.getByLabel('Message daddy')).toHaveValue('Another unsent idea');
 });
+test('Escape in the folder browser returns to the session settings draft', async ({ page }) => {
+  await login(page);
+  await create(page, 'Folder browser keyboard fixture', Date.now());
+  await page.setViewportSize({ width: 320, height: 540 });
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  const autoMerge = settings.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ });
+  await autoMerge.check();
+  await settings.getByRole('button', { name: 'Change folder for the next message' }).click();
+  const path = settings.getByLabel('Repository URL or server folder');
+  const draft = resolve('.daddyloop/e2e/fixture-repository-alternate');
+  await path.fill(draft);
+
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/workspaces/directories?*', async (route) => {
+    await pending;
+    await route.continue().catch(() => {});
+  });
+  try {
+    const requested = page.waitForRequest(/\/api\/workspaces\/directories\?path=/);
+    await settings.getByRole('button', { name: 'Browse server folders' }).press('Enter');
+    await requested;
+    await page.keyboard.press('Escape');
+    await expect(
+      settings.getByRole('region', { name: 'Choose a folder on this server' }),
+    ).toHaveCount(0);
+    await expect(settings).toBeVisible();
+    await expect(path).toBeFocused();
+    await expect(path).toHaveValue(draft);
+    await expect(autoMerge).toBeChecked();
+    await page.keyboard.press('Escape');
+    await expect(settings).toHaveCount(0);
+  } finally {
+    release();
+  }
+});
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
 }) => {

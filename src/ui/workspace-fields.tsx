@@ -1,5 +1,5 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { Check, ChevronDown, FolderGit2, FolderOpen, LoaderCircle, RotateCcw } from 'lucide-react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { Workspace } from '../core/types.js';
@@ -33,7 +33,11 @@ export function WorkspaceFields({
   const [draft, setDraft] = useState<RepositorySelection>({});
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const pathInput = useRef<HTMLInputElement>(null);
   const request = useRef<AbortController | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (editing && !picking) pathInput.current?.focus();
+  }, [editing, picking]);
   useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
     onEditingChange?.(editing);
@@ -229,6 +233,7 @@ export function WorkspaceFields({
             <label style={picking ? { display: 'none' } : undefined}>
               {t('Repository URL or server folder')}
               <input
+                ref={pathInput}
                 aria-label={t('Repository URL or server folder')}
                 value={draft.path ?? ''}
                 onChange={(event) => setDraft({ path: event.target.value })}

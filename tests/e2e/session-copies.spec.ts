@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import type { ReviewGroup } from '../../src/core/types.js';
+import { translator } from '../../src/i18n/index.js';
 
 async function login(page: import('@playwright/test').Page) {
   await page.goto('/');
@@ -142,38 +143,156 @@ test('confirms session deletion, sends its generation and clears the deleted sel
   );
 });
 
-test('explains resource waits on a phone instead of leaving the conversation silently pending', async ({
-  page,
-}) => {
-  await page.route('**/api/daddy/sessions/**', async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    if (!body.group) return route.fulfill({ json: body });
-    await route.fulfill({
-      json: {
-        ...body,
-        group: {
-          ...body.group,
-          resourceWait: {
-            state: 'repairing',
-            since: new Date().toISOString(),
-            reasons: ['Disk-space threshold reached'],
+for (const locale of ['en', 'ru'] as const) {
+  test(`keeps ${locale} session notices visible with resource waits and two usage providers`, async ({
+    page,
+  }) => {
+    const t = translator(locale);
+    const title = `Resource status fixture (${locale})`;
+    const error = 'Fixture: server operation failed';
+    const failure = { status: 503, json: { error: { message: error } } };
+    type StatusFields = Pick<ReviewGroup, 'workspacePreparation' | 'deletion' | 'daddyState'>;
+    let status: StatusFields = {};
+    let failLoad = false;
+    await login(page);
+    await page.route('**/api/preferences', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), locale } });
+    });
+    await page.route('**/api/status', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({
+        response,
+        json: { ...body, preferences: { ...body.preferences, locale } },
+      });
+    });
+    await page.route('**/api/usage', async (route) => {
+      const response = await route.fetch();
+      const {
+        agents: [codex],
+      } = await response.json();
+      await route.fulfill({
+        response,
+        json: { agents: [codex, { ...codex, engine: 'claude', name: 'Claude' }] },
+      });
+    });
+    await page.route('**/api/daddy/sessions/*', async (route) => {
+      const response = await route.fetch();
+      const board = await response.json();
+      if (board.group?.title !== title) return route.fulfill({ response, json: board });
+      if (failLoad) return route.fulfill(failure);
+      await route.fulfill({
+        response,
+        json: {
+          ...board,
+          group: {
+            ...board.group,
+            workspacePreparation: { state: 'ready' },
+            ...status,
+            resourceWait: {
+              state: 'repairing',
+              since: new Date().toISOString(),
+              reasons: ['Disk-space threshold reached'],
+            },
           },
         },
-      },
+      });
     });
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    await page.getByRole('button', { name: t('New session'), exact: true }).click();
+    await page.getByLabel(t('Session name (optional)')).fill(title);
+    await page.getByRole('button', { name: t('Start session'), exact: true }).click();
+    await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+
+    const resource = page.getByText(t('Waiting for server resources'), { exact: true });
+    const cases: { status: StatusFields; notice: string; retry?: string }[] = [
+      {
+        status: { workspacePreparation: { state: 'pending' } },
+        notice: 'Preparing the session copy',
+      },
+      {
+        status: { workspacePreparation: { state: 'preparing' } },
+        notice: 'Preparing the session copy',
+      },
+      {
+        status: { daddyState: 'paused', workspacePreparation: { state: 'error', error } },
+        notice: 'Could not prepare the session copy',
+        retry: 'Retry',
+      },
+      {
+        status: { deletion: { state: 'pending' } },
+        notice: 'Saving results and removing session copies',
+      },
+      {
+        status: { deletion: { state: 'running' } },
+        notice: 'Saving results and removing session copies',
+      },
+      {
+        status: { deletion: { state: 'error', error } },
+        notice: 'Session deletion stopped; working copies were preserved',
+        retry: 'Retry deletion',
+      },
+    ];
+    const viewports = [
+      [667, 375],
+      [320, 540],
+      [390, 540],
+      [844, 390],
+    ];
+    for (const example of cases) {
+      status = example.status;
+      await page.reload();
+      await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(2);
+      const notice = page.getByRole('status').filter({ hasText: t(example.notice) });
+      for (const [width, height] of viewports) {
+        await test.step(`${example.notice} at ${width} × ${height}`, async () => {
+          await page.setViewportSize({ width, height });
+          await expect(notice).toBeInViewport({ ratio: 0.99 });
+          await expect(resource).toBeInViewport({ ratio: 0.99 });
+          if (example.retry) {
+            await expect(page.getByText(error, { exact: true })).toBeInViewport({ ratio: 0.99 });
+            await expect(
+              page.getByRole('button', { name: t(example.retry), exact: true }),
+            ).toBeInViewport({ ratio: 0.99 });
+          }
+          expect(
+            await page.evaluate(
+              () => !window.scrollY && !document.querySelector('main')?.scrollTop,
+            ),
+          ).toBe(true);
+        });
+      }
+    }
+
+    status = {};
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.reload();
+    await expect(
+      page.getByText(
+        t(
+          'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+        ),
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await page.route('**/api/daddy/sessions/*/chat', (route) => route.fulfill(failure));
+    await page.getByLabel(t('Message daddy')).fill('Fixture message');
+    await page.getByRole('button', { name: t('Send message'), exact: true }).click();
+    await page.setViewportSize({ width: 667, height: 375 });
+    const alert = page.getByRole('alert').filter({ hasText: error });
+    const retry = alert.getByRole('button', { name: t('Retry'), exact: true });
+    await expect(alert).toBeInViewport({ ratio: 0.99 });
+    await expect(retry).toBeInViewport({ ratio: 0.99 });
+    await expect(resource).toBeInViewport({ ratio: 0.99 });
+
+    failLoad = true;
+    await page.reload();
+    await expect(alert).toBeInViewport({ ratio: 0.99 });
+    await expect(retry).toBeInViewport({ ratio: 0.99 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
   });
-  await login(page);
-  await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await page.getByLabel('Session name (optional)').fill('Resource status fixture');
-  await page.getByRole('button', { name: 'Start session', exact: true }).click();
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByText('Waiting for server resources', { exact: true })).toBeVisible();
-  await expect(
-    page.getByText(
-      'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-      { exact: true },
-    ),
-  ).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-});
+}
