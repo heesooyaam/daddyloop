@@ -252,6 +252,7 @@ export async function buildApp(options: ServerOptions) {
     15000,
     config.maxConcurrentAgents,
   );
+  worker.refreshIssueSource = (id) => tickets.refreshIssueSource(id);
   worker.autoSubmit = (id) =>
     store.getTask(id).ref.kind === 'ticket' ? tickets.submit(id) : tickets.pushFixes(id);
   if (config.cache.auto)

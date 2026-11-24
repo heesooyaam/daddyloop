@@ -84,6 +84,7 @@ export class Worker {
     }
   }
   autoCleanup?: () => Promise<unknown>;
+  refreshIssueSource?: (id: string) => Promise<void>;
   autoSubmit?: (id: string) => Promise<unknown>;
   constructor(
     readonly engine: Engine,
@@ -208,6 +209,35 @@ export class Worker {
         for (const task of tasks) {
           if (githubWait(store, task.ref)) continue;
           if (
+            this.refreshIssueSource &&
+            task.ref.provider === 'github' &&
+            !isTicket(task) &&
+            task.source?.kind === 'local'
+          ) {
+            try {
+              await this.refreshIssueSource(task.id);
+            } catch (error) {
+              store.event(task.id, 'ticket.source_refresh_failed', {
+                error: redact(String(error)),
+              });
+            }
+          }
+          if (
+            task.state === 'needs_input' &&
+            task.resumeState === 'fixing' &&
+            !task.fixingMergeConflict &&
+            task.ref.provider === 'github'
+          ) {
+            try {
+              await this.engine.recoverIncompleteFix(task.id, (t) =>
+                this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
+              );
+            } catch (error) {
+              store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          }
+          if (
             task.state === 'needs_input' &&
             !staleConflictPreparation(task) &&
             (task.resumeState === 'reviewing' || task.resumeState === 'awaiting_push') &&
@@ -322,6 +352,9 @@ export class Worker {
             }
           }
         }
+      for (const task of store.tasks())
+        if (task.deferredWorkerInstructions?.length && !store.busy(task.id))
+          await this.engine.deliverWorkerInstruction(task.id);
       // Authors may be independent; each shared reviewer thread has one worker.
       reconcileWorkerPools(store);
       const limit = Math.max(
@@ -455,7 +488,20 @@ export class Worker {
       delete job.finishedAt;
       store.saveJob(job);
       if (job.deferredResult) {
-        await this.engine.completeJob(job, job.deferredResult);
+        await this.engine.completeJob(
+          job,
+          job.deferredResult,
+          job.kind === 'fix' &&
+            job.deferredResult.status === 'incomplete' &&
+            !task.fixingMergeConflict
+            ? (t) =>
+                this.workspaces.commitFix(
+                  t,
+                  'Preserve review fixes before conflict resolution',
+                  abort.signal,
+                )
+            : undefined,
+        );
         delete job.deferredResult;
         job.status = 'completed';
         return;
