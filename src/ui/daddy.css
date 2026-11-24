@@ -136,7 +136,8 @@
   letter-spacing: 0;
 }
 .daddy-session-list {
-  min-height: 64px;
+  /* Leave room for a row when the sidebar itself needs to scroll. */
+  min-height: 4.5rem;
   overflow: auto;
   flex: 1;
 }
@@ -1137,6 +1138,7 @@
   .daddy-sidebar.open {
     visibility: visible;
     transform: translateX(0);
+    transition-property: transform;
   }
   .daddy-shade {
     display: block;

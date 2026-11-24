@@ -107,7 +107,10 @@ test('opens the palette from the mobile sidebar and keeps the choice across sess
   await page.setViewportSize({ width: 390, height: 500 });
 
   const menu = page.getByRole('button', { name: 'Sessions', exact: true });
-  const themeButton = page
+  const sidebar = page.locator('#daddy-sidebar');
+  const firstItem = sidebar.getByRole('button', { name: 'New session', exact: true });
+  const lastItem = sidebar.getByRole('combobox', { name: 'Language' });
+  const themeButton = sidebar
     .locator('.daddy-sidebar-bottom')
     .getByRole('button', { name: 'Change theme', exact: true });
   const palette = page.getByRole('dialog', { name: 'Make yourself at home' });
@@ -115,15 +118,31 @@ test('opens the palette from the mobile sidebar and keeps the choice across sess
   const html = page.locator('html');
 
   await expect(themeButton).toBeHidden();
-  await menu.click();
-  await themeButton.click();
+  await menu.press('Enter');
+  await expect(firstItem).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(lastItem).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(firstItem).toBeFocused();
+  const controls = await sidebar.locator('button, a[href], select').count();
+  for (let step = 0; step < controls; step++) {
+    await page.keyboard.press('Tab');
+    await expect(sidebar.locator(':focus')).toHaveCount(1);
+    if (await themeButton.evaluate((button) => button.matches(':focus'))) break;
+  }
+  await expect(themeButton).toBeFocused();
+  await page.keyboard.press('Enter');
   await theme.click();
   await expect(html).toHaveAttribute('data-theme', 'plum');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.keyboard.press('Escape');
   await expect(palette).toBeHidden();
   await expect(themeButton).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeFocused();
+  await expect(menu).toHaveAttribute('aria-expanded', 'false');
 
+  await page.keyboard.press('Enter');
   await page
     .getByRole('navigation', { name: 'Sessions' })
     .getByRole('button', { name: /First theme session/ })
