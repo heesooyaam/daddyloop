@@ -38,6 +38,8 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
 
+With GitHub auto-merge enabled, a reviewed task waits for merge confirmation and keeps its assigned worker. A conflict goes back to that worker with the task’s working copy and conversation. Turning auto-merge off restores completion after review and required checks.
+
 Use the main daddy chat for instructions. Task reports show progress and offer plan approval when required. Plan approval checks the exact revision and generation again.
 
 `/pause` pauses the session; `/resume` resumes it. Closing the CLI/browser only disconnects the client. Stopping the service is different: interrupted work is recorded and must be resumed after inspection. See [operations](../operations/en.md).

@@ -176,7 +176,9 @@ flowchart TB
 
 **Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. For opted-in GitHub tasks the scheduler rechecks the published review, CI and PR revision before sending a merge request with the reviewed head SHA. An uncertain write is reconciled through the outbox. A confirmed merge conflict on an opted-in task queues an author run on the pinned PR and target commits. The service pushes the resulting two-parent commit to the same PR and queues independent review of the new revision.
 
-If a Codex reviewer exhausts its context during an opted-in GitHub task, the service retries the review once with a fresh thread. The native draft and the coordinator conversation remain available. Across a target branch update, only an untouched service placeholder on the same PR head can be reused automatically.
+On a Codex review context overflow, the adapter resumes the same thread and requests history compaction. It waits for the compaction turn to finish before continuing the pinned review. The existing fresh-thread recovery for opted-in GitHub tasks remains available if the thread still cannot continue. Native drafts and the coordinator conversation are preserved. See the [Codex app-server compaction protocol](https://developers.openai.com/codex/app-server#trigger-thread-compaction).
+
+With GitHub auto-merge enabled, successful review and checks move the task to `awaiting_merge`. The pool keeps the assigned worker through conflict repairs and releases the slot on confirmed completion. Dependent tasks wait for completion as well.
 
 The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
 

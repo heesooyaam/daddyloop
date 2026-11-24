@@ -530,6 +530,14 @@ export const daddyRu: Record<string, string> = {
     'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
   'Worker assigned to resolve the GitHub merge conflict':
     'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for GitHub merge': 'Ожидает слияния PR в GitHub',
+  'Review complete. Waiting for GitHub to merge the PR.':
+    'Ревью завершено. Ожидает слияния PR в GitHub.',
+  'The reviewed revision needs verification before completion':
+    'Перед завершением задачи нужно проверить результат ревью.',
+  'Conflict repair queued for worker {number}': 'Исправление конфликта в очереди воркера №{number}',
+  'Waiting for a free worker to resolve the merge conflict':
+    'Для исправления конфликта нужен свободный воркер',
   'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
   'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
   'The PR changed during conflict resolution. Inspect the preserved worker copy.':

@@ -1,4 +1,4 @@
-import type { AgentProfile, Job, State, Task } from './types.js';
+import type { AgentProfile, Job, State, Task, WorkerSlot } from './types.js';
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
@@ -12,6 +12,7 @@ const statusLabels: Record<State, string> = {
   awaiting_publication: 'Publishing review',
   fixing: 'Addressing review feedback',
   awaiting_push: 'Sending fixes',
+  awaiting_merge: 'Waiting for GitHub merge',
   awaiting_checks: 'Waiting for CI',
   awaiting_plan_approval: 'Waiting for plan approval',
   needs_input: 'Action needed',
@@ -25,7 +26,7 @@ export function taskStatus(state: State, queued = false, role?: Job['role']) {
   return statusLabels[state];
 }
 
-export type TaskActivity = { task: Task; job?: Job; mergeStatus?: string };
+export type TaskActivity = { task: Task; job?: Job; mergeStatus?: string; assignedWorker?: number };
 
 export function outstandingActivity(item: TaskActivity) {
   return item.task.state !== 'complete' || (item.task.pr?.state === 'open' && !!item.mergeStatus);
@@ -35,9 +36,17 @@ export function taskActivity(
   tasks: Task[],
   jobs: Job[],
   mergeStatus?: (task: Task) => string | undefined,
+  slots: WorkerSlot[] = [],
 ): TaskActivity[] {
   const byId = new Map<string, TaskActivity>(
-    tasks.map((task) => [task.id, { task, mergeStatus: mergeStatus?.(task) }]),
+    tasks.map((task) => [
+      task.id,
+      {
+        task,
+        mergeStatus: mergeStatus?.(task),
+        assignedWorker: slots.find((slot) => slot.taskId === task.id)?.number,
+      },
+    ]),
   );
   const ordered = new Set<TaskActivity>();
   for (const job of jobs) {
@@ -49,12 +58,14 @@ export function taskActivity(
   return [...new Set([...ordered, ...byId.values()])];
 }
 
-export function activityStatus({ task, job, mergeStatus }: TaskActivity) {
+export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
-  if (task.fixingMergeConflict && task.state === 'fixing')
-    return job?.status === 'queued'
-      ? 'Waiting for a worker to resolve the merge conflict'
-      : 'Resolving the merge conflict';
+  if (task.fixingMergeConflict && task.state === 'fixing') {
+    if (job?.status === 'running') return 'Resolving the merge conflict';
+    return assignedWorker
+      ? `Conflict repair queued for worker ${assignedWorker}`
+      : 'Waiting for a free worker to resolve the merge conflict';
+  }
   if (
     task.workerReport &&
     task.state === 'reviewing' &&
