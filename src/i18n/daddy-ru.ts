@@ -548,6 +548,31 @@ export const daddyRu: Record<string, string> = {
     'Для продолжения исправления конфликта включи автослияние.',
   'Reviewer context was full. Restarting the independent review.':
     'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Disk cleanup': 'Очистка диска',
+  'Enable scheduled cleanup': 'Включить плановую уборку',
+  'Disable scheduled cleanup': 'Выключить плановую уборку',
+  'Cleanup skill': 'Скилл чистильщика',
+  'Every {minutes} min when disk usage exceeds {percent}%':
+    'Каждые {minutes} мин при заполнении диска выше {percent}%',
+  'Cleanup in progress': 'Идёт уборка',
+  'Last disk check': 'Последняя проверка диска',
+  'Next disk check': 'Следующая проверка диска',
+  'Last cleanup': 'Последняя уборка',
+  'Cleanup threshold (%)': 'Порог заполнения диска (%)',
+  'Check interval (minutes)': 'Интервал проверки (минуты)',
+  'New skill path on the server': 'Путь к новому скиллу на сервере',
+  'Remove cleanup skill': 'Убрать скилл чистильщика',
+  'Cleanup settings saved': 'Настройки уборки сохранены',
+  'Enable automatic cache cleanup on the host first':
+    'Сначала включи автоочистку на сервере командой daddy cache auto on',
+  'The cleanup threshold must be lower than the pause threshold':
+    'Порог уборки должен быть ниже порога приостановки задач',
+  'Send /cleanup in the private bot chat to manage disk cleanup.':
+    'Управление уборкой доступно в личке бота. Отправь /cleanup.',
+  'Use /cleanup, /cleanup threshold N, /cleanup interval N or /cleanup skill PATH':
+    'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
+  'No cleanup skill': 'Скилл не задан',
+  'Refresh cleanup status': 'Обновить статус уборки',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',
   'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
   'Draft PR: mark it ready for review on GitHub':

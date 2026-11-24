@@ -35,6 +35,7 @@ export function botSettings(locale: Locale): TelegramCard {
     ...new TelegramText().add(t('Bot settings'), 'bold'),
     buttons: [
       [{ text: t('Repositories'), callback_data: 'dad:workspaces' }],
+      [{ text: t('Disk cleanup'), callback_data: 'cleanup:show' }],
       [
         { text: t('Telegram group'), callback_data: 'dad:group' },
         { text: t('Notifications'), callback_data: 'notifications:show' },

@@ -1480,6 +1480,15 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/notifications') return await this.callback('notifications:show', destination);
+      if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.t('Send /cleanup in the private bot chat to manage disk cleanup.'),
+          ),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+        return true;
+      }
       if (text === '/updates' && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(this.t('Open the private bot chat for CLI updates.')),

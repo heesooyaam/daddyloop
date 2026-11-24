@@ -48,6 +48,8 @@ Before disk-heavy work inspect `df -h /home` and available RAM. Arcadia stores/m
 
 ### Scheduled cleanup
 
+Open **Disk cleanup** in the web sidebar. In the paired private bot chat, select **Settings → Disk cleanup** or send `/cleanup`. Use the button to enable or disable the schedule. The commands `/cleanup threshold 89`, `/cleanup interval 30` and `/cleanup skill /path/to/SKILL.md` set the threshold, interval and skill. Changes from the web and Telegram apply immediately and survive a restart.
+
 Enable scheduled cleanup separately. It checks the filesystem that holds the service data even when there are no open sessions. Cleanup runs in the background when usage exceeds the configured threshold. The check interval is at least 30 minutes. The default cleanup threshold is 80%, and the emergency pause threshold is configured separately.
 
 ```bash
