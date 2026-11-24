@@ -100,6 +100,8 @@ export class Broker {
     const task = this.store.getTask(job.taskId);
     if (task.generation !== job.generation || task.state === 'paused')
       throw new AppError('stale_run', 'This run no longer has permission to change the task');
+    if (job.kind === 'verify_merge')
+      throw new AppError('role_forbidden', 'Merge verification is read-only', 403);
     if (!Object.hasOwn(schemas, tool))
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))

@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -5,8 +6,6 @@ import {
   assertTaskVersion,
   type ExpectedTask,
   isTicket,
-  prRef,
-  sameRevision,
   now,
   type AgentProfiles,
   type PRRef,
@@ -15,13 +14,38 @@ import {
   type WorkerRequest,
   type TicketRef,
 } from './types.js';
-import { TicketReader } from '../modules/repositories/tickets.js';
+import { parseTicket, TicketReader } from '../modules/repositories/tickets.js';
 import { ArcBridge } from '../integrations/arcadia.js';
 import { Workspaces } from '../runtime/workspaces.js';
 import { allRepositories } from '../modules/repositories/index.js';
 import type { RepositoryRegistry } from '../modules/repositories/registry.js';
 import { redact } from './security.js';
 import { taskReference } from './task-activity.js';
+
+// Only a declared source or a standalone issue URL identifies the work item.
+// Links in acceptance criteria can refer to parent issues or unrelated examples.
+export function githubTaskIssue(
+  text: string,
+  workspace: Pick<Workspace, 'host' | 'provider' | 'repo'>,
+) {
+  if (workspace.provider !== 'github') return;
+  const declared = text.match(
+    /^(?:GitHub issue|Тикет GitHub)\s*[:—-]\s*(https:\/\/[^\s]+)\s*$/im,
+  )?.[1];
+  const url = declared ?? text.trim().match(/^['"]?(https:\/\/[^\s'"]+)['"]?$/)?.[1];
+  if (!url) return;
+  try {
+    const address = parseTicket(url);
+    if (
+      address.kind === 'github_issue' &&
+      address.host === workspace.host &&
+      address.repo.toLowerCase() === workspace.repo.toLowerCase()
+    )
+      return address.url;
+  } catch {
+    /* Free-form tasks need no native ticket. */
+  }
+}
 
 export class TicketWorkflow {
   readonly reader: TicketReader;
@@ -32,10 +56,14 @@ export class TicketWorkflow {
     private arc = new ArcBridge(),
     private repositories: RepositoryRegistry = allRepositories(),
   ) {
-    this.reader = reader ?? new TicketReader(undefined, undefined, undefined, repositories);
+    this.reader =
+      reader ?? new TicketReader(undefined, undefined, undefined, repositories, engine.store);
   }
   async start(input: {
     source: string;
+    dependsOn?: string[];
+    workerRequest?: WorkerRequest;
+    startImplementation?: boolean;
     repoPath?: string;
     parentTaskId?: string;
     base?: string;
@@ -71,6 +99,9 @@ export class TicketWorkflow {
     const task = await this.engine.createTicket({
       ...repository,
       source: imported.source,
+      dependsOn: input.dependsOn,
+      workerRequest: input.workerRequest,
+      startImplementation: input.startImplementation,
       parentTaskId: input.parentTaskId,
       requirements: input.requirements,
       agents: input.agents,
@@ -84,6 +115,7 @@ export class TicketWorkflow {
     return task;
   }
   async local(input: {
+    source?: string;
     workspace: Workspace;
     groupId: string;
     groupGeneration: number;
@@ -96,6 +128,40 @@ export class TicketWorkflow {
   }) {
     const id = randomUUID(),
       workspace = input.workspace;
+    const issue = input.source
+      ? githubTaskIssue(input.source, workspace)
+      : githubTaskIssue(input.requirements, workspace);
+    if (input.source && !issue)
+      throw new AppError(
+        'workspace_mismatch',
+        'Choose the GitHub issue in the task workspace',
+        422,
+      );
+    if (issue) {
+      const existing = this.engine.store
+        .tasks(input.groupId)
+        .find((t) => t.source?.url === issue && t.state !== 'complete');
+      if (existing) {
+        if (existing.repoPath !== workspace.repoPath || existing.scope !== workspace.scope)
+          throw new AppError(
+            'ticket_workspace_conflict',
+            'The ticket already belongs to another workspace',
+            422,
+          );
+        if (input.startImplementation && existing.state === 'discussing')
+          await this.engine.implement(existing.id, input.createdByAction);
+        return this.engine.store.getTask(existing.id);
+      }
+      return this.start({
+        ...input,
+        source: issue,
+        repoPath: workspace.repoPath,
+        base: workspace.base,
+        scope: workspace.scope,
+        workspaceId: workspace.id,
+        workspaceIsolation: workspace.copyMode,
+      });
+    }
     this.repositories.get(workspace.provider);
     const url = `https://${workspace.host}/${workspace.provider === 'arcadia' ? 'arc' : workspace.repo}#daddyloop-${id}`;
     const ref: TicketRef = {
@@ -137,32 +203,25 @@ export class TicketWorkflow {
       },
     });
   }
-  async pushFixes(id: string) {
-    const submitted = await this.engine.lock(id, async () => {
-      const store = this.engine.store;
-      const task = store.getTask(id);
-      if (task.state !== 'awaiting_push' || !task.pr || !task.revision || store.busy(id)) return;
-      const ref = prRef(task);
-      const pending = task.pendingAuthorHead;
-      if (!pending || pending === task.revision.head) return;
-      const current = await this.engine.provider(ref).getPR(ref);
-      if (
-        current.state !== 'open' ||
-        current.branch !== task.pr.branch ||
-        current.cloneUrl !== task.pr.cloneUrl ||
-        (current.head !== pending && !sameRevision(current, task.revision))
-      )
-        throw new AppError(
-          'stale_revision',
-          'The PR changed before the saved fixes could be sent. The local commit was preserved.',
-        );
-      if (current.head !== pending) {
-        await this.workspaces.pushSavedFix(task, pending);
-        store.event(id, 'author.submitted', { head: pending, pushed: true });
-      }
-      return true;
+  async refreshIssueSource(id: string) {
+    return this.engine.lock(id, async () => {
+      const task = this.engine.store.getTask(id);
+      if (task.ref.kind === 'ticket' || task.source?.kind !== 'local') return;
+      const url = githubTaskIssue(task.requirements, task.ref);
+      if (!url) return;
+      const imported = await this.reader.read(url);
+      if (imported.source.kind !== 'github_issue' || imported.source.url !== url) return;
+      const latest = this.engine.store.getTask(id);
+      if (latest.source?.kind !== 'local' || latest.ref.url !== task.ref.url) return;
+      latest.source = imported.source;
+      this.engine.store.transaction(() => {
+        this.engine.store.saveTask(latest);
+        this.engine.store.event(id, 'ticket.source_restored', { url });
+      });
     });
-    if (submitted) await this.engine.reconcile(id);
+  }
+  async pushFixes(id: string) {
+    await this.engine.submitSavedFix(id, (task, head) => this.workspaces.pushSavedFix(task, head));
   }
 
   async submit(id: string, expected?: ExpectedTask): Promise<Task> {
@@ -189,7 +248,16 @@ export class TicketWorkflow {
       )
         .slice(0, 230)
         .join('');
+      const issue =
+        task.source?.kind === 'github_issue'
+          ? githubTaskIssue(task.source.url, task.ref)
+          : task.source?.kind === 'local'
+            ? githubTaskIssue(task.requirements, task.ref)
+            : undefined;
+      const closes = issue ? `\n\nCloses #${parseTicket(issue).number}` : '';
       const body = `Source: ${task.source?.url ?? task.ref.url}\n\n<!-- ${marker} -->`;
+      // Keep the durable request identity compatible with submissions predating closing links.
+      const publishedBody = issue ? `Source: ${issue}${closes}\n\n<!-- ${marker} -->` : body;
       task.state = 'submitting';
       task.resumeState = 'submitting';
       task.reason = 'Creating the native PR for the shared reviewer';
@@ -216,7 +284,7 @@ export class TicketWorkflow {
             title,
             body,
           },
-          () => submission.create(task, title, body),
+          () => submission.create(task, title, publishedBody),
           async () => {
             const value = await submission.find(task, marker, owner);
             return value ? { found: true, value } : { found: false };
@@ -227,7 +295,7 @@ export class TicketWorkflow {
       } catch (error) {
         const latest = this.engine.store.getTask(id);
         if (latest.generation === generation && latest.state !== 'paused') {
-          latest.state = 'needs_input';
+          latest.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
           latest.reason = redact(String(error));
           this.engine.store.saveTask(latest);
           this.engine.store.event(id, 'task.state', { state: latest.state, reason: latest.reason });
@@ -241,9 +309,11 @@ export class TicketWorkflow {
       await this.engine.lock(id, async () => {
         const task = this.engine.store.getTask(id);
         if (isTicket(task) && task.state === 'submitting') {
-          task.state = 'needs_input';
+          task.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
           task.reason =
-            'The PR was created but the task changed. Submit again to reconcile and connect it.';
+            error instanceof GitHubQuotaError
+              ? error.message
+              : 'The PR was created but the task changed. Submit again to reconcile and connect it.';
           this.engine.store.saveTask(task);
         }
       });

@@ -5,6 +5,7 @@ import { DaddyWorkspace } from './daddy.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowRight, LoaderCircle, LockKeyhole, RefreshCw } from 'lucide-react';
+import './typography.css';
 import './style.css';
 import '@fontsource-variable/inter';
 import { ThemeProvider, ThemeButton } from './themes.js';

@@ -5,6 +5,7 @@ const mode = process.argv[2] ?? 'happy';
 const threadId = 'thread-fixture',
   turnId = 'turn-fixture';
 let result;
+let compacted = false;
 createInterface({ input: process.stdin }).on('line', (line) => {
   const m = JSON.parse(line);
   if (process.argv[3]) appendFileSync(process.argv[3], line + '\n');
@@ -17,7 +18,43 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         ? { id: m.id, error: { code: -32603, message: 'Policy update failed' } }
         : { id: m.id, result: {} },
     );
+  if (m.method === 'thread/compact/start') {
+    const id = 'compact-turn';
+    send({ method: 'turn/started', params: { threadId, turn: { id, status: 'inProgress' } } });
+    send({ id: m.id, result: {} });
+    send({
+      method: 'turn/completed',
+      params: {
+        threadId: 'unrelated',
+        turn: { id, status: 'completed', items: [{ type: 'contextCompaction' }] },
+      },
+    });
+    setTimeout(() => {
+      const status = mode === 'compact-fails' ? 'failed' : 'completed';
+      compacted = status === 'completed';
+      send({
+        method: 'item/completed',
+        params: { threadId, turnId: id, item: { type: 'contextCompaction' } },
+      });
+      send({ method: 'turn/completed', params: { threadId, turn: { id, status } } });
+    }, 40);
+  }
   if (m.method === 'turn/start') {
+    if (mode.startsWith('compact-') && (!compacted || mode === 'compact-overflows-again')) {
+      send({ id: m.id, result: { turn: { id: turnId } } });
+      send({
+        method: 'turn/completed',
+        params: {
+          threadId,
+          turn: {
+            id: turnId,
+            status: 'failed',
+            error: { codexErrorInfo: 'contextWindowExceeded' },
+          },
+        },
+      });
+      return;
+    }
     if (mode === 'exit') {
       process.exit(2);
     }

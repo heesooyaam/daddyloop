@@ -10,6 +10,7 @@ export type State =
   | 'awaiting_publication'
   | 'fixing'
   | 'awaiting_push'
+  | 'awaiting_merge'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'
@@ -74,6 +75,7 @@ export interface TicketSource {
   comments?: { id: string; author: string; body: string }[];
 }
 export type PRTask = Task & { ref: PRRef };
+export type AutoMergeMode = 'inherit' | 'on' | 'off';
 export interface ReviewGroup {
   titleSource?: 'placeholder' | 'goal' | 'manual';
   resourceWait?: { reasons: string[]; since: string; state: 'waiting' | 'repairing' | 'blocked' };
@@ -156,6 +158,11 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  draft?: boolean;
+  mergeable?: boolean | null;
+  mergeConflict?: boolean;
+  targetCloneUrl?: string;
+  mergeCommit?: string;
   title: string;
   body: string;
   branch: string;
@@ -232,9 +239,14 @@ export interface Task {
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
+  verifiedMerge?: Revision & { mergeCommit?: string };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  fixingMergeConflict?: boolean;
+  conflictCheckpoint?: string;
+  deferredWorkerInstructions?: { id: string; text: string }[];
+  pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
     Record<
@@ -305,7 +317,11 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat' | 'implement';
+  kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
+  freshContextRetry?: boolean;
+  timeoutRetry?: boolean;
+  deferredResult?: AgentResult;
+  errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;
   groupGeneration?: number;

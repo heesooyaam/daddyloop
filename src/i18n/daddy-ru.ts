@@ -508,6 +508,96 @@ export const daddyRu: Record<string, string> = {
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
+  'Auto-merge GitHub PRs': 'Автослияние PR в GitHub',
+  'Includes already reviewed open PRs in this session. Task overrides take precedence.':
+    'Настройка действует и для уже проверенных открытых PR сессии. У отдельной задачи можно выбрать свой режим.',
+  'Enable auto-merge for session': 'Включить автослияние для всей сессии',
+  'Disable auto-merge for session': 'Выключить автослияние для сессии',
+  'Use session setting (on)': 'Как в сессии (включено)',
+  'Use session setting (off)': 'Как в сессии (выключено)',
+  'On for this task': 'Включено для задачи',
+  'Off for this task': 'Выключено для задачи',
+  'Session default': 'Как в сессии',
+  'Auto-merge is available for GitHub sessions': 'Автослияние доступно для сессий GitHub',
+  'Merged on GitHub': 'PR влит в GitHub',
+  'GitHub merged a different revision': 'В GitHub влита другая ревизия',
+  'Waiting for passing CI': 'Ожидает успешных проверок CI',
+  'Waiting for a completed review of this revision': 'Ожидает завершения ревью этой ревизии',
+  'Could not stage a clean conflict resolution. Inspect the working copy for remaining conflict markers.':
+    'Не удалось подготовить исправление. Проверь оставшиеся маркеры конфликта в рабочей копии.',
+  'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.':
+    'В рабочей копии уже есть изменения. Их нужно проверить перед исправлением конфликта.',
+  'The merge conflict includes files outside the task scope. The working copy was preserved.':
+    'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
+  'Worker assigned to resolve the GitHub merge conflict':
+    'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for GitHub merge': 'Ожидает слияния PR в GitHub',
+  'Review complete. Waiting for GitHub to merge the PR.':
+    'Ревью завершено. Ожидает слияния PR в GitHub.',
+  'The reviewed revision needs verification before completion':
+    'Перед завершением задачи нужно проверить результат ревью.',
+  'Conflict repair queued for worker {number}': 'Исправление конфликта в очереди воркера №{number}',
+  'Waiting for a free worker to resolve the merge conflict':
+    'Для исправления конфликта нужен свободный воркер',
+  'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
+  'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'The PR changed during conflict resolution. Inspect the preserved worker copy.':
+    'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
+  'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
+    'Автослияние выключено. Исправление конфликта сохранено и ожидает отправки.',
+  'Enable auto-merge before resuming conflict resolution.':
+    'Для продолжения исправления конфликта включи автослияние.',
+  'Reviewer context was full. Restarting the independent review.':
+    'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Disk cleanup': 'Очистка диска',
+  'Enable scheduled cleanup': 'Включить плановую уборку',
+  'Disable scheduled cleanup': 'Выключить плановую уборку',
+  'Cleanup skill': 'Скилл чистильщика',
+  'Every {minutes} min when disk usage exceeds {percent}%':
+    'Каждые {minutes} мин при заполнении диска выше {percent}%',
+  'Cleanup in progress': 'Идёт уборка',
+  'Last disk check': 'Последняя проверка диска',
+  'Next disk check': 'Следующая проверка диска',
+  'Last cleanup': 'Последняя уборка',
+  'Cleanup threshold (%)': 'Порог заполнения диска (%)',
+  'Check interval (minutes)': 'Интервал проверки (минуты)',
+  'New skill path on the server': 'Путь к новому скиллу на сервере',
+  'Remove cleanup skill': 'Убрать скилл чистильщика',
+  'Cleanup settings saved': 'Настройки уборки сохранены',
+  'Enable automatic cache cleanup on the host first':
+    'Сначала включи автоочистку на сервере командой daddy cache auto on',
+  'The cleanup threshold must be lower than the pause threshold':
+    'Порог уборки должен быть ниже порога приостановки задач',
+  'Send /cleanup in the private bot chat to manage disk cleanup.':
+    'Управление уборкой доступно в личке бота. Отправь /cleanup.',
+  'Use /cleanup, /cleanup threshold N, /cleanup interval N or /cleanup skill PATH':
+    'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
+  'No cleanup skill': 'Скилл не задан',
+  'Refresh cleanup status': 'Обновить статус уборки',
+  'The PR or native draft changed. Inspect the interrupted review.':
+    'PR или черновик изменился. Проверь остановленное ревью.',
+  'Waiting for GitHub API quota until {time} UTC':
+    'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
+  'Review reached the run time limit': 'Ревью остановилось по таймауту',
+  'Continuing the independent review on the verified PR head':
+    'Независимое ревью продолжается на проверенном коммите PR',
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
+    'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
+  'Checking GitHub auto-merge': 'Проверяется автослияние PR',
+  'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'Draft PR: mark it ready for review on GitHub':
+    'PR в черновике. Отметь его готовым к ревью в GitHub',
+  'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
+  'Waiting for a published review with no outstanding findings':
+    'Ожидает публикации ревью с закрытыми замечаниями',
+  'PR or checks changed during the merge check': 'PR или состояние CI изменились во время проверки',
+  'Waiting for GitHub to confirm the previous merge request':
+    'Ожидает подтверждения предыдущего запроса на слияние',
+  'The PR is closed or its branches changed': 'PR закрыт или его ветки изменились',
+  'Could not check GitHub auto-merge': 'Не удалось проверить возможность автослияния в GitHub',
+  'GitHub refused the auto-merge check (HTTP {status})':
+    'GitHub отклонил запрос автослияния (HTTP {status})',
   'Task queue': 'Очередь задач',
   'No unfinished tasks.': 'Открытых задач нет.',
   'Task queued': 'Задача в очереди',

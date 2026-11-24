@@ -1,5 +1,6 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -8,6 +9,7 @@ import {
   CircleCheck,
   Folder,
   FolderGit2,
+  HardDrive,
   GitPullRequest,
   LoaderCircle,
   Menu,
@@ -29,6 +31,7 @@ import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
+import { CleanupPanel } from './cleanup.js';
 import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
@@ -47,6 +50,7 @@ import { profileText, taskReference, taskStatus } from '../core/task-activity.js
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const sidebarMedia = '(max-width: 850px)';
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -74,6 +78,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'settings'
       | 'updates'
       | 'notifications'
+      | 'cleanup'
       | 'limits'
       | 'presets'
       | 'delete'
@@ -83,8 +88,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null);
+    chatScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const media = matchMedia(sidebarMedia);
+    const resize = () => {
+      setNarrowLayout(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    resize();
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+  useLayoutEffect(() => {
+    if (menu) firstMenuItem.current?.focus();
+    else if (wasMenuOpen.current) menuButton.current?.focus();
+    wasMenuOpen.current = menu;
+  }, [menu]);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -100,8 +124,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     );
   }, [state.selected]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const chat = chatScroll.current;
+    if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!menu || !event.currentTarget.contains(event.target as Node)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenu(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length,
+    );
+    const from = event.shiftKey ? items[0] : items.at(-1);
+    const to = event.shiftKey ? items.at(-1) : items[0];
+    if (event.target === from) {
+      event.preventDefault();
+      to?.focus();
+    }
+  };
   const choose = (id: string) => {
     void model.select(id);
     setMenu(false);
@@ -126,7 +173,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   );
   return (
     <div className="daddy-app">
-      <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
+      <aside
+        id="daddy-sidebar"
+        className={'daddy-sidebar' + (menu ? ' open' : '')}
+        inert={narrowLayout && !menu}
+        onKeyDown={onMenuKeyDown}
+      >
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
           <span>
@@ -134,7 +186,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </span>
         </div>
         <p className="daddy-kicker">{t('daddy will handle it.')}</p>
-        <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
+        <button
+          ref={firstMenuItem}
+          className="daddy-button primary new-session"
+          onClick={() => setModal('new')}
+        >
           <Plus size={17} />
           {t('New session')}
         </button>
@@ -189,6 +245,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Workspaces')}
             <span>{state.workspaces.length}</span>
           </button>
+          <button onClick={() => setModal('cleanup')}>
+            <HardDrive size={17} />
+            {t('Disk cleanup')}
+          </button>
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
             {t('Notifications')}
@@ -206,6 +266,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Limits')}
             {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
           </button>
+          <ThemeButton showLabel />
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -227,23 +288,28 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <button
           className="daddy-shade"
           aria-label={t('Close menu')}
+          tabIndex={-1}
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main">
+      <main className="daddy-main" inert={menu}>
         <header className="daddy-topbar">
           <button
+            ref={menuButton}
             className="daddy-icon mobile-menu"
             aria-label={t('Sessions')}
+            aria-controls="daddy-sidebar"
+            aria-expanded={menu}
             onClick={() => setMenu(!menu)}
           >
             <Menu size={20} />
           </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
+            <span className="daddy-eyebrow" title={board?.workspace?.name}>
+              {board?.workspace?.name ?? 'daddyloop'}
+            </span>
+            <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
-          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button
@@ -354,7 +420,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
-                <div className="daddy-chat-scroll">
+                <div className="daddy-chat-scroll" ref={chatScroll}>
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
@@ -397,7 +463,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       {t('daddy is working')}
                     </div>
                   )}
-                  <div ref={end} />
                 </div>
                 <form
                   className="daddy-composer"
@@ -677,8 +742,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
-            onSave={async (profiles, instructions) => {
-              await model.action('settings', { profiles, instructions });
+            onSave={async (profiles, instructions, autoMerge) => {
+              await model.action('settings', { profiles, instructions, autoMerge });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -749,6 +814,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
+      {modal === 'cleanup' && (
+        <Dialog title={t('Disk cleanup')} onClose={() => setModal(null)}>
+          <CleanupPanel api={api} />
+        </Dialog>
+      )}
       {modal === 'notifications' && (
         <Dialog title={t('Notifications and Telegram')} onClose={() => setModal(null)}>
           <div className="daddy-telegram-setup">
@@ -777,7 +847,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => void model.refresh()} />
+          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
         </Dialog>
       )}
     </div>
@@ -1264,7 +1334,11 @@ function SessionSettings({
   onPreviewingChange: (previewing: boolean) => void;
   api: DaddyApi;
   board: DaddyBoard;
-  onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
+  onSave: (
+    profiles?: AgentProfiles,
+    instructions?: SessionInstructions,
+    autoMerge?: boolean,
+  ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
@@ -1278,6 +1352,8 @@ function SessionSettings({
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
+  const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const { catalogue, load } = useAgentCatalogue(api);
   const savingBlocked = busy || editingFolder || importingInstructions;
@@ -1293,11 +1369,29 @@ function SessionSettings({
             ? undefined
             : profiles,
           instructions,
+          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
       }}
     >
+      {board.workspace.provider === 'github' && (
+        <label className="daddy-toggle">
+          <input
+            type="checkbox"
+            checked={autoMerge}
+            onChange={(event) => setAutoMerge(event.target.checked)}
+          />
+          <span>
+            {t('Auto-merge GitHub PRs')}
+            <small className="daddy-muted">
+              {t(
+                'Includes already reviewed open PRs in this session. Task overrides take precedence.',
+              )}
+            </small>
+          </span>
+        </label>
+      )}
       {(['daddy', 'worker'] as const).map((role) => {
         const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
@@ -1360,7 +1454,7 @@ function TaskReport({
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
-  onChange: () => void;
+  onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
@@ -1424,12 +1518,57 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? value.task.reason)}</p>
+          {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
+            <label className="daddy-pool-control">
+              {t('Auto-merge GitHub PRs')}
+              <select
+                value={live.autoMerge.mode}
+                disabled={busy || !!board.group.deletion}
+                onChange={async (event) => {
+                  const mode = event.target.value;
+                  setBusy(true);
+                  setError('');
+                  try {
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await onChange();
+                  } catch (error) {
+                    setError((error as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <option value="inherit">
+                  {t(
+                    board.group.autoMerge
+                      ? 'Use session setting (on)'
+                      : 'Use session setting (off)',
+                  )}
+                </option>
+                <option value="on">{t('On for this task')}</option>
+                <option value="off">{t('Off for this task')}</option>
+              </select>
+            </label>
+          )}
+          {live?.autoMerge.result &&
+            (live.autoMerge.enabled || live.autoMerge.result.state !== 'waiting') && (
+              <p>{t(live.autoMerge.result.message)}</p>
+            )}
           {prUrl && (
             <a className="daddy-button outline" href={prUrl} target="_blank" rel="noreferrer">
               <GitPullRequest size={16} />
               {t('Open native review')}
               <ArrowUpRight size={15} />
             </a>
+          )}
+          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+            <button
+              className="daddy-button outline"
+              disabled={busy}
+              onClick={() => void action('verify-merge')}
+            >
+              {t('Verify merge')}
+            </button>
           )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button

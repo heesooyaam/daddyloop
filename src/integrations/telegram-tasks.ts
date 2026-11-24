@@ -10,6 +10,7 @@ import {
 } from '../core/types.js';
 import {
   activityStatus,
+  outstandingActivity,
   profileText,
   taskReference,
   type TaskActivity,
@@ -86,7 +87,7 @@ export function queueButtons(groupId: string, locale: Locale) {
 export function queueCard(locale: Locale, groupId: string, activity: TaskActivity[]): TelegramCard {
   const t = translator(locale);
   const text = new TelegramText().add(t('Task queue'), 'bold');
-  const tasks = activity.filter(({ task }) => task.state !== 'complete');
+  const tasks = activity.filter(outstandingActivity);
   const buttons: NonNullable<TelegramCard['buttons']> = [];
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
   for (const item of tasks) {
@@ -96,8 +97,8 @@ export function queueCard(locale: Locale, groupId: string, activity: TaskActivit
       .add(taskReference(task), 'code')
       .add('  ' + clipTitle(task.title, 90))
       .add('\n' + t(activityStatus(item)));
-    if (task.workerRequest?.slot)
-      text.add(' · ' + t('Worker {number}', { number: task.workerRequest.slot }));
+    const number = item.assignedWorker ?? task.workerRequest?.slot;
+    if (number) text.add(' · ' + t('Worker {number}', { number }));
     if (task.workerRequest?.profile) text.add(' · ' + profileText(task.workerRequest.profile));
   }
   for (let start = 0; start < Math.min(tasks.length, 9); start += 3)
@@ -140,7 +141,12 @@ export function workersCard(
   return { ...text, buttons: [[{ text: t('Back'), callback_data: `dad:open:${groupId}` }]] };
 }
 
-export function taskCard(locale: Locale, item: TaskActivity, slot?: WorkerSlot): TelegramCard {
+export function taskCard(
+  locale: Locale,
+  item: TaskActivity,
+  slot?: WorkerSlot,
+  merge?: ReturnType<typeof import('../core/auto-merge.js').autoMergeSettings>,
+): TelegramCard {
   const t = translator(locale);
   const { task } = item;
   const worker = slot?.number ?? task.workerRequest?.slot;
@@ -156,7 +162,25 @@ export function taskCard(locale: Locale, item: TaskActivity, slot?: WorkerSlot):
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
-  return { ...text, buttons: [queueButtons(task.groupId!, locale)] };
+  const buttons = [queueButtons(task.groupId!, locale)];
+  if (merge) {
+    text.add('\n\n' + t('Auto-merge GitHub PRs') + ' · ' + t(merge.enabled ? 'On' : 'Off'));
+    if (merge.result && (merge.enabled || merge.result.state !== 'waiting'))
+      text.add('\n' + t(merge.result.message));
+    buttons.unshift(
+      (['inherit', 'on', 'off'] as const).map((mode) => ({
+        text:
+          (merge.mode === mode ? '✓ ' : '') +
+          t(mode === 'inherit' ? 'Session default' : mode === 'on' ? 'On' : 'Off'),
+        callback_data: `dad:tm:${task.id}:${mode}`,
+      })),
+    );
+  }
+  if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
+    buttons.unshift([
+      { text: t('Verify merge'), callback_data: `dad:merge:${task.id}:${task.generation}` },
+    ]);
+  return { ...text, buttons };
 }
 
 export function queuedTaskCard(locale: Locale, task: Task): TelegramCard {

@@ -91,6 +91,41 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       profile: { model: 'gpt-6-astra', effort: 'max' },
     });
 
+    const click = (data: string, user = 7, topic = 17): Update => ({
+      update_id: ++updateId,
+      callback_query: {
+        id: String(updateId),
+        data,
+        from: { id: user },
+        message: {
+          chat: { id: -10042, type: 'supergroup' },
+          message_thread_id: topic,
+        },
+      },
+    });
+    await bot.handle(click(`dad:sm:${group.id}:on`, 99));
+    expect((await app.inject(session)).json().group.autoMerge).toBe(false);
+    await bot.handle(click(`dad:sm:${group.id}:on`));
+    expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
+      mode: 'inherit',
+      enabled: true,
+    });
+    await bot.handle(click(`dad:tm:${task!.id}:off`, 7, 18));
+    expect((await app.inject(session)).json().tasks[0].autoMerge.mode).toBe('inherit');
+    await bot.handle(click(`dad:tm:${task!.id}:off`));
+    expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
+      mode: 'off',
+      enabled: false,
+    });
+    const policyResponse = await app.inject({
+      method: 'POST',
+      url: session + '/tasks/' + task!.id + '/auto-merge',
+      payload: { mode: 'inherit' },
+    });
+    expect(policyResponse.statusCode).toBe(200);
+    await bot.handle(message(`/task ${id}`));
+    expect(lastText()).toContain('Auto-merge GitHub PRs · On');
+
     const input = { requirements: 'Task from web', requestId: randomUUID() };
     const enqueue = () => app.inject({ method: 'POST', url: session + '/tasks', payload: input });
     const queuedFromWeb = await enqueue();

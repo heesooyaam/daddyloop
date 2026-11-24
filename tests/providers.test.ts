@@ -1,3 +1,4 @@
+import { Store } from '../src/core/store.js';
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubProvider } from '../src/providers/github.js';
 import { GitLabProvider } from '../src/providers/gitlab.js';
@@ -106,6 +107,80 @@ describe('GitHub draft review contract', () => {
     expect(input.body).toBe(`${body}\n\n<!-- R1 -->`);
     expect(input.startSide).toBe('LEFT');
   });
+  it.each([
+    [false, 'dirty', true],
+    [null, 'unknown', false],
+    [true, 'blocked', false],
+    [true, 'behind', false],
+    [true, 'unstable', false],
+  ] as const)(
+    'distinguishes GitHub conflict from other merge blockers (%s, %s)',
+    async (mergeable, state, conflict) => {
+      const http = transport((path) => {
+        if (path.includes('/pulls/'))
+          return {
+            head: { sha: revision.head },
+            base: { sha: revision.base, ref: 'main' },
+            state: 'open',
+            mergeable,
+            mergeable_state: state,
+          };
+        if (path === '/repos/acme/service/git/ref/heads/main')
+          return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
+        return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+      });
+      expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).mergeConflict).toBe(
+        conflict,
+      );
+    },
+  );
+  it('pins an open PR to the live target ref and keeps the historical base after closure', async () => {
+    const tip = 'c'.repeat(40);
+    let state = 'open';
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return {
+          head: { sha: revision.head },
+          base: { ref: 'release/v1', sha: revision.base },
+          state,
+          merged: state === 'closed',
+        };
+      if (path.endsWith('/git/ref/heads/release/v1'))
+        return { ref: 'refs/heads/release/v1', object: { type: 'commit', sha: tip } };
+      return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+    });
+    const github = new GitHubProvider('github.com', 'fake', http);
+    expect(await github.getPR(ref)).toMatchObject({ base: tip, start: tip, head: revision.head });
+    state = 'closed';
+    expect(await github.getPR(ref)).toMatchObject({
+      base: revision.base,
+      start: revision.base,
+      state: 'merged',
+    });
+    expect(http.mock.calls.filter(([url]) => String(url).includes('/git/ref/'))).toHaveLength(1);
+  });
+  it('keeps identically named checks from distinct GitHub workflows', async () => {
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return {
+          head: { sha: revision.head },
+          base: { sha: revision.base, ref: 'main' },
+          state: 'open',
+        };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
+      if (path.includes('/status')) return { statuses: [] };
+      return {
+        check_runs: [
+          { name: 'test', check_suite: { id: 1 }, status: 'completed', conclusion: 'success' },
+          { name: 'test', check_suite: { id: 2 }, status: 'in_progress' },
+        ],
+      };
+    });
+    expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).checks).toBe(
+      'pending',
+    );
+  });
   it('does not infer success from a failed or stale CI run', async () => {
     const http = transport((path) => {
       if (path === '/repos/acme/service/pulls/12')
@@ -120,6 +195,8 @@ describe('GitHub draft review contract', () => {
           base: { sha: revision.base, ref: 'main' },
           state: 'open',
         };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
       if (path.includes('/status')) return { statuses: [{ context: 'unit', state: 'failure' }] };
       return {
         check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
@@ -239,4 +316,55 @@ it('rejects malformed PR URLs, credentials and path traversal', () => {
   ])
     expect(() => parsePR(url)).toThrow();
   expect(parsePR('https://gitlab.com/a/b/c/-/merge_requests/1').repo).toBe('a/b/c');
+});
+
+it('uses a permitted merge method and submits exactly the reviewed head to GitHub', async () => {
+  const http = transport((path, method, body) => {
+    if (method === 'GET' && path === '/repos/acme/service')
+      return { allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: true };
+    expect([method, path, body]).toEqual([
+      'PUT',
+      '/repos/acme/service/pulls/12/merge',
+      { sha: revision.head, merge_method: 'rebase' },
+    ]);
+    return { merged: true, sha: 'merged-commit' };
+  });
+  const write = await new GitHubProvider('github.com', 'fake', http).prepareMerge(ref);
+  await expect(write(revision.head)).resolves.toBe('merged-commit');
+});
+
+it('shares GitHub quota deadlines across provider instances and permits ordinary forbidden responses to be handled separately', async () => {
+  const store = new Store(':memory:');
+  const reset = Math.ceil(Date.now() / 1000) + 120;
+  const limited = transport(
+    () =>
+      new Response('{"message":"API rate limit exceeded"}', {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) },
+      }),
+  );
+  const normal = transport(
+    () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 }),
+  );
+  try {
+    const a = new GitHubProvider('github.com', 'fake', limited, store);
+    await expect(a.http.request('GET', '/user')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      until: reset * 1000 + 1000,
+      refusedWrite: false,
+    });
+    const b = new GitHubProvider('github.com', 'fake', normal, store);
+    await expect(b.http.request('PUT', '/repos/a/b')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      refusedWrite: true,
+    });
+    expect(normal).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    vi.setSystemTime(reset * 1000 + 2000);
+    await expect(b.http.request('GET', '/user')).rejects.toMatchObject({ code: 'provider_403' });
+    expect(normal).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+    store.close();
+  }
 });
