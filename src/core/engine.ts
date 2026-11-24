@@ -61,6 +61,16 @@ function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest)
   );
 }
 
+const interruptedByRestart =
+  'Server restarted during this run. Its external effects must be reconciled before retry.';
+function restartInterrupted(task: Task, job: Job) {
+  return (
+    job.status === 'failed' &&
+    job.generation + 1 === task.generation &&
+    job.error === interruptedByRestart &&
+    task.reason === interruptedByRestart
+  );
+}
 const dirtyConflictCopy =
   'AppError: The worker copy contains earlier changes. Inspect them before resolving the merge conflict.';
 export function staleConflictPreparation(task: Task) {
@@ -484,11 +494,12 @@ export class Engine {
     return (
       !this.draftHasWork(handle, draft) ||
       (this.recordedDraft(task, draft) &&
-        (await this.provider(prRef(task)).targetAdvanced?.(
-          prRef(task),
-          handle.revision.base,
-          pr.base,
-        )) === true)
+        (sameRevision(handle.revision, pr) ||
+          (await this.provider(prRef(task)).targetAdvanced?.(
+            prRef(task),
+            handle.revision.base,
+            pr.base,
+          )) === true))
     );
   }
   async retryInterruptedStep(id: string) {
@@ -527,7 +538,13 @@ export class Engine {
         previous.branch === task.pr?.branch &&
         previous.baseBranch === task.pr.targetBranch &&
         previous.cloneUrl === task.pr.cloneUrl;
-      if (!movedBase && (job.status !== 'failed' || job.generation !== task.generation)) return;
+      const restarted = restartInterrupted(task, job);
+      if (
+        !movedBase &&
+        !restarted &&
+        (job.status !== 'failed' || job.generation !== task.generation)
+      )
+        return;
       const quota = job.errorCode === 'github_rate_limit' || legacyQuotaRead(job.error);
       if (
         quota &&
@@ -564,6 +581,7 @@ export class Engine {
           'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
       if (
         !quota &&
+        !restarted &&
         !movedBase &&
         !staleStart &&
         !((context || timeout) && autoMergeEnabled(this.store, task))
@@ -591,7 +609,10 @@ export class Engine {
           );
         return;
       }
-      if (!sameRevision(task.review.revision, pr) && !(await this.canCarryDraft(task, pr, draft))) {
+      if (
+        (restarted || !sameRevision(task.review.revision, pr)) &&
+        !(await this.canCarryDraft(task, pr, draft))
+      ) {
         if (!context)
           this.state(
             task,
@@ -607,7 +628,7 @@ export class Engine {
         currentGroup.deletion ||
         currentGroup.daddyState === 'paused' ||
         currentGroup.daddyState === 'archived' ||
-        (!quota && !movedBase && !staleStart && !autoMergeEnabled(this.store, task))
+        (!quota && !restarted && !movedBase && !staleStart && !autoMergeEnabled(this.store, task))
       )
         return;
       this.store.transaction(() => {
@@ -619,6 +640,8 @@ export class Engine {
           currentGroup.reviewerThreadId = undefined;
           this.store.saveGroup(currentGroup);
         }
+        if (restarted && this.draftHasWork(task.review!, draft))
+          task.draftRecheck = { commentIds: draft.comments.map((comment) => comment.id) };
         const retry = this.restartNativeReview(
           task,
           pr,
@@ -771,22 +794,39 @@ export class Engine {
       )
         return;
       const job = this.store.jobs(id).at(-1);
-      if (!job || job.kind !== 'fix' || job.generation !== task.generation) return;
-
-      if (
+      if (!job || job.kind !== 'fix') return;
+      const restarted = restartInterrupted(task, job);
+      if (!restarted && job.generation !== task.generation) return;
+      const staleStart =
         job.status === 'failed' &&
         job.errorCode === 'stale_revision' &&
         job.error === task.reason &&
         job.error ===
-          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.'
-      ) {
+          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
+      if (staleStart || restarted) {
         if (
-          !(await this.publishedFixBaseAdvanced(
-            task,
-            await this.provider(prRef(task)).getPR(prRef(task)),
-          ))
+          task.ref.provider !== 'github' ||
+          !task.reviewFinished ||
+          !task.review ||
+          task.snapshot?.status !== 'published' ||
+          !sameRevision(task.review.revision, task.revision) ||
+          (task.pendingAuthorHead && task.pendingAuthorHead !== task.revision?.head)
         )
           return;
+        const ref = prRef(task),
+          provider = this.provider(ref);
+        const pr = await provider.getPR(ref);
+        const same =
+          sameRevision(pr, task.revision) && sameOpenTarget(task.pr, pr) && pr.draft === false;
+        if (!(restarted && same) && !(await this.publishedFixBaseAdvanced(task, pr))) return;
+        if (restarted) {
+          const native = await provider.getReview(ref, task.review);
+          const pending = this.store.db
+            .prepare("SELECT 1 FROM operations WHERE task_id=? AND status='pending'")
+            .get(task.id);
+          if (pending || native.status !== 'published' || native.revision.head !== pr.head) return;
+          task.feedback = native;
+        }
         const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
         if (
           group &&
@@ -801,7 +841,9 @@ export class Engine {
           this.state(
             task,
             'fixing',
-            'The target branch advanced. Continuing the published feedback on the same PR commit.',
+            restarted
+              ? 'Continuing the interrupted fix against confirmed published feedback.'
+              : 'The target branch advanced. Continuing the published feedback on the same PR commit.',
           );
           this.store.enqueue(task, 'author', 'fix', job.input);
         });
@@ -1982,8 +2024,8 @@ export class Engine {
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
         job.status = 'failed';
-        job.error =
-          'Server restarted during this run. Its external effects must be reconciled before retry.';
+        job.error = interruptedByRestart;
+        job.errorCode = 'server_restarted';
         job.finishedAt = now();
         this.store.saveJob(job);
         const task = this.store.getTask(job.taskId);

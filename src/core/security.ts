@@ -22,6 +22,22 @@ export function redact(value: unknown): string {
       '$1$2[REDACTED]',
     );
 }
+// Scrub protocol fields before the store serializes them. Replacing bytes in encoded
+// JSON can remove an escape next to a quote inside a perfectly valid command string.
+export function redactEvent(value: unknown): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map(redactEvent);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redact(key),
+        /^(authorization|private-token|access_token|api_key)$/i.test(key)
+          ? '[REDACTED]'
+          : redactEvent(item),
+      ]),
+    );
+  return value ?? null;
+}
 export function safeEqual(a: string, b: string) {
   const x = Buffer.from(a),
     y = Buffer.from(b);

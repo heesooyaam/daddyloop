@@ -34,7 +34,7 @@ import type { Worker } from '../runtime/worker.js';
 import type { SessionRuntime } from '../runtime/agent.js';
 import { DaddyWorkspace } from '../runtime/daddy-workspace.js';
 import { daddySchemas, daddyTools } from './daddy-tools.js';
-import { redact } from './security.js';
+import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
 import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
@@ -1003,12 +1003,7 @@ export class Daddy {
           this.store.event(group.id, 'daddy.session_attached', {}, job.id);
         },
         onEvent: (type, data) =>
-          this.store.event(
-            group.id,
-            `daddy.${type}`,
-            JSON.parse(redact(JSON.stringify(data ?? null))),
-            job.id,
-          ),
+          this.store.event(group.id, `daddy.${type}`, redactEvent(data), job.id),
         onAssistantMessage: ({ id, text }) => {
           if (
             job.status !== 'running' ||

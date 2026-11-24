@@ -282,6 +282,17 @@ describe('opt-in GitHub merging', () => {
         review: { id: handle.id },
         draftRecheck: { commentIds: [id] },
       });
+      // Reopening the store first fences the crashed reviewer. Only its confirmed native work can be resumed.
+      const interrupted = f.store.claim()!;
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id },
+        draftRecheck: { commentIds: [id] },
+      });
+      expect(f.store.jobs(old.id).find((j) => j.id === interrupted.id)?.status).toBe('failed');
       const first = f.store.claim()!;
       const result = {
         status: 'completed' as const,
@@ -448,65 +459,80 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
-  it('keeps published fixes pinned across a target advance and recovers a pre-upgrade admission failure', async () => {
-    const f = await setup();
-    try {
-      await f.engine.review(f.task.id, true);
-      const review = f.store.claim()!;
-      const pinned = f.store.getTask(f.task.id).revision!;
-      await f.engine.broker.call(review, 'add_comment', { key: 'action', body: 'Fix the layout' });
-      await f.engine.completeJob(review, {
-        status: 'completed',
-        summary: 'Found an issue',
-        checkedHead: pinned.head,
-      });
-      f.store.saveJob({ ...review, status: 'completed' });
-      await f.engine.publish(f.task.id);
-      const original = f.store.activeJobs(f.task.id)[0];
-      const target = 'd'.repeat(40);
-      const advanced = vi.fn(
-        async (_ref: unknown, before: string, after: string) =>
-          before === pinned.base && after === target,
-      );
-      Object.assign(f.provider, { targetAdvanced: advanced });
-      f.setRemote({ base: target, start: target });
-      await f.engine.reconcile(f.task.id);
-      expect(f.store.activeJobs(f.task.id).map((j) => j.id)).toEqual([original.id]);
-      const job = f.store.claim()!;
-      const error = new AppError(
-        'stale_revision',
-        'The PR changed before the queued job started. Reconcile and review the new revision.',
-      );
-      f.engine.failJob(job, error);
-      f.store.saveJob({ ...job, status: 'failed', errorCode: error.code, error: String(error) });
-      f.setRemote({ head: 'e'.repeat(40) });
-      const checkpoint = vi.fn();
-      await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
-      expect(f.store.getTask(f.task.id).state).toBe('needs_input');
-      f.setRemote({ head: pinned.head });
-      await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
-      expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'fixing', revision: pinned });
-      expect(f.store.activeJobs(f.task.id)).toHaveLength(1);
-      expect(checkpoint).not.toHaveBeenCalled();
-      vi.spyOn(f.checkouts, 'prepare').mockResolvedValue(f.dir);
-      const saved = 'f'.repeat(40);
-      vi.spyOn(f.checkouts, 'commitFix').mockResolvedValue(saved);
-      f.agentRuntime.run.mockImplementationOnce(async (input) => {
-        expect(input.task.feedback?.comments[0]?.body).toContain('Fix the layout');
-        return { status: 'completed', summary: 'Layout fixed', checkedHead: pinned.head };
-      });
-      await f.worker.tick();
-      await vi.waitFor(() =>
-        expect(f.store.getTask(f.task.id)).toMatchObject({
-          state: 'awaiting_push',
-          pendingAuthorHead: saved,
-        }),
-      );
-      expect(f.agentRuntime.run).toHaveBeenCalledOnce();
-    } finally {
-      await f.close();
-    }
-  });
+  it.each(['stale admission', 'restart on same base', 'restart with advanced base'] as const)(
+    'continues a published fix after %s while keeping its original head',
+    async (cause) => {
+      const f = await setup();
+      try {
+        await f.engine.review(f.task.id, true);
+        const review = f.store.claim()!;
+        const pinned = f.store.getTask(f.task.id).revision!;
+        await f.engine.broker.call(review, 'add_comment', {
+          key: 'action',
+          body: 'Fix the layout',
+        });
+        await f.engine.completeJob(review, {
+          status: 'completed',
+          summary: 'Found an issue',
+          checkedHead: pinned.head,
+        });
+        f.store.saveJob({ ...review, status: 'completed' });
+        await f.engine.publish(f.task.id);
+        const original = f.store.activeJobs(f.task.id)[0];
+        const target = 'd'.repeat(40);
+        const advanced = vi.fn(
+          async (_ref: unknown, before: string, after: string) =>
+            before === pinned.base && after === target,
+        );
+        Object.assign(f.provider, { targetAdvanced: advanced });
+        if (cause !== 'restart on same base') f.setRemote({ base: target, start: target });
+        await f.engine.reconcile(f.task.id);
+        expect(f.store.activeJobs(f.task.id).map((j) => j.id)).toEqual([original.id]);
+        const job = f.store.claim()!;
+        const error = new AppError(
+          'stale_revision',
+          'The PR changed before the queued job started. Reconcile and review the new revision.',
+        );
+        if (cause === 'stale admission') {
+          f.engine.failJob(job, error);
+          f.store.saveJob({
+            ...job,
+            status: 'failed',
+            errorCode: error.code,
+            error: String(error),
+          });
+        } else {
+          f.engine.recoverInterruptedJobs();
+        }
+        f.setRemote({ head: 'e'.repeat(40) });
+        const checkpoint = vi.fn();
+        await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
+        expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+        f.setRemote({ head: pinned.head });
+        await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
+        expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'fixing', revision: pinned });
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(1);
+        expect(checkpoint).not.toHaveBeenCalled();
+        vi.spyOn(f.checkouts, 'prepare').mockResolvedValue(f.dir);
+        const saved = 'f'.repeat(40);
+        vi.spyOn(f.checkouts, 'commitFix').mockResolvedValue(saved);
+        f.agentRuntime.run.mockImplementationOnce(async (input) => {
+          expect(input.task.feedback?.comments[0]?.body).toContain('Fix the layout');
+          return { status: 'completed', summary: 'Layout fixed', checkedHead: pinned.head };
+        });
+        await f.worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'awaiting_push',
+            pendingAuthorHead: saved,
+          }),
+        );
+        expect(f.agentRuntime.run).toHaveBeenCalledOnce();
+      } finally {
+        await f.close();
+      }
+    },
+  );
   it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
     const f = await setup();
     try {
