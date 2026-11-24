@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { translator } from '../../src/i18n/index.js';
+import type { UsageView } from '../../src/core/usage.js';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -300,16 +302,177 @@ test.describe('limits on a touch screen', () => {
     await expect(indicator).toHaveAttribute('aria-expanded', 'false');
   });
 });
-test('offers access to limits when the server has never returned readings', async ({ page }) => {
-  await page.route('**/api/usage', (route) => route.abort());
+test('distinguishes the first limits read, an error and a successful empty response', async ({
+  page,
+}) => {
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let recovered = false;
+  await page.route('**/api/usage*', async (route) => {
+    if (new URL(route.request().url()).searchParams.has('refresh')) recovered = true;
+    if (recovered) return route.fulfill({ json: { agents: [] } });
+    await hold;
+    return route.fulfill({
+      status: 503,
+      json: { error: { message: 'Quota service unavailable' } },
+    });
+  });
   await login(page);
   const indicator = page.getByRole('button', { name: 'Agent limits' });
-  await indicator.hover();
-  await expect(page.getByRole('tooltip')).toHaveText('No quota readings yet');
-  await indicator.click();
   const details = page.getByRole('region', { name: 'Agent limit details' });
-  await expect(details.getByText('No quota readings yet')).toBeVisible();
+  const main = page.getByRole('main');
+  try {
+    await indicator.hover();
+    await expect(page.getByRole('tooltip')).toHaveText('Reading agent limits…');
+    await indicator.click();
+    await expect(details.getByText('Reading agent limits…')).toBeVisible();
+    await details.getByRole('link', { name: 'Open limits page' }).click();
+    await expect(main.getByText('Reading agent limits…')).toBeVisible();
+  } finally {
+    release();
+  }
+  const reason = 'Could not read agent limits: Quota service unavailable';
+  await expect(main.getByRole('alert')).toHaveText(reason);
+  await main.getByRole('link', { name: 'Back to workspace' }).click();
+  await indicator.hover();
+  await expect(page.getByRole('tooltip')).toHaveText(reason);
+  await indicator.click();
+  await expect(details.getByRole('alert')).toHaveText(reason);
   await details.getByRole('link', { name: 'Open limits page' }).click();
-  await expect(page.getByRole('main').getByText('No quota readings yet')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Refresh limits' })).toBeEnabled();
+  await main.getByRole('button', { name: 'Refresh limits' }).click();
+  await expect(main.getByText('No quota readings yet')).toBeVisible();
+  await expect(main.getByRole('alert')).toHaveCount(0);
 });
+
+for (const locale of ['en', 'ru'] as const) {
+  test(`shows fresh ${locale} quotas and enables reset even when workspace loading fails`, async ({
+    page,
+  }) => {
+    const t = translator(locale);
+    await login(page);
+    const usage = (await (await page.request.get('/api/usage')).json()) as UsageView;
+    let usageFails = false;
+    await page.route('**/api/preferences', (route) =>
+      route.fulfill({ json: { locale, version: 1 } }),
+    );
+    await page.route('**/api/status', (route) =>
+      route.fulfill({ status: 503, json: { error: { message: 'Server status unavailable' } } }),
+    );
+    await page.route('**/api/usage*', (route) => {
+      if (new URL(route.request().url()).searchParams.has('refresh')) usageFails = false;
+      return usageFails
+        ? route.fulfill({ status: 503, json: { error: { message: 'Quota service unavailable' } } })
+        : route.fulfill({ json: usage });
+    });
+    await page.reload();
+    await expect(page.getByRole('alert')).toHaveText(/Server status unavailable/);
+    await page.getByRole('link', { name: t('Limits'), exact: true }).click();
+    const main = page.getByRole('main');
+    const reset = main.getByRole('button', { name: t('Use a reset'), exact: true });
+    const stale = main.getByText(t('These readings are outdated. Refresh before using a reset.'));
+    await expect(reset).toBeEnabled();
+    usageFails = true;
+    await expect(stale).toBeVisible();
+    await expect(reset).toBeDisabled();
+    await main.getByRole('button', { name: t('Refresh limits'), exact: true }).click();
+    await expect(stale).toBeHidden();
+    await expect(reset).toBeEnabled();
+  });
+}
+
+for (const latest of ['refresh', 'reset'] as const) {
+  test(`keeps the latest quota ${latest} after an earlier manual refresh returns`, async ({
+    page,
+  }) => {
+    const usage = (remainingPercent: number, resets: number): UsageView => ({
+      agents: [
+        {
+          engine: 'codex',
+          name: 'Codex',
+          source: 'fixture',
+          available: true,
+          stale: false,
+          buckets: [
+            {
+              id: 'codex',
+              name: 'Codex',
+              windows: [{ remainingPercent, durationMinutes: 10080 }],
+            },
+          ],
+          resets: { availableCount: resets, canUse: true, credits: [] },
+        },
+      ],
+    });
+    const before = usage(0, 3);
+    const after = usage(100, latest === 'reset' ? 2 : 3);
+    let current = before;
+    let calls = 0;
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const plan = {
+      id: 'cf78e04c-8d78-45b6-9e65-dde614e9f871',
+      title: 'Full reset',
+      availableCount: 3,
+      expiresAt: new Date(Date.now() + 300000).toISOString(),
+      status: 'ready',
+    };
+    await page.route('**/api/usage/reset/prepare', (route) => route.fulfill({ json: plan }));
+    await page.route('**/api/usage/reset/' + plan.id, (route) => {
+      current = after;
+      return route.fulfill({
+        json: { plan: { ...plan, status: 'done', outcome: 'reset' }, usage: after },
+      });
+    });
+    await page.route('**/api/usage?refresh=1', async (route) => {
+      if (++calls === 1) {
+        await hold;
+        return route.fulfill({ json: before, headers: { 'x-earlier-refresh': 'true' } });
+      }
+      current = after;
+      return route.fulfill({ json: after });
+    });
+    await page.route('**/api/usage', (route) => route.fulfill({ json: current }));
+    await login(page);
+    const link = page.getByRole('link', { name: 'Limits', exact: true });
+    const main = page.getByRole('main');
+    const refresh = main.getByRole('button', { name: 'Refresh limits' });
+    try {
+      await link.click();
+      await expect(main.getByText('7 days: 0% remaining')).toBeVisible();
+      await refresh.click();
+      await expect.poll(() => calls).toBe(1);
+      await main.getByRole('link', { name: 'Back to workspace' }).click();
+      await link.click();
+      if (latest === 'reset') {
+        await main.getByRole('button', { name: 'Use a reset', exact: true }).click();
+        await main.getByRole('button', { name: 'Confirm: use one reset' }).click();
+      } else {
+        await refresh.click();
+      }
+      await expect(main.getByText('7 days: 100% remaining')).toBeVisible();
+      const stale = page.waitForResponse(
+        (response) => response.headers()['x-earlier-refresh'] === 'true',
+      );
+      release();
+      await (await stale).finished();
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+      expect(await main.getByText('7 days: 100% remaining').isVisible()).toBe(true);
+      expect(
+        await main
+          .getByText(`Available resets: ${after.agents[0].resets.availableCount}`)
+          .isVisible(),
+      ).toBe(true);
+    } finally {
+      release();
+    }
+  });
+}

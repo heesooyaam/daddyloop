@@ -133,15 +133,16 @@ it.each(['success', 'failure'] as const)(
     const poll = new Promise<UsageView>((resolve, reject) => {
       finish = () => (outcome === 'success' ? resolve(old) : reject(new Error('Read failed')));
     });
-    const api: DaddyApi = async <T>(path: string) => (path === '/usage' ? await poll : []) as T;
+    const api: DaddyApi = async <T>(path: string) =>
+      (path === '/usage' ? await poll : current) as T;
     const model = new DaddyClient(api);
     try {
-      model.setUsage(old);
-      await model.refresh();
-      model.setUsage(current);
+      const pending = model.refreshUsage();
+      await model.refreshUsage(true);
       finish();
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await pending;
       expect(model.snapshot().usage).toBe(current);
+      expect(model.snapshot().usageError).toBeUndefined();
     } finally {
       model.stop();
     }

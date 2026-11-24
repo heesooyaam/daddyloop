@@ -185,9 +185,12 @@ test('opens the new chat from the limits page even when a session list is out of
 }) => {
   await login(page);
   await create(page, 'Previous session', Date.now());
-  const previousId = new URL(page.url()).hash.slice(9);
+  const previousUrl = page.url();
+  const previousId = new URL(previousUrl).hash.slice(9);
+  await page.getByLabel('Message daddy').fill('Keep this draft in the previous session');
   await page.getByRole('link', { name: 'Limits', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  const limitsUrl = page.url();
   let listRead!: () => void, releaseList!: () => void;
   const snapshotReady = new Promise<void>((resolve) => {
     listRead = resolve;
@@ -235,15 +238,57 @@ test('opens the new chat from the limits page even when a session list is out of
   }
   await expect(page).toHaveURL((url) => url.pathname === '/' && url.hash === `#session/${id}`);
   await expect(dialog).toBeHidden();
-  await expect(
-    page.getByRole('heading', { name: 'Created from limits', exact: true }),
-  ).toBeVisible();
+  const newHeading = page.getByRole('heading', { name: 'Created from limits', exact: true });
+  await expect(newHeading).toBeVisible();
+  const newUrl = page.url();
   await page.getByLabel('Message daddy').fill('Continue the conversation');
   const sent = page.waitForRequest(
     (request) => request.method() === 'POST' && request.url().endsWith('/chat'),
   );
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   expect(new URL((await sent).url()).pathname).toBe(`/api/daddy/sessions/${id}/chat`);
+  await page.goBack();
+  await expect(page).toHaveURL(limitsUrl);
+  await page.goForward();
+  await expect(page).toHaveURL(newUrl);
+  await expect(newHeading).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(limitsUrl);
+  await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
+  await expect(page).toHaveURL(previousUrl);
+  await expect(page.getByRole('heading', { name: 'Previous session', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message daddy')).toHaveValue(
+    'Keep this draft in the previous session',
+  );
+});
+test('keeps the limits history entry without a session ID when creating the first chat', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 540 });
+  let hasSession = false;
+  await page.route('**/api/daddy/sessions', async (route) => {
+    if (route.request().method() === 'POST') {
+      const response = await route.fetch();
+      hasSession = response.ok();
+      return route.fulfill({ response });
+    }
+    return hasSession ? route.continue() : route.fulfill({ json: [] });
+  });
+  await login(page);
+  await page.goto('/limits');
+  await page.getByRole('button', { name: 'Sessions', exact: true }).click();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill('First chat from limits');
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  const title = page.getByRole('heading', { name: 'First chat from limits', exact: true });
+  await expect(title).toBeVisible();
+  const chatUrl = page.url();
+  await expect(page).toHaveURL(/\/#session\/[a-f0-9-]+$/);
+  await page.goBack();
+  await expect(page).toHaveURL((url) => url.pathname === '/limits' && !url.hash);
+  await page.goForward();
+  await expect(page).toHaveURL(chatUrl);
+  await expect(title).toBeVisible();
 });
 test('shows quota remaining on a phone and requires confirmation before spending one reset', async ({
   page,

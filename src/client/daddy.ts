@@ -2,7 +2,7 @@ import type { Daddy } from '../core/daddy.js';
 import type { Workspace, ReviewGroup, ResourceStatus } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
-import type { UsageView } from '../core/usage.js';
+import type { ResetPlan, UsageView } from '../core/usage.js';
 import type { SessionInstructions } from '../core/instructions.js';
 export type DaddyBoard = ReturnType<Daddy['board']>;
 export type DaddySession = ReviewGroup & {
@@ -27,6 +27,7 @@ export interface DaddyClientState {
   board?: DaddyBoard;
   status?: DaddyStatus;
   usage?: UsageView;
+  usageError?: string;
   drafts: Record<string, string>;
   overrides: Record<string, RepositorySelection | undefined>;
   connected: boolean;
@@ -50,8 +51,9 @@ export class DaddyClient {
   private refreshPending?: Promise<void>;
   private refreshGeneration = 0;
   private usagePending?: Promise<void>;
+  private usageReset?: Promise<ResetPlan>;
+  private usageGeneration = 0;
   private sequence = 0;
-  private epoch = 0;
   private messageRequests = new Map<string, { text: string; key: string; id: string }>();
   private creation?: { key: string; id: string };
   constructor(
@@ -73,11 +75,12 @@ export class DaddyClient {
     for (const fn of this.listeners) fn();
   }
   start() {
-    this.epoch++;
+    this.usageGeneration++;
     this.stopped = false;
     this.controller = new AbortController();
     this.refreshPending = undefined;
     this.usagePending = undefined;
+    this.usageReset = undefined;
     void this.refresh();
     this.timer = setInterval(() => {
       void this.refresh();
@@ -89,7 +92,6 @@ export class DaddyClient {
     this.controller.abort();
     this.sequence++;
   }
-  setUsage = (usage: UsageView) => this.update({ usage });
   draft(text: string) {
     if (this.value.selected)
       this.update({ drafts: { ...this.value.drafts, [this.value.selected]: text } });
@@ -124,8 +126,8 @@ export class DaddyClient {
   }
   refresh(): Promise<void> {
     if (this.stopped) return Promise.resolve();
+    void this.refreshUsage();
     if (this.refreshPending) return this.refreshPending;
-    this.refreshUsage();
     const generation = ++this.refreshGeneration;
     const current = () => !this.stopped && generation === this.refreshGeneration;
     this.refreshPending = (async () => {
@@ -162,26 +164,62 @@ export class DaddyClient {
     });
     return this.refreshPending;
   }
-  private refreshUsage() {
-    if (this.usagePending || this.stopped) return;
-    const epoch = this.epoch;
-    const previous = this.value.usage;
-    const current = () => !this.stopped && epoch === this.epoch && this.value.usage === previous;
-    const pending = this.api<UsageView>('/usage', undefined, this.controller.signal)
+  private beginUsageRequest() {
+    const generation = ++this.usageGeneration;
+    return () => !this.stopped && generation === this.usageGeneration;
+  }
+  refreshUsage = (force = false): Promise<void> => {
+    if (this.stopped) return Promise.resolve();
+    if (this.usageReset)
+      return force
+        ? this.usageReset.catch(() => {}).then(() => this.refreshUsage(true))
+        : Promise.resolve();
+    if (!force && this.usagePending) return this.usagePending;
+    const current = this.beginUsageRequest();
+    const pending = this.api<UsageView>(
+      force ? '/usage?refresh=1' : '/usage',
+      undefined,
+      this.controller.signal,
+    )
       .then((usage) => {
-        if (current()) this.update({ usage });
+        if (current()) this.update({ usage, usageError: undefined });
       })
-      .catch(() => {
-        if (current() && previous)
+      .catch((error: Error) => {
+        if (current()) {
+          const previous = this.value.usage;
           this.update({
-            usage: { agents: previous.agents.map((agent) => ({ ...agent, stale: true })) },
+            usageError: error.message,
+            ...(previous && {
+              usage: { agents: previous.agents.map((agent) => ({ ...agent, stale: true })) },
+            }),
           });
+        }
       })
       .finally(() => {
         if (this.usagePending === pending) this.usagePending = undefined;
       });
     this.usagePending = pending;
-  }
+    return pending;
+  };
+  consumeUsageReset = async (id: string): Promise<ResetPlan> => {
+    if (this.usageReset) throw new Error('A rate-limit reset is already running.');
+    const current = this.beginUsageRequest();
+    this.usagePending = undefined;
+    const pending = this.api<{ usage: UsageView; plan: ResetPlan }>(
+      `/usage/reset/${id}`,
+      { confirmed: true },
+      this.controller.signal,
+    )
+      .then(({ usage, plan }) => {
+        if (current()) this.update({ usage, usageError: undefined });
+        return plan;
+      })
+      .finally(() => {
+        if (this.usageReset === pending) this.usageReset = undefined;
+      });
+    this.usageReset = pending;
+    return pending;
+  };
   async create(
     workspaceId: string,
     message?: string,
@@ -250,9 +288,12 @@ export class DaddyClient {
       this.update({ busy: false });
     }
   }
-  async action(action: 'pause' | 'resume' | 'settings' | 'delete' | 'rename', body: unknown = {}) {
-    const id = this.value.selected;
-    if (!id || this.value.busy) return;
+  async action(
+    action: 'pause' | 'resume' | 'settings' | 'delete' | 'rename',
+    body: unknown = {},
+    id = this.value.selected,
+  ) {
+    if (!id || id !== this.value.selected || this.value.busy) return;
     this.update({ busy: true, error: undefined });
     try {
       await this.api(`/daddy/sessions/${id}/${action}`, body, this.controller.signal);

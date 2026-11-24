@@ -7,11 +7,10 @@ import { useLocale } from './i18n.js';
 
 type QuotaWindow = AgentUsageView['buckets'][number]['windows'][number];
 
-function isStale(usage: AgentUsageView, connected: boolean) {
+function isStale(usage: AgentUsageView) {
   return (
     usage.available &&
     (usage.stale ||
-      !connected ||
       (usage.retrievedAt != null && Date.now() - Date.parse(usage.retrievedAt) > 120000))
   );
 }
@@ -20,11 +19,7 @@ function remaining(percent: number) {
   return percent > 0 && percent < 1 ? '<1' : Math.round(percent);
 }
 
-function providerSummary(
-  usage: AgentUsageView,
-  connected: boolean,
-  { t, locale }: ReturnType<typeof useLocale>,
-) {
+function providerSummary(usage: AgentUsageView, { t, locale }: ReturnType<typeof useLocale>) {
   let lowest: { bucket: string; window: QuotaWindow; percent: number } | undefined;
   if (usage.available) {
     for (const bucket of usage.buckets) {
@@ -56,7 +51,7 @@ function providerSummary(
   }
   const restricted =
     usage.ordinaryUsageAllowed === false || usage.buckets.some((bucket) => bucket.blocked);
-  const stale = isStale(usage, connected);
+  const stale = isStale(usage);
   return {
     engine: usage.engine,
     text: [
@@ -74,11 +69,9 @@ function providerSummary(
 
 function ProviderReadings({
   usage,
-  connected,
   compact = false,
 }: {
   usage: AgentUsageView;
-  connected: boolean;
   compact?: boolean;
 }) {
   const { t, locale } = useLocale();
@@ -87,7 +80,7 @@ function ProviderReadings({
       {!usage.available && (
         <p className="daddy-muted">{t('This provider has no current quota readings.')}</p>
       )}
-      {isStale(usage, connected) && (
+      {isStale(usage) && (
         <p role="status">
           {t(
             compact
@@ -163,14 +156,24 @@ function ProviderReadings({
   );
 }
 
+function usageStatusText(
+  usage: UsageView | undefined,
+  error: string | undefined,
+  t: ReturnType<typeof useLocale>['t'],
+) {
+  if (error) return t('Could not read agent limits: {reason}', { reason: t(error) });
+  if (!usage) return t('Reading agent limits…');
+  if (!usage.agents.length) return t('No quota readings yet');
+}
+
 export function UsageIndicator({
   usage,
-  connected,
+  usageError,
   href,
   onNavigate,
 }: {
   usage?: UsageView;
-  connected: boolean;
+  usageError?: string;
   href: string;
   onNavigate: MouseEventHandler<HTMLAnchorElement>;
 }) {
@@ -181,7 +184,8 @@ export function UsageIndicator({
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [dismissed, setDismissed] = useState(false);
-  const summaries = usage?.agents.map((agent) => providerSummary(agent, connected, language)) ?? [];
+  const summaries = usage?.agents.map((agent) => providerSummary(agent, language)) ?? [];
+  const status = usageStatusText(usage, usageError, t);
   const exhausted = summaries.some((summary) => summary.exhausted);
   const stale = summaries.some((summary) => summary.stale);
   const Icon = exhausted ? CircleAlert : stale ? Clock : Gauge;
@@ -236,9 +240,10 @@ export function UsageIndicator({
         <Icon size={19} aria-hidden="true" />
       </button>
       <div className="daddy-usage-tooltip" role="tooltip" id={id + '-summary'}>
-        {summaries.length
-          ? summaries.map((summary) => <div key={summary.engine}>{summary.text}</div>)
-          : t('No quota readings yet')}
+        {summaries.map((summary) => (
+          <div key={summary.engine}>{summary.text}</div>
+        ))}
+        {status && <div>{status}</div>}
       </div>
       <div
         className="daddy-usage-popover"
@@ -250,21 +255,18 @@ export function UsageIndicator({
         {open && (
           <>
             <div className="daddy-usage-providers">
-              {usage?.agents.length ? (
-                usage.agents.map((agent) => (
-                  <section key={agent.engine} className="daddy-usage-provider">
-                    <h2>{agent.name}</h2>
-                    <ProviderReadings usage={agent} connected={connected} compact />
-                    {agent.resets.availableCount != null && (
-                      <p className="daddy-muted">
-                        {t('Available resets: {count}', { count: agent.resets.availableCount })}
-                      </p>
-                    )}
-                  </section>
-                ))
-              ) : (
-                <p className="daddy-muted">{t('No quota readings yet')}</p>
-              )}
+              {status && <p role={usageError ? 'alert' : 'status'}>{status}</p>}
+              {usage?.agents.map((agent) => (
+                <section key={agent.engine} className="daddy-usage-provider">
+                  <h2>{agent.name}</h2>
+                  <ProviderReadings usage={agent} compact />
+                  {agent.resets.availableCount != null && (
+                    <p className="daddy-muted">
+                      {t('Available resets: {count}', { count: agent.resets.availableCount })}
+                    </p>
+                  )}
+                </section>
+              ))}
             </div>
             <a className="daddy-usage-page-link" href={href} onClick={onNavigate}>
               {t('Open limits page')}
@@ -280,13 +282,15 @@ export function UsageIndicator({
 export function UsagePanel({
   api,
   overview,
-  connected,
-  onUpdate,
+  usageError,
+  onRefresh,
+  onConsume,
 }: {
   api: DaddyApi;
   overview?: UsageView;
-  connected: boolean;
-  onUpdate: (usage: UsageView) => void;
+  usageError?: string;
+  onRefresh: () => Promise<void>;
+  onConsume: (id: string) => Promise<ResetPlan>;
 }) {
   const { t, locale } = useLocale();
   const [engine, setEngine] = useState<string>(),
@@ -301,15 +305,12 @@ export function UsagePanel({
     setError('');
     setNotice('');
     try {
-      if (kind === 'refresh') onUpdate(await api<UsageView>('/usage?refresh=1'));
+      if (kind === 'refresh') await onRefresh();
       if (kind === 'prepare')
         setPlan(await api<ResetPlan>('/usage/reset/prepare', { engine: usage?.engine }));
       if (kind === 'consume' && plan) {
-        const result = await api<{ usage: UsageView; plan: ResetPlan }>(`/usage/reset/${plan.id}`, {
-          confirmed: true,
-        });
-        onUpdate(result.usage);
-        setNotice(t(resetOutcomeText[result.plan.outcome!]));
+        const result = await onConsume(plan.id);
+        setNotice(t(resetOutcomeText[result.outcome!]));
         setPlan(undefined);
       }
     } catch (error) {
@@ -318,9 +319,11 @@ export function UsagePanel({
       setBusy(false);
     }
   };
+  const status = usageStatusText(overview, usageError, t);
   return (
     <div className="daddy-usage">
-      {usage ? (
+      {status && <p role={usageError ? 'alert' : 'status'}>{status}</p>}
+      {usage && (
         <>
           <select
             aria-label={t('Agent usage')}
@@ -345,7 +348,7 @@ export function UsagePanel({
               'Percentages show how much of each quota is left. Each period renews at its own time.',
             )}
           </p>
-          <ProviderReadings usage={usage} connected={connected} />
+          <ProviderReadings usage={usage} />
           {usage.activity && (
             <p>
               {t('Last agent turn: {input} in / {output} out · ~${cost}', {
@@ -363,8 +366,6 @@ export function UsagePanel({
               : t('Available resets: {count}', { count: usage.resets.availableCount })}
           </strong>
         </>
-      ) : (
-        <p className="daddy-muted">{t('No quota readings yet')}</p>
       )}
       {usage?.resets.credits.map((credit) => (
         <p key={credit.id}>
@@ -407,9 +408,7 @@ export function UsagePanel({
       ) : (
         <button
           className="daddy-button primary"
-          disabled={
-            busy || !usage?.resets.canUse || (isStale(usage, connected) && !usage.resets.pending)
-          }
+          disabled={busy || !usage?.resets.canUse || (isStale(usage) && !usage.resets.pending)}
           onClick={() => void action('prepare')}
         >
           {t(usage?.resets.pending ? 'Resolve pending reset' : 'Use a reset')}

@@ -1,6 +1,7 @@
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
+import { flushSync } from 'react-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -74,6 +75,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [returnToNew, setReturnToNew] = useState(false);
+  const [deleteTarget, setDeleteTarget] =
+    useState<Pick<DaddyBoard['group'], 'id' | 'generation' | 'title'>>();
+  const historyVersion = useRef(0);
   const [model] = useState(() => new DaddyClient(api, sessionFromHash()));
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
@@ -85,7 +89,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'notifications'
       | 'cleanup'
       | 'presets'
-      | 'delete'
       | 'queue-task'
       | 'workers'
       | null
@@ -98,6 +101,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
     chatScroll = useRef<HTMLDivElement>(null);
+  const lastScroll = useRef<{ chat: HTMLDivElement; history: string } | undefined>(undefined);
+  const chatHistory =
+    board && `${board.group.id}:${board.messages.length}:${board.messages.at(-1)?.id ?? ''}`;
   useEffect(() => {
     const media = matchMedia(sidebarMedia);
     const resize = () => {
@@ -121,32 +127,44 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     if (state.status?.preferences) adopt(state.status.preferences);
   }, [state.status?.preferences?.version]);
   const sessionHash = state.selected ? `#session/${state.selected}` : '';
-  const chatHref = '/' + sessionHash;
-  const limitsHref = '/limits' + sessionHash;
+  const limitsHash = limitsPage ? location.hash : sessionHash;
+  const chatHref = '/' + limitsHash;
+  const limitsHref = '/limits' + limitsHash;
   useEffect(() => {
     const syncPage = () => {
-      setLimitsPage(isLimitsPage());
-      setMenu(false);
       const id = sessionFromHash();
+      historyVersion.current++;
+      flushSync(() => {
+        setModal(null);
+        setDeleteTarget(undefined);
+        setInspect(undefined);
+        setReturnToNew(false);
+      });
       const { selected, sessions } = model.snapshot();
       if (id !== selected && sessions.some((session) => session.id === id)) void model.select(id);
+      setLimitsPage(isLimitsPage());
+      setMenu(false);
     };
     window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
   }, [model]);
   useEffect(() => {
-    if (location.hash !== sessionHash)
+    // Keep the limits history entry tied to its original chat while a new session is selected.
+    if (!isLimitsPage() && location.hash !== sessionHash)
       history.replaceState(history.state, '', location.pathname + location.search + sessionHash);
   }, [sessionHash, limitsPage]);
   useEffect(() => {
     if (limitsPage) limitsHeading.current?.focus();
-    else if (wasOnLimits.current) chatHeading.current?.focus();
+    else if (wasOnLimits.current) chatHeading.current?.focus({ preventScroll: true });
     wasOnLimits.current = limitsPage;
   }, [limitsPage]);
   useEffect(() => {
     const chat = chatScroll.current;
-    if (chat) chat.scrollTo({ top: chat.scrollHeight });
-  }, [board?.messages.length, state.selected]);
+    if (limitsPage || !chatHistory || !chat?.clientHeight) return;
+    if (lastScroll.current?.chat === chat && lastScroll.current.history === chatHistory) return;
+    chat.scrollTo({ top: chat.scrollHeight });
+    lastScroll.current = { chat, history: chatHistory };
+  }, [chatHistory, limitsPage, pane]);
   const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!menu || !event.currentTarget.contains(event.target as Node)) return;
     if (event.key === 'Escape') {
@@ -199,6 +217,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const currentHistoryVersion = historyVersion.current;
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -354,8 +373,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <UsagePanel
               api={api}
               overview={state.usage}
-              connected={state.connected}
-              onUpdate={model.setUsage}
+              usageError={state.usageError}
+              onRefresh={() => model.refreshUsage(true)}
+              onConsume={model.consumeUsageReset}
             />
           </div>
         </main>
@@ -396,7 +416,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   disabled={
                     state.busy || (!!board.group.deletion && board.group.deletion.state !== 'error')
                   }
-                  onClick={() => setModal('delete')}
+                  onClick={() => setDeleteTarget(board.group)}
                 >
                   <Trash2 size={18} />
                 </button>
@@ -406,7 +426,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           {!limitsPage && (
             <UsageIndicator
               usage={state.usage}
-              connected={state.connected}
+              usageError={state.usageError}
               href={limitsHref}
               onNavigate={navigate}
             />
@@ -470,7 +490,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             )}
             {board.group.deletion.error && <span>{t(board.group.deletion.error)}</span>}
             {board.group.deletion.state === 'error' && (
-              <button onClick={() => setModal('delete')}>{t('Retry deletion')}</button>
+              <button onClick={() => setDeleteTarget(board.group)}>{t('Retry deletion')}</button>
             )}
           </div>
         )}
@@ -808,8 +828,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onSave={async (profiles, instructions, autoMerge) => {
-              await model.action('settings', { profiles, instructions, autoMerge });
-              if (!model.snapshot().error) setModal(null);
+              await model.action('settings', { profiles, instructions, autoMerge }, board.group.id);
+              if (currentHistoryVersion === historyVersion.current && !model.snapshot().error)
+                setModal(null);
             }}
           />
         </Dialog>
@@ -821,8 +842,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onQueued={(taskId) => {
-              setModal(null);
-              setInspect(taskId);
+              if (currentHistoryVersion === historyVersion.current) {
+                setModal(null);
+                setInspect(taskId);
+              }
               void model.refresh();
             }}
           />
@@ -843,10 +866,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <PresetLibrary api={api} />
         </Dialog>
       )}
-      {modal === 'delete' && board && (
-        <Dialog title={t('Delete session')} onClose={() => setModal(null)}>
+      {deleteTarget && deleteTarget.id === state.selected && (
+        <Dialog title={t('Delete session')} onClose={() => setDeleteTarget(undefined)}>
           <p>
-            <strong>{board.group.title}</strong>
+            <strong>{deleteTarget.title}</strong>
           </p>
           <p>
             {t(
@@ -854,14 +877,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             )}
           </p>
           <div className="daddy-actions">
-            <button className="daddy-button quiet" onClick={() => setModal(null)}>
+            <button className="daddy-button quiet" onClick={() => setDeleteTarget(undefined)}>
               {t('Cancel')}
             </button>
             <button
               className="daddy-button danger"
               onClick={() => {
-                void model.action('delete', { expectedGeneration: board.group.generation });
-                setModal(null);
+                void model.action(
+                  'delete',
+                  { expectedGeneration: deleteTarget.generation },
+                  deleteTarget.id,
+                );
+                setDeleteTarget(undefined);
               }}
             >
               {t('Delete session')}
