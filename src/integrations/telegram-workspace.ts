@@ -2,7 +2,14 @@ import { commandHelp } from './telegram-commands.js';
 import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
-import { AppError, now, type Event, type ReviewGroup, type Task } from '../core/types.js';
+import {
+  sameAgentProfile,
+  AppError,
+  now,
+  type Event,
+  type ReviewGroup,
+  type Task,
+} from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
 import { TelegramText, safeLink } from './telegram-text.js';
@@ -659,6 +666,15 @@ export class TelegramWorkspace {
       .add('\n' + this.t('All workers') + ': ')
       .add(defaults.model ?? this.t('Engine configuration'), 'code')
       .add(' / ' + (defaults.effort ?? this.t('Default')));
+    for (const slot of workerSlots(this.store, group)) {
+      if (slot.profile && !sameAgentProfile(slot.profile, defaults))
+        text.add(
+          '\n' +
+            this.t('Worker {number}', { number: slot.number }) +
+            ' · ' +
+            profileText(slot.profile),
+        );
+    }
     if (!role) {
       await this.api.send(destination, {
         ...text,

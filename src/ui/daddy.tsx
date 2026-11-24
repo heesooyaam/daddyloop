@@ -1,3 +1,4 @@
+import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { KeyboardEvent } from 'react';
@@ -1350,6 +1351,9 @@ function SessionSettings({
   const originalProfiles = useRef(profiles);
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
+  const overrides = board.workers.slots.filter(
+    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  );
   const { catalogue, load } = useAgentCatalogue(api);
   return (
     <form
@@ -1409,6 +1413,12 @@ function SessionSettings({
               onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
               selectDefaultEffort
             />
+            {role === 'worker' &&
+              overrides.map((slot) => (
+                <small key={slot.number} className="daddy-muted">
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                </small>
+              ))}
             {role === 'daddy' ? (
               <label className="daddy-toggle">
                 <input
