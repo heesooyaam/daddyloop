@@ -10,6 +10,7 @@ export type State =
   | 'awaiting_publication'
   | 'fixing'
   | 'awaiting_push'
+  | 'awaiting_merge'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'
@@ -198,6 +199,7 @@ export interface ReviewHandle {
   baselineNoteId?: number;
 }
 export interface ReviewSnapshot {
+  authorId?: string;
   status: 'draft' | 'published' | 'missing' | 'partial';
   dismissed?: true;
   body: string;
@@ -234,6 +236,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  draftRecheck?: { commentIds: string[]; retried?: boolean };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;
@@ -245,6 +248,7 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   retiredReviewHandles?: ReviewHandle[];
+  retiredReviewCommentIds?: Record<string, string[]>;
   pendingAuthorFix?: {
     revision: Revision;
     generation: number;
@@ -255,6 +259,8 @@ export interface Task {
     staleDraft?: ReviewHandle;
   };
   fixingMergeConflict?: boolean;
+  conflictCheckpoint?: string;
+  deferredWorkerInstructions?: { id: string; text: string }[];
   pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
@@ -332,6 +338,8 @@ export interface Job {
   role: Role;
   kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
   freshContextRetry?: boolean;
+  timeoutRetry?: boolean;
+  deferredResult?: AgentResult;
   errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;

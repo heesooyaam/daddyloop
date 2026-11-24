@@ -487,6 +487,17 @@ export const daddyRu: Record<string, string> = {
   'Handling your request': 'Разбирает запрос',
   'Checking server resources': 'Проверяет ресурсы сервера',
   'Waiting for assignment': 'Ждёт назначения',
+  'The target branch advanced. Reviewing the updated change.':
+    'Целевая ветка обновилась. daddy заново проверяет изменения.',
+  'Rechecking the existing draft on the updated target branch':
+    'daddy перепроверяет замечания на новой версии целевой ветки',
+  'Reviewer could not verify the carried draft on the updated target branch':
+    'Ревьюеру не удалось перепроверить замечания на новой версии целевой ветки',
+  'Conflict repair found additional local changes. The working copies were preserved.':
+    'В рабочей копии появились дополнительные правки. Обе копии сохранены.',
+  'The PR changed during draft review': 'PR изменился во время подготовки ревью',
+  'Earlier worker changes need reconciliation': 'Нужно сверить прежние правки воркера',
+  'Assigned worker is waiting to start': 'Воркер назначен, запуск в очереди',
   'Waiting for a worker': 'Ждёт свободного воркера',
   'Implementing the task': 'Выполняет задачу',
   'Ready for review': 'Изменения готовы к ревью',
@@ -530,6 +541,14 @@ export const daddyRu: Record<string, string> = {
     'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
   'Worker assigned to resolve the GitHub merge conflict':
     'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for GitHub merge': 'Ожидает слияния PR в GitHub',
+  'Review complete. Waiting for GitHub to merge the PR.':
+    'Ревью завершено. Ожидает слияния PR в GitHub.',
+  'The reviewed revision needs verification before completion':
+    'Перед завершением задачи нужно проверить результат ревью.',
+  'Conflict repair queued for worker {number}': 'Исправление конфликта в очереди воркера №{number}',
+  'Waiting for a free worker to resolve the merge conflict':
+    'Для исправления конфликта нужен свободный воркер',
   'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
   'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
   'The PR changed during conflict resolution. Inspect the preserved worker copy.':
@@ -540,6 +559,41 @@ export const daddyRu: Record<string, string> = {
     'Для продолжения исправления конфликта включи автослияние.',
   'Reviewer context was full. Restarting the independent review.':
     'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Disk cleanup': 'Очистка диска',
+  'Enable scheduled cleanup': 'Включить плановую уборку',
+  'Disable scheduled cleanup': 'Выключить плановую уборку',
+  'Cleanup skill': 'Скилл чистильщика',
+  'Every {minutes} min when disk usage exceeds {percent}%':
+    'Каждые {minutes} мин при заполнении диска выше {percent}%',
+  'Cleanup in progress': 'Идёт уборка',
+  'Last disk check': 'Последняя проверка диска',
+  'Next disk check': 'Следующая проверка диска',
+  'Last cleanup': 'Последняя уборка',
+  'Cleanup threshold (%)': 'Порог заполнения диска (%)',
+  'Check interval (minutes)': 'Интервал проверки (минуты)',
+  'New skill path on the server': 'Путь к новому скиллу на сервере',
+  'Remove cleanup skill': 'Убрать скилл чистильщика',
+  'Cleanup settings saved': 'Настройки уборки сохранены',
+  'Enable automatic cache cleanup on the host first':
+    'Сначала включи автоочистку на сервере командой daddy cache auto on',
+  'The cleanup threshold must be lower than the pause threshold':
+    'Порог уборки должен быть ниже порога приостановки задач',
+  'Send /cleanup in the private bot chat to manage disk cleanup.':
+    'Управление уборкой доступно в личке бота. Отправь /cleanup.',
+  'Use /cleanup, /cleanup threshold N, /cleanup interval N or /cleanup skill PATH':
+    'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
+  'No cleanup skill': 'Скилл не задан',
+  'Refresh cleanup status': 'Обновить статус уборки',
+  'The PR or native draft changed. Inspect the interrupted review.':
+    'PR или черновик изменился. Проверь остановленное ревью.',
+  'Waiting for GitHub API quota until {time} UTC':
+    'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
+  'Review reached the run time limit': 'Ревью остановилось по таймауту',
+  'Continuing the independent review on the verified PR head':
+    'Независимое ревью продолжается на проверенном коммите PR',
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
+    'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',
   'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
   'Draft PR: mark it ready for review on GitHub':

@@ -1,3 +1,5 @@
+import { commandHelp } from './telegram-commands.js';
+import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
@@ -33,7 +35,7 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
-import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -460,10 +462,17 @@ export class TelegramWorkspace {
   }
   private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
     const group = this.authorize(destination, groupId);
+    const slots = workerSlots(this.store, group);
     const tasks = taskActivity(
       this.store.tasks(groupId).reverse(),
       this.store.activeJobs(),
-      (task) => autoMergeStatus(task, autoMergeSettings(this.store, group, task)),
+      (task) =>
+        githubActivityStatus(
+          task,
+          autoMergeSettings(this.store, group, task),
+          githubWait(this.store, task.ref),
+        ),
+      slots,
     );
     const locale = this.locale();
     await this.api.send(
@@ -473,7 +482,7 @@ export class TelegramWorkspace {
         : workersCard(
             locale,
             groupId,
-            workerSlots(this.store, group),
+            slots,
             tasks,
             group.worker ?? this.daddy.engine.defaultAgents().worker,
           ),
@@ -482,8 +491,19 @@ export class TelegramWorkspace {
   private async showTask(groupId: string, taskId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
-    const [activity] = taskActivity([task], this.store.activeJobs(taskId));
-    const slot = workerSlots(this.store, group).find((item) => item.taskId === taskId);
+    const slots = workerSlots(this.store, group);
+    const [activity] = taskActivity(
+      [task],
+      this.store.activeJobs(taskId),
+      (t) =>
+        githubActivityStatus(
+          t,
+          autoMergeSettings(this.store, group, t),
+          githubWait(this.store, t.ref),
+        ),
+      slots,
+    );
+    const slot = slots.find((item) => item.taskId === taskId);
     const merge =
       group.workspace?.provider === 'github' && task.ref.provider === 'github'
         ? autoMergeSettings(this.store, group, task)
@@ -1425,6 +1445,14 @@ export class TelegramWorkspace {
       const addressedTo = /^\/\w+@(\w+)(?=\s|$)/.exec(rawText)?.[1];
       if (addressedTo && addressedTo.toLowerCase() !== this.username.toLowerCase()) return false;
       const text = rawText.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+      const help = /^\/help(?:\s+([\s\S]*))?$/i.exec(text);
+      if (help) {
+        await this.api.send(
+          destination,
+          commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
+        );
+        return true;
+      }
       const registrationKey = this.registrationKey(destination);
       const registration = this.store.setting<{
         provider: string;
@@ -1477,6 +1505,15 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/notifications') return await this.callback('notifications:show', destination);
+      if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.t('Send /cleanup in the private bot chat to manage disk cleanup.'),
+          ),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+        return true;
+      }
       if (text === '/updates' && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(this.t('Open the private bot chat for CLI updates.')),
@@ -1499,7 +1536,7 @@ export class TelegramWorkspace {
         await this.setup();
         return true;
       }
-      if (['/sessions', '/start', '/start daddy', '/help'].includes(text)) {
+      if (['/sessions', '/start', '/start daddy'].includes(text)) {
         await this.home(destination);
         return true;
       }

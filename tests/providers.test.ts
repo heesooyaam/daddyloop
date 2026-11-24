@@ -44,6 +44,7 @@ describe('GitHub draft review contract', () => {
     'another account has a pending review',
     'pending review appeared before POST',
     'unclear POST rejection',
+    'POST refused by quota',
     'completed review then deleted',
     'completed review then published',
     'completed review then dismissed',
@@ -166,6 +167,11 @@ describe('GitHub draft review contract', () => {
             { status: 422 },
           );
         }
+        if (attempts === 1 && scenario === 'POST refused by quota')
+          return new Response('{"message":"API rate limit exceeded"}', {
+            status: 429,
+            headers: { 'retry-after': '60' },
+          });
         if (scenario === 'unclear POST rejection')
           return new Response('{"message":"Validation Failed"}', { status: 422 });
         if (
@@ -193,7 +199,7 @@ describe('GitHub draft review contract', () => {
       }
       throw new Error(`Unexpected fixture request ${method} ${path}`);
     });
-    const provider = new GitHubProvider('github.com', 'fake', http);
+    const provider = new GitHubProvider('github.com', 'fake', http, store);
     const engine = new Engine(store, () => provider);
     try {
       const task = await engine.create({
@@ -201,6 +207,25 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      if (scenario === 'POST refused by quota') {
+        await expect(engine.review(task.id)).rejects.toMatchObject({
+          code: 'github_rate_limit',
+          refusedWrite: true,
+        });
+        expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+          [],
+        );
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+        try {
+          expect(await new Engine(store, () => provider).review(task.id, true)).toMatchObject({
+            state: 'reviewing',
+            review: { id: '2' },
+          });
+        } finally {
+          clock.mockRestore();
+        }
+        return;
+      }
       if (scenario === 'pending review then dismissed') {
         await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
         draft!.state = 'DISMISSED';
@@ -793,6 +818,9 @@ describe('GitLab draft notes contract', () => {
     ['resume', 'lost create response'],
     ['resume', 'draft appears before POST'],
     ['restore', 'published successor'],
+    ['restore', 'published successor with summary'],
+    ['restore', 'successor edited between retries'],
+    ['restore', 'successor deleted between retries'],
     ['restore', 'deleted'],
     ['restore', 'delete summary'],
     ['restore', 'partial'],
@@ -866,7 +894,7 @@ describe('GitLab draft notes contract', () => {
         note: `Second round finding\n\n${tag(`${old.marker}:comment:R2`)}`,
         author_id: 7,
       };
-      if (status === 'published successor') {
+      if (status.startsWith('published successor') || status.startsWith('successor ')) {
         store.cancelJobs(task.id);
         publishDrafts();
         const snapshot = await provider.getReview(ref, old);
@@ -882,15 +910,41 @@ describe('GitLab draft notes contract', () => {
         const second = await engine.review(task.id, true);
         store.cancelJobs(task.id);
         store.saveTask(original);
+        if (status === 'published successor with summary') notes.push({ ...drafts[0], id: 125 });
         drafts = [];
         const published = { ...finding, note: tag(`${second.review!.marker}:comment:R2`) };
         notes.push(published);
+        if (status.startsWith('successor ')) {
+          vi.spyOn(provider, 'prepareReviewCreation').mockRejectedValueOnce(
+            new Error('GitLab preflight returned 503'),
+          );
+          const restarted = new Engine(store, () => provider);
+          await expect(restarted.review(task.id, true)).rejects.toThrow('503');
+          if (status === 'successor deleted between retries') notes.pop();
+          else
+            published.note = `Edited finding
+
+${tag(`${second.review!.marker}:comment:R2`)}`;
+          const next = await restarted.review(task.id, true);
+          expect(next.state).toBe('reviewing');
+          const ids = next.feedback?.comments.map(({ id }) => id);
+          if (status === 'successor deleted between retries') expect(ids).not.toContain('107');
+          else
+            expect(next.feedback?.comments.find(({ id }) => id === '107')?.body).toContain(
+              'Edited finding',
+            );
+          return;
+        }
         notes.push({ id: 999, note: 'An unrelated note', author_id: 7 });
         const restarted = new Engine(store, () => provider);
         expect(await restarted.review(task.id, true)).toMatchObject({ state: 'needs_input' });
         expect(creates).toBe(2);
         notes.pop();
-        const next = await restarted.review(task.id, true);
+        let next = await restarted.review(task.id, true);
+        if (status === 'published successor with summary') {
+          expect(next).toMatchObject({ state: 'needs_input', review: { id: second.review!.id } });
+          next = await restarted.review(task.id, true);
+        }
         expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
         expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['107']);
         return;
@@ -1116,4 +1170,40 @@ it('uses a permitted merge method and submits exactly the reviewed head to GitHu
   });
   const write = await new GitHubProvider('github.com', 'fake', http).prepareMerge(ref);
   await expect(write(revision.head)).resolves.toBe('merged-commit');
+});
+
+it('shares GitHub quota deadlines across provider instances and permits ordinary forbidden responses to be handled separately', async () => {
+  const store = new Store(':memory:');
+  const reset = Math.ceil(Date.now() / 1000) + 120;
+  const limited = transport(
+    () =>
+      new Response('{"message":"API rate limit exceeded"}', {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) },
+      }),
+  );
+  const normal = transport(
+    () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 }),
+  );
+  try {
+    const a = new GitHubProvider('github.com', 'fake', limited, store);
+    await expect(a.http.request('GET', '/user')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      until: reset * 1000 + 1000,
+      refusedWrite: false,
+    });
+    const b = new GitHubProvider('github.com', 'fake', normal, store);
+    await expect(b.http.request('PUT', '/repos/a/b')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      refusedWrite: true,
+    });
+    expect(normal).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    vi.setSystemTime(reset * 1000 + 2000);
+    await expect(b.http.request('GET', '/user')).rejects.toMatchObject({ code: 'provider_403' });
+    expect(normal).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+    store.close();
+  }
 });

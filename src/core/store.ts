@@ -395,9 +395,16 @@ export class Store {
     sender: Message['sender'],
     text: string,
     runId?: string,
+    messageId?: string,
   ) {
+    if (messageId) {
+      const row = this.db
+        .prepare('SELECT data FROM messages WHERE id=? AND task_id=?')
+        .get(messageId, taskId);
+      if (row) return JSON.parse(row.data as string) as Message;
+    }
     const msg: Message = {
-      id: randomUUID(),
+      id: messageId ?? randomUUID(),
       taskId,
       role,
       sender,

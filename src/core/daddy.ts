@@ -1,8 +1,9 @@
+import { githubWait } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   autoMergeSettings,
-  autoMergeStatus,
+  githubActivityStatus,
   sessionAutoMerge,
   setTaskMergeMode,
 } from './auto-merge.js';
@@ -212,7 +213,8 @@ export class Daddy {
     const group = this.group(id);
     const jobs = this.store.activeJobs();
     const tasks = this.store.tasks(id);
-    const activity = taskActivity(tasks, jobs);
+    const session = this.sessionActivity(group, jobs);
+    const activity = taskActivity(tasks, jobs, undefined, session.workers.slots);
     const activeByTask = new Map(activity.map((item) => [item.task.id, item]));
     return {
       group: { ...group, autoMerge: sessionAutoMerge(this.store, group.id) },
@@ -229,7 +231,9 @@ export class Daddy {
           id: task.id,
           title: task.title,
           state: task.state,
-          statusLabel: autoMergeStatus(task, autoMerge) ?? activityStatus(item),
+          statusLabel:
+            githubActivityStatus(task, autoMerge, githubWait(this.store, task.ref)) ??
+            activityStatus(item),
           autoMerge,
           reason: task.reason,
           workspaceId: task.workspaceId,
@@ -249,7 +253,7 @@ export class Daddy {
           queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
         };
       }),
-      ...this.sessionActivity(group, jobs),
+      ...session,
       messages: this.store.messages(id),
       jobs: this.store
         .daddyJobs(id)
@@ -1238,6 +1242,19 @@ export class Daddy {
           found: true as const,
           value: { taskId: created.id, title: created.title, state: created.state },
         };
+      if (
+        name === 'message_worker' &&
+        this.store.db
+          .prepare('SELECT 1 FROM messages WHERE id=? AND task_id=?')
+          .get(
+            'deferred:' + (input as { taskId: string }).taskId + ':' + actionId,
+            (input as { taskId: string }).taskId,
+          )
+      )
+        return {
+          found: true as const,
+          value: { taskId: (input as { taskId: string }).taskId, accepted: true },
+        };
       const queued = this.store.jobs().find((job) => job.actionId === actionId);
       if (queued)
         return {
@@ -1382,6 +1399,7 @@ export class Daddy {
           } else
             task = await this.tickets.local({
               workspace,
+              source: options.source,
               groupId: group.id,
               groupGeneration: job.generation,
               title: options.title!,
@@ -1415,6 +1433,20 @@ export class Daddy {
             );
           await this.engine.implement(task.id, actionId, options.instruction);
         } else if (name === 'message_worker') {
+          if (task.pendingFix || task.state === 'awaiting_push') {
+            const current = await this.engine.chat(
+              task.id,
+              'author',
+              options.instruction!,
+              actionId,
+              true,
+            );
+            return {
+              taskId: task.id,
+              state: current.state,
+              deferred: !!current.deferredWorkerInstructions?.some((m) => m.id === actionId),
+            };
+          }
           if (this.store.busy(task.id))
             throw new AppError(
               'worker_busy',

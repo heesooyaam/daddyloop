@@ -1,3 +1,4 @@
+import { githubWait } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
 import {
@@ -36,8 +37,27 @@ export function autoMergeSettings(store: Store, group: ReviewGroup, task: Task) 
   };
 }
 
-export function autoMergeStatus(task: Task, settings: ReturnType<typeof autoMergeSettings>) {
-  if (task.state !== 'complete') return;
+export function githubActivityStatus(
+  task: Task,
+  settings: ReturnType<typeof autoMergeSettings>,
+  until?: number,
+) {
+  if (
+    until &&
+    [
+      'queued',
+      'fixing',
+      'reviewing',
+      'awaiting_publication',
+      'awaiting_checks',
+      'awaiting_push',
+      'awaiting_merge',
+      'ready_for_review',
+      'submitting',
+    ].includes(task.state)
+  )
+    return `Waiting for GitHub API quota until ${new Date(until).toISOString().slice(11, 16)} UTC`;
+  if (!reviewed(task) || task.ref.provider !== 'github') return;
   if (settings.result?.state === 'merged') return settings.result.message;
   if (settings.enabled && task.pr?.state === 'open')
     return settings.result?.message ?? 'Checking GitHub auto-merge';
@@ -60,21 +80,47 @@ export function setTaskMergeMode(
   return autoMergeSettings(store, group, task);
 }
 
-export function autoMergeEnabled(store: Store, task: Task) {
-  if (!task.groupId || task.ref.provider !== 'github' || isTicket(task)) return false;
+function reviewed(task: Task) {
+  return task.state === 'awaiting_merge' || task.state === 'complete';
+}
+
+function configuredGroup(store: Store, task: Task) {
+  if (!task.groupId || task.ref.provider !== 'github' || isTicket(task)) return;
   const group = store.getGroup(task.groupId);
-  return (
+  if (
     group.workspace?.provider === 'github' &&
     !group.deletedAt &&
     !group.deletion &&
-    group.daddyState !== 'paused' &&
-    group.daddyState !== 'archived' &&
     autoMergeSettings(store, group, task).enabled
-  );
+  )
+    return group;
+}
+
+export function autoMergeRequested(store: Store, task: Task) {
+  return !!configuredGroup(store, task);
+}
+
+export function autoMergeEnabled(store: Store, task: Task) {
+  const group = configuredGroup(store, task);
+  return !!group && group.daddyState !== 'paused' && group.daddyState !== 'archived';
+}
+
+function pendingMerge(store: Store, task: Task) {
+  if (!task.revision) return;
+  // An idle pause advances the run generation while the provider's answer can still be unknown.
+  return store.db
+    .prepare("SELECT id FROM operations WHERE task_id=? AND status='pending' AND id GLOB ?")
+    .get(task.id, `auto-merge:${task.id}:*:${task.revision.head}:${task.revision.base}`)?.id as
+    string | undefined;
 }
 
 function enabled(store: Store, task: Task) {
-  return task.state === 'complete' && !store.busy(task.id) && autoMergeEnabled(store, task);
+  return (
+    reviewed(task) &&
+    !task.deferredWorkerInstructions?.length &&
+    !store.busy(task.id) &&
+    autoMergeEnabled(store, task)
+  );
 }
 
 export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
@@ -82,13 +128,32 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
   for (const candidate of store.tasks()) {
     if (stopping()) return;
     if (
-      candidate.state !== 'complete' ||
+      !reviewed(candidate) ||
       candidate.ref.provider !== 'github' ||
-      candidate.pr?.state !== 'open'
+      candidate.pr?.state !== 'open' ||
+      githubWait(store, candidate.ref)
     )
       continue;
     const last = store.setting<MergeResult>(`autoMerge.result:${candidate.id}`);
-    if (!enabled(store, candidate) && last?.state !== 'uncertain') continue;
+    if (
+      candidate.state === 'awaiting_merge' &&
+      !autoMergeRequested(store, candidate) &&
+      last?.state !== 'uncertain' &&
+      !pendingMerge(store, candidate)
+    ) {
+      try {
+        await engine.reconcile(candidate.id);
+      } catch {
+        store.event(candidate.id, 'automerge.recheck_failed', { head: candidate.revision?.head });
+      }
+      continue;
+    }
+    if (
+      !enabled(store, candidate) &&
+      last?.state !== 'uncertain' &&
+      !pendingMerge(store, candidate)
+    )
+      continue;
     if (
       last?.generation === candidate.generation &&
       last.head === candidate.revision?.head &&
@@ -97,17 +162,15 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
       continue;
     const recheck = await engine.lock(candidate.id, async () => {
       const task = store.getTask(candidate.id);
-      if (
-        stopping() ||
-        task.state !== 'complete' ||
-        !task.revision ||
-        !task.pr ||
-        store.busy(task.id)
-      )
+      if (stopping() || !reviewed(task) || !task.revision || !task.pr || store.busy(task.id))
         return;
+      if (task.state === 'complete' && autoMergeRequested(store, task))
+        engine.finishReviewedTask(task);
       const ref = prRef(task),
         revision = task.revision;
-      const key = `auto-merge:${task.id}:${task.generation}:${revision.head}:${revision.base}`;
+      const pending = pendingMerge(store, task);
+      const key =
+        pending ?? `auto-merge:${task.id}:${task.generation}:${revision.head}:${revision.base}`;
       const input = { ref, revision, target: task.pr.targetBranch };
       const record = (state: MergeResult['state'], message: string, commit?: string) => {
         const result = {
@@ -140,8 +203,8 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
           }
           store.transaction(() => {
             task.pr = pr;
-            store.saveTask(task);
             record('merged', 'Merged on GitHub', pr.mergeCommit);
+            engine.finishReviewedTask(task, 'Merged on GitHub');
           });
           return;
         }
@@ -152,7 +215,7 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
           pr.branch !== task.pr.branch
         )
           return record('waiting', 'The PR is closed or its branches changed');
-        if (store.db.prepare("SELECT 1 FROM operations WHERE id=? AND status='pending'").get(key))
+        if (pending)
           return record('uncertain', 'Waiting for GitHub to confirm the previous merge request');
         if (!enabled(store, store.getTask(task.id))) return;
         if (pr.draft === true)
@@ -217,8 +280,8 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
         );
         store.transaction(() => {
           task.pr = { ...fresh, state: 'merged', mergeCommit: commit };
-          store.saveTask(task);
           record('merged', 'Merged on GitHub', commit);
+          engine.finishReviewedTask(task, 'Merged on GitHub');
         });
       } catch (error) {
         const pending = store.db

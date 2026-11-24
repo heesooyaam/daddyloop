@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../providers/github-quota.js';
 import { createHash } from 'node:crypto';
 import { AppError, ProviderWriteNotAttempted } from './types.js';
 import type { Store } from './store.js';
@@ -75,7 +76,11 @@ export class Outbox {
         return result;
       } catch (error) {
         const notAttempted = error instanceof ProviderWriteNotAttempted;
-        if (notAttempted || refused?.(error) === true) {
+        if (
+          notAttempted ||
+          (error instanceof GitHubQuotaError && error.refusedWrite) ||
+          refused?.(error) === true
+        ) {
           this.store.transaction(() => {
             this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
             this.store.event(taskId, notAttempted ? 'operation.blocked' : 'operation.refused', {

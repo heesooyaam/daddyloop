@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../src/providers/github-quota.js';
 import { it, expect, vi } from 'vitest';
 import { fixture } from './helpers.js';
 import { Worker } from '../src/runtime/worker.js';
@@ -961,6 +962,7 @@ it('stops a queued legacy reviewer when the target changes after polling', async
       .mockResolvedValue({ ...pr, targetBranch: 'release' })
       .mockResolvedValueOnce(pr);
 
+    await f.engine.reconcile(task.id);
     await worker.tick();
     await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
 
@@ -1908,13 +1910,17 @@ it.each([false, true])(
         });
       } else {
         await f.engine.chat(task.id, 'author', 'Discuss the published findings');
-        await f.run();
+        expect(f.store.activeJobs(task.id)).toEqual([]);
+        await f.engine.reconcile(task.id);
         const held = f.store.getTask(task.id);
         expect(held).toMatchObject({
           state: 'needs_input',
           revision: task.revision,
           pendingAuthorHead: head,
         });
+        expect(held.deferredWorkerInstructions).toEqual([
+          expect.objectContaining({ text: 'Discuss the published findings' }),
+        ]);
         expect(held.reason).toContain(task.revision!.base);
         expect(held.reason).toContain(current.base);
       }
@@ -2662,6 +2668,90 @@ it('emits an attention milestone when a native review cannot start', async () =>
     expect(runtime.run).not.toHaveBeenCalled();
   } finally {
     await worker.stop();
+    f.store.close();
+  }
+});
+
+it('finishes the saved result after a throttled verification read without restarting the agent', async () => {
+  const f = await fixture(),
+    runtime = new DemoRuntime();
+  const agent = vi.spyOn(runtime, 'run').mockImplementation(async () => {
+    vi.spyOn(f.provider, 'getPR').mockRejectedValueOnce(new GitHubQuotaError(Date.now() + 60_000));
+    return f.result();
+  });
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+  try {
+    await worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.jobs()[0]).toMatchObject({
+        status: 'queued',
+        deferredResult: { status: 'completed' },
+      }),
+    );
+    const job = f.store.jobs()[0];
+    f.store.saveJob({ ...job, notBefore: undefined });
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
+    expect(agent).toHaveBeenCalledTimes(1);
+    expect(f.store.messages(f.task.id)).toHaveLength(1);
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
+it('blocks starting and completing merge verification while the legacy fix is still absent', async () => {
+  const f = await fixture();
+  try {
+    const { task, saved } = await recordLegacyLostFix(f);
+    const pr = { ...task.pr!, state: 'merged' as const, mergeCommit: 'merged-old-head' };
+    f.store.saveTask({ ...task, pr, state: 'needs_input' });
+    f.store.setSetting('demo-pr:1', pr);
+    expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'needs_input' });
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+    const stale = f.store.getTask(task.id);
+    f.store.enqueue(stale, 'reviewer', 'verify_merge', 'Check an older merge');
+    const job = f.store.claim()!;
+    await f.engine.completeJob(job, f.result());
+    const held = f.store.getTask(task.id);
+    expect(held.state).toBe('needs_input');
+    for (const sha of [saved, pr.head]) expect(held.reason).toContain(sha);
+    expect(held.verifiedMerge).toBeUndefined();
+  } finally {
+    f.store.close();
+  }
+});
+
+it('requires verification on the merged result instead of accepting verification from another target', async () => {
+  const f = await fixture();
+  try {
+    const checked = await f.engine.review(f.task.id);
+    f.store.cancelJobs(checked.id);
+    const ref = prRef(checked);
+    const oldPr = checked.pr!;
+    const pr = {
+      ...oldPr,
+      state: 'merged' as const,
+      base: 'c'.repeat(40),
+      targetBranch: 'release',
+      mergeCommit: 'merged-head',
+    };
+    const snapshot = {
+      status: 'published' as const,
+      url: ref.url,
+      body: '',
+      revision: checked.revision!,
+      comments: [{ id: 'R1', url: ref.url, body: 'Verify the saved fix' }],
+    };
+    f.store.decision(checked, { commentId: 'R1', outcome: 'verified', reason: 'Verified on main' });
+    f.store.saveTask({ ...checked, feedback: snapshot, state: 'needs_input' });
+    f.store.setSetting('demo-pr:1', pr);
+    await f.engine.action(checked.id, 'verify-merge');
+    const job = f.store.claim()!;
+    expect(job.kind).toBe('verify_merge');
+    await f.engine.completeJob(job, f.result());
+    expect(f.store.getTask(checked.id).state).toBe('needs_input');
+  } finally {
     f.store.close();
   }
 });

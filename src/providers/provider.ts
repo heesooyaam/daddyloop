@@ -32,6 +32,11 @@ export interface ReviewProvider {
     successor?: ReviewHandle,
     retired?: readonly ReviewHandle[],
   ): Promise<ReviewSnapshot>;
+  discardSupersededDraft?(
+    ref: PRRef,
+    review: ReviewHandle,
+    snapshot: ReviewSnapshot,
+  ): Promise<void>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,

@@ -176,12 +176,16 @@ export class Workspaces {
             `reviewer-${task.revision.head.slice(0, 12)}-${task.revision.start.slice(0, 8)}`,
           );
     if (existsSync(target)) await this.verifyCopy(target, bare, signal);
-    if (!existsSync(target))
-      await run(
-        ['--git-dir', bare, 'worktree', 'add', '--detach', target, task.revision.head],
-        root,
-      );
-    else if (role === 'author') {
+    if (!existsSync(target)) {
+      const checkpoint = role === 'author' && task.fixingMergeConflict && task.conflictCheckpoint;
+      const start =
+        checkpoint &&
+        /^[a-f0-9]{40,64}$/.test(checkpoint) &&
+        existsSync(join(root, 'author-before-conflict-' + checkpoint))
+          ? checkpoint
+          : task.revision.head;
+      await run(['--git-dir', bare, 'worktree', 'add', '--detach', target, start], root);
+    } else if (role === 'author') {
       const current = await run(['rev-parse', 'HEAD'], target);
       if (current !== task.revision.head) {
         if (task.authorBaseHead === task.revision.head) {
@@ -232,23 +236,40 @@ export class Workspaces {
         'A GitHub PR working copy is required to resolve conflicts',
       );
     const cwd = task.authorWorktree;
-    const { head, base } = task.revision;
+    const { base } = task.revision;
+    const head = task.conflictCheckpoint ?? task.revision.head;
     const run = (args: string[]) => git(args, cwd, {}, signal);
+    const { root, bare } = await this.initialize(task, signal);
+    if (cwd !== join(root, 'author') || !/^[a-f0-9]{40,64}$/.test(head))
+      throw new AppError(
+        'workspace_invalid',
+        'Conflict repair requires the managed author checkout',
+      );
+    await this.verifyCopy(cwd, bare, signal);
+    const preserved = join(root, 'author-before-conflict-' + head);
+    if (existsSync(preserved)) await this.verifyCopy(preserved, bare, signal);
+    await run(['merge-base', '--is-ancestor', task.revision.head, head]);
     const current = await run(['rev-parse', 'HEAD']);
     const merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
     if (!merging && current !== head && (await this.savedConflictMerge(cwd, head, base, signal)))
-      return;
+      return existsSync(preserved) ? preserved : undefined;
     if (current !== head || (merging && merging !== base))
       throw new AppError(
         'workspace_diverged',
         'The worker copy has a different commit or unfinished merge. Its changes were preserved.',
       );
     if (!merging) {
-      if (await run(['status', '--porcelain']))
-        throw new AppError(
-          'workspace_dirty',
-          'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.',
-        );
+      if (await run(['status', '--porcelain'])) {
+        if (task.scope || existsSync(preserved))
+          throw new AppError(
+            'workspace_dirty',
+            'Conflict repair found additional local changes. The working copies were preserved.',
+          );
+        // Move the entire worktree, including its index, ignored and untracked files.
+        await git(['--git-dir', bare, 'worktree', 'move', cwd, preserved], root, {}, signal);
+        await git(['--git-dir', bare, 'worktree', 'add', '--detach', cwd, head], root, {}, signal);
+        await this.verifyCopy(cwd, bare, signal);
+      }
       try {
         await run([
           '-c',
@@ -280,6 +301,7 @@ export class Workspaces {
           'The merge conflict includes files outside the task scope. The working copy was preserved.',
         );
     }
+    return existsSync(preserved) ? preserved : undefined;
   }
   async commitFix(task: Task, message: string, signal?: AbortSignal): Promise<string> {
     if (task.ref.provider === 'arcadia') return this.arc.commit(task, message, signal);
@@ -297,12 +319,17 @@ export class Workspaces {
     if (task.fixingMergeConflict) {
       if (
         !merging &&
-        (await this.savedConflictMerge(cwd, task.revision.head, task.revision.base, signal))
+        (await this.savedConflictMerge(
+          cwd,
+          task.conflictCheckpoint ?? task.revision.head,
+          task.revision.base,
+          signal,
+        ))
       )
         return run(['rev-parse', 'HEAD']);
       if (
         merging !== task.revision.base ||
-        (await run(['rev-parse', 'HEAD'])) !== task.revision.head
+        (await run(['rev-parse', 'HEAD'])) !== (task.conflictCheckpoint ?? task.revision.head)
       )
         throw new AppError(
           'merge_target_changed',

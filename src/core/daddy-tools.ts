@@ -29,6 +29,7 @@ export const daddySchemas = {
     .strict(),
   create_task: z
     .object({
+      source: z.string().url().max(2048).optional(),
       title: z.string().trim().min(1).max(200),
       requirements: text,
       workspaceId: id.optional(),
@@ -62,7 +63,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   attach_review:
     'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The workspace must match the native repository.',
   create_task:
-    'Create a concrete task from the user requirements. Choose a registered workspace and optional dependencies. Does not start a worker.',
+    'Create a concrete task from the user requirements. For an existing GitHub issue or newly created sub-issue, pass its canonical issue URL in source (one task per issue). Choose a registered workspace and optional dependencies. Does not start a worker.',
   dispatch:
     'Start work on a ready task. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
   message_worker:

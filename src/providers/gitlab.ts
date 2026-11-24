@@ -208,12 +208,12 @@ export class GitLabProvider implements ReviewProvider {
           n.id > (review.baselineNoteId ?? Infinity) &&
           !isSummary(n) &&
           !isComment(n) &&
-          !retired?.some(
+          ![...(retired ?? []), ...(successor ? [successor] : [])].some(
             (item) =>
               String(n.author_id ?? n.author?.id) === item.authorId &&
-              body(n).includes(`<!-- ${item.marker}:comment:`),
-          ) &&
-          !(successor && String(n.id) === successor.id && body(n).includes(tag(successor.marker))),
+              (body(n).includes(tag(item.marker)) ||
+                body(n).includes(`<!-- ${item.marker}:comment:`)),
+          ),
       );
     const stillDraft = drafts.some(isSummary);
     return {

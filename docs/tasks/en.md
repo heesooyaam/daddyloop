@@ -38,6 +38,10 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
 
+For an existing GitHub issue, use its URL as the task source. A standalone issue URL or a line such as “GitHub issue: https://github.com/owner/repo/issues/42” imports the issue in the selected repository. Other links in the requirements are references. A PR for an imported issue includes its closing reference, so merging into the default branch closes that issue.
+
+With GitHub auto-merge enabled, a reviewed task waits for merge confirmation and keeps its assigned worker. A conflict goes back to that worker with the task’s working copy and conversation. Turning auto-merge off restores completion after review and required checks.
+
 Use the main daddy chat for instructions. Task reports show progress and offer plan approval when required. Plan approval checks the exact revision and generation again.
 
 `/pause` pauses the session; `/resume` resumes it. Closing the CLI/browser only disconnects the client. Stopping the service is different: interrupted work is recorded and must be resumed after inspection. See [operations](../operations/en.md).
@@ -49,5 +53,7 @@ On the web or in Telegram, open the session settings to enable **Auto-merge GitH
 When GitHub confirms a conflict with the target branch, daddy assigns the repair to a worker. The service merges the pinned branches in the managed working copy. The worker resolves the conflict and tests the result. The service pushes the merge commit to the same PR using a normal push. daddy reviews the new revision and waits for passing CI. If the worker needs a decision about the intended behavior, the task card shows its question.
 
 For an open PR, the service reads the current target branch commit directly from GitHub. If the target advances during a conflict repair, the service preserves the fix on the PR branch with a normal push and reviews it against the updated target. The web task list and Telegram /queue show why auto-merge is waiting, including draft PRs.
+
+When GitHub throttles requests, the service persists the host deadline, then resumes polling and reconciles the PR. A saved fix uses a normal push after verifying both branches. If the target advanced, GitHub must confirm its ancestry, and the new revision goes through independent review. A timed-out review can be retried automatically once.
 
 The service waits for a completed independent review, a published review with no outstanding findings, and passing CI on the current revision. GitHub checks the supplied head SHA and repository rules. The service prefers squash, then a merge commit, then rebase according to the repository’s allowed methods. The task card shows the outcome or why the merge is waiting.

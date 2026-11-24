@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
 import { describe, expect, it, vi } from 'vitest';
+import { reconcileWorkerPools, workerSlots, saveWorkerSlots } from '../src/core/worker-pool.js';
 import { pollAutoMerge } from '../src/core/auto-merge.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
 import { DemoProvider } from '../src/providers/demo.js';
@@ -131,6 +132,190 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('reserves the original worker from clean review through a late conflict', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const group = f.store.getGroup(f.group.id);
+      saveWorkerSlots(f.store, group, [{ number: 1, taskId: f.task.id }]);
+      await f.daddy.settings(group.id, { autoMerge: true });
+      const job = f.store.claim()!;
+      await f.engine.completeJob(job, {
+        status: 'completed',
+        summary: 'Verified',
+        checkedHead: f.task.revision!.head,
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      await f.engine.publish(f.task.id);
+      const slots = () => workerSlots(f.store, f.store.getGroup(group.id));
+      reconcileWorkerPools(f.store);
+      expect(f.store.getTask(f.task.id).state).toBe('awaiting_merge');
+      expect(slots()[0].taskId).toBe(f.task.id);
+      await f.engine.action(f.task.id, 'pause');
+      await f.engine.action(f.task.id, 'resume');
+      expect(f.store.getTask(f.task.id).state).toBe('awaiting_merge');
+      f.setRemote({ mergeConflict: true, mergeable: false });
+      await f.poll();
+      expect(f.daddy.board(group.id).tasks[0].statusLabel).toBe(
+        'Conflict repair queued for worker 1',
+      );
+      expect(slots()[0].taskId).toBe(f.task.id);
+    } finally {
+      await f.close();
+    }
+  });
+  it('retains legacy assignments until merge confirmation or opt-out', async () => {
+    const f = await setup();
+    try {
+      const group = f.store.getGroup(f.group.id);
+      saveWorkerSlots(f.store, group, [{ number: 1, taskId: f.task.id }]);
+      await f.daddy.settings(group.id, { autoMerge: true });
+      f.engine.restoreMergeWaits();
+      reconcileWorkerPools(f.store);
+      expect(f.daddy.board(group.id).workers.occupied).toBe(1);
+      f.daddy.taskAutoMerge(group.id, f.task.id, 'off');
+      await f.poll();
+      expect(f.store.getTask(f.task.id).state).toBe('complete');
+      expect(f.send).not.toHaveBeenCalled();
+      f.daddy.taskAutoMerge(group.id, f.task.id, 'on');
+      await f.poll();
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: 'complete',
+        pr: { state: 'merged' },
+      });
+      reconcileWorkerPools(f.store);
+      expect(f.daddy.board(group.id).workers.occupied).toBe(0);
+    } finally {
+      await f.close();
+    }
+  });
+  it.each(['poll', 'completion', 'admission'] as const)(
+    'restarts a review on target advance during %s without requiring auto-merge or human input',
+    async (path) => {
+      const f = await setup();
+      try {
+        await f.engine.review(f.task.id, true);
+        const old = f.store.getTask(f.task.id);
+        const job = path === 'admission' ? undefined : f.store.claim()!;
+        const handle = old.review!,
+          key = 'demo-review:' + handle.id;
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(old), handle)),
+          body: `Review in progress.\n\n<!-- ${handle.marker} -->`,
+        });
+        f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+        const lastEvent = f.store.events(old.id).at(-1)?.id ?? 0;
+        if (path === 'completion') {
+          await f.engine.completeJob(job!, {
+            status: 'completed',
+            summary: 'Old assessment',
+            checkedHead: old.revision!.head,
+          });
+        } else if (path === 'admission') {
+          await f.worker.tick();
+          await vi.waitFor(() =>
+            expect(f.store.getTask(old.id).revision?.base).toBe('d'.repeat(40)),
+          );
+        } else {
+          await f.engine.reconcile(old.id);
+        }
+        expect(
+          f.store
+            .events(old.id)
+            .filter((e) => e.id > lastEvent && e.type === 'task.state')
+            .map((e) => e.data),
+        ).not.toContainEqual(expect.objectContaining({ state: 'needs_input' }));
+        expect(f.store.activeJobs(old.id)).toHaveLength(1);
+        expect(f.store.getTask(old.id)).toMatchObject({
+          state: 'reviewing',
+          review: { id: handle.id, revision: { base: 'd'.repeat(40) } },
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
+    const f = await setup();
+    const readReview = DemoProvider.prototype.getReview;
+    const githubSnapshot = vi
+      .spyOn(DemoProvider.prototype, 'getReview')
+      .mockImplementation(async function (this: DemoProvider, ref, review) {
+        const snapshot = await readReview.call(this, ref, review);
+        // GitHub reports the commit ID. The comparison base comes from the checked handle.
+        return { ...snapshot, revision: { ...review.revision, head: snapshot.revision.head } };
+      });
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await f.engine.review(f.task.id, true);
+      const old = f.store.getTask(f.task.id);
+      const handle = { ...old.review!, authorId: 'reviewer' };
+      const key = 'demo-review:' + handle.id;
+      f.store.saveTask({
+        ...old,
+        review: handle,
+        ticketRepository: {
+          baseHead: old.revision!.base,
+          baseBranch: old.pr!.targetBranch,
+          branch: old.pr!.branch,
+          cloneUrl: old.pr!.cloneUrl,
+        },
+      });
+      f.store.setSetting(key, {
+        ...(await f.provider.getReview(prRef(old), handle)),
+        authorId: handle.authorId,
+      });
+      const job = f.store.claim()!;
+      const { id } = (await f.engine.broker.call(job, 'add_comment', {
+        key: 'finding',
+        body: 'Check layout',
+      })) as { id: string };
+      await f.engine.broker.call(job, 'set_summary', { body: 'Old summary' });
+      const before = await f.provider.getReview(prRef(old), handle);
+      const comment = before.comments[0];
+      Object.assign(f.provider, { targetAdvanced: async () => true });
+      f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+      f.store.setSetting(key, {
+        ...before,
+        comments: [{ ...comment, body: 'Private human edit' }],
+      });
+      await f.engine.reconcile(old.id);
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      f.store.setSetting(key, before);
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id },
+        draftRecheck: { commentIds: [id] },
+      });
+      const first = f.store.claim()!;
+      const result = {
+        status: 'completed' as const,
+        summary: 'Reviewed',
+        checkedHead: old.revision!.head,
+      };
+      await f.engine.completeJob(first, result);
+      f.store.saveJob({ ...first, status: 'completed' });
+      expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+      const second = f.store.claim()!;
+      await f.engine.broker.call(second, 'edit_comment', {
+        id,
+        body: 'Verified against the new base',
+      });
+      await f.engine.broker.call(second, 'set_summary', { body: 'Rechecked' });
+      await f.engine.completeJob(second, result);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'awaiting_publication',
+        reviewFinished: true,
+      });
+    } finally {
+      githubSnapshot.mockRestore();
+      await f.close();
+    }
+  });
+
   it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
     const f = await setup();
     try {
@@ -154,15 +339,15 @@ describe('opt-in GitHub merging', () => {
       const tip = 'd'.repeat(40);
       f.setRemote({ base: tip, start: tip });
       f.store.setSetting(key, { ...draft, body: 'Private review notes' });
-      await f.engine.retryExhaustedReview(old.id);
+      await f.engine.retryInterruptedStep(old.id);
       expect(f.store.activeJobs(old.id)).toHaveLength(0);
       f.store.setSetting(key, {
         ...draft,
         body: `Review in progress.\n\n<!-- ${old.review!.marker} -->`,
       });
       await Promise.all([
-        f.engine.retryExhaustedReview(old.id),
-        f.engine.retryExhaustedReview(old.id),
+        f.engine.retryInterruptedStep(old.id),
+        f.engine.retryInterruptedStep(old.id),
       ]);
       expect(f.store.getTask(old.id)).toMatchObject({
         state: 'reviewing',
@@ -175,9 +360,135 @@ describe('opt-in GitHub merging', () => {
       expect(retry.freshContextRetry).toBe(true);
       f.engine.failJob(retry, failure);
       f.store.saveJob({ ...retry, status: 'failed', error: String(failure) });
-      await f.engine.retryExhaustedReview(old.id);
+      await f.engine.retryInterruptedStep(old.id);
       expect(f.store.activeJobs(old.id)).toHaveLength(0);
       expect(f.send).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it.each(['quota', 'timeout'] as const)(
+    'rechecks the native placeholder before automatically resuming a %s review',
+    async (cause) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const job = f.store.claim()!;
+        const error =
+          cause === 'quota'
+            ? new AppError(
+                'provider_403',
+                'GET /repos/test/repo/pulls/12: HTTP 403 {\n  "message":"API rate limit exceeded for user ID 7."\n}\n',
+              )
+            : new AppError('run_timeout', 'Agent exceeded the configured run time limit');
+        f.engine.failJob(job, error);
+        f.store.saveJob({ ...job, status: 'failed', error: String(error), errorCode: error.code });
+        const t = f.store.getTask(f.task.id),
+          key = 'demo-review:' + t.review!.id;
+        const draft = await f.provider.getReview(prRef(t), t.review!);
+        const group = f.store.getGroup(f.group.id);
+        group.reviewerThreadId = 'codex:existing';
+        f.store.saveGroup(group);
+        f.store.setSetting(key, {
+          ...draft,
+          body: `Review in progress.\n\n<!-- ${t.review!.marker} -->`,
+        });
+        f.setRemote({ base: 'e'.repeat(40), start: 'e'.repeat(40) });
+        await f.engine.retryInterruptedStep(t.id);
+        expect(f.store.getTask(t.id)).toMatchObject({
+          state: 'reviewing',
+          review: { id: t.review!.id, revision: { base: 'e'.repeat(40) } },
+        });
+        expect(f.store.getGroup(group.id).reviewerThreadId).toBe('codex:existing');
+        expect(f.store.activeJobs(t.id)).toHaveLength(1);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('archives a stale service draft before deletion and opens a fresh draft only on the confirmed saved head', async () => {
+    const f = await setup();
+    try {
+      const t = f.store.getTask(f.task.id),
+        old = t.review!,
+        head = 'e'.repeat(40);
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      old.authorId = '123';
+      t.state = 'needs_input';
+      t.pendingFix = { revision: t.revision! };
+      t.pendingAuthorHead = head;
+      t.pr = { ...t.pr!, head };
+      t.revision = { ...t.revision!, head };
+      t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
+      f.setRemote({ head, mergeConflict: true });
+      const key = 'demo-review:' + old.id,
+        snapshot = await f.provider.getReview(prRef(t), old);
+      const draft = {
+        ...snapshot,
+        status: 'draft',
+        body: `Review in progress.\n\n<!-- ${old.marker} -->`,
+      };
+      const discard = vi.fn(async () => {
+        expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
+        f.store.setSetting(key, { ...draft, status: 'missing' });
+      });
+      Object.assign(f.provider, { discardSupersededDraft: discard });
+      f.store.saveTask(t);
+      f.store.setSetting(key, { ...draft, body: 'Human edit' });
+      await f.engine.review(t.id, true);
+      expect(discard).not.toHaveBeenCalled();
+      f.store.saveTask(t);
+      f.store.setSetting(key, draft);
+      await f.engine.review(t.id, true);
+      expect(discard).toHaveBeenCalledTimes(1);
+      const current = f.store.getTask(t.id);
+      expect(current).toMatchObject({
+        state: 'reviewing',
+        review: { revision: { head } },
+        reviewFinished: false,
+      });
+      expect(current.review!.id).not.toBe(old.id);
+      expect(f.store.activeJobs(t.id)).toHaveLength(1);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      const task = f.store.getTask(f.task.id);
+      task.state = 'fixing';
+      task.authorWorktree = f.dir;
+      f.store.saveTask(task);
+      saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
+      f.setRemote({ mergeable: false, mergeConflict: true });
+      const job = f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
+      f.store.claim();
+      const save = vi.fn(async () => 'c'.repeat(40));
+      await f.engine.completeJob(
+        job,
+        {
+          status: 'incomplete',
+          summary: 'Integration blocked on conflict',
+          checkedHead: task.revision!.head,
+        },
+        undefined,
+        save,
+      );
+      f.store.saveJob({ ...job, status: 'completed' });
+      expect(save).toHaveBeenCalledOnce();
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'fixing',
+        fixingMergeConflict: true,
+        conflictCheckpoint: 'c'.repeat(40),
+      });
+      expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      expect(f.daddy.board(f.group.id).workers.slots[0].taskId).toBe(task.id);
     } finally {
       await f.close();
     }
@@ -224,8 +535,16 @@ describe('opt-in GitHub merging', () => {
       });
       expect(f.store.activeJobs(task.id)).toHaveLength(1);
       expect(f.send).not.toHaveBeenCalled();
+      const previousCopy = await f.checkouts.prepare(task, 'author');
+      writeFileSync(join(previousCopy, 'untracked-note'), 'work in progress');
+      writeFileSync(join(previousCopy, 'feature'), 'previous resolution');
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.job.role).toBe('author');
+        const preserved = previousCopy + '-before-conflict-' + head;
+        expect(input.readPaths).toContain(preserved);
+        expect(input.prompt).toContain(preserved);
+        expect(readFileSync(join(preserved, 'untracked-note'), 'utf8')).toBe('work in progress');
+        expect(readFileSync(join(preserved, 'feature'), 'utf8')).toBe('previous resolution');
         expect(input.prompt).toContain('resolving a GitHub PR conflict');
         expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toContain('<<<<<<<');
         await expect(f.checkouts.commitFix(input.task, 'premature')).rejects.toMatchObject({
@@ -319,6 +638,8 @@ describe('opt-in GitHub merging', () => {
         throw new Error('response lost');
       });
       await f.poll();
+      await f.engine.action(f.task.id, 'pause');
+      await f.engine.action(f.task.id, 'resume');
       const resultKey = 'autoMerge.result:' + f.task.id;
       const previous = f.store.setting<{ state: string; checkedAt: number }>(resultKey)!;
       expect(previous.state).toBe('uncertain');

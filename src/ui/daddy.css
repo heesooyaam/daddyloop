@@ -1103,11 +1103,16 @@
     left: 0;
     z-index: 40;
     width: 260px;
+    visibility: hidden;
     transform: translateX(-100%);
-    transition: transform 0.16s;
+    transition:
+      transform 0.16s,
+      visibility 0.16s;
   }
   .daddy-sidebar.open {
+    visibility: visible;
     transform: translateX(0);
+    transition-property: transform;
   }
   .daddy-shade {
     display: block;
@@ -1670,9 +1675,6 @@ body {
 .daddy-button.primary:hover,
 .daddy-send:hover {
   background: var(--primary-hover);
-}
-.daddy-theme-toggle {
-  flex-shrink: 0;
 }
 .login-page > .daddy-theme-toggle {
   position: absolute;

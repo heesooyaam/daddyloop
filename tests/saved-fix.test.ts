@@ -250,3 +250,102 @@ it.each(['waiting', 'moved base', 'deadline expired'] as const)(
     }
   },
 );
+
+it.each(['advanced target', 'rewritten target', 'different branch'] as const)(
+  'recovers an ordinary GitHub fix confirmed by main (%s)',
+  async (scenario) => {
+    const f = await fixture();
+    try {
+      const task = f.store.getTask(f.task.id);
+      const original = task.revision!;
+      const confirmed = {
+        ...task.pr!,
+        head: savedHead,
+        base: 'c'.repeat(40),
+        start: 'c'.repeat(40),
+      };
+      const ref = { ...prRef(task), provider: 'github' as const };
+      const author = f.store.enqueue(task, 'author', 'fix', 'Save the fix');
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.event(
+        task.id,
+        'author.fixes_saved',
+        { head: savedHead, revision: original },
+        author.id,
+      );
+      f.store.event(task.id, 'author.submitted', { head: savedHead, pushed: true });
+      f.store.saveTask({
+        ...task,
+        ref,
+        pr: confirmed,
+        revision: confirmed,
+        state: 'queued',
+        pendingAuthorHead: savedHead,
+        pendingFix: { revision: original, attempted: true },
+      });
+      f.store.setSetting(
+        'demo-pr:1',
+        scenario === 'different branch' ? { ...confirmed, targetBranch: 'release' } : confirmed,
+      );
+      const targetAdvanced = vi.fn(async () => scenario === 'advanced target');
+      Object.assign(f.provider, { targetAdvanced });
+      const restarted = new Engine(f.store, () => f.provider);
+      if (scenario === 'advanced target') {
+        expect(await restarted.review(task.id, true)).toMatchObject({
+          state: 'reviewing',
+          review: { revision: { head: savedHead, base: confirmed.base } },
+        });
+        expect(targetAdvanced).toHaveBeenCalledWith(ref, original.base, confirmed.base);
+      } else {
+        await expect(restarted.review(task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+        });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        if (scenario === 'different branch') expect(targetAdvanced).not.toHaveBeenCalled();
+      }
+      expect(
+        f.store.events(task.id).filter(({ type }) => type === 'author.submitted'),
+      ).toHaveLength(1);
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it('retains a worker message through push confirmation and delivers it once on the published revision', async () => {
+  const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+  try {
+    const original = f.task.pr!;
+    f.store.saveTask({ ...f.task, pendingFix: { revision: f.task.revision! } });
+    const native = vi.spyOn(f.provider, 'getPR').mockResolvedValue(original);
+    await f.engine.chat(f.task.id, 'author', 'Check the empty state too', 'command-one');
+    await f.engine.chat(f.task.id, 'author', 'Check the empty state too', 'command-one');
+    expect(f.store.messages(f.task.id)).toHaveLength(1);
+    await f.engine.deliverWorkerInstruction(f.task.id);
+    expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+    await f.engine.submitSavedFix(f.task.id, async () => async () => {
+      native.mockResolvedValue({ ...original, head: savedHead });
+    });
+    await f.engine.review(f.task.id);
+    const review = f.store.claim()!;
+    await f.engine.completeJob(review, f.result({ checkedHead: savedHead }));
+    f.store.saveJob({ ...review, status: 'completed' });
+    await f.engine.publish(f.task.id);
+    await Promise.all([
+      f.engine.deliverWorkerInstruction(f.task.id),
+      f.engine.deliverWorkerInstruction(f.task.id),
+    ]);
+    const job = f.store.claim()!;
+    expect(job).toMatchObject({
+      kind: 'chat',
+      input: 'Check the empty state too',
+      generation: f.store.getTask(f.task.id).generation,
+    });
+    await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
+    f.store.saveJob({ ...job, status: 'completed' });
+    await f.engine.deliverWorkerInstruction(f.task.id);
+    expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});

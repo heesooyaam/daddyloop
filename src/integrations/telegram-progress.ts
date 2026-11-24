@@ -1,5 +1,7 @@
+import { githubWait } from '../providers/github-quota.js';
 import { randomUUID } from 'node:crypto';
-import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
+import { workerSlots } from '../core/worker-pool.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import type { Store } from '../core/store.js';
 import type { DaddyJob, Job, ReviewGroup, State } from '../core/types.js';
 import { redact } from '../core/security.js';
@@ -23,6 +25,7 @@ const activeStates = new Set<State>([
   'reviewing',
   'fixing',
   'awaiting_checks',
+  'awaiting_merge',
   'ready_for_review',
   'awaiting_publication',
   'awaiting_push',
@@ -65,10 +68,16 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     group.workspacePreparation?.state !== 'error' &&
     (preparing || !!activeTask || turns.length > 0 || workers.length > 0);
   const attention = tasks.find((task) => task.state === 'needs_input');
-  const outstanding = taskActivity([...tasks].reverse(), workers, (task) =>
-    task.state === 'complete'
-      ? autoMergeStatus(task, autoMergeSettings(store, group, task))
-      : undefined,
+  const outstanding = taskActivity(
+    [...tasks].reverse(),
+    workers,
+    (task) =>
+      githubActivityStatus(
+        task,
+        autoMergeSettings(store, group, task),
+        githubWait(store, task.ref),
+      ),
+    workerSlots(store, group),
   ).filter(outstandingActivity);
   let label = 'No work in progress';
   if (group.deletion) label = 'Saving results and removing session copies';
