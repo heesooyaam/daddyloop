@@ -494,6 +494,12 @@ export const daddyRu: Record<string, string> = {
   'Continuing the interrupted fix against confirmed published feedback.':
     'Воркер продолжает прерванное исправление по подтверждённым замечаниям.',
   'Open task': 'Открыть задачу',
+  'Apply now and restart the active daddy turn or review':
+    'Применить сейчас и перезапустить текущий ход daddy или ревью',
+  'Apply this profile to all worker slots': 'Применить этот профиль ко всем воркерам',
+  'Apply now · {effort}': 'Применить сейчас · {effort}',
+  'The session is busy. Choose Apply now to switch the active daddy turn or review.':
+    'Сессия занята. Выбери «Применить сейчас», чтобы переключить текущий ход daddy или ревью.',
   'Session owner': 'Владелец сессии',
   'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':

@@ -25,6 +25,7 @@ import {
   type ReviewGroup,
   type Task,
   type AgentProfiles,
+  sameAgentProfile,
   type AgentProfile,
   type Job,
   type WorkerRequest,
@@ -333,8 +334,11 @@ export class Daddy {
         slot.profile = profile;
         saveWorkerSlots(this.store, group, slots);
         const restarted = lockedTaskId
-          ? this.engine.reconfigureAuthor(this.store.getTask(lockedTaskId), profile, (jobId) =>
-              this.worker.isFinalizing(jobId),
+          ? this.engine.reconfigureTaskRuns(
+              this.store.getTask(lockedTaskId),
+              'author',
+              profile,
+              (jobId) => !this.worker.isFinalizing(jobId),
             )
           : false;
         this.store.event(id, 'daddy.worker_configured', {
@@ -470,86 +474,139 @@ export class Daddy {
     id: string,
     input: {
       workerLimit?: number;
-      profiles?: AgentProfiles;
+      profiles?: Partial<AgentProfiles>;
+      forceDaddy?: boolean;
+      applyWorkers?: boolean;
       instructions?: SessionInstructions;
       autoMerge?: boolean;
     },
   ) {
-    if (input.profiles)
-      await Promise.all([
-        this.catalogue.validate(input.profiles.worker),
-        this.catalogue.validate(input.profiles.daddy),
-      ]);
-    const group = this.group(id);
-    if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-    if (input.autoMerge !== undefined) {
-      if (group.workspace?.provider !== 'github')
-        throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
-    }
+    for (const profile of Object.values(input.profiles ?? {}))
+      await this.catalogue.validate(profile);
     if (input.instructions)
-      group.instructions = sessionInstructionsSchema.parse(input.instructions);
-    if (
-      input.workerLimit !== undefined &&
-      (!Number.isInteger(input.workerLimit) || input.workerLimit < 1 || input.workerLimit > 8)
-    )
-      throw new AppError('invalid_pool', 'Choose between 1 and 8 workers', 400);
-    if (input.profiles) {
-      const reviewerChanged = JSON.stringify(group.daddy) !== JSON.stringify(input.profiles.daddy);
+      input.instructions = sessionInstructionsSchema.parse(input.instructions);
+    await this.withSessionTasks(id, (group, tasks) => {
+      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+      if (input.autoMerge !== undefined && group.workspace?.provider !== 'github')
+        throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
+      const limit = input.workerLimit;
+      if (limit !== undefined) {
+        if (!Number.isInteger(limit) || limit < 1 || limit > 8)
+          throw new AppError('invalid_pool', 'Choose between 1 and 8 workers', 400);
+        if (
+          tasks.some((task) => task.state !== 'complete' && (task.workerRequest?.slot ?? 0) > limit)
+        )
+          throw new AppError(
+            'worker_requested',
+            'A task is waiting for a worker that would be removed by this change',
+          );
+        group.requestedWorkerLimit = limit;
+      }
+      const nextDaddy = input.profiles?.daddy,
+        nextWorker = input.profiles?.worker;
+      const changeWorkers =
+        nextWorker &&
+        (input.applyWorkers ||
+          !sameAgentProfile(group.worker ?? this.engine.defaultAgents().worker, nextWorker));
+      const turns = this.store
+        .daddyJobs(id)
+        .filter((j) => j.status === 'queued' || j.status === 'running');
+
+      const sharedReviews = this.store
+        .activeJobs()
+        .filter((j) => j.groupId === id && j.role === 'reviewer');
+      const changeDaddy =
+        nextDaddy &&
+        (!sameAgentProfile(group.daddy, nextDaddy) ||
+          (input.forceDaddy &&
+            [...turns, ...sharedReviews].some((j) => !sameAgentProfile(j.profile, nextDaddy))));
       if (
-        reviewerChanged &&
-        (this.running.has(id) ||
-          this.store
-            .jobs()
-            .some(
-              (job) =>
-                job.groupId === id &&
-                job.role === 'reviewer' &&
-                ['running', 'queued'].includes(job.status),
-            ) ||
-          this.store.daddyJobs(id).some((job) => ['running', 'queued'].includes(job.status)))
+        changeDaddy &&
+        !input.forceDaddy &&
+        (this.running.has(id) || turns.length || sharedReviews.length)
       )
         throw new AppError(
           'daddy_busy',
-          'Wait for this session to become idle before changing its models',
+          'The session is busy. Choose Apply now to switch the active daddy turn or review.',
         );
-      if (group.daddy.engine !== input.profiles.daddy.engine) {
-        this.store.event(id, 'agent.engine_changed', {
-          previous: group.daddy.engine,
-          current: input.profiles.daddy.engine,
-          coordination: group.daddyThreadId,
-          review: group.reviewerThreadId,
+      const restartReviews: string[] = [];
+      let restartCoordinator = false;
+      this.store.transaction(() => {
+        if (input.instructions) group.instructions = input.instructions;
+        if (changeWorkers) {
+          group.worker = nextWorker;
+          for (const slot of group.workerSlots ?? []) delete slot.profile;
+          for (const task of tasks.filter((t) => t.state !== 'complete')) {
+            this.engine.reconfigureTaskRuns(task, 'author', nextWorker, () => false);
+          }
+        }
+        if (changeDaddy) {
+          const engineChanged = group.daddy.engine !== nextDaddy.engine;
+          if (engineChanged) {
+            this.store.event(id, 'agent.engine_changed', {
+              previous: group.daddy.engine,
+              current: nextDaddy.engine,
+              coordination: group.daddyThreadId,
+              review: group.reviewerThreadId,
+            });
+            group.daddyThreadId = undefined;
+            group.reviewerThreadId = undefined;
+          }
+          const generation = group.generation++;
+          group.daddy = nextDaddy;
+          for (const task of tasks.filter((t) => t.state !== 'complete' || this.store.busy(t.id))) {
+            if (engineChanged) task.reviewerThreadId = undefined;
+            // Keep unrelated authors eligible across this change to the shared reviewer.
+            for (const job of this.store.activeJobs(task.id)) {
+              if (job.groupGeneration === generation)
+                this.store.saveJob({ ...job, groupGeneration: group.generation });
+            }
+            if (
+              this.engine.reconfigureTaskRuns(task, 'reviewer', nextDaddy, () => !!input.forceDaddy)
+            )
+              restartReviews.push(task.id);
+          }
+          for (const turn of turns) {
+            if (turn.generation !== generation) continue;
+            if (turn.status === 'queued') {
+              this.store.saveDaddyJob({
+                ...turn,
+                generation: group.generation,
+                profile: nextDaddy,
+              });
+            } else if (turn.trigger !== 'resources') {
+              this.store.saveDaddyJob({ ...turn, status: 'cancelled', finishedAt: now() });
+              this.store.saveDaddyJob({
+                ...turn,
+                id: randomUUID(),
+                firstAttemptId: turn.firstAttemptId ?? turn.id,
+                input: turn.input,
+                profile: nextDaddy,
+                generation: group.generation,
+                status: 'queued',
+                startedAt: undefined,
+                finishedAt: undefined,
+                error: undefined,
+                notBefore: undefined,
+              });
+              restartCoordinator = true;
+            }
+          }
+        }
+        this.store.saveGroup(group);
+        if (input.autoMerge !== undefined)
+          this.store.setSetting('autoMerge.session:' + id, input.autoMerge);
+        this.store.event(id, 'daddy.settings', {
+          workerLimit: group.workerLimit,
+          requestedWorkerLimit: group.requestedWorkerLimit,
+          autoMerge: sessionAutoMerge(this.store, id),
+          restartReviews,
+          restartCoordinator,
         });
-        group.daddyThreadId = undefined;
-        group.reviewerThreadId = undefined;
-      }
-      group.daddy = input.profiles.daddy;
-      group.worker = input.profiles.worker;
-      if (reviewerChanged) group.generation++;
-    }
-    if (input.workerLimit !== undefined) {
-      if (
-        this.store
-          .tasks(id)
-          .some(
-            (task) =>
-              task.state !== 'complete' && (task.workerRequest?.slot ?? 0) > input.workerLimit!,
-          )
-      )
-        throw new AppError(
-          'worker_requested',
-          'A task is waiting for a worker that would be removed by this change',
-        );
-      group.requestedWorkerLimit = input.workerLimit;
-    }
-    this.store.transaction(() => {
-      this.store.saveGroup(group);
-      if (input.autoMerge !== undefined)
-        this.store.setSetting(`autoMerge.session:${id}`, input.autoMerge);
-    });
-    this.store.event(id, 'daddy.settings', {
-      workerLimit: group.workerLimit,
-      requestedWorkerLimit: group.requestedWorkerLimit,
-      autoMerge: sessionAutoMerge(this.store, id),
+      });
+      if (changeDaddy) this.worker.updateAuthorGroupGeneration(id, group.generation);
+      if (restartCoordinator) this.running.get(id)?.controller.abort();
+      for (const taskId of restartReviews) this.engine.onCancel(taskId);
     });
     return this.board(id);
   }
@@ -1013,7 +1070,10 @@ export class Daddy {
         readOnly: true,
         tools: daddyTools,
         instructions: withInstructions(instructions, job.instructions),
-        prompt: JSON.stringify(context),
+        prompt:
+          (job.firstAttemptId
+            ? 'Continue the interrupted turn on the selected model. Inspect confirmed actions and preserved work before continuing the original request.\n'
+            : '') + JSON.stringify(context),
         signal: controller.signal,
         onSession: (threadId) => {
           const current = this.active(job, controller.signal);
@@ -1260,7 +1320,7 @@ export class Daddy {
     }
     if (!callId || callId.length > 200)
       throw new AppError('action_identity_required', 'A stable tool call ID is required', 400);
-    const actionId = `daddy:${job.id}:${callId}`;
+    const actionId = `daddy:${job.firstAttemptId ?? job.id}:${callId}`;
     const recover = async () => {
       const session = this.sessions().find((session) => session.createdByAction === actionId);
       if (session)
@@ -1325,7 +1385,7 @@ export class Daddy {
             );
           if (
             this.sessions().filter((session) =>
-              session.createdByAction?.startsWith(`daddy:${job.id}:`),
+              session.createdByAction?.startsWith(`daddy:${job.firstAttemptId ?? job.id}:`),
             ).length >= 5
           )
             throw new AppError(

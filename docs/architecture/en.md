@@ -84,7 +84,7 @@ sequenceDiagram
 
 For a Git URL, the hosting module validates the address and supplies authentication through `GitRepositoryTransport`. `Workspaces` asks Git for the default branch and commit, fetches that commit into a task-owned Git database, then creates a worktree. The next task gets a separate database and branch; retries reuse the existing copy. A local Git source is read without fetching into it. [The source-to-copy diagram](../workspaces/en.md#one-source-separate-workers) shows the separation.
 
-**Settings.** The agent profile and instructions are saved with the queued run. The first dispatch in a session applies any explicit task or worker profile and saves the selected profile with the run. Changing the session default leaves saved profiles intact. `AgentRegistry` selects the adapter by `profile.engine`.
+**Settings.** The agent profile and instructions are saved with the queued run. The first dispatch in a session applies any explicit task or worker profile and saves the selected profile with the run. A session-wide worker profile replaces slot overrides and applies to queued author turns. An active worker turn finishes on its current profile. `AgentRegistry` selects the adapter by `profile.engine`.
 
 **Result.** The agent returns a status, report and the commit it worked against. `Engine` checks these against the task and repository. A “done” message is insufficient: an unfinished review, for example, leaves the task open.
 

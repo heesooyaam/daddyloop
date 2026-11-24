@@ -136,6 +136,7 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  firstAttemptId?: string;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   groupId: string;

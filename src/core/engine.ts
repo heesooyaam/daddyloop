@@ -2114,24 +2114,31 @@ export class Engine {
   }
 
   /** Called under the task lock and in the same transaction as the slot update. */
-  reconfigureAuthor(task: Task, profile: AgentProfile, isFinalizing: (id: string) => boolean) {
+  reconfigureTaskRuns(
+    task: Task,
+    role: Job['role'],
+    profile: AgentProfile,
+    canInterrupt: (id: string) => boolean,
+  ) {
     const jobs = this.store.activeJobs(task.id).filter((job) => job.generation === task.generation);
     const previous = jobs.find(
       (job) =>
-        job.role === 'author' &&
+        job.role === role &&
         job.status === 'running' &&
-        !isFinalizing(job.id) &&
+        canInterrupt(job.id) &&
         !sameAgentProfile(job.profile, profile),
     );
     if (previous) task.generation++;
-    this.applyAuthorProfile(task, profile);
-    if (task.workerRequest?.profile) task.workerRequest.profile = profile;
+    if (role === 'author') {
+      this.applyAuthorProfile(task, profile);
+      if (task.workerRequest?.profile) task.workerRequest.profile = profile;
+    }
     this.store.saveTask(task);
 
     for (const job of jobs) {
       if (job.status !== 'queued') continue;
       job.generation = task.generation;
-      if (job.role === 'author') job.profile = profile;
+      if (job.role === role) job.profile = profile;
       this.store.saveJob(job);
     }
     if (!previous) return false;

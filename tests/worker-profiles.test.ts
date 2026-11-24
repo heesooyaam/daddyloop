@@ -183,3 +183,135 @@ it('keeps a result that is already being saved when the model is switched', asyn
     await f.close();
   }
 });
+
+it('applies the common worker profile to overridden slots, assigned tasks and queued turns', async () => {
+  const f = daddyFixture(),
+    runs = holdWorker(f);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
+    const override = { engine: 'claude', model: 'sonnet', effort: 'high' };
+    await f.daddy.configureWorker(group.id, 1, override);
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Active job',
+      requestId: 'active',
+      workerRequest: { slot: 1 },
+    });
+    await f.worker.tick();
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    const waiting = await f.daddy.createTask(group.id, {
+      requirements: 'Next job',
+      requestId: 'waiting',
+      workerRequest: { profile: override },
+    });
+    await f.daddy.settings(group.id, { profiles: { worker: profiles.worker }, applyWorkers: true });
+    const board = f.daddy.board(group.id);
+    expect(board.workers.slots.every((s) => !s.profile)).toBe(true);
+    expect(board.workerDefault).toEqual(profiles.worker);
+    expect(runs[0].input.signal.aborted).toBe(false);
+    expect(runs[0].input.job.profile).toEqual(override);
+    expect(f.store.getTask(task.id).agents?.worker).toEqual(profiles.worker);
+    expect(f.store.getTask(waiting.id).workerRequest?.profile).toEqual(profiles.worker);
+    expect(f.store.activeJobs(waiting.id)[0].profile).toEqual(profiles.worker);
+    runs[0].input.onSession('stale-author-thread');
+    expect(f.store.getTask(task.id).authorThreadId).toBeUndefined();
+  } finally {
+    runs.forEach((r) => r.finish());
+    await f.close();
+  }
+});
+
+it('forces a busy coordinator onto the selected model, preserving its request and rejecting late tools', async () => {
+  const f = daddyFixture();
+  let finish!: () => void;
+  const held = new Promise<void>((r) => {
+    finish = r;
+  });
+  f.runtime.runSession.mockImplementationOnce(async (input) => {
+    input.onSession('previous-coordinator');
+    await held;
+    return { status: 'completed', summary: 'Ignored late result', checkedHead: '' };
+  });
+  try {
+    const group = f.daddy.create({
+      workspaceId: f.workspace.id,
+      message: 'Continue the original request',
+    });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledOnce());
+    const active = f.runtime.runSession.mock.calls[0][0];
+    const previous = f.store.daddyJobs(group.id)[0];
+    f.daddy.chat(group.id, 'Another request');
+    const profile = { engine: 'claude', model: 'sonnet', effort: 'high' };
+    await expect(
+      f.daddy.settings(group.id, { profiles: { daddy: profile } }),
+    ).rejects.toMatchObject({ code: 'daddy_busy' });
+    await f.daddy.settings(group.id, { profiles: { daddy: profile }, forceDaddy: true });
+    expect(active.signal.aborted).toBe(true);
+    expect(f.store.getGroup(group.id).daddyThreadId).toBeUndefined();
+    expect(f.store.daddyJobs(group.id).filter((j) => j.status === 'queued')).toMatchObject([
+      { firstAttemptId: previous.id, input: previous.input, profile },
+      { input: 'Another request', profile },
+    ]);
+    await expect(active.onTool('read_board', {}, 'late')).rejects.toThrow('no longer active');
+    finish();
+    await vi.waitFor(() => {
+      f.daddy.tick();
+      expect(f.runtime.runSession).toHaveBeenCalledTimes(2);
+    });
+    expect(f.runtime.runSession.mock.calls[1][0].profile).toEqual(profile);
+    expect(f.store.messages(group.id).some((m) => m.text === 'Ignored late result')).toBe(false);
+  } finally {
+    finish();
+    await f.close();
+  }
+});
+
+it('restarts an active shared review while retaining its draft and draft publication gate', async () => {
+  const f = daddyFixture(),
+    runs = holdWorker(f);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.engine.create({
+      groupId: group.id,
+      requirements: 'Review a PR',
+      repoPath: f.dir,
+      ref: {
+        provider: 'demo',
+        host: 'demo',
+        repo: 'test/repo',
+        number: 12,
+        url: 'https://example.test/pull/12',
+      },
+    });
+    await f.engine.review(task.id);
+    await f.worker.tick();
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    const previous = f.store.getTask(task.id);
+    const profile = { engine: 'claude', model: 'sonnet', effort: 'high' };
+    await f.daddy.settings(group.id, { profiles: { daddy: profile }, forceDaddy: true });
+    const active = f.store.activeJobs(task.id);
+    expect(active).toMatchObject([
+      { kind: 'review', status: 'queued', profile, firstAttemptId: runs[0].input.job.id },
+    ]);
+    expect(f.store.getTask(task.id)).toMatchObject({
+      review: { id: previous.review!.id },
+      reviewFinished: false,
+      generation: previous.generation + 1,
+    });
+    expect(runs[0].input.signal.aborted).toBe(true);
+    runs[0].finish();
+    await vi.waitFor(() =>
+      expect(f.store.jobs(task.id).find((j) => j.id === runs[0].input.job.id)?.status).toBe(
+        'cancelled',
+      ),
+    );
+    await vi.waitFor(async () => {
+      await f.worker.tick();
+      expect(runs).toHaveLength(2);
+    });
+    expect(runs[1].input.job.profile).toEqual(profile);
+  } finally {
+    runs.forEach((r) => r.finish());
+    await f.close();
+  }
+});

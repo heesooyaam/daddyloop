@@ -868,3 +868,55 @@ it.each(['private', 'topic'])(
     }
   },
 );
+
+it('offers an immediate model switch from the daddy effort picker', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let n = 1;
+  const press = (data: string) =>
+    bot.handle({
+      update_id: n++,
+      callback_query: {
+        id: String(n),
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+  try {
+    await press('dad:models:' + group.id + ':daddy');
+    const choice = sent
+      .at(-1)
+      .buttons.flat()
+      .find((b: any) => b.text.includes('gpt-5.6-sol'));
+    await press(choice.callback_data);
+    const force = sent
+      .at(-1)
+      .buttons.flat()
+      .find((b: any) => b.callback_data?.endsWith(':force'));
+    const settings = vi.spyOn(f.daddy, 'settings');
+    await press(force.callback_data);
+    expect(settings).toHaveBeenCalledWith(
+      group.id,
+      expect.objectContaining({
+        profiles: { daddy: expect.objectContaining({ model: 'gpt-5.6-sol' }) },
+        forceDaddy: true,
+      }),
+    );
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});

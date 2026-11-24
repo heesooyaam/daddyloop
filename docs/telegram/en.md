@@ -4,6 +4,8 @@
 
 When daddy or a worker asks for a decision, the bot sends a new message with a mention of the paired owner and the question. It uses the session topic or the paired private chat. A plan awaiting approval also alerts the owner. Attention and All notifications include these mentions. Ordinary progress updates stay silent.
 
+In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.
