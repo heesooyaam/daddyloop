@@ -215,7 +215,7 @@ for (const locale of ['en', 'ru'] as const) {
     await page.reload();
     await expect(page.locator('html')).toHaveAttribute('lang', locale);
     await expect(page.getByRole('heading', { name: sessionTitle, exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: t('Agent limits'), exact: true })).toBeVisible();
     const tasks = page.locator('.daddy-work-item');
     await expect(tasks).toHaveCount(3);
     const lastTitle = await tasks.last().locator('strong').innerText();

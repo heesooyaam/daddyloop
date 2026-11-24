@@ -153,8 +153,12 @@ test('opens the palette from the mobile sidebar and keeps the choice across sess
   await page.reload();
   await expect(activeSession).toBeVisible();
   await expect(html).toHaveAttribute('data-theme', 'plum');
-  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Agent limits' })).toBeVisible();
   await menu.click();
+  await sidebar.getByRole('link', { name: 'Limits', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent limits' })).toBeFocused();
+  await menu.press('Enter');
+  await expect(firstItem).toBeFocused();
   await themeButton.click();
   await expect(theme).toHaveAttribute('aria-checked', 'true');
 });

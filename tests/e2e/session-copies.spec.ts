@@ -64,9 +64,7 @@ test('keeps copy preparation and retry visible and shows the ready path in sessi
   await expect(progress).toBeVisible();
 
   preparation = { state: 'error', error };
-  const failure = page
-    .getByRole('status')
-    .filter({ hasText: 'Could not prepare the session copy' });
+  const failure = page.getByRole('alert').filter({ hasText: 'Could not prepare the session copy' });
   await expect(failure.getByText(error, { exact: true })).toBeVisible();
   const retried = page.waitForResponse(
     (response) => response.url().endsWith('/resume') && response.request().method() === 'POST',
@@ -177,11 +175,11 @@ test('shows copy preparation and deletion progress without scrolling on short sc
   ] satisfies { group: Partial<DaddyBoard['group']>; heading: string }[]) {
     groupPatch = group;
     await page.reload();
-    await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+    await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
 
     const notice = page.getByRole('status').filter({ hasText: heading });
     const composer = page.getByLabel('Message daddy');
-    const overview = page.getByRole('region', { name: 'Session overview' });
+    const quotas = page.getByRole('button', { name: 'Agent limits', exact: true });
     for (const viewport of [
       { width: 390, height: 540 },
       { width: 1024, height: 480 },
@@ -199,7 +197,7 @@ test('shows copy preparation and deletion progress without scrolling on short sc
       }
       await expect(notice).toBeInViewport({ ratio: 1 });
       await expect(firstTask).toBeInViewport({ ratio: 1 });
-      expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+      await expect(quotas).toBeInViewport({ ratio: 1 });
     }
   }
 });
@@ -234,9 +232,9 @@ test('shows the resource wait and a task card without scrolling on short screens
     .fill(`https://github.com/fixture/planning/issues/${Date.now()}`);
   await page.getByLabel('Session name (optional)').fill('Resource status fixture');
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
 
-  const overview = page.getByRole('region', { name: 'Session overview' });
+  const quotas = page.getByRole('button', { name: 'Agent limits', exact: true });
   const notice = page.getByRole('status').filter({ hasText: 'Waiting for server resources' });
   await expect(notice).toContainText('Your messages and working files are saved.');
   for (const viewport of [
@@ -255,7 +253,7 @@ test('shows the resource wait and a task card without scrolling on short screens
     await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
       ratio: 1,
     });
-    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(quotas).toBeInViewport({ ratio: 1 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );

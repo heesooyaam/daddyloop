@@ -251,6 +251,19 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
       (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
   );
+  const sidebarToggle = (
+    <button
+      type="button"
+      ref={menuButton}
+      className="daddy-icon mobile-menu"
+      aria-label={t('Sessions')}
+      aria-controls="daddy-sessions-panel"
+      aria-expanded={menu}
+      onClick={() => setMenu(!menu)}
+    >
+      <Menu size={20} />
+    </button>
+  );
   return (
     <div className="daddy-app">
       <aside
@@ -374,10 +387,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       {limitsPage && (
         <main className="daddy-main daddy-limits-page" inert={menu}>
           <div className="daddy-limits-content">
-            <a className="daddy-limits-back" href={chatHref} onClick={navigate}>
-              <ArrowLeft size={16} aria-hidden="true" />
-              {t('Back to workspace')}
-            </a>
+            <div className="daddy-limits-navigation">
+              {sidebarToggle}
+              <a className="daddy-limits-back" href={chatHref} onClick={navigate}>
+                <ArrowLeft size={16} aria-hidden="true" />
+                {t('Back to workspace')}
+              </a>
+            </div>
             <h1 ref={limitsHeading} tabIndex={-1}>
               {t('Agent limits')}
             </h1>
@@ -402,16 +418,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           >
             {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
-          <button
-            ref={menuButton}
-            className="daddy-icon mobile-menu"
-            aria-label={t('Sessions')}
-            aria-controls="daddy-sessions-panel"
-            aria-expanded={menu}
-            onClick={() => setMenu((open) => !open)}
-          >
-            <Menu size={20} />
-          </button>
+          {!limitsPage && sidebarToggle}
           <div className="daddy-title">
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
               {board?.workspace?.name ?? 'daddyloop'}

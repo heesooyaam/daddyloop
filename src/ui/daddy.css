@@ -2317,3 +2317,9 @@ body {
   gap: 6px;
   overflow-wrap: anywhere;
 }
+
+.daddy-limits-navigation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

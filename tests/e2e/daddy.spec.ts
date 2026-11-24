@@ -183,7 +183,7 @@ test('collapses each side panel independently and keeps the current conversation
 
   const sessions = page.getByRole('navigation', { name: 'Sessions' });
   const session = sessions.getByRole('button', { name: /^Panel layout session/ });
-  const workers = page.getByRole('heading', { name: 'Worker pool' });
+  const workers = page.locator('#daddy-tasks-panel').getByRole('button', { name: /^Workers/ });
   const chat = page.getByRole('region', { name: 'Conversation with daddy' });
   const composer = chat.getByLabel('Message daddy');
   await session.click();
@@ -391,12 +391,10 @@ test('shows a full card on short screens and keeps actions available in a dense 
   const cards = list.getByRole('button');
   const fullTitle = `1. ${longTitle}`;
   const queue = page.getByRole('button', { name: 'Queue a task', exact: true });
-  const copyPath = page
-    .getByRole('status')
-    .filter({ hasText: 'Session copy ready' })
-    .locator('code');
-  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
-  await expect(copyPath).toHaveText(path);
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const copyPath = page.getByRole('dialog').getByText(path, { exact: true });
+  await expect(copyPath).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
   for (const viewport of [
     { width: 1024, height: 480 },
     { width: 390, height: 540 },
@@ -410,23 +408,14 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await expect(cards.first()).toContainText('Prerequisites: 1');
     await expect(cards.last()).toHaveAttribute('title', `10. ${longTitle}`);
     await expect(cards.last()).toContainText('Prerequisites: 1');
-    expect(
-      await copyPath.evaluate((element) => {
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        return range.getClientRects().length;
-      }),
-    ).toBeGreaterThan(1);
     await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
     await expect(cards.first()).toBeInViewport({ ratio: 1 });
     await expect(cards.first().locator('.daddy-work-state')).not.toBeEmpty();
     await expect(cards.last()).not.toBeInViewport();
 
-    await page.getByRole('region', { name: 'Session overview' }).focus();
-    await page.keyboard.press('End');
-    await expect(copyPath).toBeInViewport({ ratio: 1 });
-    await expect(cards.first()).toBeInViewport({ ratio: 1 });
-
+    await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeInViewport({
+      ratio: 1,
+    });
     await list.hover();
     await page.mouse.wheel(0, 1400);
     await expect(cards.last()).toBeInViewport({ ratio: 1 });
@@ -475,9 +464,9 @@ test('shows message send errors without scrolling on short screens', async ({ pa
   );
   await login(page);
   await create(page, 'Send failure on a short screen', Date.now());
-  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
 
-  const overview = page.getByRole('region', { name: 'Session overview' });
+  const quotas = page.getByRole('button', { name: 'Agent limits', exact: true });
   const composer = page.getByLabel('Message daddy');
   const alert = page.getByRole('alert').filter({ hasText: message });
   for (const viewport of [
@@ -485,7 +474,7 @@ test('shows message send errors without scrolling on short screens', async ({ pa
     { width: 1024, height: 480 },
   ]) {
     await page.setViewportSize(viewport);
-    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(quotas).toBeInViewport({ ratio: 1 });
     const draft = `Keep this draft at ${viewport.width} pixels`;
     await composer.fill(draft);
     const rejected = page.waitForResponse(
@@ -497,7 +486,7 @@ test('shows message send errors without scrolling on short screens', async ({ pa
     await expect(alert).toBeInViewport({ ratio: 1 });
     await expect(alert.getByRole('button', { name: 'Retry' })).toBeInViewport({ ratio: 1 });
     await expect(composer).toHaveValue(draft);
-    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(quotas).toBeInViewport({ ratio: 1 });
 
     if (viewport.width === 390) {
       await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
@@ -546,8 +535,8 @@ test('shows copy and deletion failures with the task board without scrolling', a
   }[]) {
     groupPatch = group;
     await page.reload();
-    await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
-    const overview = page.getByRole('region', { name: 'Session overview' });
+    await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+    const quotas = page.getByRole('button', { name: 'Agent limits', exact: true });
     const tasks = page.locator('.daddy-work-items .daddy-work-item');
     for (const viewport of [
       { width: 390, height: 540 },
@@ -563,7 +552,7 @@ test('shows copy and deletion failures with the task board without scrolling', a
         ratio: 1,
       });
       await expect(tasks.first()).toBeInViewport({ ratio: 1 });
-      expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+      await expect(quotas).toBeInViewport({ ratio: 1 });
     }
   }
 });
