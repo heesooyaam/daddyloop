@@ -166,3 +166,24 @@ it('polls for a successfully sent head when the first provider reads lag behind 
     f.store.close();
   }
 });
+
+it('recovers an earlier unconfirmed push by reading the PR without resending', async () => {
+  const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+  try {
+    const task = f.store.getTask(f.task.id);
+    task.pendingFix = { revision: task.revision!, attempted: true };
+    task.reason = `Submission of saved fix ${savedHead} is unconfirmed; the PR still shows ${task.revision!.head}. Inspect the outcome and resume to retry this exact commit.`;
+    f.store.saveTask(task);
+    f.engine.recoverLostFixes();
+    expect(f.store.getTask(task.id).state).toBe('awaiting_push');
+    const remote = vi.spyOn(f.provider, 'getPR').mockResolvedValue(task.pr!);
+    const push = vi.fn();
+    await f.engine.submitSavedFix(task.id, push);
+    remote.mockResolvedValue({ ...task.pr!, head: savedHead });
+    await f.engine.submitSavedFix(task.id, push);
+    expect(f.store.getTask(task.id).state).toBe('queued');
+    expect(push).not.toHaveBeenCalled();
+  } finally {
+    f.store.close();
+  }
+});

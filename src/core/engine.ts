@@ -549,7 +549,11 @@ export class Engine {
         return;
       const provider = this.provider(prRef(task));
       if (!(await this.checkSavedFix(task, await provider.getPR(prRef(task))))) return;
-      task.pendingFix = { revision: task.pendingFix?.revision ?? task.revision, attempted: true };
+      task.pendingFix = {
+        revision: task.pendingFix?.revision ?? task.revision,
+        attempted: true,
+        confirmUntil: confirmationDeadline(),
+      };
       this.store.saveTask(task);
       try {
         await push(task, head);
@@ -623,6 +627,23 @@ export class Engine {
   recoverLostFixes() {
     for (const task of this.store.tasks()) {
       if (
+        isTicket(task) ||
+        !['queued', 'needs_input'].includes(task.state) ||
+        this.store.busy(task.id) ||
+        !task.revision
+      )
+        continue;
+      if (task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (
+          group.deletion ||
+          group.deletedAt ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          continue;
+      }
+      if (
         task.state === 'needs_input' &&
         task.pendingFix?.attempted &&
         !task.pendingFix.confirmUntil &&
@@ -640,26 +661,12 @@ export class Engine {
         continue;
       }
       if (
-        isTicket(task) ||
         task.pendingFix ||
         task.pendingAuthorHead ||
-        !['queued', 'needs_input'].includes(task.state) ||
-        this.store.busy(task.id) ||
-        !task.revision ||
         task.feedback?.status !== 'published' ||
         !sameRevision(task.feedback.revision, task.revision)
       )
         continue;
-      if (task.groupId) {
-        const group = this.store.getGroup(task.groupId);
-        if (
-          group.deletion ||
-          group.deletedAt ||
-          group.daddyState === 'paused' ||
-          group.daddyState === 'archived'
-        )
-          continue;
-      }
       const job = this.store
         .jobs(task.id)
         .filter((item) => item.role === 'author')
