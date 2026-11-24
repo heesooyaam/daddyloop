@@ -189,39 +189,52 @@ describe('opt-in GitHub merging', () => {
       await f.close();
     }
   });
-  it('resumes a cancelled review on the same PR head when its target advances and its draft is untouched', async () => {
-    const f = await setup();
-    try {
-      await f.engine.review(f.task.id, true);
-      const old = f.store.getTask(f.task.id);
-      f.store.saveTask({
-        ...old,
-        ticketRepository: {
-          baseHead: old.revision!.base,
-          baseBranch: old.pr!.targetBranch,
-          branch: old.pr!.branch,
-          cloneUrl: old.pr!.cloneUrl,
-        },
-      });
-      const handle = old.review!,
-        key = 'demo-review:' + handle.id;
-      f.store.setSetting(key, {
-        ...(await f.provider.getReview(prRef(old), handle)),
-        body: `Review in progress.\n\n<!-- ${handle.marker} -->`,
-      });
-      f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
-      await f.daddy.settings(f.group.id, { autoMerge: true });
-      await f.engine.reconcile(old.id);
-      expect(f.store.getTask(old.id).state).toBe('needs_input');
-      await f.engine.retryInterruptedStep(old.id);
-      expect(f.store.getTask(old.id)).toMatchObject({
-        state: 'reviewing',
-        review: { id: handle.id, revision: { base: 'd'.repeat(40) } },
-      });
-    } finally {
-      await f.close();
-    }
-  });
+  it.each(['poll', 'completion', 'admission'] as const)(
+    'restarts a review on target advance during %s without requiring auto-merge or human input',
+    async (path) => {
+      const f = await setup();
+      try {
+        await f.engine.review(f.task.id, true);
+        const old = f.store.getTask(f.task.id);
+        const job = path === 'admission' ? undefined : f.store.claim()!;
+        const handle = old.review!,
+          key = 'demo-review:' + handle.id;
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(old), handle)),
+          body: `Review in progress.\n\n<!-- ${handle.marker} -->`,
+        });
+        f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+        const lastEvent = f.store.events(old.id).at(-1)?.id ?? 0;
+        if (path === 'completion') {
+          await f.engine.completeJob(job!, {
+            status: 'completed',
+            summary: 'Old assessment',
+            checkedHead: old.revision!.head,
+          });
+        } else if (path === 'admission') {
+          await f.worker.tick();
+          await vi.waitFor(() =>
+            expect(f.store.getTask(old.id).revision?.base).toBe('d'.repeat(40)),
+          );
+        } else {
+          await f.engine.reconcile(old.id);
+        }
+        expect(
+          f.store
+            .events(old.id)
+            .filter((e) => e.id > lastEvent && e.type === 'task.state')
+            .map((e) => e.data),
+        ).not.toContainEqual(expect.objectContaining({ state: 'needs_input' }));
+        expect(f.store.activeJobs(old.id)).toHaveLength(1);
+        expect(f.store.getTask(old.id)).toMatchObject({
+          state: 'reviewing',
+          review: { id: handle.id, revision: { base: 'd'.repeat(40) } },
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
 
   it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
     const f = await setup();
@@ -255,11 +268,11 @@ describe('opt-in GitHub merging', () => {
       const comment = before.comments[0];
       Object.assign(f.provider, { targetAdvanced: async () => true });
       f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
-      await f.engine.reconcile(old.id);
       f.store.setSetting(key, {
         ...before,
         comments: [{ ...comment, body: 'Private human edit' }],
       });
+      await f.engine.reconcile(old.id);
       await f.engine.retryInterruptedStep(old.id);
       expect(f.store.getTask(old.id).state).toBe('needs_input');
       f.store.setSetting(key, before);

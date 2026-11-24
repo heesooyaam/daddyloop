@@ -509,11 +509,23 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (startingPR && !sameRevision(startingPR, task.revision))
+      if (startingPR && !sameRevision(startingPR, task.revision)) {
+        if (
+          job.kind === 'review' &&
+          task.ref.provider === 'github' &&
+          startingPR.head === task.revision?.head
+        ) {
+          const updated = await this.engine.reconcile(task.id);
+          if (updated.generation !== job.generation) {
+            job.status = 'cancelled';
+            return;
+          }
+        }
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
         );
+      }
       if (
         job.kind === 'verify_merge' &&
         (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
