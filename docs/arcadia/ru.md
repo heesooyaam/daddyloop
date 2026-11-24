@@ -25,7 +25,22 @@ daddy init --yes --no-service --modules codex,github,arcadia
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-Helper входит в корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
+Если исходная Arcadia уже смонтирована, сначала проверь helper рядом с её исходниками:
+
+```bash
+helper="$HOME/arcadia2/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+test -f "$helper"
+bash "$helper" --json status
+```
+
+Если `status` видит `~/arcadia2`, подключи этот helper напрямую. Отдельная установка SkillStore не нужна:
+
+```bash
+helper="$HOME/arcadia2/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+```
+
+Если файла нет или источник не виден, установи корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
 
 ```bash
 SKILLS_DIR="$HOME/.codex/skills"
@@ -35,12 +50,11 @@ bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "
 
 Если SkillStore уже установлен, пропусти `--download-only` и укажи в `SKILLS_DIR` тот каталог, который раньше передавал как `--target-dir`.
 
-`daddy arcadia setup` находит helper в `PATH` и в стандартных каталогах навыков. Также можно передать его точный путь через `--lease-helper`. Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
+После установки навыка выполни `daddy arcadia setup --workspace ~/arcadia2`. Команда находит helper в `PATH` и в стандартных каталогах навыков. Также можно передать его точный путь через `--lease-helper`. Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
 
 Для Arcanum daddyloop использует, по порядку, `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia` или штатный `~/.arc/token`. Настройка проверяет чтение Arcanum, но не копирует и не меняет учётные данные.
 
 ```bash
-daddy arcadia setup --workspace ~/arcadia2
 daddy workspaces add ~/arcadia2 --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```

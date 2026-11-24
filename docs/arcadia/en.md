@@ -25,7 +25,22 @@ Install the supported Arcanum CLI from the internal npm registry. The similarly 
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-The helper is part of the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
+If the source Arcadia is already mounted, first check for the helper beside its source files:
+
+```bash
+helper="$HOME/arcadia2/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+test -f "$helper"
+bash "$helper" --json status
+```
+
+If `status` includes `~/arcadia2`, connect this helper directly. A separate SkillStore installation is not required:
+
+```bash
+helper="$HOME/arcadia2/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+```
+
+If the file is absent or the source is not listed, install the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
 
 ```bash
 SKILLS_DIR="$HOME/.codex/skills"
@@ -35,12 +50,11 @@ bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "
 
 If SkillStore is already installed, skip `--download-only` and set `SKILLS_DIR` to the directory previously passed as `--target-dir`.
 
-`daddy arcadia setup` finds the helper on `PATH` and in the standard skill directories. You can also pass its exact path with `--lease-helper`. daddyloop invokes the helper through Bash, so it does not need an executable bit.
+After installing the skill, run `daddy arcadia setup --workspace ~/arcadia2`. The command finds the helper on `PATH` and in the standard skill directories. You can also pass its exact path with `--lease-helper`. daddyloop invokes the helper through Bash, so it does not need an executable bit.
 
 For Arcanum, daddyloop checks `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia`, and the standard `~/.arc/token`, in that order. Setup verifies Arcanum read access without copying or changing credentials.
 
 ```bash
-daddy arcadia setup --workspace ~/arcadia2
 daddy workspaces add ~/arcadia2 --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
