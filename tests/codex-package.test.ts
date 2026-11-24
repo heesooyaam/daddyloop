@@ -10,11 +10,12 @@ import {
   existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { installCodexPackage, latestCodexPackage } from '../src/modules/agents/codex/package.js';
-function archive(unsafe = false) {
+function archive(options: { unsafe?: boolean; voiceFiles?: number } = {}) {
+  const { unsafe = false, voiceFiles = 0 } = options;
   const dir = mkdtempSync(join(tmpdir(), 'daddyloop-codex-package-test-'));
   const triple =
     process.arch === 'x64' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl';
@@ -25,6 +26,10 @@ function archive(unsafe = false) {
     join(dir, prefix, 'codex-package.json'),
     JSON.stringify({ entrypoint: 'bin/codex' }),
   );
+  const voice = join(dir, prefix, 'codex-resources', 'voice', 'lib');
+  mkdirSync(voice, { recursive: true });
+  for (let index = 0; index < voiceFiles; index += 1)
+    writeFileSync(join(voice, `libfixture-${index}.so`), String(index));
   execFileSync('tar', [
     '-czf',
     join(dir, 'package.tgz'),
@@ -71,10 +76,30 @@ it('installs verified bytes into immutable directories and removes compressed do
     f.close();
   }
 });
+it('installs the 43-file platform layout introduced in Codex 0.171.0', async () => {
+  const f = archive({ voiceFiles: 41 });
+  try {
+    const executable = await installCodexPackage(
+      f.pkg,
+      join(f.dir, 'managed'),
+      new AbortController().signal,
+      () => {},
+      async () => new Response(f.bytes),
+    );
+    expect(
+      readFileSync(
+        join(dirname(dirname(executable)), 'codex-resources', 'voice', 'lib', 'libfixture-40.so'),
+        'utf8',
+      ),
+    ).toBe('40');
+  } finally {
+    f.close();
+  }
+});
 it.each(['checksum', 'path', 'url', 'disk'])(
   'rejects %s hazards without modifying another installation',
   async (failure) => {
-    const f = archive(failure === 'path');
+    const f = archive({ unsafe: failure === 'path' });
     try {
       const root = join(f.dir, 'managed');
       mkdirSync(root);
