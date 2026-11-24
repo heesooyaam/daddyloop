@@ -1,4 +1,5 @@
-import type { Engine } from '../core/engine.js';
+import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
+import { staleConflictPreparation, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Revision } from '../core/types.js';
 import {
   AppError,
@@ -35,6 +36,7 @@ export class Worker {
   private ticking = false;
   private stopped = false;
   private lastPoll = 0;
+  private mergeRun?: Promise<void>;
   private tickDone: Promise<void> = Promise.resolve();
   private lastCleanup = 0;
   private lastArcRelease = 0;
@@ -191,8 +193,19 @@ export class Worker {
       const poll = Date.now() - this.lastPoll > this.pollMs;
       if (poll) {
         this.lastPoll = Date.now();
-        for (const task of store.tasks())
+        for (const task of store.tasks()) {
           if (
+            task.state === 'needs_input' &&
+            task.resumeState === 'reviewing' &&
+            autoMergeEnabled(store, task)
+          ) {
+            try {
+              await this.engine.retryExhaustedReview(task.id);
+            } catch (error) {
+              store.event(task.id, 'review.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          } else if (
             [
               'awaiting_publication',
               'awaiting_push',
@@ -200,7 +213,8 @@ export class Worker {
               'awaiting_plan_approval',
               'reviewing',
               'fixing',
-            ].includes(task.state)
+            ].includes(task.state) ||
+            (staleConflictPreparation(task) && autoMergeEnabled(store, task))
           ) {
             try {
               await this.engine.reconcile(task.id);
@@ -211,6 +225,7 @@ export class Worker {
               });
             }
           }
+        }
       }
       if (this.stopped) return;
       if (this.autoSubmit && resources.ok)
@@ -361,6 +376,18 @@ export class Worker {
           void running.finally(() => this.pendingRuns.delete(running));
         } else break;
       }
+      if (poll && !this.stopped && resources.ok && !this.mergeRun) {
+        const run = pollAutoMerge(this.engine, () => this.stopped)
+          .catch((error) => {
+            store.event('_system', 'automerge.error', { error: redact(String(error)) });
+          })
+          .finally(() => {
+            this.mergeRun = undefined;
+            this.pendingRuns.delete(run);
+          });
+        this.mergeRun = run;
+        this.pendingRuns.add(run);
+      }
     } finally {
       this.ticking = false;
       finishTick();
@@ -373,12 +400,13 @@ export class Worker {
     const store = this.engine.store;
     try {
       let task = store.getTask(job.taskId);
-      const reportReview = job.kind === 'review' && isTicket(task);
+      const isolatedReview =
+        job.kind === 'verify_merge' || (job.kind === 'review' && isTicket(task));
       const group = task.groupId ? store.getGroup(task.groupId) : undefined;
       if (job.role === 'reviewer' && group) {
         if (job.groupGeneration !== group.generation)
           throw new Error('The shared reviewer configuration changed before this job started');
-        if (!reportReview) task.reviewerThreadId = group.reviewerThreadId;
+        if (!isolatedReview) task.reviewerThreadId = group.reviewerThreadId;
       }
       if (!job.profile)
         throw new AppError(
@@ -395,17 +423,26 @@ export class Worker {
         if (targetChange) throw new AppError('review_target_changed', targetChange);
       }
       const feedbackTarget = task.review?.targetBranch;
-      if (job.kind === 'fix' && startingPR && !feedbackTarget)
+      if (job.kind === 'fix' && startingPR && !task.fixingMergeConflict && !feedbackTarget)
         throw new AppError(
           'stale_revision',
           `The published feedback has no recorded target branch. Use Retry review to start a new review on ${startingPR.targetBranch}.`,
         );
-      if (job.kind === 'fix' && startingPR && startingPR.targetBranch !== feedbackTarget)
+      if (
+        job.kind === 'fix' &&
+        startingPR &&
+        !task.fixingMergeConflict &&
+        startingPR.targetBranch !== feedbackTarget
+      )
         throw new AppError(
           'stale_revision',
           `The PR target branch differs from the published feedback. Feedback target branch ${feedbackTarget ?? 'unknown'}. Observed target branch ${startingPR.targetBranch}.`,
         );
-      if (startingPR && (startingPR.state !== 'open' || !sameRevision(startingPR, task.revision)))
+      if (
+        startingPR &&
+        (startingPR.state !== (job.kind === 'verify_merge' ? 'merged' : 'open') ||
+          !sameRevision(startingPR, task.revision))
+      )
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
@@ -419,13 +456,32 @@ export class Worker {
             'The review is no longer a draft. Inspect it before retrying.',
           );
       }
+      if (
+        job.kind === 'verify_merge' &&
+        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+      )
+        throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
+      const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
+      if (
+        repairingConflict &&
+        (!autoMergeEnabled(store, task) ||
+          startingPR?.state !== 'open' ||
+          startingPR.draft !== false ||
+          startingPR.branch !== task.pr?.branch ||
+          startingPR.targetBranch !== task.pr.targetBranch ||
+          startingPR.cloneUrl !== task.pr.cloneUrl)
+      )
+        throw new AppError(
+          'conflict_repair_unavailable',
+          'Check the PR branches and auto-merge setting before resuming conflict resolution.',
+        );
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir
         : isTicket(task)
           ? await this.workspaces.prepareTicket(task, job.role, abort.signal)
           : await this.workspaces.prepare(task, job.role, abort.signal);
-      if (task.kind === 'plan' && job.kind === 'review') {
+      if (task.kind === 'plan' && (job.kind === 'review' || job.kind === 'verify_merge')) {
         if (demo)
           task.planDocuments = [
             {
@@ -479,7 +535,9 @@ export class Worker {
       if (isTicket(task)) task.revision = prepared.revision;
       if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
-      if (job.kind === 'fix') {
+      if (repairingConflict) {
+        await this.workspaces.prepareConflict(task, abort.signal);
+      } else if (job.kind === 'fix' && !repairingConflict) {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
@@ -512,14 +570,14 @@ export class Worker {
         readPaths: demo ? [] : this.workspaces.readPaths?.(task),
         prompt: buildContext(store, task, job),
         signal: abort.signal,
-        tools: reportReview ? [] : undefined,
+        tools: isolatedReview ? [] : undefined,
         onSession: (threadId, turnId) => {
           const current = store.getTask(job.taskId);
           if (current.generation !== job.generation || abort.signal.aborted) return;
           if (job.role === 'reviewer' && current.groupId) {
             const shared = store.getGroup(current.groupId);
             if (shared.generation !== job.groupGeneration) return;
-            if (!reportReview) {
+            if (!isolatedReview) {
               if (shared.reviewerThreadId && shared.reviewerThreadId !== threadId)
                 throw new Error('The shared reviewer returned a different thread identity');
               shared.reviewerThreadId = threadId;
@@ -587,7 +645,9 @@ export class Worker {
           // Once saving starts, collect the local SHA even if cancellation arrives mid-commit.
           const head = await this.workspaces.commitFix(
             task,
-            `Address review feedback (round ${task.round})`,
+            repairingConflict
+              ? 'Resolve conflict with the target branch'
+              : `Address review feedback (round ${task.round})`,
           );
           savedFix = { head, revision: task.revision };
         }
@@ -599,6 +659,7 @@ export class Worker {
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       job.status = capacity ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
+      if (error instanceof AppError) job.errorCode = error.code;
       if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {

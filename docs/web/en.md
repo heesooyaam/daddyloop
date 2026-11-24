@@ -110,3 +110,25 @@ Click the **palette icon** in the top bar, or on the login screen. Eight themes 
 The web palettes cover the conversation, task board, dialogs, forms and login screen. The terminal separately supports `daddy --theme dark` and `daddy --theme light`.
 
 The panel above the conversation shows [agent quotas](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).
+
+## Interface typography
+
+The web interface uses Inter for English and Russian. Choose a [shared type role](../../src/ui/typography.css) by what the text does. Each role sets the size, line height and weight together.
+
+| Role      | Size / line height | Weight | Use                                              |
+| --------- | ------------------ | ------ | ------------------------------------------------ |
+| `caption` | 12 / 18 px         | 400    | Timestamps, counts and short notes               |
+| `status`  | 12 / 18 px         | 600    | State labels and badges                          |
+| `help`    | 13 / 19.5 px       | 400    | Field hints and errors                           |
+| `label`   | 13 / 19.5 px       | 600    | Form labels and buttons                          |
+| `body`    | 14 / 21 px         | 400    | General descriptions                             |
+| `item`    | 14 / 19.6 px       | 600    | Task, session and workspace names in lists       |
+| `reading` | 16 / 25.6 px       | 400    | Messages and input values                        |
+| `section` | 16 / 21.6 px       | 600    | Section headings                                 |
+| `title`   | 20 / 26 px         | 600    | Page and dialog titles, task name in its details |
+| `brand`   | 24 / 30 px         | 700    | Wordmark                                         |
+| `display` | 32 / 38.4 px       | 600    | Welcome heading                                  |
+
+The table uses a default browser text size of 16 px. The CSS uses `rem` for sizes and unitless line heights, so user text settings scale both. Switch to monospace for code and paths while keeping the size of the appropriate role.
+
+Use the same scale on phones and desktops. Let list names, dialog titles and help text wrap. The compact session header may shorten the title after two lines and the workspace name after one. Their full text is available in the session list. Check new text at phone and desktop widths in both languages, including long names and multi-line hints.

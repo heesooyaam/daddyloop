@@ -1,0 +1,46 @@
+:root {
+  --font-ui: 'Inter Variable', Inter, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --weight-semibold: 600;
+
+  /* Sizes in rem follow the browser's text size. Line heights are unitless. */
+  --type-caption: 400 0.75rem / 1.5 var(--font-ui);
+  --type-status: var(--weight-semibold) 0.75rem / 1.5 var(--font-ui);
+  --type-help: 400 0.8125rem / 1.5 var(--font-ui);
+  --type-label: var(--weight-semibold) 0.8125rem / 1.5 var(--font-ui);
+  --type-body: 400 0.875rem / 1.5 var(--font-ui);
+  --type-item: var(--weight-semibold) 0.875rem / 1.4 var(--font-ui);
+  --type-reading: 400 1rem / 1.6 var(--font-ui);
+  --type-section: var(--weight-semibold) 1rem / 1.35 var(--font-ui);
+  --type-title: var(--weight-semibold) 1.25rem / 1.3 var(--font-ui);
+  --type-brand: 700 1.5rem / 1.25 var(--font-ui);
+  --type-display: var(--weight-semibold) 2rem / 1.2 var(--font-ui);
+}
+
+body {
+  font: var(--type-body);
+}
+button {
+  font: inherit;
+}
+input,
+select,
+textarea {
+  min-width: 0;
+  font: var(--type-reading);
+}
+small,
+time {
+  font: var(--type-caption);
+}
+strong,
+b {
+  font-weight: var(--weight-semibold);
+}
+pre {
+  font: var(--type-body);
+}
+code,
+pre {
+  font-family: var(--font-mono);
+}

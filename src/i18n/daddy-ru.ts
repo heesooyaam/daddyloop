@@ -507,6 +507,53 @@ export const daddyRu: Record<string, string> = {
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
+  'Auto-merge GitHub PRs': 'Автослияние PR в GitHub',
+  'Includes already reviewed open PRs in this session. Task overrides take precedence.':
+    'Настройка действует и для уже проверенных открытых PR сессии. У отдельной задачи можно выбрать свой режим.',
+  'Enable auto-merge for session': 'Включить автослияние для всей сессии',
+  'Disable auto-merge for session': 'Выключить автослияние для сессии',
+  'Use session setting (on)': 'Как в сессии (включено)',
+  'Use session setting (off)': 'Как в сессии (выключено)',
+  'On for this task': 'Включено для задачи',
+  'Off for this task': 'Выключено для задачи',
+  'Session default': 'Как в сессии',
+  'Auto-merge is available for GitHub sessions': 'Автослияние доступно для сессий GitHub',
+  'Merged on GitHub': 'PR влит в GitHub',
+  'GitHub merged a different revision': 'В GitHub влита другая ревизия',
+  'Waiting for passing CI': 'Ожидает успешных проверок CI',
+  'Waiting for a completed review of this revision': 'Ожидает завершения ревью этой ревизии',
+  'Could not stage a clean conflict resolution. Inspect the working copy for remaining conflict markers.':
+    'Не удалось подготовить исправление. Проверь оставшиеся маркеры конфликта в рабочей копии.',
+  'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.':
+    'В рабочей копии уже есть изменения. Их нужно проверить перед исправлением конфликта.',
+  'The merge conflict includes files outside the task scope. The working copy was preserved.':
+    'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
+  'Worker assigned to resolve the GitHub merge conflict':
+    'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
+  'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'The PR changed during conflict resolution. Inspect the preserved worker copy.':
+    'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
+  'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
+    'Автослияние выключено. Исправление конфликта сохранено и ожидает отправки.',
+  'Enable auto-merge before resuming conflict resolution.':
+    'Для продолжения исправления конфликта включи автослияние.',
+  'Reviewer context was full. Restarting the independent review.':
+    'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Checking GitHub auto-merge': 'Проверяется автослияние PR',
+  'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'Draft PR: mark it ready for review on GitHub':
+    'PR в черновике. Отметь его готовым к ревью в GitHub',
+  'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
+  'Waiting for a published review with no outstanding findings':
+    'Ожидает публикации ревью с закрытыми замечаниями',
+  'PR or checks changed during the merge check': 'PR или состояние CI изменились во время проверки',
+  'Waiting for GitHub to confirm the previous merge request':
+    'Ожидает подтверждения предыдущего запроса на слияние',
+  'The PR is closed or its branches changed': 'PR закрыт или его ветки изменились',
+  'Could not check GitHub auto-merge': 'Не удалось проверить возможность автослияния в GitHub',
+  'GitHub refused the auto-merge check (HTTP {status})':
+    'GitHub отклонил запрос автослияния (HTTP {status})',
   'Task queue': 'Очередь задач',
   'No unfinished tasks.': 'Открытых задач нет.',
   'Task queued': 'Задача в очереди',

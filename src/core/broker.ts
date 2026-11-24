@@ -157,11 +157,15 @@ export class Broker {
         'SELECT id, status, result FROM operations WHERE task_id=? AND id GLOB ? ORDER BY rowid',
       )
       .all(task.id, `${prefix}[0-9]*${suffix}`);
+    const reopen = this.store.db
+      .prepare("SELECT max(id) AS id FROM events WHERE task_id=? AND type='human.reopen'")
+      .get(task.id)?.id;
     for (const row of operations) {
       const marker = String(row.id);
       const generation = Number(marker.slice(prefix.length, -suffix.length));
       if (!Number.isSafeInteger(generation)) continue;
       const { targetBranch, revision: recorded, eventId } = this.reviewIntent(task.id, marker);
+      if (typeof reopen === 'number' && (eventId ?? 0) <= reopen) continue;
       if (recorded && !this.outbox.hasOperation(marker, recorded)) continue;
       const completed =
         row.status === 'done' && typeof row.result === 'string'
@@ -178,6 +182,17 @@ export class Broker {
         review: existing && { ...existing, revision: revision ?? existing.revision, targetBranch },
       };
     }
+  }
+  async recoverDismissedReview(task: Task, review: ReviewHandle, revision: Revision) {
+    await this.outbox.perform(
+      task.id,
+      review.marker,
+      revision,
+      async () => {
+        throw new AppError('review_missing', 'The review creation record was lost');
+      },
+      async () => ({ found: true, value: review }),
+    );
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
@@ -220,6 +235,7 @@ export class Broker {
           ? { found: true, value: { ...existing, revision, targetBranch } }
           : { found: false };
       },
+      undefined,
       { targetBranch, revision },
     );
     task.review = review;
@@ -234,6 +250,8 @@ export class Broker {
     const task = this.store.getTask(job.taskId);
     if (task.generation !== job.generation || task.state === 'paused')
       throw new AppError('stale_run', 'This run no longer has permission to change the task');
+    if (job.kind === 'verify_merge')
+      throw new AppError('role_forbidden', 'Merge verification is read-only', 403);
     if (!Object.hasOwn(schemas, tool))
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))

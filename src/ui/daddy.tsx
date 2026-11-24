@@ -84,7 +84,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null);
+    chatScroll = useRef<HTMLDivElement>(null);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -100,7 +100,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     );
   }, [state.selected]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const chat = chatScroll.current;
+    if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
   const choose = (id: string) => {
     void model.select(id);
@@ -238,8 +239,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <Menu size={20} />
           </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
+            <span className="daddy-eyebrow" title={board?.workspace?.name}>
+              {board?.workspace?.name ?? 'daddyloop'}
+            </span>
+            <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
           <ThemeButton />
           {board && (
@@ -363,7 +366,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
-                <div className="daddy-chat-scroll">
+                <div className="daddy-chat-scroll" ref={chatScroll}>
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
@@ -406,7 +409,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       {t('daddy is working')}
                     </div>
                   )}
-                  <div ref={end} />
                 </div>
                 <form
                   className="daddy-composer"
@@ -679,8 +681,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles, instructions) => {
-              await model.action('settings', { profiles, instructions });
+            onSave={async (profiles, instructions, autoMerge) => {
+              await model.action('settings', { profiles, instructions, autoMerge });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -779,7 +781,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => void model.refresh()} />
+          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
         </Dialog>
       )}
     </div>
@@ -1204,7 +1206,11 @@ function SessionSettings({
 }: {
   api: DaddyApi;
   board: DaddyBoard;
-  onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
+  onSave: (
+    profiles?: AgentProfiles,
+    instructions?: SessionInstructions,
+    autoMerge?: boolean,
+  ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
@@ -1217,6 +1223,8 @@ function SessionSettings({
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
+  const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const { catalogue, load } = useAgentCatalogue(api);
   return (
@@ -1231,11 +1239,29 @@ function SessionSettings({
             ? undefined
             : profiles,
           instructions,
+          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
       }}
     >
+      {board.workspace.provider === 'github' && (
+        <label className="daddy-toggle">
+          <input
+            type="checkbox"
+            checked={autoMerge}
+            onChange={(event) => setAutoMerge(event.target.checked)}
+          />
+          <span>
+            {t('Auto-merge GitHub PRs')}
+            <small className="daddy-muted">
+              {t(
+                'Includes already reviewed open PRs in this session. Task overrides take precedence.',
+              )}
+            </small>
+          </span>
+        </label>
+      )}
       {(['daddy', 'worker'] as const).map((role) => {
         const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
@@ -1286,7 +1312,7 @@ function TaskReport({
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
-  onChange: () => void;
+  onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
@@ -1350,12 +1376,57 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? value.task.reason)}</p>
+          {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
+            <label className="daddy-pool-control">
+              {t('Auto-merge GitHub PRs')}
+              <select
+                value={live.autoMerge.mode}
+                disabled={busy || !!board.group.deletion}
+                onChange={async (event) => {
+                  const mode = event.target.value;
+                  setBusy(true);
+                  setError('');
+                  try {
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await onChange();
+                  } catch (error) {
+                    setError((error as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <option value="inherit">
+                  {t(
+                    board.group.autoMerge
+                      ? 'Use session setting (on)'
+                      : 'Use session setting (off)',
+                  )}
+                </option>
+                <option value="on">{t('On for this task')}</option>
+                <option value="off">{t('Off for this task')}</option>
+              </select>
+            </label>
+          )}
+          {live?.autoMerge.result &&
+            (live.autoMerge.enabled || live.autoMerge.result.state !== 'waiting') && (
+              <p>{t(live.autoMerge.result.message)}</p>
+            )}
           {prUrl && (
             <a className="daddy-button outline" href={prUrl} target="_blank" rel="noreferrer">
               <GitPullRequest size={16} />
               {t('Open native review')}
               <ArrowUpRight size={15} />
             </a>
+          )}
+          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+            <button
+              className="daddy-button outline"
+              disabled={busy}
+              onClick={() => void action('verify-merge')}
+            >
+              {t('Verify merge')}
+            </button>
           )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button

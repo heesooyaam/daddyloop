@@ -25,10 +25,20 @@ export function taskStatus(state: State, queued = false, role?: Job['role']) {
   return statusLabels[state];
 }
 
-export type TaskActivity = { task: Task; job?: Job };
+export type TaskActivity = { task: Task; job?: Job; mergeStatus?: string };
 
-export function taskActivity(tasks: Task[], jobs: Job[]): TaskActivity[] {
-  const byId = new Map<string, TaskActivity>(tasks.map((task) => [task.id, { task }]));
+export function outstandingActivity(item: TaskActivity) {
+  return item.task.state !== 'complete' || (item.task.pr?.state === 'open' && !!item.mergeStatus);
+}
+
+export function taskActivity(
+  tasks: Task[],
+  jobs: Job[],
+  mergeStatus?: (task: Task) => string | undefined,
+): TaskActivity[] {
+  const byId = new Map<string, TaskActivity>(
+    tasks.map((task) => [task.id, { task, mergeStatus: mergeStatus?.(task) }]),
+  );
   const ordered = new Set<TaskActivity>();
   for (const job of jobs) {
     const item = byId.get(job.taskId);
@@ -39,7 +49,12 @@ export function taskActivity(tasks: Task[], jobs: Job[]): TaskActivity[] {
   return [...new Set([...ordered, ...byId.values()])];
 }
 
-export function activityStatus({ task, job }: TaskActivity) {
+export function activityStatus({ task, job, mergeStatus }: TaskActivity) {
+  if (mergeStatus) return mergeStatus;
+  if (task.fixingMergeConflict && task.state === 'fixing')
+    return job?.status === 'queued'
+      ? 'Waiting for a worker to resolve the merge conflict'
+      : 'Resolving the merge conflict';
   if (
     task.workerReport &&
     task.state === 'reviewing' &&

@@ -525,3 +525,70 @@ describe('publication gates and revision safety', () => {
     f.store.close();
   });
 });
+
+it('verifies a merged task independently, retaining the old draft and gating completion on CI', async () => {
+  const f = await fixture({ state: 'needs_input' });
+  const task = f.task;
+  const pr = await f.provider.getPR(prRef(task));
+  const setPR = (patch: Partial<typeof pr>) =>
+    f.store.setSetting('demo-pr:' + task.ref.number, { ...pr, ...patch });
+  try {
+    await expect(f.engine.action(task.id, 'verify-merge')).rejects.toMatchObject({
+      code: 'merge_unconfirmed',
+    });
+    setPR({ state: 'merged', head: 'f'.repeat(40) });
+    await expect(f.engine.action(task.id, 'verify-merge')).rejects.toMatchObject({
+      code: 'merge_unconfirmed',
+    });
+    setPR({ state: 'merged', checks: 'pending', mergeCommit: 'c'.repeat(40) });
+    await f.engine.action(task.id, 'verify-merge', '', {
+      head: pr.head,
+      generation: task.generation,
+    });
+    const job = f.store.activeJobs(task.id)[0];
+    expect(job).toMatchObject({ kind: 'verify_merge', role: 'reviewer' });
+    await expect(
+      f.engine.broker.call(job, 'set_summary', { body: 'changed' }),
+    ).rejects.toMatchObject({ code: 'role_forbidden' });
+    await f.engine.reconcile(task.id);
+    expect(f.store.activeJobs(task.id)).toHaveLength(1);
+    await f.run();
+    expect(f.store.getTask(task.id).state).toBe('awaiting_checks');
+    setPR({ state: 'merged', checks: 'passing', mergeCommit: 'c'.repeat(40) });
+    await f.engine.reconcile(task.id);
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'complete',
+      verifiedMerge: { head: pr.head },
+    });
+    expect(f.store.getTask(task.id).review).toBeUndefined();
+    expect((await f.engine.reconcile(task.id)).state).toBe('complete');
+  } finally {
+    f.store.close();
+  }
+});
+
+it('keeps a merged task open when verification fails or the merge identity changes', async () => {
+  const f = await fixture({ state: 'needs_input' });
+  const pr = {
+    ...(await f.provider.getPR(prRef(f.task))),
+    state: 'merged' as const,
+    mergeCommit: 'first',
+  };
+  const key = 'demo-pr:' + f.task.ref.number;
+  try {
+    f.store.setSetting(key, pr);
+    await f.engine.review(f.task.id, true);
+    await f.run({ status: 'incomplete', summary: 'Deployment still pending' });
+    expect(f.store.getTask(f.task.id)).toMatchObject({
+      state: 'needs_input',
+      reason: 'Deployment still pending',
+    });
+    await f.engine.action(f.task.id, 'verify-merge');
+    f.store.setSetting(key, { ...pr, mergeCommit: 'different' });
+    await f.run();
+    expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+    expect(f.store.getTask(f.task.id).verifiedMerge).toBeUndefined();
+  } finally {
+    f.store.close();
+  }
+});

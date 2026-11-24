@@ -47,6 +47,9 @@ describe('GitHub draft review contract', () => {
     'completed review then deleted',
     'completed review then published',
     'completed review then dismissed',
+    'pending review then dismissed',
+    'dismissed successor to a processed review',
+    'reopen after publication',
     'base changed after the second response was lost',
     'base changed before retrying the deleted review',
     'lost response on current revision',
@@ -88,6 +91,7 @@ describe('GitHub draft review contract', () => {
           state: string;
         }
       | undefined;
+    let previousDraft: typeof draft;
     const http = transport((path, method, body) => {
       if (path === pull)
         return {
@@ -100,14 +104,28 @@ describe('GitHub draft review contract', () => {
           },
           base: { sha: base, ref: branch },
         };
+      if (path.startsWith('/repos/acme/service/git/ref/heads/'))
+        return { ref: 'refs/heads/' + branch, object: { type: 'commit', sha: base } };
       if (path.includes('/check-runs?')) return { check_runs: [] };
       if (path.includes('/status?')) return { statuses: [] };
       if (path === '/user') return { id: 7 };
       if (path.startsWith(`${pull}/reviews?`)) {
         if (!reviewsAvailable) return new Response('{}', { status: 503 });
-        return [...(draft ? [draft] : []), ...(hasOtherReview ? [otherReview] : [])];
+        return [
+          ...(previousDraft ? [previousDraft] : []),
+          ...(draft ? [draft] : []),
+          ...(hasOtherReview ? [otherReview] : []),
+        ];
       }
       if (path.includes('/comments?')) {
+        const dismissedId = scenario === 'dismissed successor to a processed review' ? 2 : 1;
+        if (
+          ['pending review then dismissed', 'dismissed successor to a processed review'].includes(
+            scenario,
+          ) &&
+          path.startsWith(`${pull}/reviews/${dismissedId}/comments?`)
+        )
+          return [{ id: 202, body: 'Outstanding finding', html_url: ref.url }];
         if (
           (scenario === 'completed review then published' ||
             scenario === 'completed review then dismissed') &&
@@ -118,6 +136,8 @@ describe('GitHub draft review contract', () => {
           return [{ id: 203, body: 'Finding from the second review', html_url: ref.url }];
         return [];
       }
+      if (method === 'GET' && previousDraft && path === `${pull}/reviews/${previousDraft.id}`)
+        return previousDraft;
       if (method === 'GET' && path.startsWith(`${pull}/reviews/`))
         return draft && path === `${pull}/reviews/${draft.id}`
           ? draft
@@ -163,7 +183,9 @@ describe('GitHub draft review contract', () => {
         };
         if (
           attempts === 1 &&
-          (scenario.startsWith('lost response') || scenario.startsWith('legacy intent'))
+          (scenario.startsWith('lost response') ||
+            scenario.startsWith('legacy intent') ||
+            scenario === 'pending review then dismissed')
         )
           throw new Error('Lost create response');
         if (attempts === 2 && lostSecondResponse) throw new Error('Lost second create response');
@@ -179,6 +201,54 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      if (scenario === 'pending review then dismissed') {
+        await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+        draft!.state = 'DISMISSED';
+        const next = await new Engine(store, () => provider).review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', round: 2 });
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['202']);
+        expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
+          [],
+        );
+        return;
+      }
+      if (
+        scenario === 'dismissed successor to a processed review' ||
+        scenario === 'reopen after publication'
+      ) {
+        const initial = await engine.review(task.id);
+        store.cancelJobs(task.id);
+        draft!.state = 'COMMENTED';
+        const snapshot = await provider.getReview(ref, initial.review!);
+        store.event(task.id, 'review.published', { reviewId: initial.review!.id, snapshot });
+        const original = {
+          ...initial,
+          snapshot,
+          reviewFinished: true,
+          state: 'awaiting_checks' as const,
+        };
+        previousDraft = draft;
+        if (scenario === 'reopen after publication') {
+          store.saveTask({ ...original, state: 'complete' });
+          await engine.action(task.id, 'reopen');
+          expect(await engine.review(task.id)).toMatchObject({
+            state: 'reviewing',
+            review: { id: '2' },
+          });
+          return;
+        }
+        store.saveTask(original);
+        base = 'e'.repeat(40);
+        await engine.review(task.id, true);
+        store.cancelJobs(task.id);
+        store.saveTask(original);
+        draft!.state = 'DISMISSED';
+        base = 'f'.repeat(40);
+        const next = await new Engine(store, () => provider).review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { id: '3' } });
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['202']);
+        return;
+      }
       if (
         scenario === 'completed review then deleted' ||
         scenario === 'completed review then published' ||
@@ -512,6 +582,80 @@ describe('GitHub draft review contract', () => {
     expect(input.body).toBe(`${body}\n\n<!-- R1 -->`);
     expect(input.startSide).toBe('LEFT');
   });
+  it.each([
+    [false, 'dirty', true],
+    [null, 'unknown', false],
+    [true, 'blocked', false],
+    [true, 'behind', false],
+    [true, 'unstable', false],
+  ] as const)(
+    'distinguishes GitHub conflict from other merge blockers (%s, %s)',
+    async (mergeable, state, conflict) => {
+      const http = transport((path) => {
+        if (path.includes('/pulls/'))
+          return {
+            head: { sha: revision.head },
+            base: { sha: revision.base, ref: 'main' },
+            state: 'open',
+            mergeable,
+            mergeable_state: state,
+          };
+        if (path === '/repos/acme/service/git/ref/heads/main')
+          return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
+        return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+      });
+      expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).mergeConflict).toBe(
+        conflict,
+      );
+    },
+  );
+  it('pins an open PR to the live target ref and keeps the historical base after closure', async () => {
+    const tip = 'c'.repeat(40);
+    let state = 'open';
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return {
+          head: { sha: revision.head },
+          base: { ref: 'release/v1', sha: revision.base },
+          state,
+          merged: state === 'closed',
+        };
+      if (path.endsWith('/git/ref/heads/release/v1'))
+        return { ref: 'refs/heads/release/v1', object: { type: 'commit', sha: tip } };
+      return path.includes('/status') ? { statuses: [] } : { check_runs: [] };
+    });
+    const github = new GitHubProvider('github.com', 'fake', http);
+    expect(await github.getPR(ref)).toMatchObject({ base: tip, start: tip, head: revision.head });
+    state = 'closed';
+    expect(await github.getPR(ref)).toMatchObject({
+      base: revision.base,
+      start: revision.base,
+      state: 'merged',
+    });
+    expect(http.mock.calls.filter(([url]) => String(url).includes('/git/ref/'))).toHaveLength(1);
+  });
+  it('keeps identically named checks from distinct GitHub workflows', async () => {
+    const http = transport((path) => {
+      if (path.includes('/pulls/'))
+        return {
+          head: { sha: revision.head },
+          base: { sha: revision.base, ref: 'main' },
+          state: 'open',
+        };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
+      if (path.includes('/status')) return { statuses: [] };
+      return {
+        check_runs: [
+          { name: 'test', check_suite: { id: 1 }, status: 'completed', conclusion: 'success' },
+          { name: 'test', check_suite: { id: 2 }, status: 'in_progress' },
+        ],
+      };
+    });
+    expect((await new GitHubProvider('github.com', 'fake', http).getPR(ref)).checks).toBe(
+      'pending',
+    );
+  });
   it('does not infer success from a failed or stale CI run', async () => {
     const http = transport((path) => {
       if (path === '/repos/acme/service/pulls/12')
@@ -526,6 +670,8 @@ describe('GitHub draft review contract', () => {
           base: { sha: revision.base, ref: 'main' },
           state: 'open',
         };
+      if (path === '/repos/acme/service/git/ref/heads/main')
+        return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
       if (path.includes('/status')) return { statuses: [{ context: 'unit', state: 'failure' }] };
       return {
         check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
@@ -646,6 +792,7 @@ describe('GitLab draft notes contract', () => {
     ['resume', 'published'],
     ['resume', 'lost create response'],
     ['resume', 'draft appears before POST'],
+    ['restore', 'published successor'],
     ['restore', 'deleted'],
     ['restore', 'delete summary'],
     ['restore', 'partial'],
@@ -719,6 +866,35 @@ describe('GitLab draft notes contract', () => {
         note: `Second round finding\n\n${tag(`${old.marker}:comment:R2`)}`,
         author_id: 7,
       };
+      if (status === 'published successor') {
+        store.cancelJobs(task.id);
+        publishDrafts();
+        const snapshot = await provider.getReview(ref, old);
+        store.event(task.id, 'review.published', { reviewId: old.id, snapshot });
+        const original = {
+          ...queued,
+          snapshot,
+          reviewFinished: true,
+          state: 'awaiting_checks' as const,
+        };
+        store.saveTask(original);
+        branch = 'release';
+        const second = await engine.review(task.id, true);
+        store.cancelJobs(task.id);
+        store.saveTask(original);
+        drafts = [];
+        const published = { ...finding, note: tag(`${second.review!.marker}:comment:R2`) };
+        notes.push(published);
+        notes.push({ id: 999, note: 'An unrelated note', author_id: 7 });
+        const restarted = new Engine(store, () => provider);
+        expect(await restarted.review(task.id, true)).toMatchObject({ state: 'needs_input' });
+        expect(creates).toBe(2);
+        notes.pop();
+        const next = await restarted.review(task.id, true);
+        expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual(['107']);
+        return;
+      }
       if (entry === 'restore') {
         store.cancelJobs(task.id);
         store.saveTask({ ...task, feedback: prior });
@@ -925,4 +1101,19 @@ it('rejects malformed PR URLs, credentials and path traversal', () => {
   ])
     expect(() => parsePR(url)).toThrow();
   expect(parsePR('https://gitlab.com/a/b/c/-/merge_requests/1').repo).toBe('a/b/c');
+});
+
+it('uses a permitted merge method and submits exactly the reviewed head to GitHub', async () => {
+  const http = transport((path, method, body) => {
+    if (method === 'GET' && path === '/repos/acme/service')
+      return { allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: true };
+    expect([method, path, body]).toEqual([
+      'PUT',
+      '/repos/acme/service/pulls/12/merge',
+      { sha: revision.head, merge_method: 'rebase' },
+    ]);
+    return { merged: true, sha: 'merged-commit' };
+  });
+  const write = await new GitHubProvider('github.com', 'fake', http).prepareMerge(ref);
+  await expect(write(revision.head)).resolves.toBe('merged-commit');
 });

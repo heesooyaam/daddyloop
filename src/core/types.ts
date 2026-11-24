@@ -74,6 +74,7 @@ export interface TicketSource {
   comments?: { id: string; author: string; body: string }[];
 }
 export type PRTask = Task & { ref: PRRef };
+export type AutoMergeMode = 'inherit' | 'on' | 'off';
 export interface ReviewGroup {
   titleSource?: 'placeholder' | 'goal' | 'manual';
   resourceWait?: { reasons: string[]; since: string; state: 'waiting' | 'repairing' | 'blocked' };
@@ -156,6 +157,11 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  draft?: boolean;
+  mergeable?: boolean | null;
+  mergeConflict?: boolean;
+  targetCloneUrl?: string;
+  mergeCommit?: string;
   title: string;
   body: string;
   branch: string;
@@ -234,9 +240,11 @@ export interface Task {
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
+  verifiedMerge?: Revision & { mergeCommit?: string };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  retiredReviewHandles?: ReviewHandle[];
   pendingAuthorFix?: {
     revision: Revision;
     generation: number;
@@ -246,6 +254,8 @@ export interface Task {
     confirmUntil?: number;
     staleDraft?: ReviewHandle;
   };
+  fixingMergeConflict?: boolean;
+  pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
     Record<
@@ -320,7 +330,9 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat' | 'implement';
+  kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
+  freshContextRetry?: boolean;
+  errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;
   groupGeneration?: number;

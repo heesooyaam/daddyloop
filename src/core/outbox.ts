@@ -38,6 +38,7 @@ export class Outbox {
     input: unknown,
     operation: ProviderWrite<T>,
     recover: () => Promise<{ found: true; value: T } | { found: false }>,
+    refused?: (error: unknown) => boolean,
     intent?: Record<string, unknown>,
   ): Promise<T> {
     if (this.active.has(id))
@@ -73,10 +74,14 @@ export class Outbox {
         this.store.event(taskId, 'operation.completed', { operationId: id });
         return result;
       } catch (error) {
-        if (error instanceof ProviderWriteNotAttempted) {
+        const notAttempted = error instanceof ProviderWriteNotAttempted;
+        if (notAttempted || refused?.(error) === true) {
           this.store.transaction(() => {
             this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
-            this.store.event(taskId, 'operation.blocked', { operationId: id, code: error.code });
+            this.store.event(taskId, notAttempted ? 'operation.blocked' : 'operation.refused', {
+              operationId: id,
+              ...(notAttempted ? { code: error.code } : { error: redact(String(error)) }),
+            });
           });
           throw error;
         }

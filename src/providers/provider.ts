@@ -13,6 +13,8 @@ import {
 
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
+  targetAdvanced?(ref: PRRef, before: string, after: string): Promise<boolean>;
+  prepareMerge?(ref: PRRef): Promise<(expectedHead: string) => Promise<string>>;
   findReview(
     ref: PRRef,
     marker: string,
@@ -24,7 +26,12 @@ export interface ReviewProvider {
     revision: Revision,
     marker: string,
   ): Promise<{ baselineNoteId: number; write: () => Promise<ReviewHandle> }>;
-  getReview(ref: PRRef, review: ReviewHandle, successor?: ReviewHandle): Promise<ReviewSnapshot>;
+  getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    successor?: ReviewHandle,
+    retired?: readonly ReviewHandle[],
+  ): Promise<ReviewSnapshot>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,
