@@ -237,7 +237,7 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
-  pendingFix?: { revision: Revision; attempted?: boolean };
+  pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
     Record<

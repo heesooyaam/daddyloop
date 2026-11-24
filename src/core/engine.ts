@@ -39,6 +39,15 @@ const oldPublishedReviewLimit =
 const noFixChanges =
   'Author made no code changes; independent verification of the decisions is next';
 
+function confirmationDeadline() {
+  // Allow several scheduler polls for the host's PR API to catch up with Git.
+  return new Date(Date.now() + 120_000).toISOString();
+}
+
+function unconfirmedFix(head: string, remote: string) {
+  return `Submission of saved fix ${head} is unconfirmed; the PR still shows ${remote}. Inspect the outcome and resume to retry this exact commit.`;
+}
+
 function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
   return (
     current.state === 'open' &&
@@ -500,13 +509,16 @@ export class Engine {
       return false;
     }
     if (sameTarget && sameRevision(original, pr)) {
-      if (resume || !task.pendingFix.attempted) return true;
+      if (!task.pendingFix.attempted) return true;
+      if (task.pendingFix.confirmUntil && task.pendingFix.confirmUntil > now()) {
+        const reason = `Waiting for the PR to confirm saved fix ${head}.`;
+        if (task.state !== 'awaiting_push' || task.reason !== reason)
+          this.state(task, 'awaiting_push', reason);
+        return false;
+      }
+      if (resume) return true;
       task.resumeState = 'awaiting_push';
-      this.state(
-        task,
-        'needs_input',
-        `Submission of saved fix ${head} is unconfirmed; the PR still shows ${pr.head}. Inspect the outcome and resume to retry this exact commit.`,
-      );
+      this.state(task, 'needs_input', unconfirmedFix(head, pr.head));
       return false;
     }
     this.holdSavedFix(task, pr);
@@ -541,7 +553,11 @@ export class Engine {
       this.store.saveTask(task);
       try {
         await push(task, head);
-        this.store.event(id, 'author.submitted', { head, pushed: true });
+        task.pendingFix.confirmUntil = confirmationDeadline();
+        this.store.transaction(() => {
+          this.store.saveTask(task);
+          this.store.event(id, 'author.submitted', { head, pushed: true });
+        });
       } catch (error) {
         this.store.event(id, 'author.submission_uncertain', { head, error: redact(String(error)) });
       }
@@ -606,6 +622,23 @@ export class Engine {
 
   recoverLostFixes() {
     for (const task of this.store.tasks()) {
+      if (
+        task.state === 'needs_input' &&
+        task.pendingFix?.attempted &&
+        !task.pendingFix.confirmUntil &&
+        task.pendingAuthorHead &&
+        task.revision &&
+        task.reason === unconfirmedFix(task.pendingAuthorHead, task.revision.head)
+      ) {
+        // A previous release stopped on the first stale read. Recheck without sending.
+        task.pendingFix.confirmUntil = confirmationDeadline();
+        this.state(
+          task,
+          'awaiting_push',
+          `Waiting for the PR to confirm saved fix ${task.pendingAuthorHead}.`,
+        );
+        continue;
+      }
       if (
         isTicket(task) ||
         task.pendingFix ||
