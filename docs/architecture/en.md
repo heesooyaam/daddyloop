@@ -235,7 +235,7 @@ sequenceDiagram
 
 **An old result cannot advance the task.** The generation is a cancellation counter saved with each run. After a pause, the numbers differ. `Engine.completeJob()` ignores that result, and `Broker.call()` prevents that run from changing comments. Files and history are preserved.
 
-When the target branch advances during a managed GitHub review, daddy can keep the native draft on the same PR commit. For a draft with findings it verifies the author, the recorded summary and each comment against confirmed review operations. The reviewer must check the complete change, update or withdraw the remaining findings and write a new summary before publication. Unrecognized edits stay in the draft for inspection.
+If the target branch advances before or during a GitHub review, daddy can keep its draft on the same PR commit and immediately schedule a fresh review, including when auto-merge is off. The old result cannot release feedback. For a draft with findings it verifies the author, the recorded summary and each comment against confirmed review operations. The reviewer must check the complete change, update or withdraw the remaining findings and write a new summary before publication. Unrecognized edits stay in the draft for inspection.
 
 When a conflict repair starts in a dirty, unscoped GitHub worker checkout, the service preserves the entire checkout alongside a clean copy at the expected commit. The same worker can read its staged and untracked files while resolving the merge. The preserved files remain available after a retry.
 

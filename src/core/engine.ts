@@ -446,6 +446,51 @@ export class Engine {
       'Verify the worker report and its evidence against the original requirements. Report any missing work.',
     );
   }
+  private restartNativeReview(task: Task, pr: PullRequest, draft: ReviewSnapshot, reason: string) {
+    const handle = task.review!;
+    const recheck =
+      !sameRevision(handle.revision, pr) && this.draftHasWork(handle, draft)
+        ? { commentIds: draft.comments.map((comment) => comment.id) }
+        : task.draftRecheck;
+    // The old run cannot release feedback or authorize a merge after the generation changes.
+    this.invalidate(task, pr);
+    task.reviewerThreadId = undefined;
+    task.review = { ...handle, revision: revisionOf(pr) };
+    task.snapshot = { ...draft, revision: revisionOf(pr) };
+    task.draftRecheck = recheck;
+    task.resumeState = 'reviewing';
+    this.state(task, 'reviewing', reason);
+    return this.store.enqueue(
+      task,
+      'reviewer',
+      'review',
+      'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
+    );
+  }
+  private draftHasWork(handle: ReviewHandle, draft: ReviewSnapshot) {
+    return (
+      draft.comments.length > 0 || draft.body !== `Review in progress.\n\n<!-- ${handle.marker} -->`
+    );
+  }
+  private async canCarryDraft(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (
+      (handle.authorId && draft.authorId !== handle.authorId) ||
+      this.store.db
+        .prepare("SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='pending'")
+        .get(task.id, handle.marker + ':*')
+    )
+      return false;
+    return (
+      !this.draftHasWork(handle, draft) ||
+      (this.recordedDraft(task, draft) &&
+        (await this.provider(prRef(task)).targetAdvanced?.(
+          prRef(task),
+          handle.revision.base,
+          pr.base,
+        )) === true)
+    );
+  }
   async retryInterruptedStep(id: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -519,7 +564,9 @@ export class Engine {
           'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
       if (
         !quota &&
-        !((context || timeout || staleStart || movedBase) && autoMergeEnabled(this.store, task))
+        !movedBase &&
+        !staleStart &&
+        !((context || timeout) && autoMergeEnabled(this.store, task))
       )
         return;
       const ref = prRef(task),
@@ -544,17 +591,7 @@ export class Engine {
           );
         return;
       }
-      const changedBase = !sameRevision(task.review.revision, pr);
-      const hasDraftWork =
-        draft.comments.length > 0 ||
-        draft.body !== `Review in progress.\n\n<!-- ${task.review.marker} -->`;
-      if (
-        changedBase &&
-        hasDraftWork &&
-        (!movedBase ||
-          !this.recordedDraft(task, draft) ||
-          !(await provider.targetAdvanced?.(ref, task.review.revision.base, pr.base)))
-      ) {
+      if (!sameRevision(task.review.revision, pr) && !(await this.canCarryDraft(task, pr, draft))) {
         if (!context)
           this.state(
             task,
@@ -570,11 +607,9 @@ export class Engine {
         currentGroup.deletion ||
         currentGroup.daddyState === 'paused' ||
         currentGroup.daddyState === 'archived' ||
-        (!quota && !autoMergeEnabled(this.store, task))
+        (!quota && !movedBase && !staleStart && !autoMergeEnabled(this.store, task))
       )
         return;
-      const handle = task.review;
-      const recheck = task.draftRecheck;
       this.store.transaction(() => {
         if (
           context &&
@@ -584,24 +619,13 @@ export class Engine {
           currentGroup.reviewerThreadId = undefined;
           this.store.saveGroup(currentGroup);
         }
-        this.invalidate(task, pr);
-        task.reviewerThreadId = undefined;
-        task.review = { ...handle, revision: revisionOf(pr) };
-        task.snapshot = { ...draft, revision: revisionOf(pr) };
-        task.draftRecheck =
-          changedBase && hasDraftWork ? { commentIds: draft.comments.map((c) => c.id) } : recheck;
-        this.state(
+        const retry = this.restartNativeReview(
           task,
-          'reviewing',
+          pr,
+          draft,
           context
             ? 'Reviewer context was full. Restarting the independent review.'
             : 'Continuing the independent review on the verified PR head',
-        );
-        const retry = this.store.enqueue(
-          task,
-          'reviewer',
-          'review',
-          'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
         );
         retry.freshContextRetry = job.freshContextRetry || !!context;
         retry.timeoutRetry = job.timeoutRetry || timeout;
@@ -769,6 +793,65 @@ export class Engine {
       'Resolve the merge conflicts in the prepared working copy. Preserve the intended behavior of both branches and verify the result.',
     );
   }
+  private async changeReviewRevision(task: Task, pr: PullRequest) {
+    const handle = task.review;
+    if (
+      task.ref.provider === 'github' &&
+      handle &&
+      !task.pendingFix &&
+      ['reviewing', 'awaiting_publication'].includes(task.state) &&
+      sameOpenTarget(task.pr, pr) &&
+      pr.draft === false &&
+      sameRevision(handle.revision, task.revision) &&
+      handle.revision.head === pr.head &&
+      handle.revision.base !== pr.base
+    ) {
+      const groupGeneration = task.groupId && this.store.getGroup(task.groupId).generation;
+      const draft = await this.provider(prRef(task)).getReview(prRef(task), handle);
+      const reusable =
+        draft.status === 'draft' &&
+        draft.revision.head === pr.head &&
+        (await this.canCarryDraft(task, pr, draft));
+      const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (
+        this.store.getTask(task.id).generation !== task.generation ||
+        (group &&
+          (group.generation !== groupGeneration ||
+            group.deletedAt ||
+            group.deletion ||
+            group.daddyState === 'paused' ||
+            group.daddyState === 'archived'))
+      )
+        return;
+      if (reusable) {
+        this.store.transaction(() =>
+          this.restartNativeReview(
+            task,
+            pr,
+            draft,
+            'The target branch advanced. Reviewing the updated change.',
+          ),
+        );
+        return;
+      }
+    }
+    const hadUnpublished =
+      task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
+    const previous = task.snapshot;
+    this.invalidate(task, pr);
+    if (hadUnpublished) {
+      if (handle) task.resumeState = 'reviewing';
+      task.review = handle;
+      task.snapshot = previous;
+    }
+    this.state(
+      task,
+      hadUnpublished ? 'needs_input' : 'queued',
+      hadUnpublished
+        ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
+        : 'New revision is ready for review',
+    );
+  }
   private async reconcileLocked(id: string): Promise<Task> {
     let task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
@@ -852,23 +935,7 @@ export class Engine {
       return task;
     }
     if (!sameRevision(task.revision, pr)) {
-      const hadUnpublished =
-        task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
-      const handle = task.review,
-        previous = task.snapshot;
-      this.invalidate(task, pr);
-      if (hadUnpublished) {
-        if (handle) task.resumeState = 'reviewing';
-        task.review = handle;
-        task.snapshot = previous;
-      }
-      this.state(
-        task,
-        hadUnpublished ? 'needs_input' : 'queued',
-        hadUnpublished
-          ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
-          : 'New revision is ready for review',
-      );
+      await this.changeReviewRevision(task, pr);
       return task;
     }
     task.pr = pr;
@@ -1502,6 +1569,15 @@ export class Engine {
         return;
       }
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
+        if (
+          job.kind === 'review' &&
+          task.ref.provider === 'github' &&
+          task.review &&
+          pr.state === 'open'
+        ) {
+          await this.changeReviewRevision(task, pr);
+          return;
+        }
         this.invalidate(task, pr);
         this.state(
           task,

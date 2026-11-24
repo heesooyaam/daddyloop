@@ -487,6 +487,14 @@ export const daddyRu: Record<string, string> = {
   'Handling your request': 'Разбирает запрос',
   'Checking server resources': 'Проверяет ресурсы сервера',
   'Waiting for assignment': 'Ждёт назначения',
+  'The target branch advanced. Reviewing the updated change.':
+    'Целевая ветка обновилась. daddy заново проверяет изменения.',
+  'Rechecking the existing draft on the updated target branch':
+    'daddy перепроверяет замечания на новой версии целевой ветки',
+  'Reviewer could not verify the carried draft on the updated target branch':
+    'Ревьюеру не удалось перепроверить замечания на новой версии целевой ветки',
+  'Conflict repair found additional local changes. The working copies were preserved.':
+    'В рабочей копии появились дополнительные правки. Обе копии сохранены.',
   'The PR changed during draft review': 'PR изменился во время подготовки ревью',
   'Earlier worker changes need reconciliation': 'Нужно сверить прежние правки воркера',
   'Assigned worker is waiting to start': 'Воркер назначен, запуск в очереди',
