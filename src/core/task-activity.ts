@@ -2,6 +2,9 @@ import type { AgentProfile, Job, State, Task, WorkerSlot } from './types.js';
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const draftInspectionRequired =
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.';
+
 const statusLabels: Record<State, string> = {
   discussing: 'Waiting for assignment',
   implementing: 'Implementing the task',
