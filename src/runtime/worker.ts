@@ -593,8 +593,9 @@ export class Worker {
       if (isTicket(task)) task.revision = prepared.revision;
       if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
+      let preservedCopy: string | undefined;
       if (repairingConflict) {
-        await this.workspaces.prepareConflict(task, abort.signal);
+        preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
       } else if (job.kind === 'fix') {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
@@ -619,8 +620,22 @@ export class Worker {
         task,
         job,
         cwd: agentCwd,
-        readPaths: demo ? [] : this.workspaces.readPaths?.(task),
-        prompt: buildContext(store, task, job),
+        readPaths: demo
+          ? []
+          : [
+              ...(this.workspaces.readPaths?.(task) ?? []),
+              ...(preservedCopy ? [preservedCopy] : []),
+            ],
+        prompt: [
+          buildContext(store, task, job),
+          preservedCopy &&
+            `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
+          job.kind === 'review' &&
+            task.draftRecheck &&
+            `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
         signal: abort.signal,
         tools: isolatedReview ? [] : undefined,
         onSession: (threadId, turnId) => {

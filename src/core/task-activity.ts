@@ -61,6 +61,13 @@ export function taskActivity(
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
   if (task.state === 'needs_input') {
+    if (task.reason.startsWith('PR changed while a draft existed'))
+      return 'The PR changed during draft review';
+    if (
+      task.reason.includes('The worker copy contains earlier changes') ||
+      task.reason.includes('additional local changes')
+    )
+      return 'Earlier worker changes need reconciliation';
     if (
       task.reason.includes('Inspect the earlier draft review') ||
       task.reason.includes('Inspect the old review draft')
@@ -85,6 +92,8 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
     job.status === 'running'
   )
     return 'Reviewing the worker report';
+  if (assignedWorker && job?.role === 'author' && job.status === 'queued')
+    return 'Assigned worker is waiting to start';
   return taskStatus(task.state, job?.status === 'queued', job?.role);
 }
 

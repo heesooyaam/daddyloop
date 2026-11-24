@@ -269,6 +269,7 @@ export class GitHubProvider implements ReviewProvider {
               ? 'missing'
               : 'published',
         body: value.body ?? '',
+        authorId: String(value.user.id),
         comments: comments.map(comment),
         url: value.html_url ?? ref.url,
         revision: { ...review.revision, head: value.commit_id },
