@@ -1,3 +1,4 @@
+import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
@@ -33,6 +34,7 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -459,7 +461,18 @@ export class TelegramWorkspace {
   }
   private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
     const group = this.authorize(destination, groupId);
-    const tasks = taskActivity(this.store.tasks(groupId).reverse(), this.store.activeJobs());
+    const slots = workerSlots(this.store, group);
+    const tasks = taskActivity(
+      this.store.tasks(groupId).reverse(),
+      this.store.activeJobs(),
+      (task) =>
+        githubActivityStatus(
+          task,
+          autoMergeSettings(this.store, group, task),
+          githubWait(this.store, task.ref),
+        ),
+      slots,
+    );
     const locale = this.locale();
     await this.api.send(
       destination,
@@ -468,7 +481,7 @@ export class TelegramWorkspace {
         : workersCard(
             locale,
             groupId,
-            workerSlots(this.store, group),
+            slots,
             tasks,
             group.worker ?? this.daddy.engine.defaultAgents().worker,
           ),
@@ -477,9 +490,24 @@ export class TelegramWorkspace {
   private async showTask(groupId: string, taskId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
-    const [activity] = taskActivity([task], this.store.activeJobs(taskId));
-    const slot = workerSlots(this.store, group).find((item) => item.taskId === taskId);
-    await this.api.send(destination, taskCard(this.locale(), activity!, slot));
+    const slots = workerSlots(this.store, group);
+    const [activity] = taskActivity(
+      [task],
+      this.store.activeJobs(taskId),
+      (t) =>
+        githubActivityStatus(
+          t,
+          autoMergeSettings(this.store, group, t),
+          githubWait(this.store, t.ref),
+        ),
+      slots,
+    );
+    const slot = slots.find((item) => item.taskId === taskId);
+    const merge =
+      group.workspace?.provider === 'github' && task.ref.provider === 'github'
+        ? autoMergeSettings(this.store, group, task)
+        : undefined;
+    await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge));
   }
   private async taskCommand(
     command: string,
@@ -1021,6 +1049,37 @@ export class TelegramWorkspace {
       await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
       return true;
     }
+    const sessionMerge = /^dad:sm:([a-f0-9-]{36}):(on|off)$/.exec(data);
+    if (sessionMerge) {
+      const id = sessionMerge[1]!;
+      this.authorize(destination, id);
+      const board = await this.daddy.settings(id, { autoMerge: sessionMerge[2] === 'on' });
+      await this.api.send(destination, sessionSettings(this.locale(), board));
+      return true;
+    }
+    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
+    if (taskMerge) {
+      const task = this.store.getTask(taskMerge[1]!);
+      if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, task.groupId);
+      this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
+      await this.showTask(task.groupId, task.id, destination);
+      return true;
+    }
+    const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);
+    if (merge) {
+      const item = this.store.getTask(merge[1]!);
+      if (!item.groupId || !item.revision)
+        throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, item.groupId);
+      await this.daddy.engine.action(item.id, 'verify-merge', '', {
+        groupId: item.groupId,
+        head: item.revision.head,
+        generation: Number(merge[2]),
+      });
+      await this.showTask(item.groupId, item.id, destination);
+      return true;
+    }
     const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
     if (task) {
       const { groupId } = this.store.getTask(task[1]!);
@@ -1437,6 +1496,15 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/notifications') return await this.callback('notifications:show', destination);
+      if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.t('Send /cleanup in the private bot chat to manage disk cleanup.'),
+          ),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+        return true;
+      }
       if (text === '/updates' && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(this.t('Open the private bot chat for CLI updates.')),

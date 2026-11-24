@@ -174,11 +174,19 @@ flowchart TB
 
 **From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
 
-**Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. Merging the PR remains a separate user action.
+**Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. For opted-in GitHub tasks the scheduler rechecks the published review, CI and PR revision before sending a merge request with the reviewed head SHA. An uncertain write is reconciled through the outbox. A confirmed merge conflict on an opted-in task queues an author run on the pinned PR and target commits. The service pushes the resulting two-parent commit to the same PR and queues independent review of the new revision.
+
+On a Codex review context overflow, the adapter resumes the same thread and requests history compaction. It waits for the compaction turn to finish before continuing the pinned review. The existing fresh-thread recovery for opted-in GitHub tasks remains available if the thread still cannot continue. Native drafts and the coordinator conversation are preserved. See the [Codex app-server compaction protocol](https://developers.openai.com/codex/app-server#trigger-thread-compaction).
+
+After a saved fix is confirmed, a pending GitHub review on the previous head can block the next review. For opted-in tasks, the service archives its draft Markdown in SQLite before deletion. Replacement requires the same account, marker and revision, zero inline comments, and either the original placeholder or a summary matching a confirmed write receipt. Unrecognized edits stay on GitHub. The new draft is attached to the confirmed head and needs a full review.
+
+With GitHub auto-merge enabled, successful review and checks move the task to `awaiting_merge`. The pool keeps the assigned worker through conflict repairs and releases the slot on confirmed completion. Dependent tasks wait for completion as well.
 
 The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
+
+The worker records a saved correction and its starting revision under the task lock. The service submits that exact commit and verifies the PR head before starting another review. A changed target or an unconfirmed submission leaves the task waiting with the saved commit ID. Earlier native drafts stay available for inspection.
 
 ## 5. Which runs can work in parallel
 

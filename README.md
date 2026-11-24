@@ -110,7 +110,7 @@ Save reusable sets in **Presets**, then enable several for a session and choose 
 - Assigning work and following up with workers. You have one conversation with daddy.
 - Importing GitHub issues, Tracker tickets, PRs/MRs and plain task descriptions.
 - Managing the crew. Reducing the pool lets busy workers finish their whole task, including review fixes.
-- Publishing completed reviews, sending saved fixes and checking the next revision. You make the merge decision.
+- Publishing completed reviews, sending saved fixes and checking the next revision. GitHub sessions and individual tasks support opt-in auto-merge after review and passing CI.
 - Checking resources and pruning verified application caches: `daddy cache status`, `daddy cache prune --apply`.
 
 ## Moving house? Take daddy with you

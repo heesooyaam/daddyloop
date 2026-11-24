@@ -1,3 +1,5 @@
+import { GitHubQuota } from '../../providers/github-quota.js';
+import type { Store } from '../../core/store.js';
 import { allRepositories } from './index.js';
 import type { RepositoryRegistry } from './registry.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -95,6 +97,7 @@ export class TicketReader {
     private trackerCredential = trackerToken,
     private githubCredential = (host: string) => credential('github', host),
     private repositories: RepositoryRegistry = allRepositories(),
+    private store?: Store,
   ) {}
   gitlab(address: { host: string }) {
     return new ProviderHttp(
@@ -117,6 +120,7 @@ export class TicketReader {
       address.host === 'github.com' ? 'https://api.github.com' : `https://${address.host}/api/v3`,
       headers,
       this.fetcher,
+      this.store ? new GitHubQuota(this.store, address.host) : undefined,
     );
   }
   async read(input: string): Promise<{ source: TicketSource; ref: TicketRef }> {

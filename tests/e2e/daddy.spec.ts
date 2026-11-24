@@ -285,3 +285,44 @@ test('shows quota remaining on a phone and requires confirmation before spending
   await expect(main.getByText('Available resets: 2')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
+  await login(page);
+  await create(page, 'GitHub auto-merge settings', Date.now());
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const dialog = page.getByRole('dialog');
+  const sessionSwitch = dialog.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ });
+  await expect(sessionSwitch).not.toBeChecked();
+  await sessionSwitch.check();
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.locator('.daddy-work-item').first().click();
+  const mode = dialog.getByRole('combobox', { name: 'Auto-merge GitHub PRs' });
+  await expect(mode.locator('option:checked')).toHaveText('Use session setting (on)');
+  await mode.selectOption('off');
+  await expect(mode).toHaveValue('off');
+  await page.reload();
+  await page.locator('.daddy-work-item').first().click();
+  await expect(mode).toHaveValue('off');
+  await mode.selectOption('inherit');
+  await expect(mode).toHaveValue('inherit');
+});
+
+test('changes the host cleanup schedule from the web sidebar', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  const panel = page.getByRole('dialog');
+  await panel.getByLabel('Enable scheduled cleanup').check();
+  await panel.getByLabel('Cleanup threshold (%)').fill('89');
+  await panel.getByLabel('Check interval (minutes)').fill('45');
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
+  await page.reload();
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  await expect(panel.getByLabel('Enable scheduled cleanup')).toBeChecked();
+  await expect(panel.getByLabel('Cleanup threshold (%)')).toHaveValue('89');
+  await expect(panel.getByLabel('Check interval (minutes)')).toHaveValue('45');
+  await panel.getByLabel('Enable scheduled cleanup').uncheck();
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
+});
