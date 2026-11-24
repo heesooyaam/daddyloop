@@ -223,6 +223,77 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await f.engine.review(f.task.id, true);
+      const old = f.store.getTask(f.task.id);
+      const handle = { ...old.review!, authorId: 'reviewer' };
+      const key = 'demo-review:' + handle.id;
+      f.store.saveTask({
+        ...old,
+        review: handle,
+        ticketRepository: {
+          baseHead: old.revision!.base,
+          baseBranch: old.pr!.targetBranch,
+          branch: old.pr!.branch,
+          cloneUrl: old.pr!.cloneUrl,
+        },
+      });
+      f.store.setSetting(key, {
+        ...(await f.provider.getReview(prRef(old), handle)),
+        authorId: handle.authorId,
+      });
+      const job = f.store.claim()!;
+      const { id } = (await f.engine.broker.call(job, 'add_comment', {
+        key: 'finding',
+        body: 'Check layout',
+      })) as { id: string };
+      await f.engine.broker.call(job, 'set_summary', { body: 'Old summary' });
+      const before = await f.provider.getReview(prRef(old), handle);
+      const comment = before.comments[0];
+      Object.assign(f.provider, { targetAdvanced: async () => true });
+      f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+      await f.engine.reconcile(old.id);
+      f.store.setSetting(key, {
+        ...before,
+        comments: [{ ...comment, body: 'Private human edit' }],
+      });
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      f.store.setSetting(key, before);
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id },
+        draftRecheck: { commentIds: [id] },
+      });
+      const first = f.store.claim()!;
+      const result = {
+        status: 'completed' as const,
+        summary: 'Reviewed',
+        checkedHead: old.revision!.head,
+      };
+      await f.engine.completeJob(first, result);
+      f.store.saveJob({ ...first, status: 'completed' });
+      expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+      const second = f.store.claim()!;
+      await f.engine.broker.call(second, 'edit_comment', {
+        id,
+        body: 'Verified against the new base',
+      });
+      await f.engine.broker.call(second, 'set_summary', { body: 'Rechecked' });
+      await f.engine.completeJob(second, result);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'awaiting_publication',
+        reviewFinished: true,
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
   it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
     const f = await setup();
     try {
@@ -441,8 +512,16 @@ describe('opt-in GitHub merging', () => {
       });
       expect(f.store.activeJobs(task.id)).toHaveLength(1);
       expect(f.send).not.toHaveBeenCalled();
+      const previousCopy = await f.checkouts.prepare(task, 'author');
+      writeFileSync(join(previousCopy, 'untracked-note'), 'work in progress');
+      writeFileSync(join(previousCopy, 'feature'), 'previous resolution');
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.job.role).toBe('author');
+        const preserved = previousCopy + '-before-conflict-' + head;
+        expect(input.readPaths).toContain(preserved);
+        expect(input.prompt).toContain(preserved);
+        expect(readFileSync(join(preserved, 'untracked-note'), 'utf8')).toBe('work in progress');
+        expect(readFileSync(join(preserved, 'feature'), 'utf8')).toBe('previous resolution');
         expect(input.prompt).toContain('resolving a GitHub PR conflict');
         expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toContain('<<<<<<<');
         await expect(f.checkouts.commitFix(input.task, 'premature')).rejects.toMatchObject({

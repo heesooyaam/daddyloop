@@ -198,6 +198,7 @@ export interface ReviewHandle {
   baselineNoteId?: number;
 }
 export interface ReviewSnapshot {
+  authorId?: string;
   status: 'draft' | 'published' | 'missing' | 'partial';
   body: string;
   comments: ReviewComment[];
@@ -233,6 +234,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  draftRecheck?: { commentIds: string[]; retried?: boolean };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;

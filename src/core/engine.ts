@@ -12,6 +12,8 @@ import {
   type AgentProfiles,
   type AgentProfile,
   type ReviewGroup,
+  type ReviewHandle,
+  type ReviewSnapshot,
   type TicketSource,
   type TicketRef,
   type PRTask,
@@ -59,15 +61,17 @@ function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest)
   );
 }
 
-// Only retry failures from preparing a conflict job against an outdated base.
+const dirtyConflictCopy =
+  'AppError: The worker copy contains earlier changes. Inspect them before resolving the merge conflict.';
 export function staleConflictPreparation(task: Task) {
   return (
     task.state === 'needs_input' &&
     task.fixingMergeConflict === true &&
     !task.pendingFix &&
     task.resumeState === 'fixing' &&
-    (task.reason ===
-      'AppError: The worker copy has no pending merge of the expected target commit.' ||
+    (task.reason === dirtyConflictCopy ||
+      task.reason ===
+        'AppError: The worker copy has no pending merge of the expected target commit.' ||
       task.reason ===
         'AppError: The PR changed before the queued job started. Reconcile and review the new revision.')
   );
@@ -321,6 +325,42 @@ export class Engine {
       return task;
     });
   }
+  private knownDraftSummary(taskId: string, handle: ReviewHandle, body: string) {
+    const suffix = `\n\n<!-- ${handle.marker} -->`;
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ body: body.slice(0, -suffix.length) }))
+      .digest('hex');
+    return (
+      body === 'Review in progress.' + suffix ||
+      (body.endsWith(suffix) &&
+        this.store.db
+          .prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND request=? AND status='done'",
+          )
+          .get(taskId, handle.marker + ':*:set_summary:*', digest))
+    );
+  }
+  private recordedDraft(task: Task, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (
+      !handle.authorId ||
+      draft.authorId !== handle.authorId ||
+      !this.knownDraftSummary(task.id, handle, draft.body)
+    )
+      return false;
+    const receipt = this.store.db.prepare(
+      "SELECT 1 FROM operations WHERE task_id=? AND (id GLOB ? OR id GLOB ?) AND status='done' AND json_extract(result,'$.id')=? AND json_extract(result,'$.body')=?",
+    );
+    return draft.comments.every((comment) =>
+      receipt.get(
+        task.id,
+        handle.marker + ':comment:*',
+        handle.marker + ':*:edit_comment:*',
+        comment.id,
+        comment.body,
+      ),
+    );
+  }
   private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
     const handle = task.review!,
       ref = prRef(task);
@@ -332,26 +372,14 @@ export class Engine {
     const pending = this.store.db.prepare('SELECT status FROM operations WHERE id=?').get(key);
     if (snapshot.status === 'missing' && !pending) return true;
     const source = snapshot.status === 'missing' ? archived : snapshot;
-    const suffix = `\n\n<!-- ${handle.marker} -->`;
     const body = source?.body ?? '';
-    const digest = createHash('sha256')
-      .update(JSON.stringify({ body: body.slice(0, -suffix.length) }))
-      .digest('hex');
-    const knownSummary =
-      body === 'Review in progress.' + suffix ||
-      (body.endsWith(suffix) &&
-        this.store.db
-          .prepare(
-            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND request=? AND status='done'",
-          )
-          .get(task.id, handle.marker + ':*:set_summary:*', digest));
     if (
       !source ||
       source.status !== 'draft' ||
       source.revision.head !== handle.revision.head ||
       !handle.authorId ||
       source.comments.length ||
-      !knownSummary ||
+      !this.knownDraftSummary(task.id, handle, body) ||
       !provider.discardSupersededDraft ||
       (archived && archived.body !== body)
     ) {
@@ -392,6 +420,7 @@ export class Engine {
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
+    task.draftRecheck = undefined;
     task.snapshot = undefined;
     task.approvedAt = undefined;
     task.checksWaivedAt = undefined;
@@ -442,8 +471,10 @@ export class Engine {
         job.kind === 'review' &&
         job.status === 'cancelled' &&
         job.generation + 1 === task.generation &&
-        task.reason ===
-          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' &&
+        (task.reason ===
+          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
+          task.reason ===
+            'Inspect the old review draft: it contains changes that daddy cannot safely replace.') &&
         !!task.review &&
         task.review.revision.head === task.revision?.head &&
         task.review.revision.base !== task.revision.base &&
@@ -513,11 +544,16 @@ export class Engine {
           );
         return;
       }
-      // Rebind only an untouched service placeholder when the target advanced.
+      const changedBase = !sameRevision(task.review.revision, pr);
+      const hasDraftWork =
+        draft.comments.length > 0 ||
+        draft.body !== `Review in progress.\n\n<!-- ${task.review.marker} -->`;
       if (
-        !sameRevision(task.review.revision, pr) &&
-        (draft.comments.length ||
-          draft.body !== `Review in progress.\n\n<!-- ${task.review.marker} -->`)
+        changedBase &&
+        hasDraftWork &&
+        (!movedBase ||
+          !this.recordedDraft(task, draft) ||
+          !(await provider.targetAdvanced?.(ref, task.review.revision.base, pr.base)))
       ) {
         if (!context)
           this.state(
@@ -538,6 +574,7 @@ export class Engine {
       )
         return;
       const handle = task.review;
+      const recheck = task.draftRecheck;
       this.store.transaction(() => {
         if (
           context &&
@@ -551,6 +588,8 @@ export class Engine {
         task.reviewerThreadId = undefined;
         task.review = { ...handle, revision: revisionOf(pr) };
         task.snapshot = { ...draft, revision: revisionOf(pr) };
+        task.draftRecheck =
+          changedBase && hasDraftWork ? { commentIds: draft.comments.map((c) => c.id) } : recheck;
         this.state(
           task,
           'reviewing',
@@ -780,7 +819,7 @@ export class Engine {
     if (staleConflictPreparation(task)) {
       if (
         task.revision?.head === pr.head &&
-        task.revision.base !== pr.base &&
+        (task.reason === dirtyConflictCopy ? pr.mergeConflict : task.revision.base !== pr.base) &&
         sameOpenTarget(task.pr, pr) &&
         pr.draft === false &&
         pr.mergeable != null &&
@@ -788,7 +827,9 @@ export class Engine {
         autoMergeEnabled(this.store, task)
       ) {
         this.store.transaction(() => {
+          const checkpoint = task.conflictCheckpoint;
           this.invalidate(task, pr);
+          if (pr.mergeConflict) task.conflictCheckpoint = checkpoint;
           if (pr.mergeConflict) this.enqueueConflictRepair(task);
           else this.state(task, 'queued', 'New revision is ready for review');
         });
@@ -1527,6 +1568,44 @@ export class Engine {
             'Review was published, removed or changed before the reviewer completed; inspect it before releasing feedback',
           );
           return;
+        }
+        if (task.draftRecheck) {
+          const key = task.review!.marker + ':' + job.id;
+          const done = this.store.db.prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='done' AND json_extract(result,'$.id')=? AND json_extract(result,'$.body')=?",
+          );
+          const summary = this.store.db
+            .prepare("SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='done'")
+            .get(task.id, key + ':set_summary:*');
+          const missed = snapshot.comments.some(
+            (c) =>
+              task.draftRecheck!.commentIds.includes(c.id) &&
+              !done.get(task.id, key + ':edit_comment:*', c.id, c.body),
+          );
+          if (!summary || missed) {
+            if (!task.draftRecheck.retried) {
+              task.draftRecheck.retried = true;
+              this.state(
+                task,
+                'reviewing',
+                'Rechecking the existing draft on the updated target branch',
+              );
+              this.store.enqueue(
+                task,
+                'reviewer',
+                'review',
+                'Finish rechecking the carried draft before publication.',
+              );
+            } else {
+              this.state(
+                task,
+                'needs_input',
+                'Reviewer could not verify the carried draft on the updated target branch',
+              );
+            }
+            return;
+          }
+          task.draftRecheck = undefined;
         }
         task.reviewFinished = true;
         for (const id of verified)
