@@ -1,3 +1,4 @@
+import { commandHelp } from './telegram-commands.js';
 import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
@@ -1444,6 +1445,14 @@ export class TelegramWorkspace {
       const addressedTo = /^\/\w+@(\w+)(?=\s|$)/.exec(rawText)?.[1];
       if (addressedTo && addressedTo.toLowerCase() !== this.username.toLowerCase()) return false;
       const text = rawText.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+      const help = /^\/help(?:\s+([\s\S]*))?$/i.exec(text);
+      if (help) {
+        await this.api.send(
+          destination,
+          commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
+        );
+        return true;
+      }
       const registrationKey = this.registrationKey(destination);
       const registration = this.store.setting<{
         provider: string;
@@ -1527,7 +1536,7 @@ export class TelegramWorkspace {
         await this.setup();
         return true;
       }
-      if (['/sessions', '/start', '/start daddy', '/help'].includes(text)) {
+      if (['/sessions', '/start', '/start daddy'].includes(text)) {
         await this.home(destination);
         return true;
       }
