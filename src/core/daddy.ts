@@ -1,8 +1,9 @@
+import { githubWait } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   autoMergeSettings,
-  autoMergeStatus,
+  githubActivityStatus,
   sessionAutoMerge,
   setTaskMergeMode,
 } from './auto-merge.js';
@@ -230,7 +231,9 @@ export class Daddy {
           id: task.id,
           title: task.title,
           state: task.state,
-          statusLabel: autoMergeStatus(task, autoMerge) ?? activityStatus(item),
+          statusLabel:
+            githubActivityStatus(task, autoMerge, githubWait(this.store, task.ref)) ??
+            activityStatus(item),
           autoMerge,
           reason: task.reason,
           workspaceId: task.workspaceId,

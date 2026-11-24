@@ -317,6 +317,8 @@ export interface Job {
   role: Role;
   kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
   freshContextRetry?: boolean;
+  timeoutRetry?: boolean;
+  deferredResult?: AgentResult;
   errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;

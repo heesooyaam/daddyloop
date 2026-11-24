@@ -1,3 +1,5 @@
+import { GitHubQuota, GitHubQuotaError } from './github-quota.js';
+import type { Store } from '../core/store.js';
 import type {
   PRRef,
   PullRequest,
@@ -49,7 +51,7 @@ const comment = (c: GHComment): ReviewComment => ({
 });
 export class GitHubProvider implements ReviewProvider {
   readonly http: ProviderHttp;
-  constructor(host: string, token: string, fetcher?: Fetch) {
+  constructor(host: string, token: string, fetcher?: Fetch, store?: Store) {
     this.http = new ProviderHttp(
       host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
       {
@@ -59,6 +61,7 @@ export class GitHubProvider implements ReviewProvider {
         'User-Agent': 'daddyloop/0.1',
       },
       fetcher,
+      store ? new GitHubQuota(store, host) : undefined,
     );
   }
   async getPR(ref: PRRef): Promise<PullRequest> {
@@ -185,6 +188,7 @@ export class GitHubProvider implements ReviewProvider {
           merge_method: method,
         });
       } catch (error) {
+        if (error instanceof GitHubQuotaError) throw error;
         if (error instanceof AppError)
           throw new AppError(
             error.code,
@@ -237,7 +241,11 @@ export class GitHubProvider implements ReviewProvider {
     };
   }
   async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const existing = await this.findReview(ref, marker);
+    const existing = await this.findReview(ref, marker).catch((error) => {
+      // This lookup happens before the create request.
+      if (error instanceof GitHubQuotaError) throw new GitHubQuotaError(error.until, true);
+      throw error;
+    });
     if (existing) return { ...existing, revision };
     // GitHub itself enforces one pending review per authenticated account. Never adopt
     // or delete the user's unrelated review when that constraint rejects this call.
@@ -277,6 +285,28 @@ export class GitHubProvider implements ReviewProvider {
       throw error;
     }
   }
+  async discardSupersededDraft(ref: PRRef, review: ReviewHandle, snapshot: ReviewSnapshot) {
+    const url = `${path(ref)}/reviews/${review.id}`;
+    const [value, user, comments] = await Promise.all([
+      this.http.request<GHReview>('GET', url),
+      this.http.request<{ id: number }>('GET', '/user'),
+      this.http.pages<GHComment>(url + '/comments'),
+    ]);
+    if (
+      value.state !== 'PENDING' ||
+      String(user.id) !== review.authorId ||
+      value.user.id !== user.id ||
+      value.commit_id !== review.revision.head ||
+      value.body !== snapshot.body ||
+      !value.body.endsWith(tag(review.marker)) ||
+      comments.length
+    )
+      throw new AppError(
+        'draft_changed',
+        'The old draft changed. Inspect it before replacing the review.',
+      );
+    await this.http.request('DELETE', url);
+  }
   async createComment(
     ref: PRRef,
     review: ReviewHandle,
@@ -294,7 +324,7 @@ export class GitHubProvider implements ReviewProvider {
     const base = this.http.baseUrl.endsWith('/api/v3')
       ? this.http.baseUrl.slice(0, -7) + '/api'
       : this.http.baseUrl;
-    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher);
+    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher, this.http.quota);
     const value = await http.request<{
       errors?: { message: string }[];
       data: {

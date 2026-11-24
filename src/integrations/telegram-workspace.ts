@@ -1,3 +1,4 @@
+import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
 import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
@@ -33,7 +34,7 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
-import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -464,7 +465,12 @@ export class TelegramWorkspace {
     const tasks = taskActivity(
       this.store.tasks(groupId).reverse(),
       this.store.activeJobs(),
-      (task) => autoMergeStatus(task, autoMergeSettings(this.store, group, task)),
+      (task) =>
+        githubActivityStatus(
+          task,
+          autoMergeSettings(this.store, group, task),
+          githubWait(this.store, task.ref),
+        ),
       slots,
     );
     const locale = this.locale();
@@ -485,7 +491,17 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
     const slots = workerSlots(this.store, group);
-    const [activity] = taskActivity([task], this.store.activeJobs(taskId), undefined, slots);
+    const [activity] = taskActivity(
+      [task],
+      this.store.activeJobs(taskId),
+      (t) =>
+        githubActivityStatus(
+          t,
+          autoMergeSettings(this.store, group, t),
+          githubWait(this.store, t.ref),
+        ),
+      slots,
+    );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
       group.workspace?.provider === 'github' && task.ref.provider === 'github'

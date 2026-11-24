@@ -97,8 +97,8 @@ export function queueCard(locale: Locale, groupId: string, activity: TaskActivit
       .add(taskReference(task), 'code')
       .add('  ' + clipTitle(task.title, 90))
       .add('\n' + t(activityStatus(item)));
-    if (task.workerRequest?.slot)
-      text.add(' · ' + t('Worker {number}', { number: task.workerRequest.slot }));
+    const number = item.assignedWorker ?? task.workerRequest?.slot;
+    if (number) text.add(' · ' + t('Worker {number}', { number }));
     if (task.workerRequest?.profile) text.add(' · ' + profileText(task.workerRequest.profile));
   }
   for (let start = 0; start < Math.min(tasks.length, 9); start += 3)

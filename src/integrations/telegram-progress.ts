@@ -1,6 +1,7 @@
+import { githubWait } from '../providers/github-quota.js';
 import { randomUUID } from 'node:crypto';
 import { workerSlots } from '../core/worker-pool.js';
-import { autoMergeSettings, autoMergeStatus } from '../core/auto-merge.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import type { Store } from '../core/store.js';
 import type { DaddyJob, Job, ReviewGroup, State } from '../core/types.js';
 import { redact } from '../core/security.js';
@@ -71,9 +72,11 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     [...tasks].reverse(),
     workers,
     (task) =>
-      task.state === 'complete' || task.state === 'awaiting_merge'
-        ? autoMergeStatus(task, autoMergeSettings(store, group, task))
-        : undefined,
+      githubActivityStatus(
+        task,
+        autoMergeSettings(store, group, task),
+        githubWait(store, task.ref),
+      ),
     workerSlots(store, group),
   ).filter(outstandingActivity);
   let label = 'No work in progress';

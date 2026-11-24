@@ -1,3 +1,4 @@
+import { legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
@@ -69,6 +70,20 @@ export function staleConflictPreparation(task: Task) {
       'AppError: The worker copy has no pending merge of the expected target commit.' ||
       task.reason ===
         'AppError: The PR changed before the queued job started. Reconcile and review the new revision.')
+  );
+}
+
+export function confirmedSupersededDraft(task: Task) {
+  return (
+    task.ref.provider === 'github' &&
+    task.state === 'needs_input' &&
+    !!task.review &&
+    !!task.pendingFix &&
+    !!task.pendingAuthorHead &&
+    task.pendingAuthorHead === task.revision?.head &&
+    task.review.revision.head !== task.pendingAuthorHead &&
+    task.reason ===
+      `Saved fix ${task.pendingAuthorHead} is on the PR. Inspect the earlier draft review ${task.review.id} before starting another review.`
   );
 }
 
@@ -245,6 +260,15 @@ export class Engine {
       const provider = this.provider(prRef(task));
       const pr = await provider.getPR(prRef(task));
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
+      if (confirmedSupersededDraft(task)) {
+        if (pr.head !== task.pendingAuthorHead || !sameOpenTarget(task.pr, pr)) {
+          this.holdSavedFix(task, pr);
+          return task;
+        }
+        if (!(await this.retireSupersededDraft(task, provider))) return task;
+        this.invalidate(task, pr);
+        task.pendingFix = undefined;
+      }
       if (task.pendingFix && (!sameRevision(task.revision, pr) || !sameOpenTarget(task.pr, pr))) {
         this.holdSavedFix(task, pr);
         return task;
@@ -297,6 +321,72 @@ export class Engine {
       return task;
     });
   }
+  private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
+    const handle = task.review!,
+      ref = prRef(task);
+    const snapshot = await provider.getReview(ref, handle);
+    if (snapshot.status === 'published') return true;
+    const archiveKey = 'review.archive:' + task.id + ':' + handle.id;
+    const archived = this.store.setting<typeof snapshot>(archiveKey);
+    const key = handle.marker + ':retire:' + handle.id;
+    const pending = this.store.db.prepare('SELECT status FROM operations WHERE id=?').get(key);
+    if (snapshot.status === 'missing' && !pending) return true;
+    const source = snapshot.status === 'missing' ? archived : snapshot;
+    const suffix = `\n\n<!-- ${handle.marker} -->`;
+    const body = source?.body ?? '';
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ body: body.slice(0, -suffix.length) }))
+      .digest('hex');
+    const knownSummary =
+      body === 'Review in progress.' + suffix ||
+      (body.endsWith(suffix) &&
+        this.store.db
+          .prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND request=? AND status='done'",
+          )
+          .get(task.id, handle.marker + ':*:set_summary:*', digest));
+    if (
+      !source ||
+      source.status !== 'draft' ||
+      source.revision.head !== handle.revision.head ||
+      !handle.authorId ||
+      source.comments.length ||
+      !knownSummary ||
+      !provider.discardSupersededDraft ||
+      (archived && archived.body !== body)
+    ) {
+      this.state(
+        task,
+        'needs_input',
+        'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
+      );
+      return false;
+    }
+    if (!archived)
+      this.store.transaction(() => {
+        this.store.setSetting(archiveKey, source);
+        this.store.event(task.id, 'review.draft_archived', {
+          reviewId: handle.id,
+          head: source.revision.head,
+          archiveKey,
+        });
+      });
+    await this.broker.outbox.perform(
+      task.id,
+      key,
+      { review: handle.id, head: source.revision.head, body },
+      async () => {
+        await provider.discardSupersededDraft!(ref, handle, source);
+        return null;
+      },
+      async () => ({
+        found: (await provider.getReview(ref, handle)).status === 'missing',
+        value: null,
+      }),
+      (error) => error instanceof AppError && error.code === 'draft_changed',
+    );
+    return true;
+  }
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
     task.generation++;
     this.store.cancelJobs(task.id);
@@ -326,44 +416,68 @@ export class Engine {
       'Verify the worker report and its evidence against the original requirements. Report any missing work.',
     );
   }
-  async retryExhaustedReview(id: string) {
+  async retryInterruptedStep(id: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (
         task.state !== 'needs_input' ||
-        task.resumeState !== 'reviewing' ||
         !task.groupId ||
         task.ref.provider !== 'github' ||
-        !task.review ||
-        task.pendingFix ||
-        this.store.busy(id) ||
-        !autoMergeEnabled(this.store, task)
+        this.store.busy(id)
+      )
+        return;
+      const group = this.store.getGroup(task.groupId);
+      if (
+        group.deletedAt ||
+        group.deletion ||
+        group.daddyState === 'paused' ||
+        group.daddyState === 'archived'
       )
         return;
       const job = this.store.jobs(id).at(-1);
       if (
         !job ||
-        job.kind !== 'review' ||
-        job.profile?.engine !== 'codex' ||
-        job.freshContextRetry ||
         job.status !== 'failed' ||
         job.generation !== task.generation ||
+        job.groupGeneration !== group.generation
+      )
+        return;
+      const quota = job.errorCode === 'github_rate_limit' || legacyQuotaRead(job.error);
+      if (
+        quota &&
+        job.error &&
+        job.kind === 'fix' &&
+        task.resumeState === 'awaiting_push' &&
+        task.pendingFix &&
+        task.pendingAuthorHead &&
+        task.reason === `Saved fix ${task.pendingAuthorHead} is preserved. ${job.error}`
+      ) {
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        if (await this.checkSavedFix(task, pr))
+          this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
+        return;
+      }
+      if (
+        task.resumeState !== 'reviewing' ||
+        job.kind !== 'review' ||
+        !task.review ||
+        task.pendingFix ||
         job.error !== task.reason
       )
         return;
-      if (job.errorCode !== 'context_window_exceeded') {
-        // Compatibility with failed runs saved before structured error codes were stored.
-        const prefix = 'AppError: Codex turn failed: ';
-        if (!job.error?.startsWith(prefix)) return;
-        try {
-          if (
-            JSON.parse(job.error.slice(prefix.length))?.codexErrorInfo !== 'contextWindowExceeded'
-          )
-            return;
-        } catch {
-          return;
-        }
-      }
+      const context =
+        job.profile?.engine === 'codex' &&
+        !job.freshContextRetry &&
+        (job.errorCode === 'context_window_exceeded' ||
+          (job.error?.startsWith('AppError: Codex turn failed: {') &&
+            job.error.includes('"codexErrorInfo":"contextWindowExceeded"')));
+      const timeout = job.errorCode === 'run_timeout' && !job.timeoutRetry;
+      const staleStart =
+        job.errorCode === 'stale_revision' &&
+        job.error ===
+          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
+      if (!quota && !((context || timeout || staleStart) && autoMergeEnabled(this.store, task)))
+        return;
       const ref = prRef(task),
         provider = this.provider(ref);
       const [pr, draft] = await Promise.all([
@@ -386,13 +500,25 @@ export class Engine {
           draft.body !== `Review in progress.\n\n<!-- ${task.review.marker} -->`)
       )
         return;
-      const group = this.store.getGroup(task.groupId);
-      if (group.generation !== job.groupGeneration || !autoMergeEnabled(this.store, task)) return;
+      const currentGroup = this.store.getGroup(task.groupId);
+      if (
+        currentGroup.generation !== job.groupGeneration ||
+        currentGroup.deletedAt ||
+        currentGroup.deletion ||
+        currentGroup.daddyState === 'paused' ||
+        currentGroup.daddyState === 'archived' ||
+        (!quota && !autoMergeEnabled(this.store, task))
+      )
+        return;
       const handle = task.review;
       this.store.transaction(() => {
-        if (group.reviewerThreadId && group.reviewerThreadId === job.threadId) {
-          group.reviewerThreadId = undefined;
-          this.store.saveGroup(group);
+        if (
+          context &&
+          currentGroup.reviewerThreadId &&
+          currentGroup.reviewerThreadId === job.threadId
+        ) {
+          currentGroup.reviewerThreadId = undefined;
+          this.store.saveGroup(currentGroup);
         }
         this.invalidate(task, pr);
         task.reviewerThreadId = undefined;
@@ -401,7 +527,9 @@ export class Engine {
         this.state(
           task,
           'reviewing',
-          'Reviewer context was full. Restarting the independent review.',
+          context
+            ? 'Reviewer context was full. Restarting the independent review.'
+            : 'Continuing the independent review on the verified PR head',
         );
         const retry = this.store.enqueue(
           task,
@@ -409,7 +537,8 @@ export class Engine {
           'review',
           'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
         );
-        retry.freshContextRetry = true;
+        retry.freshContextRetry = job.freshContextRetry || !!context;
+        retry.timeoutRetry = job.timeoutRetry || timeout;
         this.store.saveJob(retry);
       });
     });
@@ -572,7 +701,13 @@ export class Engine {
     if (!sameRevision(task.revision, pr)) {
       const hadUnpublished =
         task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
+      const handle = task.review,
+        previous = task.snapshot;
       this.invalidate(task, pr);
+      if (hadUnpublished) {
+        task.review = handle;
+        task.snapshot = previous;
+      }
       this.state(
         task,
         hadUnpublished ? 'needs_input' : 'queued',
@@ -677,7 +812,7 @@ export class Engine {
     const sameBase = pr.base === original.base && pr.start === original.start;
     const compatibleBase =
       sameBase ||
-      (task.fixingMergeConflict === true &&
+      (task.ref.provider === 'github' &&
         sameTarget &&
         (pr.head === head || pr.head === original.head) &&
         (await this.provider(prRef(task)).targetAdvanced?.(prRef(task), original.base, pr.base)) ===
@@ -1060,7 +1195,7 @@ export class Engine {
       }
       if (isTicket(task)) {
         this.store.transaction(() => {
-          this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+          this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
           const reportReview = job.kind === 'review';
           if (
             reportReview &&
@@ -1127,7 +1262,7 @@ export class Engine {
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
       if (job.kind === 'fix' && task.pendingFix) {
-        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (await this.checkSavedFix(task, pr)) {
           task.resumeState = 'awaiting_push';
           this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
@@ -1135,7 +1270,7 @@ export class Engine {
         return;
       }
       if (job.kind === 'verify_merge') {
-        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (
           pr.state !== 'merged' ||
           !sameRevision(task.revision, pr) ||
@@ -1173,7 +1308,7 @@ export class Engine {
         );
         return;
       }
-      this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+      this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
       if (pr.state !== 'open') {
         this.state(
           task,
