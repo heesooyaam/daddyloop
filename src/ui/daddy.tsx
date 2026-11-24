@@ -61,6 +61,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
   const [usageEngine, setUsageEngine] = useState<string>();
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
+  const [previewingRepository, setPreviewingRepository] = useState(false);
   const [returnToNew, setReturnToNew] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
@@ -664,13 +665,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         </Dialog>
       )}
       {modal === 'settings' && board && (
-        <Dialog title={t('Session settings')} onClose={() => setModal(null)}>
+        <Dialog
+          title={t('Session settings')}
+          onClose={() => setModal(null)}
+          closeDisabled={previewingRepository}
+        >
           <SessionSettings
             key={board.group.id}
-            api={api}
-            board={board}
             repository={repository}
             onRepositoryChange={(value) => model.repository(value)}
+            onPreviewingChange={setPreviewingRepository}
+            api={api}
+            board={board}
             onSave={async (profiles, instructions) => {
               await model.action('settings', { profiles, instructions });
               if (!model.snapshot().error) setModal(null);
@@ -1196,6 +1202,7 @@ function SessionRepository({
   disabled,
   onChange,
   onEditingChange,
+  onPreviewingChange,
 }: {
   api: DaddyApi;
   board: DaddyBoard;
@@ -1203,6 +1210,7 @@ function SessionRepository({
   disabled: boolean;
   onChange: (value?: RepositorySelection) => void;
   onEditingChange: (editing: boolean) => void;
+  onPreviewingChange: (previewing: boolean) => void;
 }) {
   const { t } = useLocale();
   const { workspace, group } = board;
@@ -1237,22 +1245,25 @@ function SessionRepository({
         value={repository}
         onChange={onChange}
         onEditingChange={onEditingChange}
+        onPreviewingChange={onPreviewingChange}
         target="message"
       />
     </fieldset>
   );
 }
 function SessionSettings({
-  api,
-  board,
   repository,
   onRepositoryChange,
+  onPreviewingChange,
+  api,
+  board,
   onSave,
 }: {
-  api: DaddyApi;
-  board: DaddyBoard;
   repository?: RepositorySelection;
   onRepositoryChange: (value?: RepositorySelection) => void;
+  onPreviewingChange: (previewing: boolean) => void;
+  api: DaddyApi;
+  board: DaddyBoard;
   onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1287,14 +1298,6 @@ function SessionSettings({
           .finally(() => setBusy(false));
       }}
     >
-      <SessionRepository
-        api={api}
-        board={board}
-        repository={repository}
-        disabled={busy}
-        onChange={onRepositoryChange}
-        onEditingChange={setEditingFolder}
-      />
       {(['daddy', 'worker'] as const).map((role) => {
         const label = role === 'daddy' ? 'daddy' : t('New workers');
         return (
@@ -1310,6 +1313,15 @@ function SessionSettings({
           </fieldset>
         );
       })}
+      <SessionRepository
+        api={api}
+        board={board}
+        repository={repository}
+        disabled={busy}
+        onChange={onRepositoryChange}
+        onEditingChange={setEditingFolder}
+        onPreviewingChange={onPreviewingChange}
+      />
       <InstructionFields
         api={api}
         value={instructions}

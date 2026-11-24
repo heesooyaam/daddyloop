@@ -60,6 +60,8 @@ test('sets a one-message repository in session settings and sends the next messa
   const alternate = resolve('.daddyloop/e2e/fixture-repository-alternate');
   const settings = page.getByRole('dialog', { name: 'Session settings' });
   const changeFolder = settings.getByRole('button', { name: 'Change folder for the next message' });
+  const close = settings.getByRole('button', { name: 'Close', exact: true });
+  const cancel = settings.getByRole('button', { name: 'Cancel', exact: true });
   const save = settings.getByRole('button', { name: 'Save settings', exact: true });
   const override = page.getByRole('button', { name: 'Repository override for the next message' });
   await expect(page.getByText('Workspace source', { exact: true })).toHaveCount(0);
@@ -71,28 +73,40 @@ test('sets a one-message repository in session settings and sends the next messa
   const pendingPreview = new Promise<void>((resolve) => {
     releasePreview = resolve;
   });
+  let onChecked!: (ok: boolean) => void;
+  const checkedPreview = new Promise<boolean>((resolve) => {
+    onChecked = resolve;
+  });
   await page.route(
     '**/api/workspaces/preview',
     async (route) => {
+      const response = await route.fetch();
+      onChecked(response.ok());
       await pendingPreview;
-      await route.continue();
+      await route.fulfill({ response });
     },
     { times: 1 },
   );
-  const preview = page.waitForRequest('**/api/workspaces/preview');
   try {
     await settings.getByRole('button', { name: 'Apply settings' }).click();
-    await preview;
+    expect(await checkedPreview).toBe(true);
     await expect(save).toBeDisabled();
+    await expect(close).toBeDisabled();
+    await expect(cancel).toBeEnabled();
+    await page.keyboard.press('Escape');
+    await expect(settings).toBeVisible();
+    await page.locator('.daddy-overlay').click({ position: { x: 2, y: 2 } });
+    await expect(settings).toBeVisible();
   } finally {
     releasePreview();
   }
   await expect(settings.getByText(alternate, { exact: true })).toBeVisible();
   await expect(settings.getByText(source, { exact: true })).toBeVisible();
+  await expect(close).toBeEnabled();
   await expect(save).toBeEnabled();
   await changeFolder.click();
   await expect(save).toBeDisabled();
-  await settings.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await cancel.click();
   await expect(save).toBeEnabled();
   await save.click();
   await expect(settings).toHaveCount(0);

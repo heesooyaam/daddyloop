@@ -16,6 +16,7 @@ export function WorkspaceFields({
   target = 'session',
   sessionId,
   onEditingChange,
+  onPreviewingChange,
 }: {
   api: DaddyApi;
   workspace: Workspace;
@@ -24,6 +25,7 @@ export function WorkspaceFields({
   target?: 'session' | 'message' | 'task';
   sessionId?: string;
   onEditingChange?: (editing: boolean) => void;
+  onPreviewingChange?: (previewing: boolean) => void;
 }) {
   const { t } = useLocale();
   const [editing, setEditing] = useState(false),
@@ -37,6 +39,10 @@ export function WorkspaceFields({
     onEditingChange?.(editing);
     return () => onEditingChange?.(false);
   }, [editing, onEditingChange]);
+  useEffect(() => {
+    onPreviewingChange?.(busy);
+    return () => onPreviewingChange?.(false);
+  }, [busy, onPreviewingChange]);
   useEffect(() => {
     if (!value) {
       request.current?.abort();

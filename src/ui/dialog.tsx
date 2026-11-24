@@ -5,17 +5,22 @@ export function Dialog({
   title,
   children,
   onClose,
+  closeDisabled = false,
   wide = false,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  closeDisabled?: boolean;
   wide?: boolean;
 }) {
   const { t } = useLocale();
+  const requestClose = () => {
+    if (!closeDisabled) onClose();
+  };
   const ref = useRef<HTMLDivElement>(null),
-    close = useRef(onClose);
-  close.current = onClose;
+    close = useRef(requestClose);
+  close.current = requestClose;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement;
     (
@@ -55,7 +60,7 @@ export function Dialog({
     <div
       className="daddy-overlay"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) requestClose();
       }}
     >
       <div
@@ -67,7 +72,12 @@ export function Dialog({
       >
         <header>
           <h2>{title}</h2>
-          <button className="daddy-icon" aria-label={t('Close')} onClick={onClose}>
+          <button
+            className="daddy-icon"
+            aria-label={t('Close')}
+            onClick={requestClose}
+            disabled={closeDisabled}
+          >
             <X size={19} />
           </button>
         </header>
