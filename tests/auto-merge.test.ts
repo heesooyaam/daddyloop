@@ -189,6 +189,40 @@ describe('opt-in GitHub merging', () => {
       await f.close();
     }
   });
+  it('resumes a cancelled review on the same PR head when its target advances and its draft is untouched', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const old = f.store.getTask(f.task.id);
+      f.store.saveTask({
+        ...old,
+        ticketRepository: {
+          baseHead: old.revision!.base,
+          baseBranch: old.pr!.targetBranch,
+          branch: old.pr!.branch,
+          cloneUrl: old.pr!.cloneUrl,
+        },
+      });
+      const handle = old.review!,
+        key = 'demo-review:' + handle.id;
+      f.store.setSetting(key, {
+        ...(await f.provider.getReview(prRef(old), handle)),
+        body: `Review in progress.\n\n<!-- ${handle.marker} -->`,
+      });
+      f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await f.engine.reconcile(old.id);
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id, revision: { base: 'd'.repeat(40) } },
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
   it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
     const f = await setup();
     try {

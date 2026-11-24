@@ -235,6 +235,8 @@ sequenceDiagram
 
 **An old result cannot advance the task.** The generation is a cancellation counter saved with each run. After a pause, the numbers differ. `Engine.completeJob()` ignores that result, and `Broker.call()` prevents that run from changing comments. Files and history are preserved.
 
+When only the target branch advances during a managed GitHub review, the scheduler can reuse an untouched native draft on the same PR head and queue a fresh independent review. A changed source branch, meaningful draft content or uncertain PR identity still requires inspection.
+
 Code-version checks solve a related problem: reviewing H1 does not verify a fix in H2. The service compares the full code and comparison-base identity (`head`, `base`, `start`, `revisionId`). Changed code invalidates the old review, plan approval and human CI waiver. A leftover stale draft requires inspection.
 
 Failures follow the same rules:
