@@ -573,6 +573,8 @@ export const daddyRu: Record<string, string> = {
     'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
   'No cleanup skill': 'Скилл не задан',
   'Refresh cleanup status': 'Обновить статус уборки',
+  'The PR or native draft changed. Inspect the interrupted review.':
+    'PR или черновик изменился. Проверь остановленное ревью.',
   'Waiting for GitHub API quota until {time} UTC':
     'Ожидает восстановления лимита GitHub API до {time} UTC',
   'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',

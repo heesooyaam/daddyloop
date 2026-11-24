@@ -491,15 +491,29 @@ export class Engine {
         pr.head !== task.review.revision.head ||
         draft.status !== 'draft' ||
         draft.revision.head !== pr.head
-      )
+      ) {
+        if (!context)
+          this.state(
+            task,
+            'needs_input',
+            'The PR or native draft changed. Inspect the interrupted review.',
+          );
         return;
+      }
       // Rebind only an untouched service placeholder when the target advanced.
       if (
         !sameRevision(task.review.revision, pr) &&
         (draft.comments.length ||
           draft.body !== `Review in progress.\n\n<!-- ${task.review.marker} -->`)
-      )
+      ) {
+        if (!context)
+          this.state(
+            task,
+            'needs_input',
+            'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
+          );
         return;
+      }
       const currentGroup = this.store.getGroup(task.groupId);
       if (
         currentGroup.generation !== job.groupGeneration ||

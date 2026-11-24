@@ -449,6 +449,10 @@ export class Worker {
           'agent_profile_missing',
           'The queued job has no frozen agent profile; queue a new turn',
         );
+      delete job.error;
+      delete job.errorCode;
+      delete job.notBefore;
+      delete job.finishedAt;
       store.saveJob(job);
       if (job.deferredResult) {
         await this.engine.completeJob(job, job.deferredResult);
@@ -564,6 +568,7 @@ export class Worker {
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }
+      let reviewQuota: GitHubQuotaError | undefined;
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
@@ -605,8 +610,16 @@ export class Worker {
             typeof data === 'string' ? redact(data) : JSON.parse(redact(JSON.stringify(data))),
             job.id,
           ),
-        onTool: (name, args, callId) => this.engine.broker.call(job, name, args, callId),
+        onTool: async (name, args, callId) => {
+          try {
+            return await this.engine.broker.call(job, name, args, callId);
+          } catch (error) {
+            if (job.kind === 'review' && error instanceof GitHubQuotaError) reviewQuota = error;
+            throw error;
+          }
+        },
       });
+      if (reviewQuota) throw reviewQuota; // An incomplete native review must be checked again.
       // Finish recording any saved commit before considering a forced model switch.
       if (job.role === 'author') this.finalizing.add(job.id);
       task = store.getTask(job.taskId);

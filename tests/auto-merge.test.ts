@@ -253,7 +253,7 @@ describe('opt-in GitHub merging', () => {
           cause === 'quota'
             ? new AppError(
                 'provider_403',
-                'GET /repos/test/repo/pulls/12: HTTP 403 {"message":"API rate limit exceeded for user ID 7."}',
+                'GET /repos/test/repo/pulls/12: HTTP 403 {\n  "message":"API rate limit exceeded for user ID 7."\n}\n',
               )
             : new AppError('run_timeout', 'Agent exceeded the configured run time limit');
         f.engine.failJob(job, error);

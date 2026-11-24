@@ -66,7 +66,10 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       task.reason.includes('Inspect the old review draft')
     )
       return 'Check the draft on the previous commit';
-    if (task.reason.includes('Agent exceeded the configured run time limit'))
+    if (
+      task.resumeState === 'reviewing' &&
+      task.reason.includes('Agent exceeded the configured run time limit')
+    )
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {

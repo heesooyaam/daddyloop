@@ -24,7 +24,9 @@ export function isQuotaMessage(message: string) {
 }
 
 export function legacyQuotaRead(error?: string) {
-  const match = /^AppError: GET [^\s]+: HTTP (?:403|429) (\{[\s\S]+\})$/.exec(error ?? '');
+  const match = /^AppError: GET [^\s]+: HTTP (?:403|429) (\{[\s\S]+\})$/.exec(
+    error?.trimEnd() ?? '',
+  );
   if (!match) return false;
   try {
     return isQuotaMessage(JSON.parse(match[1]).message ?? '');
