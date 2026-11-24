@@ -512,7 +512,7 @@ it('allows worker defaults to change while daddy works, but preserves his active
     expect(f.store.getGroup(group.id).generation).toBe(group.generation);
     await expect(
       f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.worker } }),
-    ).rejects.toThrow('idle');
+    ).rejects.toMatchObject({ code: 'daddy_busy' });
     expect(f.store.getGroup(group.id).daddy).toEqual(profiles.daddy);
   } finally {
     done?.();
