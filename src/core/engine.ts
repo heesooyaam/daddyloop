@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
-import { autoMergeEnabled } from './auto-merge.js';
+import { autoMergeEnabled, autoMergeRequested } from './auto-merge.js';
 import {
   AppError,
   assertTaskVersion,
@@ -457,7 +457,13 @@ export class Engine {
       !pr.mergeConflict ||
       pr.draft !== false ||
       !sameOpenTarget(task.pr, pr) ||
-      !['complete', 'awaiting_checks', 'awaiting_plan_approval', 'queued'].includes(task.state) ||
+      ![
+        'complete',
+        'awaiting_merge',
+        'awaiting_checks',
+        'awaiting_plan_approval',
+        'queued',
+      ].includes(task.state) ||
       (task.review && task.snapshot?.status !== 'published') ||
       (task.pendingFix &&
         (task.pendingAuthorHead !== pr.head || !sameRevision(task.revision, pr))) ||
@@ -499,6 +505,15 @@ export class Engine {
       return task;
     }
     if (pr.state === 'merged') {
+      if (
+        task.state === 'awaiting_merge' &&
+        task.revision?.head === pr.head &&
+        task.pr?.targetBranch === pr.targetBranch
+      ) {
+        task.pr = pr;
+        this.finishReviewedTask(task, 'Merged on GitHub');
+        return task;
+      }
       if (
         task.state === 'complete' ||
         this.store.activeJobs(id).some((job) => job.kind === 'verify_merge')
@@ -629,6 +644,15 @@ export class Engine {
           );
         else this.queuePublishedFix(task, 'Author is addressing the published review');
       } else await this.finish(task);
+    } else if (task.state === 'awaiting_merge' && !autoMergeRequested(this.store, task)) {
+      if (snapshot.status === 'published' && task.reviewFinished && !snapshot.comments.length)
+        await this.finish(task);
+      else
+        this.state(
+          task,
+          'needs_input',
+          'The reviewed revision needs verification before completion',
+        );
     } else if (task.state === 'awaiting_checks' || task.state === 'awaiting_plan_approval')
       await this.finish(task);
     else this.store.saveTask(task);
@@ -771,6 +795,25 @@ export class Engine {
       feedback?.comments.filter((c) => !verified.has(c.id) && !exempt.has(c.id)) ?? [];
     return unresolved.length > 0;
   }
+  finishReviewedTask(
+    task: Task,
+    reason = 'Current revision reviewed; publication, findings and checks are accounted for',
+  ) {
+    if (task.pr?.state === 'open' && autoMergeRequested(this.store, task))
+      this.state(task, 'awaiting_merge', 'Review complete. Waiting for GitHub to merge the PR.');
+    else this.state(task, 'complete', reason);
+  }
+
+  restoreMergeWaits() {
+    for (const task of this.store.tasks())
+      if (
+        task.state === 'complete' &&
+        task.pr?.state === 'open' &&
+        autoMergeRequested(this.store, task)
+      )
+        this.finishReviewedTask(task);
+  }
+
   private async finish(task: Task) {
     if (task.policy.requireChecks && !task.checksWaivedAt && task.pr?.checks !== 'passing') {
       this.state(
@@ -790,12 +833,9 @@ export class Engine {
       );
     else {
       if (task.kind === 'plan') task.approvedAt = now();
-      this.state(
+      this.finishReviewedTask(
         task,
-        'complete',
-        task.verifiedMerge
-          ? 'daddy verified the merged result'
-          : 'Current revision reviewed; publication, findings and checks are accounted for',
+        task.verifiedMerge ? 'daddy verified the merged result' : undefined,
       );
     }
   }
@@ -1298,6 +1338,14 @@ export class Engine {
             );
           return task;
         }
+        if (task.resumeState === 'awaiting_merge') {
+          this.state(
+            task,
+            'awaiting_merge',
+            'Review complete. Waiting for GitHub to merge the PR.',
+          );
+          return task;
+        }
         if (task.resumeState === 'fixing' && task.fixingMergeConflict) {
           const pr = await this.provider(prRef(task)).getPR(prRef(task));
           if (!sameOpenTarget(task.pr, pr) || !sameRevision(task.revision, pr))
@@ -1349,7 +1397,8 @@ export class Engine {
         )
           throw new AppError('stale_plan', 'The plan changed after review');
         task.approvedAt = now();
-        this.state(task, 'complete', 'Plan approved for implementation at this exact revision');
+        task.pr = current;
+        this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
       } else if (action === 'waive-checks') {
         if (task.state !== 'awaiting_checks' || !reason.trim())
           throw new AppError(

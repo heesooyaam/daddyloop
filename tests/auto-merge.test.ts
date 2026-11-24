@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
 import { describe, expect, it, vi } from 'vitest';
+import { reconcileWorkerPools, workerSlots, saveWorkerSlots } from '../src/core/worker-pool.js';
 import { pollAutoMerge } from '../src/core/auto-merge.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
 import { DemoProvider } from '../src/providers/demo.js';
@@ -131,6 +132,63 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('reserves the original worker from clean review through a late conflict', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const group = f.store.getGroup(f.group.id);
+      saveWorkerSlots(f.store, group, [{ number: 1, taskId: f.task.id }]);
+      await f.daddy.settings(group.id, { autoMerge: true });
+      const job = f.store.claim()!;
+      await f.engine.completeJob(job, {
+        status: 'completed',
+        summary: 'Verified',
+        checkedHead: f.task.revision!.head,
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      await f.engine.publish(f.task.id);
+      const slots = () => workerSlots(f.store, f.store.getGroup(group.id));
+      reconcileWorkerPools(f.store);
+      expect(f.store.getTask(f.task.id).state).toBe('awaiting_merge');
+      expect(slots()[0].taskId).toBe(f.task.id);
+      await f.engine.action(f.task.id, 'pause');
+      await f.engine.action(f.task.id, 'resume');
+      expect(f.store.getTask(f.task.id).state).toBe('awaiting_merge');
+      f.setRemote({ mergeConflict: true, mergeable: false });
+      await f.poll();
+      expect(f.daddy.board(group.id).tasks[0].statusLabel).toBe(
+        'Conflict repair queued for worker 1',
+      );
+      expect(slots()[0].taskId).toBe(f.task.id);
+    } finally {
+      await f.close();
+    }
+  });
+  it('retains legacy assignments until merge confirmation or opt-out', async () => {
+    const f = await setup();
+    try {
+      const group = f.store.getGroup(f.group.id);
+      saveWorkerSlots(f.store, group, [{ number: 1, taskId: f.task.id }]);
+      await f.daddy.settings(group.id, { autoMerge: true });
+      f.engine.restoreMergeWaits();
+      reconcileWorkerPools(f.store);
+      expect(f.daddy.board(group.id).workers.occupied).toBe(1);
+      f.daddy.taskAutoMerge(group.id, f.task.id, 'off');
+      await f.poll();
+      expect(f.store.getTask(f.task.id).state).toBe('complete');
+      expect(f.send).not.toHaveBeenCalled();
+      f.daddy.taskAutoMerge(group.id, f.task.id, 'on');
+      await f.poll();
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: 'complete',
+        pr: { state: 'merged' },
+      });
+      reconcileWorkerPools(f.store);
+      expect(f.daddy.board(group.id).workers.occupied).toBe(0);
+    } finally {
+      await f.close();
+    }
+  });
   it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
     const f = await setup();
     try {
@@ -314,6 +372,8 @@ describe('opt-in GitHub merging', () => {
         throw new Error('response lost');
       });
       await f.poll();
+      await f.engine.action(f.task.id, 'pause');
+      await f.engine.action(f.task.id, 'resume');
       const resultKey = 'autoMerge.result:' + f.task.id;
       const previous = f.store.setting<{ state: string; checkedAt: number }>(resultKey)!;
       expect(previous.state).toBe('uncertain');

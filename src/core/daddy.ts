@@ -212,7 +212,8 @@ export class Daddy {
     const group = this.group(id);
     const jobs = this.store.activeJobs();
     const tasks = this.store.tasks(id);
-    const activity = taskActivity(tasks, jobs);
+    const session = this.sessionActivity(group, jobs);
+    const activity = taskActivity(tasks, jobs, undefined, session.workers.slots);
     const activeByTask = new Map(activity.map((item) => [item.task.id, item]));
     return {
       group: { ...group, autoMerge: sessionAutoMerge(this.store, group.id) },
@@ -249,7 +250,7 @@ export class Daddy {
           queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
         };
       }),
-      ...this.sessionActivity(group, jobs),
+      ...session,
       messages: this.store.messages(id),
       jobs: this.store
         .daddyJobs(id)

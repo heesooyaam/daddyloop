@@ -10,6 +10,7 @@ export type State =
   | 'awaiting_publication'
   | 'fixing'
   | 'awaiting_push'
+  | 'awaiting_merge'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'

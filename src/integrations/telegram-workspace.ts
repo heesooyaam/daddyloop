@@ -460,10 +460,12 @@ export class TelegramWorkspace {
   }
   private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
     const group = this.authorize(destination, groupId);
+    const slots = workerSlots(this.store, group);
     const tasks = taskActivity(
       this.store.tasks(groupId).reverse(),
       this.store.activeJobs(),
       (task) => autoMergeStatus(task, autoMergeSettings(this.store, group, task)),
+      slots,
     );
     const locale = this.locale();
     await this.api.send(
@@ -473,7 +475,7 @@ export class TelegramWorkspace {
         : workersCard(
             locale,
             groupId,
-            workerSlots(this.store, group),
+            slots,
             tasks,
             group.worker ?? this.daddy.engine.defaultAgents().worker,
           ),
@@ -482,8 +484,9 @@ export class TelegramWorkspace {
   private async showTask(groupId: string, taskId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
-    const [activity] = taskActivity([task], this.store.activeJobs(taskId));
-    const slot = workerSlots(this.store, group).find((item) => item.taskId === taskId);
+    const slots = workerSlots(this.store, group);
+    const [activity] = taskActivity([task], this.store.activeJobs(taskId), undefined, slots);
+    const slot = slots.find((item) => item.taskId === taskId);
     const merge =
       group.workspace?.provider === 'github' && task.ref.provider === 'github'
         ? autoMergeSettings(this.store, group, task)

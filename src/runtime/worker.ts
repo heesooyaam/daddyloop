@@ -93,6 +93,7 @@ export class Worker {
   }
   start() {
     this.engine.recoverInterruptedJobs();
+    this.engine.restoreMergeWaits();
     this.engine.recoverLostFixes();
     this.engine.recoverReviewRoundLimits();
     this.timer = setInterval(() => {

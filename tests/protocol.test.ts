@@ -78,6 +78,58 @@ it.each(['happy', 'tool'])(
     f.store.close();
   },
 );
+it.each(['compact-success', 'compact-fails', 'compact-overflows-again'])(
+  'resumes the same review only after confirmed compaction (%s)',
+  async (mode) => {
+    const f = await fixture();
+    const dir = mkdtempSync(join(tmpdir(), 'daddyloop-compact-')),
+      trace = join(dir, 'requests.jsonl');
+    try {
+      const runtime = new CodexRuntime({
+        executable: process.execPath,
+        args: [resolve('tests/fixtures/fake-codex.mjs'), mode, trace],
+        timeoutMs: 5000,
+      });
+      const event = vi.fn();
+      const result = runtime.run({
+        task: f.task,
+        job: f.job(),
+        cwd: dir,
+        prompt: 'Review the pinned change',
+        signal: new AbortController().signal,
+        onSession: () => {},
+        onEvent: event,
+        onTool: vi.fn(),
+      });
+      if (mode === 'compact-success')
+        await expect(result).resolves.toMatchObject({
+          status: 'completed',
+          checkedHead: f.task.revision!.head,
+        });
+      else await expect(result).rejects.toMatchObject({ code: 'context_window_exceeded' });
+      const calls = readFileSync(trace, 'utf8')
+        .trim()
+        .split('\n')
+        .map((x) => JSON.parse(x));
+      expect(calls.filter((x) => x.method === 'thread/start')).toHaveLength(1);
+      expect(
+        calls.filter((x) => x.method === 'thread/resume').map((x) => x.params.threadId),
+      ).toEqual(['thread-fixture']);
+      expect(
+        calls.filter((x) => x.method === 'thread/compact/start').map((x) => x.params.threadId),
+      ).toEqual(['thread-fixture']);
+      expect(calls.filter((x) => x.method === 'turn/start')).toHaveLength(
+        mode === 'compact-fails' ? 1 : 2,
+      );
+      expect(event.mock.calls.some(([type]) => type === 'review.compacted')).toBe(
+        mode !== 'compact-fails',
+      );
+    } finally {
+      f.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 it.each(['malformed', 'exit'])(
   'does not convert invalid or interrupted runtime output to success (%s)',
   async (mode) => {
