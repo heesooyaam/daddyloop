@@ -53,15 +53,8 @@ export function setTaskMergeMode(
   return autoMergeSettings(store, group, task);
 }
 
-function enabled(store: Store, task: Task) {
-  if (
-    !task.groupId ||
-    task.ref.provider !== 'github' ||
-    isTicket(task) ||
-    task.state !== 'complete' ||
-    store.busy(task.id)
-  )
-    return false;
+export function autoMergeEnabled(store: Store, task: Task) {
+  if (!task.groupId || task.ref.provider !== 'github' || isTicket(task)) return false;
   const group = store.getGroup(task.groupId);
   return (
     group.workspace?.provider === 'github' &&
@@ -71,6 +64,10 @@ function enabled(store: Store, task: Task) {
     group.daddyState !== 'archived' &&
     autoMergeSettings(store, group, task).enabled
   );
+}
+
+function enabled(store: Store, task: Task) {
+  return task.state === 'complete' && !store.busy(task.id) && autoMergeEnabled(store, task);
 }
 
 export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
@@ -148,10 +145,10 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
           pr.branch !== task.pr.branch
         )
           return record('waiting', 'The PR is closed or its branches changed');
-        if (!sameRevision(revision, pr)) return enabled(store, store.getTask(task.id));
         if (store.db.prepare("SELECT 1 FROM operations WHERE id=? AND status='pending'").get(key))
           return record('uncertain', 'Waiting for GitHub to confirm the previous merge request');
         if (!enabled(store, store.getTask(task.id))) return;
+        if (!sameRevision(revision, pr) || (pr.mergeConflict && pr.draft === false)) return true;
         if (
           !task.reviewFinished ||
           task.snapshot?.status !== 'published' ||

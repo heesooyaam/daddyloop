@@ -1,11 +1,13 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { git } from '../src/runtime/git.js';
 import { describe, expect, it, vi } from 'vitest';
 import { pollAutoMerge } from '../src/core/auto-merge.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import { daddyFixture } from './daddy-fixture.js';
 
-async function setup() {
-  const f = daddyFixture();
+async function setup(f = daddyFixture(), initial: Partial<PullRequest> = {}, repoPath = f.dir) {
   const group = f.daddy.create({ workspaceId: f.workspace.id });
   const ref = {
     provider: 'github',
@@ -15,9 +17,19 @@ async function setup() {
     url: 'https://github.com/test/repo/pull/12',
   };
   const provider = new DemoProvider(f.store);
-  let remote: PullRequest = { ...(await provider.getPR(ref)), draft: false, mergeable: true };
+  let remote: PullRequest = {
+    ...(await provider.getPR(ref)),
+    draft: false,
+    mergeable: true,
+    ...initial,
+  };
+  function setRemote(patch: Partial<PullRequest>) {
+    remote = { ...remote, ...patch };
+    f.store.setSetting('demo-pr:' + ref.number, remote);
+  }
+  setRemote(remote);
   const send = vi.fn(async (_head: string) => {
-    remote = { ...remote, state: 'merged', mergeCommit: 'integration-commit' };
+    setRemote({ state: 'merged', mergeCommit: 'integration-commit' });
     return remote.mergeCommit!;
   });
   const prepareMerge = vi.fn(async () => send);
@@ -26,7 +38,7 @@ async function setup() {
   const task = await f.engine.create({
     ref,
     requirements: 'Implement the feature',
-    repoPath: f.dir,
+    repoPath,
     groupId: group.id,
   });
   // Complete a genuine published-review cycle before attempting to merge.
@@ -50,9 +62,7 @@ async function setup() {
     prepareMerge,
     getPR,
     poll,
-    setRemote: (patch: Partial<PullRequest>) => {
-      remote = { ...remote, ...patch };
-    },
+    setRemote,
   };
 }
 
@@ -118,6 +128,98 @@ describe('opt-in GitHub merging', () => {
       if (why.startsWith('changed')) expect(f.store.getTask(f.task.id).state).toBe('queued');
     } finally {
       await f.close();
+    }
+  });
+
+  it('assigns one conflict repair, pushes a two-parent commit, then requires fresh review and CI', async () => {
+    const fixture = daddyFixture();
+    try {
+      const repo = join(fixture.dir, 'source'),
+        remoteRepo = join(fixture.dir, 'remote.git');
+      mkdirSync(repo);
+      const command = (...args: string[]) => git(args, repo);
+      await command('init', '-b', 'main');
+      await command('config', 'user.name', 'Test');
+      await command('config', 'user.email', 'test@localhost');
+      const commit = async (value: string) => {
+        writeFileSync(join(repo, 'feature'), value + '\n');
+        await command('add', 'feature');
+        await command('commit', '-m', value);
+        return command('rev-parse', 'HEAD');
+      };
+      const original = await commit('original');
+      await command('switch', '-c', 'feature');
+      const head = await commit('worker');
+      await command('switch', 'main');
+      const base = await commit('upstream');
+      await command('clone', '--bare', repo, remoteRepo);
+      const cloneUrl = 'ssh://git@github.com/test/repo.git';
+      const f = await setup(
+        fixture,
+        { head, base: original, start: original, branch: 'feature', cloneUrl },
+        repo,
+      );
+      f.setRemote({ base, start: base, mergeable: false, mergeConflict: true, checks: 'missing' });
+      await f.poll();
+      expect(f.store.busy(f.task.id)).toBe(false);
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await Promise.all([f.poll(), f.poll()]);
+      const task = f.store.getTask(f.task.id);
+      expect(task).toMatchObject({
+        state: 'fixing',
+        fixingMergeConflict: true,
+        revision: { head, base },
+      });
+      expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      expect(f.send).not.toHaveBeenCalled();
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.role).toBe('author');
+        expect(input.prompt).toContain('resolving a GitHub PR conflict');
+        expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toContain('<<<<<<<');
+        await expect(f.checkouts.commitFix(input.task, 'premature')).rejects.toMatchObject({
+          code: 'unresolved_merge',
+        });
+        expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(head);
+        await f.checkouts.prepareConflict(input.task);
+
+        // Exercise the real push path against a local bare remote. Disallow network transports.
+        await git(['config', 'protocol.allow', 'never'], input.cwd);
+        await git(['config', 'protocol.file.allow', 'always'], input.cwd);
+        await git(['config', 'url.' + remoteRepo + '.insteadOf', cloneUrl], input.cwd);
+        writeFileSync(join(input.cwd, 'feature'), 'upstream and worker\n');
+        return { status: 'completed', summary: 'Combined both changes', checkedHead: head };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_push'), {
+        timeout: 5000,
+      });
+      const saved = f.store.getTask(task.id).pendingAuthorHead!;
+      await f.engine.submitSavedFix(task.id, async (current, sha) => {
+        await f.checkouts.pushSavedFix(current, sha);
+        expect(await git(['rev-parse', 'refs/heads/feature'], remoteRepo)).toBe(saved);
+        expect(await git(['show', '-s', '--format=%P', saved], remoteRepo)).toBe(head + ' ' + base);
+        f.setRemote({ head: saved, mergeConflict: false, mergeable: true, checks: 'pending' });
+      });
+      expect(f.store.getTask(task.id).state).toBe('queued');
+      await f.poll();
+      expect(f.send).not.toHaveBeenCalled();
+      await f.engine.review(task.id);
+      const review = f.store.claim()!;
+      await f.engine.completeJob(review, {
+        status: 'completed',
+        summary: 'Verified both branches',
+        checkedHead: saved,
+      });
+      f.store.saveJob({ ...review, status: 'completed' });
+      await f.engine.publish(task.id);
+      await f.poll();
+      expect(f.send).not.toHaveBeenCalled();
+      f.setRemote({ checks: 'passing' });
+      await f.engine.reconcile(task.id);
+      await f.poll();
+      expect(f.send).toHaveBeenCalledExactlyOnceWith(saved);
+    } finally {
+      await fixture.close();
     }
   });
 

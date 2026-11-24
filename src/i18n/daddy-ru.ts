@@ -522,6 +522,22 @@ export const daddyRu: Record<string, string> = {
   'GitHub merged a different revision': 'В GitHub влита другая ревизия',
   'Waiting for passing CI': 'Ожидает успешных проверок CI',
   'Waiting for a completed review of this revision': 'Ожидает завершения ревью этой ревизии',
+  'Could not stage a clean conflict resolution. Inspect the working copy for remaining conflict markers.':
+    'Не удалось подготовить исправление. Проверь оставшиеся маркеры конфликта в рабочей копии.',
+  'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.':
+    'В рабочей копии уже есть изменения. Их нужно проверить перед исправлением конфликта.',
+  'The merge conflict includes files outside the task scope. The working copy was preserved.':
+    'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
+  'Worker assigned to resolve the GitHub merge conflict':
+    'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
+  'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'The PR changed during conflict resolution. Inspect the preserved worker copy.':
+    'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
+  'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
+    'Автослияние выключено. Исправление конфликта сохранено и ожидает отправки.',
+  'Enable auto-merge before resuming conflict resolution.':
+    'Для продолжения исправления конфликта включи автослияние.',
   'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
   'Waiting for a published review with no outstanding findings':
     'Ожидает публикации ревью с закрытыми замечаниями',

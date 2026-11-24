@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
+import { autoMergeEnabled } from './auto-merge.js';
 import {
   AppError,
   assertTaskVersion,
@@ -235,6 +236,7 @@ export class Engine {
         return task;
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
+      if (this.queueConflictIfReady(task, pr)) return task;
       if (
         task.review &&
         sameRevision(task.revision, pr) &&
@@ -293,6 +295,7 @@ export class Engine {
     task.pr = pr;
     task.revision = pr ? revisionOf(pr) : undefined;
     task.verifiedMerge = undefined;
+    task.fixingMergeConflict = undefined;
     this.store.event(task.id, 'revision.changed', {
       revision: task.revision,
       generation: task.generation,
@@ -346,6 +349,35 @@ export class Engine {
     });
     return task;
   }
+  private queueConflictIfReady(task: Task, pr: PullRequest) {
+    if (
+      !pr.mergeConflict ||
+      pr.draft !== false ||
+      !sameOpenTarget(task.pr, pr) ||
+      !['complete', 'awaiting_checks', 'awaiting_plan_approval', 'queued'].includes(task.state) ||
+      (task.review && task.snapshot?.status !== 'published') ||
+      task.pendingFix ||
+      (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head) ||
+      this.store.busy(task.id) ||
+      !autoMergeEnabled(this.store, task)
+    )
+      return false;
+    this.store.transaction(() => {
+      this.invalidate(task, pr);
+      this.enqueueConflictRepair(task);
+    });
+    return true;
+  }
+  private enqueueConflictRepair(task: Task) {
+    task.fixingMergeConflict = true;
+    this.state(task, 'fixing', 'Worker assigned to resolve the GitHub merge conflict');
+    this.store.enqueue(
+      task,
+      'author',
+      'fix',
+      'Resolve the merge conflicts in the prepared working copy. Preserve the intended behavior of both branches and verify the result.',
+    );
+  }
   private async reconcileLocked(id: string): Promise<Task> {
     let task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
@@ -382,6 +414,21 @@ export class Engine {
       this.store.cancelJobs(id);
       task.generation++;
       this.state(task, 'needs_input', `PR is ${pr.state}; automatic work stopped`);
+      return task;
+    }
+    if (this.queueConflictIfReady(task, pr)) return task;
+    if (task.state === 'fixing' && task.fixingMergeConflict) {
+      if (!sameRevision(task.revision, pr) || !sameOpenTarget(task.pr, pr)) {
+        this.onCancel(id);
+        this.store.cancelJobs(id);
+        task.generation++;
+        task.resumeState = 'fixing';
+        this.state(
+          task,
+          'needs_input',
+          'The PR changed during conflict resolution. Inspect the preserved worker copy.',
+        );
+      }
       return task;
     }
     if (!sameRevision(task.revision, pr)) {
@@ -549,6 +596,15 @@ export class Engine {
         return;
       const provider = this.provider(prRef(task));
       if (!(await this.checkSavedFix(task, await provider.getPR(prRef(task))))) return;
+      if (task.fixingMergeConflict && !autoMergeEnabled(this.store, task)) {
+        task.resumeState = 'awaiting_push';
+        this.state(
+          task,
+          'needs_input',
+          'Auto-merge is disabled. The saved conflict resolution is waiting for submission.',
+        );
+        return;
+      }
       task.pendingFix = {
         revision: task.pendingFix?.revision ?? task.revision,
         attempted: true,
@@ -1109,6 +1165,21 @@ export class Engine {
               'implement',
               'Continue the interrupted task. Preserve the existing working copy and verify the requested outcome.',
             );
+          return task;
+        }
+        if (task.resumeState === 'fixing' && task.fixingMergeConflict) {
+          const pr = await this.provider(prRef(task)).getPR(prRef(task));
+          if (!sameOpenTarget(task.pr, pr) || !sameRevision(task.revision, pr))
+            throw new AppError(
+              'stale_revision',
+              'The PR changed during conflict resolution. Inspect the preserved worker copy.',
+            );
+          if (!autoMergeEnabled(this.store, task))
+            throw new AppError(
+              'automerge_disabled',
+              'Enable auto-merge before resuming conflict resolution.',
+            );
+          this.store.transaction(() => this.enqueueConflictRepair(task));
           return task;
         }
         if (

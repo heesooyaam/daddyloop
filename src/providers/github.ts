@@ -66,7 +66,7 @@ export class GitHubProvider implements ReviewProvider {
       title: string;
       body: string;
       head: { sha: string; ref: string; repo: { clone_url: string } | null };
-      base: { sha: string; ref: string };
+      base: { sha: string; ref: string; repo?: { clone_url: string } };
       state: string;
       merged: boolean;
       draft: boolean;
@@ -114,6 +114,8 @@ export class GitHubProvider implements ReviewProvider {
       head: pr.head.sha,
       draft: pr.draft,
       mergeable: pr.mergeable === true && pr.mergeable_state === 'clean',
+      mergeConflict: pr.mergeable === false && pr.mergeable_state === 'dirty',
+      targetCloneUrl: pr.base.repo?.clone_url,
       mergeCommit: pr.merged ? pr.merge_commit_sha : undefined,
       base: pr.base.sha,
       start: pr.base.sha,

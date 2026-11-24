@@ -156,10 +156,14 @@ export class Workspaces {
             this.sourceEnv(task),
           );
         } catch {
+          const address =
+            sha === task.revision.base && task.pr.targetCloneUrl
+              ? task.pr.targetCloneUrl
+              : task.pr.cloneUrl;
           await run(
-            ['--git-dir', bare, 'fetch', '--no-tags', '--', task.pr.cloneUrl, sha],
+            ['--git-dir', bare, 'fetch', '--no-tags', '--', address, sha],
             root,
-            this.env(task),
+            this.env(task, address),
           );
         }
       }
@@ -214,6 +218,69 @@ export class Workspaces {
     } else task.reviewerWorktree = target;
     return target;
   }
+  private async savedConflictMerge(cwd: string, head: string, base: string, signal?: AbortSignal) {
+    // A restart can occur between creating the merge commit and recording its SHA.
+    const parents = await git(['show', '-s', '--format=%P', 'HEAD'], cwd, {}, signal);
+    return (
+      parents === head + ' ' + base && !(await git(['status', '--porcelain'], cwd, {}, signal))
+    );
+  }
+  async prepareConflict(task: Task, signal?: AbortSignal) {
+    if (!task.authorWorktree || !task.revision || task.ref.provider !== 'github')
+      throw new AppError(
+        'workspace_missing',
+        'A GitHub PR working copy is required to resolve conflicts',
+      );
+    const cwd = task.authorWorktree;
+    const { head, base } = task.revision;
+    const run = (args: string[]) => git(args, cwd, {}, signal);
+    const current = await run(['rev-parse', 'HEAD']);
+    const merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
+    if (!merging && current !== head && (await this.savedConflictMerge(cwd, head, base, signal)))
+      return;
+    if (current !== head || (merging && merging !== base))
+      throw new AppError(
+        'workspace_diverged',
+        'The worker copy has a different commit or unfinished merge. Its changes were preserved.',
+      );
+    if (!merging) {
+      if (await run(['status', '--porcelain']))
+        throw new AppError(
+          'workspace_dirty',
+          'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.',
+        );
+      try {
+        await run([
+          '-c',
+          'user.name=daddyloop',
+          '-c',
+          'user.email=daddyloop@localhost',
+          'merge',
+          '--no-commit',
+          '--no-ff',
+          base,
+        ]);
+      } catch (error) {
+        // A merge with conflicts exits with status 1 and leaves the index for the worker.
+        if (signal?.aborted || !(await run(['ls-files', '--unmerged']))) throw error;
+      }
+    }
+    if ((await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined)) !== base)
+      throw new AppError(
+        'merge_target_changed',
+        'The worker copy has no pending merge of the expected target commit.',
+      );
+    if (task.scope) {
+      const paths = (await run(['diff', '--name-only', '--diff-filter=U', '-z']))
+        .split('\0')
+        .filter(Boolean);
+      if (paths.some((path) => !path.startsWith(task.scope!.replace(/\/$/, '') + '/')))
+        throw new AppError(
+          'workspace_scope',
+          'The merge conflict includes files outside the task scope. The working copy was preserved.',
+        );
+    }
+  }
   async commitFix(task: Task, message: string, signal?: AbortSignal): Promise<string> {
     if (task.ref.provider === 'arcadia') return this.arc.commit(task, message, signal);
     if (!task.authorWorktree || !task.revision || !task.pr)
@@ -226,20 +293,58 @@ export class Workspaces {
         'Author workspace is outside the managed task directory',
       );
     await run(['merge-base', '--is-ancestor', task.revision.head, 'HEAD']);
-    const dirty = await run(['status', '--porcelain']);
-    if (dirty) {
+    const merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
+    if (task.fixingMergeConflict) {
+      if (
+        !merging &&
+        (await this.savedConflictMerge(cwd, task.revision.head, task.revision.base, signal))
+      )
+        return run(['rev-parse', 'HEAD']);
+      if (
+        merging !== task.revision.base ||
+        (await run(['rev-parse', 'HEAD'])) !== task.revision.head
+      )
+        throw new AppError(
+          'merge_target_changed',
+          'The worker copy has no pending merge of the expected target commit.',
+        );
+      // Stage the worker's resolutions, including a choice that changes no file from our side.
+      const markerCheck = [
+        '-c',
+        'core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab',
+        'diff',
+        '--check',
+      ];
+      try {
+        await run(markerCheck);
+        await run(['add', '--all', '--', '.']);
+        await run([...markerCheck, '--cached']);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new AppError(
+          'unresolved_merge',
+          'Could not stage a clean conflict resolution. Inspect the working copy for remaining conflict markers.',
+        );
+      }
+    } else {
+      if (merging)
+        throw new AppError(
+          'unexpected_merge',
+          'An unfinished merge in the worker copy needs inspection.',
+        );
+      if (!(await run(['status', '--porcelain']))) return run(['rev-parse', 'HEAD']);
       await run(['diff', '--check']);
       await run(['add', '--all', '--', '.']);
-      await run([
-        '-c',
-        'user.name=daddyloop',
-        '-c',
-        'user.email=daddyloop@localhost',
-        'commit',
-        '-m',
-        message,
-      ]);
     }
+    await run([
+      '-c',
+      'user.name=daddyloop',
+      '-c',
+      'user.email=daddyloop@localhost',
+      'commit',
+      '-m',
+      message,
+    ]);
     return run(['rev-parse', 'HEAD']);
   }
   async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {

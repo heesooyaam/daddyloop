@@ -46,4 +46,6 @@ Use the main daddy chat for instructions. Task reports show progress and offer p
 
 On the web or in Telegram, open the session settings to enable **Auto-merge GitHub PRs**. This includes existing reviewed open PRs and future tasks in that session. In a task card choose **Session default**, **On** or **Off**. An explicit task choice takes precedence.
 
+When GitHub confirms a conflict with the target branch, daddy assigns the repair to a worker. The service merges the pinned branches in the managed working copy. The worker resolves the conflict and tests the result. The service pushes the merge commit to the same PR using a normal push. daddy reviews the new revision and waits for passing CI. If the worker needs a decision about the intended behavior, the task card shows its question.
+
 The service waits for a completed independent review, a published review with no outstanding findings, and passing CI on the current revision. GitHub checks the supplied head SHA and repository rules. The service prefers squash, then a merge commit, then rebase according to the repository’s allowed methods. The task card shows the outcome or why the merge is waiting.
