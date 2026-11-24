@@ -218,6 +218,8 @@ Workers keep their numbers while tasks occupy them. A request for a specific wor
 
 ## 6. How cancellation blocks old results
 
+Pausing a session records which tasks and queued turns it stopped. Resume restores their previous states and queue order, including after a service restart. Tasks paused individually keep their pause. A worker resumes in its existing working copy, and an unfinished review still needs a completed reviewer result.
+
 Cancellation can arrive while an agent is already sending its answer. Sending “stop” is therefore insufficient: the service must also check whether that old run may still change the task.
 
 ```mermaid

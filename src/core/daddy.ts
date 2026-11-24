@@ -1,3 +1,4 @@
+import { pauseSessionWork, restoreSessionWork } from './session-pause.js';
 import { githubWait } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -552,47 +553,65 @@ export class Daddy {
     });
     return this.board(id);
   }
+  private withSessionTasks<T>(
+    id: string,
+    apply: (group: ReviewGroup, tasks: Task[]) => T,
+  ): Promise<T> {
+    return this.engine.lock('create-task:' + id, async () => {
+      const ids = this.store
+        .tasks(id)
+        .map((t) => t.id)
+        .sort();
+      const lock = (index: number): Promise<T> =>
+        index === ids.length
+          ? Promise.resolve(apply(this.group(id), this.store.tasks(id)))
+          : this.engine.lock(ids[index], () => lock(index + 1));
+      return lock(0);
+    });
+  }
   async pause(id: string) {
-    const group = this.group(id);
-    if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-    group.daddyState = 'paused';
-    delete group.resourceWait;
-    group.generation++;
-    if (group.workspacePreparation?.state === 'preparing')
-      group.workspacePreparation = { state: 'pending' };
-    this.store.saveGroup(group);
-    this.running.get(id)?.controller.abort();
-    this.maintenance.get(id)?.controller.abort();
-    for (const job of this.store.daddyJobs(id))
-      if (job.status === 'queued') {
-        job.status = 'cancelled';
-        job.finishedAt = now();
-        this.store.saveDaddyJob(job);
-      }
-    for (const task of this.store
-      .tasks()
-      .filter((task) => task.groupId === id && !['complete', 'paused'].includes(task.state)))
-      await this.engine.action(task.id, 'pause');
-    this.store.event(id, 'daddy.paused');
+    await this.withSessionTasks(id, (group, tasks) => {
+      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+      if (group.daddyState === 'paused') return;
+      const stopped = this.store.transaction(() => {
+        group.daddyState = 'paused';
+        delete group.resourceWait;
+        group.generation++;
+        if (group.workspacePreparation?.state === 'preparing')
+          group.workspacePreparation = { state: 'pending' };
+        this.store.saveGroup(group);
+        const stopped = pauseSessionWork(this.store, group, tasks);
+        this.store.event(id, 'daddy.paused', { snapshot: true });
+        return stopped;
+      });
+      this.running.get(id)?.controller.abort();
+      this.maintenance.get(id)?.controller.abort();
+      for (const taskId of stopped) this.engine.onCancel(taskId);
+    });
     return this.board(id);
   }
   async resume(id: string) {
-    const group = this.group(id);
-    if (group.deletion)
-      throw new AppError('session_deleting', 'Retry deletion before changing this session');
-    if (this.running.has(id))
-      throw new AppError('daddy_stopping', 'Wait for the previous daddy turn to stop');
-    group.daddyState = 'active';
-    group.autoTurns = 0;
-    if (group.workspacePreparation?.state === 'error')
-      group.workspacePreparation = { state: 'pending' };
-    this.store.saveGroup(group);
-    this.enqueue(
-      group,
-      'recovery',
-      'The user resumed this session. Inspect preserved work and continue the original tasks.',
-    );
-    this.store.event(id, 'daddy.resumed');
+    await this.withSessionTasks(id, (group) => {
+      if (group.deletion)
+        throw new AppError('session_deleting', 'Retry deletion before changing this session');
+      if (this.running.has(id) && group.daddyState !== 'active' && group.daddyState !== 'paused')
+        throw new AppError('daddy_stopping', 'Wait for the previous daddy turn to stop');
+      this.store.transaction(() => {
+        restoreSessionWork(this.store, group);
+        if (group.daddyState === 'active') return;
+        group.daddyState = 'active';
+        group.autoTurns = 0;
+        if (group.workspacePreparation?.state === 'error')
+          group.workspacePreparation = { state: 'pending' };
+        this.store.saveGroup(group);
+        this.enqueue(
+          group,
+          'recovery',
+          'The user resumed this session. Inspect preserved work and continue the original tasks.',
+        );
+        this.store.event(id, 'daddy.resumed');
+      });
+    });
     return this.board(id);
   }
   async remove(id: string, expectedGeneration: number) {
@@ -762,6 +781,7 @@ export class Daddy {
         );
       }
     for (const group of this.sessions().filter((group) => group.daddyState === 'active')) {
+      this.store.transaction(() => restoreSessionWork(this.store, group, true));
       const last =
         this.store
           .daddyJobs(group.id)
