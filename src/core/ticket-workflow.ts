@@ -1,3 +1,4 @@
+import { GitHubQuotaError } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -30,7 +31,8 @@ export class TicketWorkflow {
     private arc = new ArcBridge(),
     private repositories: RepositoryRegistry = allRepositories(),
   ) {
-    this.reader = reader ?? new TicketReader(undefined, undefined, undefined, repositories);
+    this.reader =
+      reader ?? new TicketReader(undefined, undefined, undefined, repositories, engine.store);
   }
   async start(input: {
     source: string;
@@ -201,7 +203,7 @@ export class TicketWorkflow {
       } catch (error) {
         const latest = this.engine.store.getTask(id);
         if (latest.generation === generation && latest.state !== 'paused') {
-          latest.state = 'needs_input';
+          latest.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
           latest.reason = redact(String(error));
           this.engine.store.saveTask(latest);
           this.engine.store.event(id, 'task.state', { state: latest.state, reason: latest.reason });
@@ -215,9 +217,11 @@ export class TicketWorkflow {
       await this.engine.lock(id, async () => {
         const task = this.engine.store.getTask(id);
         if (isTicket(task) && task.state === 'submitting') {
-          task.state = 'needs_input';
+          task.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
           task.reason =
-            'The PR was created but the task changed. Submit again to reconcile and connect it.';
+            error instanceof GitHubQuotaError
+              ? error.message
+              : 'The PR was created but the task changed. Submit again to reconcile and connect it.';
           this.engine.store.saveTask(task);
         }
       });

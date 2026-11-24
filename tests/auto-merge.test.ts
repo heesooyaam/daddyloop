@@ -212,15 +212,15 @@ describe('opt-in GitHub merging', () => {
       const tip = 'd'.repeat(40);
       f.setRemote({ base: tip, start: tip });
       f.store.setSetting(key, { ...draft, body: 'Private review notes' });
-      await f.engine.retryExhaustedReview(old.id);
+      await f.engine.retryInterruptedStep(old.id);
       expect(f.store.activeJobs(old.id)).toHaveLength(0);
       f.store.setSetting(key, {
         ...draft,
         body: `Review in progress.\n\n<!-- ${old.review!.marker} -->`,
       });
       await Promise.all([
-        f.engine.retryExhaustedReview(old.id),
-        f.engine.retryExhaustedReview(old.id),
+        f.engine.retryInterruptedStep(old.id),
+        f.engine.retryInterruptedStep(old.id),
       ]);
       expect(f.store.getTask(old.id)).toMatchObject({
         state: 'reviewing',
@@ -233,9 +233,98 @@ describe('opt-in GitHub merging', () => {
       expect(retry.freshContextRetry).toBe(true);
       f.engine.failJob(retry, failure);
       f.store.saveJob({ ...retry, status: 'failed', error: String(failure) });
-      await f.engine.retryExhaustedReview(old.id);
+      await f.engine.retryInterruptedStep(old.id);
       expect(f.store.activeJobs(old.id)).toHaveLength(0);
       expect(f.send).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it.each(['quota', 'timeout'] as const)(
+    'rechecks the native placeholder before automatically resuming a %s review',
+    async (cause) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const job = f.store.claim()!;
+        const error =
+          cause === 'quota'
+            ? new AppError(
+                'provider_403',
+                'GET /repos/test/repo/pulls/12: HTTP 403 {\n  "message":"API rate limit exceeded for user ID 7."\n}\n',
+              )
+            : new AppError('run_timeout', 'Agent exceeded the configured run time limit');
+        f.engine.failJob(job, error);
+        f.store.saveJob({ ...job, status: 'failed', error: String(error), errorCode: error.code });
+        const t = f.store.getTask(f.task.id),
+          key = 'demo-review:' + t.review!.id;
+        const draft = await f.provider.getReview(prRef(t), t.review!);
+        const group = f.store.getGroup(f.group.id);
+        group.reviewerThreadId = 'codex:existing';
+        f.store.saveGroup(group);
+        f.store.setSetting(key, {
+          ...draft,
+          body: `Review in progress.\n\n<!-- ${t.review!.marker} -->`,
+        });
+        f.setRemote({ base: 'e'.repeat(40), start: 'e'.repeat(40) });
+        await f.engine.retryInterruptedStep(t.id);
+        expect(f.store.getTask(t.id)).toMatchObject({
+          state: 'reviewing',
+          review: { id: t.review!.id, revision: { base: 'e'.repeat(40) } },
+        });
+        expect(f.store.getGroup(group.id).reviewerThreadId).toBe('codex:existing');
+        expect(f.store.activeJobs(t.id)).toHaveLength(1);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('archives a stale service draft before deletion and opens a fresh draft only on the confirmed saved head', async () => {
+    const f = await setup();
+    try {
+      const t = f.store.getTask(f.task.id),
+        old = t.review!,
+        head = 'e'.repeat(40);
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      old.authorId = '123';
+      t.state = 'needs_input';
+      t.pendingFix = { revision: t.revision! };
+      t.pendingAuthorHead = head;
+      t.pr = { ...t.pr!, head };
+      t.revision = { ...t.revision!, head };
+      t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
+      f.setRemote({ head, mergeConflict: true });
+      const key = 'demo-review:' + old.id,
+        snapshot = await f.provider.getReview(prRef(t), old);
+      const draft = {
+        ...snapshot,
+        status: 'draft',
+        body: `Review in progress.\n\n<!-- ${old.marker} -->`,
+      };
+      const discard = vi.fn(async () => {
+        expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
+        f.store.setSetting(key, { ...draft, status: 'missing' });
+      });
+      Object.assign(f.provider, { discardSupersededDraft: discard });
+      f.store.saveTask(t);
+      f.store.setSetting(key, { ...draft, body: 'Human edit' });
+      await f.engine.review(t.id, true);
+      expect(discard).not.toHaveBeenCalled();
+      f.store.saveTask(t);
+      f.store.setSetting(key, draft);
+      await f.engine.review(t.id, true);
+      expect(discard).toHaveBeenCalledTimes(1);
+      const current = f.store.getTask(t.id);
+      expect(current).toMatchObject({
+        state: 'reviewing',
+        review: { revision: { head } },
+        reviewFinished: false,
+      });
+      expect(current.review!.id).not.toBe(old.id);
+      expect(f.store.activeJobs(t.id)).toHaveLength(1);
     } finally {
       await f.close();
     }

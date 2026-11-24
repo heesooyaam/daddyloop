@@ -1,3 +1,4 @@
+import { Store } from '../src/core/store.js';
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubProvider } from '../src/providers/github.js';
 import { GitLabProvider } from '../src/providers/gitlab.js';
@@ -330,4 +331,40 @@ it('uses a permitted merge method and submits exactly the reviewed head to GitHu
   });
   const write = await new GitHubProvider('github.com', 'fake', http).prepareMerge(ref);
   await expect(write(revision.head)).resolves.toBe('merged-commit');
+});
+
+it('shares GitHub quota deadlines across provider instances and permits ordinary forbidden responses to be handled separately', async () => {
+  const store = new Store(':memory:');
+  const reset = Math.ceil(Date.now() / 1000) + 120;
+  const limited = transport(
+    () =>
+      new Response('{"message":"API rate limit exceeded"}', {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) },
+      }),
+  );
+  const normal = transport(
+    () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 }),
+  );
+  try {
+    const a = new GitHubProvider('github.com', 'fake', limited, store);
+    await expect(a.http.request('GET', '/user')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      until: reset * 1000 + 1000,
+      refusedWrite: false,
+    });
+    const b = new GitHubProvider('github.com', 'fake', normal, store);
+    await expect(b.http.request('PUT', '/repos/a/b')).rejects.toMatchObject({
+      code: 'github_rate_limit',
+      refusedWrite: true,
+    });
+    expect(normal).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    vi.setSystemTime(reset * 1000 + 2000);
+    await expect(b.http.request('GET', '/user')).rejects.toMatchObject({ code: 'provider_403' });
+    expect(normal).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+    store.close();
+  }
 });

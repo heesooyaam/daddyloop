@@ -573,6 +573,16 @@ export const daddyRu: Record<string, string> = {
     'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
   'No cleanup skill': 'Скилл не задан',
   'Refresh cleanup status': 'Обновить статус уборки',
+  'The PR or native draft changed. Inspect the interrupted review.':
+    'PR или черновик изменился. Проверь остановленное ревью.',
+  'Waiting for GitHub API quota until {time} UTC':
+    'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
+  'Review reached the run time limit': 'Ревью остановилось по таймауту',
+  'Continuing the independent review on the verified PR head':
+    'Независимое ревью продолжается на проверенном коммите PR',
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
+    'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',
   'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
   'Draft PR: mark it ready for review on GitHub':

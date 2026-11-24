@@ -1,3 +1,4 @@
+import { githubWait } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
 import {
@@ -36,7 +37,26 @@ export function autoMergeSettings(store: Store, group: ReviewGroup, task: Task) 
   };
 }
 
-export function autoMergeStatus(task: Task, settings: ReturnType<typeof autoMergeSettings>) {
+export function githubActivityStatus(
+  task: Task,
+  settings: ReturnType<typeof autoMergeSettings>,
+  until?: number,
+) {
+  if (
+    until &&
+    [
+      'queued',
+      'fixing',
+      'reviewing',
+      'awaiting_publication',
+      'awaiting_checks',
+      'awaiting_push',
+      'awaiting_merge',
+      'ready_for_review',
+      'submitting',
+    ].includes(task.state)
+  )
+    return `Waiting for GitHub API quota until ${new Date(until).toISOString().slice(11, 16)} UTC`;
   if (!reviewed(task) || task.ref.provider !== 'github') return;
   if (settings.result?.state === 'merged') return settings.result.message;
   if (settings.enabled && task.pr?.state === 'open')
@@ -105,7 +125,8 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
     if (
       !reviewed(candidate) ||
       candidate.ref.provider !== 'github' ||
-      candidate.pr?.state !== 'open'
+      candidate.pr?.state !== 'open' ||
+      githubWait(store, candidate.ref)
     )
       continue;
     const last = store.setting<MergeResult>(`autoMerge.result:${candidate.id}`);

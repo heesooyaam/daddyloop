@@ -178,6 +178,8 @@ flowchart TB
 
 On a Codex review context overflow, the adapter resumes the same thread and requests history compaction. It waits for the compaction turn to finish before continuing the pinned review. The existing fresh-thread recovery for opted-in GitHub tasks remains available if the thread still cannot continue. Native drafts and the coordinator conversation are preserved. See the [Codex app-server compaction protocol](https://developers.openai.com/codex/app-server#trigger-thread-compaction).
 
+After a saved fix is confirmed, a pending GitHub review on the previous head can block the next review. For opted-in tasks, the service archives its draft Markdown in SQLite before deletion. Replacement requires the same account, marker and revision, zero inline comments, and either the original placeholder or a summary matching a confirmed write receipt. Unrecognized edits stay on GitHub. The new draft is attached to the confirmed head and needs a full review.
+
 With GitHub auto-merge enabled, successful review and checks move the task to `awaiting_merge`. The pool keeps the assigned worker through conflict repairs and releases the slot on confirmed completion. Dependent tasks wait for completion as well.
 
 The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.

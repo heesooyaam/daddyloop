@@ -17,6 +17,11 @@ export interface ReviewProvider {
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
   createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
+  discardSupersededDraft?(
+    ref: PRRef,
+    review: ReviewHandle,
+    snapshot: ReviewSnapshot,
+  ): Promise<void>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,

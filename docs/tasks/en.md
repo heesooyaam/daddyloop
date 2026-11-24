@@ -52,4 +52,6 @@ When GitHub confirms a conflict with the target branch, daddy assigns the repair
 
 For an open PR, the service reads the current target branch commit directly from GitHub. If the target advances during a conflict repair, the service preserves the fix on the PR branch with a normal push and reviews it against the updated target. The web task list and Telegram /queue show why auto-merge is waiting, including draft PRs.
 
+When GitHub throttles requests, the service persists the host deadline, then resumes polling and reconciles the PR. A saved fix uses a normal push after verifying both branches. If the target advanced, GitHub must confirm its ancestry, and the new revision goes through independent review. A timed-out review can be retried automatically once.
+
 The service waits for a completed independent review, a published review with no outstanding findings, and passing CI on the current revision. GitHub checks the supplied head SHA and repository rules. The service prefers squash, then a merge commit, then rebase according to the repository’s allowed methods. The task card shows the outcome or why the merge is waiting.
