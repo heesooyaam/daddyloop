@@ -1,6 +1,7 @@
+import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubQuotaError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
-import { confirmedSupersededDraft, staleConflictPreparation, type Engine } from '../core/engine.js';
+import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Revision, Task } from '../core/types.js';
 import {
   AppError,
@@ -613,11 +614,9 @@ export class Worker {
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
-          startingPR?.state !== 'open' ||
-          startingPR.draft !== false ||
-          startingPR.branch !== task.pr?.branch ||
-          startingPR.targetBranch !== task.pr.targetBranch ||
-          startingPR.cloneUrl !== task.pr.cloneUrl)
+          !startingPR ||
+          !sameOpenTarget(task.pr, startingPR) ||
+          startingPR.draft !== false)
       )
         throw new AppError(
           'conflict_repair_unavailable',
