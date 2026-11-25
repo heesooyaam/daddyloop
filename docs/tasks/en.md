@@ -36,7 +36,7 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 ## Review and control
 
-The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
+The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. On GitHub it also publishes recorded findings when a review stops early, after checking the commit, owner and native comments. Workers receive the published snapshot. An incomplete review cannot authorize completion or a merge. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
 
 For an existing GitHub issue, use its URL as the task source. A standalone issue URL or a line such as “GitHub issue: https://github.com/owner/repo/issues/42” imports the issue in the selected repository. Other links in the requirements are references. A PR for an imported issue includes its closing reference, so merging into the default branch closes that issue.
 

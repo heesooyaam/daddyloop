@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
@@ -189,6 +190,287 @@ describe('opt-in GitHub merging', () => {
       await f.close();
     }
   });
+  it.each(['poll', 'completion', 'admission'] as const)(
+    'restarts a review on target advance during %s without requiring auto-merge or human input',
+    async (path) => {
+      const f = await setup();
+      try {
+        await f.engine.review(f.task.id, true);
+        const old = f.store.getTask(f.task.id);
+        const job = path === 'admission' ? undefined : f.store.claim()!;
+        const handle = old.review!,
+          key = 'demo-review:' + handle.id;
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(old), handle)),
+          body: `Review in progress.\n\n<!-- ${handle.marker} -->`,
+        });
+        f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+        const lastEvent = f.store.events(old.id).at(-1)?.id ?? 0;
+        if (path === 'completion') {
+          await f.engine.completeJob(job!, {
+            status: 'completed',
+            summary: 'Old assessment',
+            checkedHead: old.revision!.head,
+          });
+        } else if (path === 'admission') {
+          await f.worker.tick();
+          await vi.waitFor(() =>
+            expect(f.store.getTask(old.id).revision?.base).toBe('d'.repeat(40)),
+          );
+        } else {
+          await f.engine.reconcile(old.id);
+        }
+        expect(
+          f.store
+            .events(old.id)
+            .filter((e) => e.id > lastEvent && e.type === 'task.state')
+            .map((e) => e.data),
+        ).not.toContainEqual(expect.objectContaining({ state: 'needs_input' }));
+        expect(f.store.activeJobs(old.id)).toHaveLength(1);
+        expect(f.store.getTask(old.id)).toMatchObject({
+          state: 'reviewing',
+          review: { id: handle.id, revision: { base: 'd'.repeat(40) } },
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it.each([
+    { conflict: false, legacy: false },
+    { conflict: true, legacy: false },
+    { conflict: true, legacy: true },
+  ])(
+    'publishes incomplete findings and dispatches the assigned author: %j',
+    async ({ conflict, legacy }) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const task = f.store.getTask(f.task.id);
+        const handle = { ...task.review!, authorId: 'owner' };
+        f.store.saveTask({ ...task, review: handle });
+        saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
+        f.store.setSetting('demo-review:' + handle.id, {
+          ...(await f.provider.getReview(prRef(task), handle)),
+          authorId: 'owner',
+        });
+        const job = f.store.claim()!;
+        await f.engine.broker.call(job, 'add_comment', {
+          key: 'R1',
+          body: 'Fix the visible defect',
+        });
+        await f.engine.broker.call(job, 'set_summary', {
+          body: 'Verified one defect. Full validation remains open.',
+        });
+        const result = {
+          status: 'incomplete' as const,
+          summary: 'A required check is blocked.',
+          checkedHead: task.revision!.head,
+          question: conflict ? '' : 'Which API decision was approved?',
+        };
+        if (conflict) {
+          f.setRemote({
+            mergeable: false,
+            mergeConflict: true,
+            base: 'd'.repeat(40),
+            start: 'd'.repeat(40),
+          });
+          Object.assign(f.provider, { targetAdvanced: async () => true });
+        }
+        if (legacy) {
+          f.store.event(
+            task.id,
+            'runtime.item',
+            { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify(result) },
+            job.id,
+          );
+          f.store.saveTask({
+            ...f.store.getTask(task.id),
+            state: 'needs_input',
+            resumeState: 'reviewing',
+            reason: result.summary,
+          });
+        } else await f.engine.completeJob(job, result);
+        f.store.saveJob({ ...job, status: 'completed' });
+        if (legacy) {
+          await f.engine.retryInterruptedStep(task.id);
+          await f.engine.retryInterruptedStep(task.id);
+        }
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'awaiting_publication',
+          reviewFinished: false,
+        });
+
+        // A restart after the native write must adopt the same published review.
+        if (legacy) await f.provider.publish(prRef(task), handle);
+        await f.engine.publish(task.id);
+        expect((await f.provider.getReview(prRef(task), handle)).status).toBe('published');
+        expect(
+          f.store
+            .events(task.id)
+            .filter(
+              (e) =>
+                e.type === 'operation.completed' &&
+                (e.data as { operationId?: string }).operationId === handle.marker + ':publish',
+            ),
+        ).toHaveLength(legacy ? 0 : 1);
+        const next = f.store.getTask(task.id);
+        expect(next).toMatchObject({
+          state: 'fixing',
+          reviewFinished: false,
+          feedback: {
+            status: 'published',
+            comments: [{ body: expect.stringContaining('Fix the visible defect') }],
+          },
+        });
+        expect(!!next.fixingMergeConflict).toBe(conflict);
+        if (!conflict) expect(f.engine.coordinationBlocker(next)?.question).toBe(result.question);
+        expect(f.store.activeJobs(task.id)).toMatchObject([{ role: 'author', kind: 'fix' }]);
+        expect(workerSlots(f.store, f.store.getGroup(f.group.id))[0].taskId).toBe(task.id);
+        await f.poll();
+        expect(f.send).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('keeps external edits private when the partial findings change before publication', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const t = f.store.getTask(f.task.id),
+        handle = { ...t.review!, authorId: 'owner' };
+      f.store.saveTask({ ...t, review: handle });
+      f.store.setSetting('demo-review:' + handle.id, {
+        ...(await f.provider.getReview(prRef(t), handle)),
+        authorId: 'owner',
+      });
+      const job = f.store.claim()!;
+      await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Service finding' });
+      await f.engine.broker.call(job, 'set_summary', { body: 'Service summary' });
+      await f.engine.completeJob(job, {
+        status: 'incomplete',
+        checkedHead: t.revision!.head,
+        summary: 'Blocked',
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      await f.provider.updateSummary(prRef(t), handle, 'Private human note');
+      await expect(f.engine.publish(t.id)).rejects.toMatchObject({ code: 'draft_changed' });
+      expect((await f.provider.getReview(prRef(t), handle)).status).toBe('draft');
+      expect(f.store.activeJobs(t.id)).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      await f.engine.review(f.task.id, true);
+      const old = f.store.getTask(f.task.id);
+      const handle = { ...old.review!, authorId: 'reviewer' };
+      const key = 'demo-review:' + handle.id;
+      f.store.saveTask({
+        ...old,
+        review: handle,
+        ticketRepository: {
+          baseHead: old.revision!.base,
+          baseBranch: old.pr!.targetBranch,
+          branch: old.pr!.branch,
+          cloneUrl: old.pr!.cloneUrl,
+        },
+      });
+      f.store.setSetting(key, {
+        ...(await f.provider.getReview(prRef(old), handle)),
+        authorId: handle.authorId,
+      });
+      const job = f.store.claim()!;
+      const { id } = (await f.engine.broker.call(job, 'add_comment', {
+        key: 'finding',
+        body: 'Check layout',
+      })) as { id: string };
+      await f.engine.broker.call(job, 'set_summary', { body: 'Old summary' });
+      const before = await f.provider.getReview(prRef(old), handle);
+      const comment = before.comments[0];
+      Object.assign(f.provider, { targetAdvanced: async () => true });
+      f.setRemote({ base: 'd'.repeat(40), start: 'd'.repeat(40) });
+      f.store.setSetting(key, {
+        ...before,
+        comments: [{ ...comment, body: 'Private human edit' }],
+      });
+      await f.engine.reconcile(old.id);
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      f.store.setSetting(key, before);
+      const observedEdit = handle.marker + ':' + job.id + ':edit_comment:lost-response';
+      const digest = createHash('sha256')
+        .update(JSON.stringify({ id, body: 'Check layout' }))
+        .digest('hex');
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(observedEdit, old.id, 'pending', digest);
+      // A timeout remains uncertain. A refused legacy REST edit can be retired after a native read.
+      const op = handle.marker + ':' + job.id + ':edit_comment:old:hash';
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(op, old.id, 'pending', 'different-text');
+      await f.engine.retryInterruptedStep(old.id);
+      expect(
+        f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(observedEdit)?.status,
+      ).toBe('done');
+      expect(f.store.getTask(old.id).reason).toContain('Waiting to confirm');
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      f.store.event(old.id, 'operation.uncertain', {
+        operationId: op,
+        error: `AppError: PATCH /repos/${old.ref.repo}/pulls/comments/${id}: HTTP 404 Not Found`,
+      });
+
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id },
+        draftRecheck: { commentIds: [id] },
+      });
+      // Reopening the store first fences the crashed reviewer. Only its confirmed native work can be resumed.
+      const interrupted = f.store.claim()!;
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.getTask(old.id).state).toBe('needs_input');
+      await f.engine.retryInterruptedStep(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        review: { id: handle.id },
+        draftRecheck: { commentIds: [id] },
+      });
+      expect(f.store.jobs(old.id).find((j) => j.id === interrupted.id)?.status).toBe('failed');
+      const first = f.store.claim()!;
+      const result = {
+        status: 'completed' as const,
+        summary: 'Reviewed',
+        checkedHead: old.revision!.head,
+      };
+      await f.engine.completeJob(first, result);
+      f.store.saveJob({ ...first, status: 'completed' });
+      expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+      const second = f.store.claim()!;
+      await f.engine.broker.call(second, 'edit_comment', {
+        id,
+        body: 'Verified against the new base',
+      });
+      await f.engine.broker.call(second, 'set_summary', { body: 'Rechecked' });
+      await f.engine.completeJob(second, result);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'awaiting_publication',
+        reviewFinished: true,
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
   it('recovers an exhausted shared reviewer once, retaining its native draft and coordinator thread', async () => {
     const f = await setup();
     try {
@@ -330,6 +612,80 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it.each(['stale admission', 'restart on same base', 'restart with advanced base'] as const)(
+    'continues a published fix after %s while keeping its original head',
+    async (cause) => {
+      const f = await setup();
+      try {
+        await f.engine.review(f.task.id, true);
+        const review = f.store.claim()!;
+        const pinned = f.store.getTask(f.task.id).revision!;
+        await f.engine.broker.call(review, 'add_comment', {
+          key: 'action',
+          body: 'Fix the layout',
+        });
+        await f.engine.completeJob(review, {
+          status: 'completed',
+          summary: 'Found an issue',
+          checkedHead: pinned.head,
+        });
+        f.store.saveJob({ ...review, status: 'completed' });
+        await f.engine.publish(f.task.id);
+        const original = f.store.activeJobs(f.task.id)[0];
+        const target = 'd'.repeat(40);
+        const advanced = vi.fn(
+          async (_ref: unknown, before: string, after: string) =>
+            before === pinned.base && after === target,
+        );
+        Object.assign(f.provider, { targetAdvanced: advanced });
+        if (cause !== 'restart on same base') f.setRemote({ base: target, start: target });
+        await f.engine.reconcile(f.task.id);
+        expect(f.store.activeJobs(f.task.id).map((j) => j.id)).toEqual([original.id]);
+        const job = f.store.claim()!;
+        const error = new AppError(
+          'stale_revision',
+          'The PR changed before the queued job started. Reconcile and review the new revision.',
+        );
+        if (cause === 'stale admission') {
+          f.engine.failJob(job, error);
+          f.store.saveJob({
+            ...job,
+            status: 'failed',
+            errorCode: error.code,
+            error: String(error),
+          });
+        } else {
+          f.engine.recoverInterruptedJobs();
+        }
+        f.setRemote({ head: 'e'.repeat(40) });
+        const checkpoint = vi.fn();
+        await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
+        expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+        f.setRemote({ head: pinned.head });
+        await f.engine.recoverInterruptedFix(f.task.id, checkpoint);
+        expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'fixing', revision: pinned });
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(1);
+        expect(checkpoint).not.toHaveBeenCalled();
+        vi.spyOn(f.checkouts, 'prepare').mockResolvedValue(f.dir);
+        const saved = 'f'.repeat(40);
+        vi.spyOn(f.checkouts, 'commitFix').mockResolvedValue(saved);
+        f.agentRuntime.run.mockImplementationOnce(async (input) => {
+          expect(input.task.feedback?.comments[0]?.body).toContain('Fix the layout');
+          return { status: 'completed', summary: 'Layout fixed', checkedHead: pinned.head };
+        });
+        await f.worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'awaiting_push',
+            pendingAuthorHead: saved,
+          }),
+        );
+        expect(f.agentRuntime.run).toHaveBeenCalledOnce();
+      } finally {
+        await f.close();
+      }
+    },
+  );
   it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
     const f = await setup();
     try {
@@ -407,8 +763,16 @@ describe('opt-in GitHub merging', () => {
       });
       expect(f.store.activeJobs(task.id)).toHaveLength(1);
       expect(f.send).not.toHaveBeenCalled();
+      const previousCopy = await f.checkouts.prepare(task, 'author');
+      writeFileSync(join(previousCopy, 'untracked-note'), 'work in progress');
+      writeFileSync(join(previousCopy, 'feature'), 'previous resolution');
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.job.role).toBe('author');
+        const preserved = previousCopy + '-before-conflict-' + head;
+        expect(input.readPaths).toContain(preserved);
+        expect(input.prompt).toContain(preserved);
+        expect(readFileSync(join(preserved, 'untracked-note'), 'utf8')).toBe('work in progress');
+        expect(readFileSync(join(preserved, 'feature'), 'utf8')).toBe('previous resolution');
         expect(input.prompt).toContain('resolving a GitHub PR conflict');
         expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toContain('<<<<<<<');
         await expect(f.checkouts.commitFix(input.task, 'premature')).rejects.toMatchObject({

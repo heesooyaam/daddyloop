@@ -1,3 +1,4 @@
+import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { KeyboardEvent } from 'react';
@@ -15,6 +16,10 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Plus,
@@ -67,6 +72,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [previewingRepository, setPreviewingRepository] = useState(false);
   const [returnToNew, setReturnToNew] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [tasksCollapsed, setTasksCollapsed] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
   );
@@ -166,6 +173,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const preparation = board?.group.workspacePreparation;
   const deletion = board?.group.deletion;
   const repository = state.overrides[state.selected];
+  const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
+  const tasksToggleLabel = t(
+    tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
+  );
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -305,6 +316,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           >
             <Menu size={20} />
           </button>
+          <button
+            className="daddy-icon daddy-sessions-toggle"
+            aria-label={sessionsToggleLabel}
+            title={sessionsToggleLabel}
+            aria-controls="daddy-sidebar"
+            aria-expanded={!sessionsCollapsed}
+            onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
+          >
+            {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
               {board?.workspace?.name ?? 'daddyloop'}
@@ -342,6 +363,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </button>
               )}
             </div>
+          )}
+          {board && (
+            <button
+              className="daddy-icon daddy-tasks-toggle"
+              aria-label={tasksToggleLabel}
+              title={tasksToggleLabel}
+              aria-controls="daddy-tasks-panel"
+              aria-expanded={!tasksCollapsed}
+              onClick={() => setTasksCollapsed((collapsed) => !collapsed)}
+            >
+              {tasksCollapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
+            </button>
           )}
         </header>
         {state.error && (
@@ -396,11 +429,21 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
-              <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>
+              <button
+                className={pane === 'chat' ? 'active' : ''}
+                aria-controls="daddy-chat-panel"
+                aria-pressed={pane === 'chat'}
+                onClick={() => setPane('chat')}
+              >
                 <MessageSquare size={15} />
                 daddy
               </button>
-              <button className={pane === 'tasks' ? 'active' : ''} onClick={() => setPane('tasks')}>
+              <button
+                className={pane === 'tasks' ? 'active' : ''}
+                aria-controls="daddy-tasks-panel"
+                aria-pressed={pane === 'tasks'}
+                onClick={() => setPane('tasks')}
+              >
                 <Users size={15} />
                 {t('Tasks')}
                 <span>{board.tasks.length}</span>
@@ -408,6 +451,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
             <div className="daddy-workspace">
               <section
+                id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
@@ -522,7 +566,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   )}
                 </div>
               </section>
-              <aside className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}>
+              <aside
+                id="daddy-tasks-panel"
+                className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
+              >
                 <div className="daddy-board-header">
                   <div>
                     <span className="daddy-eyebrow">{t('Your team')}</span>
@@ -733,8 +780,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
-            onSave={async (profiles, instructions, autoMerge) => {
-              await model.action('settings', { profiles, instructions, autoMerge });
+            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
+              await model.action('settings', {
+                profiles,
+                instructions,
+                autoMerge,
+                forceDaddy,
+                applyWorkers,
+              });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -1363,15 +1416,17 @@ function SessionSettings({
   api: DaddyApi;
   board: DaddyBoard;
   onSave: (
-    profiles?: AgentProfiles,
+    profiles?: Partial<AgentProfiles>,
     instructions?: SessionInstructions,
     autoMerge?: boolean,
+    forceDaddy?: boolean,
+    applyWorkers?: boolean,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
-      worker: board.group.worker ?? board.group.daddy,
+      worker: board.workerDefault,
     }),
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
@@ -1383,6 +1438,11 @@ function SessionSettings({
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const [forceDaddy, setForceDaddy] = useState(false),
+    [applyWorkers, setApplyWorkers] = useState(false);
+  const overrides = board.workers.slots.filter(
+    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  );
   const { catalogue, load } = useAgentCatalogue(api);
   const savingBlocked = busy || editingFolder || importingInstructions;
   return (
@@ -1392,12 +1452,23 @@ function SessionSettings({
         event.preventDefault();
         if (savingBlocked) return;
         setBusy(true);
+        const changed: Partial<AgentProfiles> = {};
+        if (
+          forceDaddy ||
+          JSON.stringify(profiles.daddy) !== JSON.stringify(originalProfiles.current.daddy)
+        )
+          changed.daddy = profiles.daddy;
+        if (
+          applyWorkers ||
+          JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
+        )
+          changed.worker = profiles.worker;
         void onSave(
-          JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
-            ? undefined
-            : profiles,
+          Object.keys(changed).length ? changed : undefined,
           instructions,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          forceDaddy || undefined,
+          applyWorkers || undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1421,7 +1492,7 @@ function SessionSettings({
         </label>
       )}
       {(['daddy', 'worker'] as const).map((role) => {
-        const label = role === 'daddy' ? 'daddy' : t('New workers');
+        const label = role === 'daddy' ? 'daddy' : t('All workers');
         return (
           <fieldset key={role}>
             <legend>{label}</legend>
@@ -1432,6 +1503,39 @@ function SessionSettings({
               onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
               selectDefaultEffort
             />
+            {role === 'worker' &&
+              overrides.map((slot) => (
+                <small key={slot.number} className="daddy-muted">
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                </small>
+              ))}
+            {role === 'daddy' ? (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={forceDaddy}
+                  onChange={(e) => setForceDaddy(e.target.checked)}
+                />
+                {t('Apply now and restart the active daddy turn or review')}
+              </label>
+            ) : (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={
+                    applyWorkers ||
+                    JSON.stringify(profiles.worker) !==
+                      JSON.stringify(originalProfiles.current.worker)
+                  }
+                  onChange={(e) => setApplyWorkers(e.target.checked)}
+                  disabled={
+                    JSON.stringify(profiles.worker) !==
+                    JSON.stringify(originalProfiles.current.worker)
+                  }
+                />
+                {t('Apply this profile to all worker slots')}
+              </label>
+            )}
           </fieldset>
         );
       })}

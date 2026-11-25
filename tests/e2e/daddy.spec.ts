@@ -227,6 +227,134 @@ test('Escape in the folder browser returns to the session settings draft', async
   await page.keyboard.press('Escape');
   await expect(settings).toHaveCount(0);
 });
+test('collapses each side panel independently and keeps the current conversation accessible on a phone', async ({
+  page,
+}) => {
+  const desktop = { width: 1280, height: 900 };
+  await page.setViewportSize(desktop);
+  await login(page);
+  const issue = Date.now();
+  await create(page, 'Panel layout session', issue);
+  await create(page, 'Another panel layout session', issue + 1);
+
+  const sessions = page.getByRole('navigation', { name: 'Sessions' });
+  const session = sessions.getByRole('button', { name: /^Panel layout session/ });
+  const workers = page.getByRole('heading', { name: 'Worker pool' });
+  const chat = page.getByRole('region', { name: 'Conversation with daddy' });
+  const composer = chat.getByLabel('Message daddy');
+  await session.click();
+  await expect(
+    page.getByRole('heading', { name: 'Panel layout session', exact: true }),
+  ).toBeVisible();
+  const selectedUrl = page.url();
+  const draft = 'Keep this message while switching panels';
+  await composer.fill(draft);
+
+  const checkConversation = async () => {
+    await expect(page).toHaveURL(selectedUrl);
+    await expect(composer).toBeVisible();
+    await expect(composer).toHaveValue(draft);
+  };
+  const chatWidth = () => chat.evaluate((element) => element.getBoundingClientRect().width);
+  const initialWidth = await chatWidth();
+  const hideSessions = page.getByRole('button', { name: 'Hide sessions panel' });
+  const showSessions = page.getByRole('button', { name: 'Show sessions panel' });
+  const hideTasks = page.getByRole('button', { name: 'Hide workers and tasks panel' });
+  const showTasks = page.getByRole('button', { name: 'Show workers and tasks panel' });
+  const openSessions = page.getByRole('button', { name: 'Sessions', exact: true });
+  const sidebarId = await page.locator('.daddy-sidebar').getAttribute('id');
+  expect(sidebarId).toBeTruthy();
+  expect(await hideSessions.getAttribute('aria-controls')).toBe(sidebarId);
+  const openSessionsWithKeyboard = async () => {
+    expect(await openSessions.getAttribute('aria-controls')).toBe(sidebarId);
+    const first = page.getByRole('button', { name: 'New session', exact: true });
+    const last = page.getByRole('combobox', { name: 'Language', exact: true });
+    await openSessions.press('Enter');
+    await expect(first).toBeFocused();
+    await expect(page.locator('.daddy-main')).toHaveAttribute('inert', '');
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(openSessions).toBeFocused();
+    await page.keyboard.press('Enter');
+  };
+  const openTaskReport = async (number: number) => {
+    const title = `Ticket fixture ${number}`;
+    await page.getByRole('button', { name: new RegExp(title) }).click({ timeout: 5000 });
+    const report = page.getByRole('dialog', { name: 'Work item' });
+    await expect(report.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    await report.getByRole('button', { name: 'Close', exact: true }).click();
+  };
+
+  await hideSessions.press('Enter');
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeVisible();
+  await expect(showSessions).toBeFocused();
+  await expect(showSessions).toHaveAttribute('aria-expanded', 'false');
+  await checkConversation();
+  const leftCollapsedWidth = await chatWidth();
+  expect(leftCollapsedWidth).toBeGreaterThan(initialWidth);
+
+  await hideTasks.click();
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeHidden();
+  await expect(showSessions).toBeVisible();
+  await expect(showTasks).toBeVisible();
+  await expect(showTasks).toHaveAttribute('aria-expanded', 'false');
+  await checkConversation();
+  const bothCollapsedWidth = await chatWidth();
+  expect(bothCollapsedWidth).toBeGreaterThan(leftCollapsedWidth);
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(sessions).toBeHidden();
+  await showTasks.click();
+  await expect(workers).toBeVisible();
+  await openSessionsWithKeyboard();
+  await sessions
+    .getByRole('button', { name: /^Another panel layout session/ })
+    .click({ timeout: 5000 });
+  await expect(
+    page.getByRole('heading', { name: 'Another panel layout session', exact: true }),
+  ).toBeVisible();
+  await openTaskReport(issue + 1);
+  await hideTasks.click();
+  await expect(workers).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 540 });
+  await expect(sessions).toBeHidden();
+  await openSessionsWithKeyboard();
+  await expect(sessions).toBeVisible();
+  await session.click();
+  await expect(sessions).toBeHidden();
+  const tabs = page.locator('.daddy-mobile-tabs');
+  await tabs.getByRole('button', { name: /Tasks/ }).click();
+  await expect(workers).toBeVisible();
+  await openTaskReport(issue);
+  await expect(chat).toBeHidden();
+  await tabs.getByRole('button', { name: 'daddy' }).click();
+  await checkConversation();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await page.setViewportSize(desktop);
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeHidden();
+  await showSessions.click();
+  await expect(sessions).toBeVisible();
+  await expect(workers).toBeHidden();
+  await expect(hideSessions).toHaveAttribute('aria-expanded', 'true');
+  await checkConversation();
+  const rightCollapsedWidth = await chatWidth();
+  expect(rightCollapsedWidth).toBeGreaterThan(initialWidth);
+  expect(rightCollapsedWidth).toBeLessThan(bothCollapsedWidth);
+
+  await showTasks.click();
+  await expect(workers).toBeVisible();
+  await expect(hideTasks).toHaveAttribute('aria-expanded', 'true');
+  await checkConversation();
+  expect(await chatWidth()).toBe(initialWidth);
+});
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
 }) => {
@@ -301,7 +429,7 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
-  await expect(page.getByLabel('Новые воркеры Модель')).toHaveValue('gpt-5.6-sol');
+  await expect(page.getByLabel('Все воркеры Модель')).toHaveValue('gpt-5.6-sol');
   const refreshed = page.waitForRequest((request) =>
     request.url().includes('/api/agents?refresh=1'),
   );

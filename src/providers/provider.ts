@@ -29,8 +29,19 @@ export interface ReviewProvider {
     marker: string,
     location?: Location,
   ): Promise<ReviewComment>;
-  updateComment(ref: PRRef, review: ReviewHandle, id: string, body: string): Promise<ReviewComment>;
-  deleteComment(ref: PRRef, review: ReviewHandle, id: string): Promise<void>;
+  updateComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    body: string,
+    current?: ReviewComment,
+  ): Promise<ReviewComment>;
+  deleteComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    current?: ReviewComment,
+  ): Promise<void>;
   updateSummary(ref: PRRef, review: ReviewHandle, body: string): Promise<void>;
   publish(ref: PRRef, review: ReviewHandle): Promise<void>;
 }

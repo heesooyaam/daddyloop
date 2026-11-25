@@ -136,11 +136,13 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  firstAttemptId?: string;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   groupId: string;
   generation: number;
   trigger: 'user' | 'worker' | 'recovery' | 'resources';
+  waitingTaskId?: string;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
@@ -180,6 +182,7 @@ export interface Location {
   startLine?: number;
 }
 export interface ReviewComment {
+  nodeId?: string;
   id: string;
   body: string;
   url: string;
@@ -198,6 +201,7 @@ export interface ReviewHandle {
   baselineNoteId?: number;
 }
 export interface ReviewSnapshot {
+  authorId?: string;
   status: 'draft' | 'published' | 'missing' | 'partial';
   body: string;
   comments: ReviewComment[];
@@ -205,6 +209,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  inputRequest?: { runId: string; role: Role; generation: number };
   resourcePause?: { generation: number; at: string };
   id: string;
   title: string;
@@ -233,6 +238,15 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  openReviewQuestion?: { head: string; text: string };
+  partialReview?: {
+    reviewId: string;
+    runId: string;
+    question?: string;
+    limitation: string;
+    retryAt?: number;
+  };
+  draftRecheck?: { commentIds: string[]; retried?: boolean };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;
@@ -290,6 +304,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  needsReply?: boolean;
   phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
   origin?: { channel: 'telegram'; chatId: number; threadId?: number };
@@ -336,6 +351,11 @@ export interface Job {
   actionId?: string;
   firstAttemptId?: string;
   notBefore?: string;
+}
+export function requestsHumanInput(result: AgentResult) {
+  return (
+    result.status === 'needs_input' || (result.status === 'incomplete' && !!result.question?.trim())
+  );
 }
 export interface AgentResult {
   status: 'completed' | 'needs_input' | 'incomplete';
