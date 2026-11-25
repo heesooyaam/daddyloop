@@ -8,6 +8,7 @@ import { catalogue } from './planning-fixture.js';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
 import { effectiveInstructions } from '../src/core/instructions.js';
 import { randomUUID } from 'node:crypto';
+import { rememberSecret } from '../src/core/security.js';
 afterEach(() => vi.restoreAllMocks());
 it('changes only the selected session role from a private chat or topic and ignores other senders', async () => {
   const f = daddyFixture();
@@ -1124,6 +1125,7 @@ it.each(['private', 'topic'])(
       ),
     } as unknown as TelegramApi;
     const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    const secret = rememberSecret('PRIVATE_OWNER_QUESTION_TITLE_12345');
     f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7, username: 'fixture_bot' });
     if (where === 'topic')
       f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
@@ -1160,6 +1162,8 @@ it.each(['private', 'topic'])(
         requirements: 'Build the layout',
         requestId: 'ask-worker',
       });
+      task.title = `Build ${secret}`;
+      f.store.saveTask(task);
       f.agentRuntime.run.mockImplementationOnce(async (input) => ({
         status: 'needs_input',
         summary: 'Blocked',
@@ -1170,6 +1174,8 @@ it.each(['private', 'topic'])(
       await vi.waitFor(() => expect(mentions()).toHaveLength(2));
       const second = mentions()[1];
       expect(second.card.text).toContain('Which layout?');
+      if (where === 'topic') expect(second.card.text).not.toContain(secret);
+      else expect(second.card.text).toContain(secret);
       expect(second.card.buttons[0][0].callback_data).toBe('dad:task:' + task.id);
       bot.replay();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1436,13 +1442,23 @@ it('pages through every model and supports profiles without effort and engine de
       .at(-1)
       .buttons.flat()
       .find((item: any) => item.text.includes(text));
+  const expectBoundedCallbacks = () =>
+    expect(
+      sent
+        .at(-1)
+        .buttons.flat()
+        .map((item: any) => item.callback_data?.length ?? 0)
+        .sort((left: number, right: number) => right - left)[0],
+    ).toBeLessThanOrEqual(64);
   try {
     for (const role of ['daddy', 'worker'] as const) {
       await press(`dad:models:${group.id}:${role}`);
       for (let page = 0; page < 3; page++) await press(button('→').callback_data);
+      expectBoundedCallbacks();
       const last = button('Claude without effort');
       expect(last).toBeTruthy();
       await press(last.callback_data);
+      expectBoundedCallbacks();
       const noEffort = sent
         .at(-1)
         .buttons.flat()
@@ -1456,6 +1472,7 @@ it('pages through every model and supports profiles without effort and engine de
       locale = 'ru';
       await press(`dad:models:${group.id}:${role}`);
       await press(button('по умолчанию').callback_data);
+      expectBoundedCallbacks();
       const saveDefault = sent
         .at(-1)
         .buttons.flat()
@@ -1470,6 +1487,7 @@ it('pages through every model and supports profiles without effort and engine de
     await press(`dad:models:${group.id}:daddy`);
     for (let page = 0; page < 3; page++) await press(button('→').callback_data);
     await press(button('Claude without effort').callback_data);
+    expectBoundedCallbacks();
     const normal = button('Default effort').callback_data,
       force = sent
         .at(-1)

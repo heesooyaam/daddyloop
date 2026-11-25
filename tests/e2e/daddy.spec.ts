@@ -286,6 +286,8 @@ test('saves only fields changed in an open session settings form', async ({ page
   const dialog = page.getByRole('dialog', { name: 'Session settings' }),
     name = dialog.getByLabel('Session name');
   await expect(name).toHaveValue(initialTitle);
+  await name.fill('Temporary local name');
+  await name.fill(initialTitle);
 
   const renamed = await page.request.post(`/api/daddy/sessions/${id}/rename`, {
     headers: { 'X-daddyloop-Request': '1' },
@@ -314,11 +316,17 @@ test('saves only fields changed in an open session settings form', async ({ page
   expect(instructions.status()).toBe(200);
   await page.waitForTimeout(2200);
   await dialog.getByLabel('Session name').fill('Only the local name changed');
+  await dialog.getByText('Style and skills for this session').click();
+  await dialog.getByRole('button', { name: 'All workers', exact: true }).click();
+  await dialog
+    .getByLabel('Your instructions for workers')
+    .fill('Worker instructions from this form');
   await dialog.getByRole('button', { name: 'Save settings' }).click();
   await expect(dialog).toHaveCount(0);
   board = (await (await page.request.get(`/api/daddy/sessions/${id}`)).json()) as DaddyBoard;
   expect(board.group.title).toBe('Only the local name changed');
   expect(board.group.instructions?.daddy.prompt).toBe('Instructions from another client');
+  expect(board.group.instructions?.worker.prompt).toBe('Worker instructions from this form');
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Only the local name changed' })).toBeVisible();
 });

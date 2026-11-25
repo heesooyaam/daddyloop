@@ -81,6 +81,18 @@ export type AppliedPreset = z.infer<typeof appliedPresetSchema>;
 export type SessionInstructions = z.infer<typeof baseInstructionsSchema> & {
   presets?: AppliedPreset[];
 };
+export const sessionInstructionsPatchSchema = z
+  .object({
+    daddy: agentInstructionsSchema.optional(),
+    worker: agentInstructionsSchema.optional(),
+    presets: z.array(appliedPresetSchema).max(16).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (Buffer.byteLength(JSON.stringify(value)) > 786432)
+      context.addIssue({ code: 'custom', message: 'The saved instruction set exceeds 768 KiB' });
+  });
+export type SessionInstructionsPatch = z.infer<typeof sessionInstructionsPatchSchema>;
 export const sessionInstructionsSchema = baseInstructionsSchema
   .extend({
     presets: z.array(appliedPresetSchema).max(16).optional(),

@@ -56,7 +56,7 @@ import { WorkspaceFields } from './workspace-fields.js';
 import { FolderBrowser } from './folder-browser.js';
 import { InstructionFields } from './instructions.js';
 import { PresetLibrary } from './preset-library.js';
-import type { SessionInstructions } from '../core/instructions.js';
+import type { SessionInstructions, SessionInstructionsPatch } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
@@ -1787,7 +1787,7 @@ function SessionSettings({
   board: DaddyBoard;
   onSave: (
     profiles?: Partial<AgentProfiles>,
-    instructions?: SessionInstructions,
+    instructions?: SessionInstructionsPatch,
     autoMerge?: boolean,
     forceDaddy?: boolean,
     applyWorkers?: boolean,
@@ -1803,8 +1803,6 @@ function SessionSettings({
       board.group.instructions,
     ),
     [title, setTitle] = useState(board.group.title),
-    [instructionsChanged, setInstructionsChanged] = useState(false),
-    [titleChanged, setTitleChanged] = useState(false),
     [editingFolder, setEditingFolder] = useState(false),
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
@@ -1812,6 +1810,8 @@ function SessionSettings({
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const originalInstructions = useRef(instructions);
+  const originalTitle = useRef(title);
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
   const overrides = board.workers.slots.filter(
@@ -1837,13 +1837,25 @@ function SessionSettings({
           JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
         )
           changed.worker = profiles.worker;
+        const changedInstructions: SessionInstructionsPatch = {};
+        for (const role of ['daddy', 'worker'] as const)
+          if (
+            JSON.stringify(instructions?.[role] ?? {}) !==
+            JSON.stringify(originalInstructions.current?.[role] ?? {})
+          )
+            changedInstructions[role] = instructions?.[role] ?? {};
+        if (
+          JSON.stringify(instructions?.presets ?? []) !==
+          JSON.stringify(originalInstructions.current?.presets ?? [])
+        )
+          changedInstructions.presets = instructions?.presets ?? [];
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          instructionsChanged ? instructions : undefined,
+          Object.keys(changedInstructions).length ? changedInstructions : undefined,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
           forceDaddy || undefined,
           applyWorkers || undefined,
-          titleChanged ? title.trim() : undefined,
+          title.trim() !== originalTitle.current.trim() ? title.trim() : undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1855,10 +1867,7 @@ function SessionSettings({
           required
           maxLength={200}
           value={title}
-          onChange={(event) => {
-            setTitle(event.target.value);
-            setTitleChanged(true);
-          }}
+          onChange={(event) => setTitle(event.target.value)}
         />
       </label>
       {board.workspace.provider === 'github' && (
@@ -1938,10 +1947,7 @@ function SessionSettings({
       <InstructionFields
         api={api}
         value={instructions}
-        onChange={(value) => {
-          setInstructions(value);
-          setInstructionsChanged(true);
-        }}
+        onChange={setInstructions}
         onBusyChange={setImportingInstructions}
       />
       <button type="button" className="daddy-text-button" onClick={() => void load(true)}>

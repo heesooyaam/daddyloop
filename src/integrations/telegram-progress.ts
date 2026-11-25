@@ -32,7 +32,13 @@ const activeStates = new Set<State>([
   'awaiting_push',
 ]);
 
-function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: DaddyJob[]) {
+function snapshot(
+  store: Store,
+  group: ReviewGroup,
+  jobs: Job[],
+  coordination: DaddyJob[],
+  sanitize: (value: string) => string = (value) => value,
+) {
   const tasks = store.tasks(group.id);
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const workers = jobs.filter((job) => taskById.get(job.taskId)?.generation === job.generation);
@@ -58,7 +64,7 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
         startedAt: job.startedAt,
         engine: job.profile?.engine,
         label: activityStatus({ task: taskById.get(job.taskId)!, job }),
-        title: taskById.get(job.taskId)!.title,
+        title: sanitize(taskById.get(job.taskId)!.title),
       })),
   ];
   const preparing = ['pending', 'preparing'].includes(group.workspacePreparation?.state ?? '');
@@ -110,11 +116,14 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     running,
     tasks: outstanding.map((item) => ({
       id: taskReference(item.task),
-      title: clipTitle(item.task.title, 80),
+      title: clipTitle(sanitize(item.task.title), 80),
       label: activityStatus(item),
     })),
-    attention: attention?.title,
-    resources: label === 'Waiting for server resources' ? group.resourceWait?.reasons : undefined,
+    attention: attention ? sanitize(attention.title) : undefined,
+    resources:
+      label === 'Waiting for server resources'
+        ? group.resourceWait?.reasons.map(sanitize)
+        : undefined,
   };
 }
 
@@ -136,6 +145,7 @@ function render(
   group: ReviewGroup,
   status: ReturnType<typeof snapshot>,
   now: number,
+  sanitize: (value: string) => string = (value) => value,
 ) {
   const t = translator(locale);
   const time = new Intl.DateTimeFormat(locale, {
@@ -145,7 +155,7 @@ function render(
     minute: '2-digit',
     timeZoneName: 'short',
   });
-  const text = new TelegramText().add(group.title, 'bold').add('\n' + t(status.label));
+  const text = new TelegramText().add(sanitize(group.title), 'bold').add('\n' + t(status.label));
   if (status.resources?.length)
     text.add('\n' + status.resources.map((reason) => t(reason)).join('\n'));
   if (status.attention && ['Action needed', 'Agent run failed'].includes(status.label))
@@ -208,13 +218,14 @@ export class TelegramProgress {
     private destination: (groupId: string, previous?: StatusRoute) => StatusRoute | undefined,
   ) {}
 
-  card(group: ReviewGroup) {
+  card(group: ReviewGroup, sanitize: (value: string) => string = (value) => value) {
     return render(
       this.store,
       this.locale(),
       group,
-      snapshot(this.store, group, this.store.activeJobs(), this.store.activeDaddyJobs()),
+      snapshot(this.store, group, this.store.activeJobs(), this.store.activeDaddyJobs(), sanitize),
       Date.now(),
+      sanitize,
     );
   }
 
@@ -270,11 +281,12 @@ export class TelegramProgress {
         this.clearCard(key, card.id);
         card = undefined;
       }
-      const status = snapshot(this.store, group, jobs, coordination);
+      const sanitize = route.threadId === undefined ? (value: string) => value : redact;
+      const status = snapshot(this.store, group, jobs, coordination, sanitize);
       const topic = route.threadId !== undefined;
       if (!card && !topic && !status.active) continue;
       const locale = this.locale();
-      const signature = JSON.stringify([locale, group.title, status]);
+      const signature = JSON.stringify([locale, sanitize(group.title), status]);
       const last = card && this.sent.get(card.id);
       const now = Date.now();
       if (last && last.signature === signature && (!status.active || now - last.at < 60000))
@@ -283,12 +295,17 @@ export class TelegramProgress {
         card = { id: randomUUID(), route };
         this.store.setSetting(key, card);
       }
-      await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
-        key: `progress:${card.id}`,
-        replace: true,
-        final: topic || !status.active,
-        pin: topic,
-      });
+      await this.api.send(
+        route,
+        render(this.store, locale, group, status, now, sanitize),
+        undefined,
+        {
+          key: `progress:${card.id}`,
+          replace: true,
+          final: topic || !status.active,
+          pin: topic,
+        },
+      );
       if (topic || status.active) this.sent.set(card.id, { at: now, signature });
       else this.clearCard(key, card.id);
     }

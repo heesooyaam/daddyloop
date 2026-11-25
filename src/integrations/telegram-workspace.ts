@@ -55,7 +55,7 @@ import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
-import { profileText, taskActivity } from '../core/task-activity.js';
+import { activityStatus, profileText, taskActivity } from '../core/task-activity.js';
 import {
   parseTaskInput,
   parseWorkerInput,
@@ -573,7 +573,10 @@ export class TelegramWorkspace {
   private async showStatus(groupId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
     await this.api.send(destination, {
-      ...this.progress.card(this.groupBoard(destination, this.daddy.board(group.id)).group),
+      ...this.progress.card(
+        group,
+        destination.chatId === this.pair()?.chatId ? (value) => value : redact,
+      ),
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
     });
   }
@@ -1152,6 +1155,7 @@ export class TelegramWorkspace {
       ...board,
       group: { ...board.group, title: redact(board.group.title) },
       workspace: { ...board.workspace, name: redact(board.workspace.name) },
+      tasks: board.tasks.map((task) => ({ ...task, title: redact(task.title) })),
     };
   }
   private workspacePickerCard(destination: Destination, workspaces: Workspace[], page = 0) {
@@ -1378,13 +1382,25 @@ export class TelegramWorkspace {
     });
   }
   private async taskCard(task: Task, destination: Destination) {
-    this.authorizeControl(destination, task.groupId!);
+    const group = this.authorizeControl(destination, task.groupId!);
     this.store.setSetting(this.selectedTaskKey(destination, task.groupId!), task.id);
+    const [activity] = taskActivity(
+      [task],
+      this.store.activeJobs(task.id),
+      (item) =>
+        githubActivityStatus(
+          item,
+          autoMergeSettings(this.store, group, item),
+          githubBackoff(this.store, item.ref),
+        ),
+      workerSlots(this.store, group),
+    );
+    const statusLabel = activityStatus(activity!);
     task = this.groupTask(destination, task);
     const version = this.taskVersion(task);
     const text = new TelegramText()
       .add(task.title, 'bold')
-      .add('\n\n' + this.t(task.state))
+      .add('\n\n' + this.t(statusLabel))
       .add('\n' + this.t(task.reason))
       .add(
         '\n\n' +
@@ -1809,9 +1825,14 @@ export class TelegramWorkspace {
       workspace: next?.workspace,
     });
     if (next) this.store.setSetting(nextKey, null);
-    await this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
-      key: receipt,
-    });
+    await this.api.send(
+      destination,
+      queuedTaskCard(this.locale(), this.groupTask(destination, task)),
+      undefined,
+      {
+        key: receipt,
+      },
+    );
   }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
     const board = this.daddy.board(groupId);
@@ -1934,10 +1955,21 @@ export class TelegramWorkspace {
       );
       return [{ text: model.engine + ' · ' + model.name, callback_data: id }];
     });
+    const defaultId = 'dad-default:' + randomBytes(12).toString('base64url');
+    this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
+      defaultId,
+      JSON.stringify({
+        groupId,
+        role,
+        chatId: destination.chatId,
+        threadId: destination.threadId,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      }),
+    );
     buttons.unshift([
       {
         text: this.t('Use engine defaults'),
-        callback_data: `dad:model-default:${groupId}:${role}`,
+        callback_data: defaultId,
       },
     ]);
     const navigation = [
@@ -2624,18 +2656,34 @@ export class TelegramWorkspace {
       });
       return true;
     }
-    const modelDefault =
-      /^dad:model-default:([a-f0-9-]{36}):(worker|daddy)(?::(save|force))?$/.exec(data);
+    const modelDefault = /^dad-default:([A-Za-z0-9_-]{16})(?::(save|force))?$/.exec(data);
     if (modelDefault) {
-      const group = this.authorize(destination, modelDefault[1]),
-        role = modelDefault[2] as 'worker' | 'daddy',
+      const key = 'dad-default:' + modelDefault[1],
+        row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(key);
+      if (!row || row.consumed)
+        throw new Error(this.t('This model selection expired. Open Models again.'));
+      const action = JSON.parse(row.data as string) as {
+        groupId: string;
+        role: 'worker' | 'daddy';
+        chatId: number;
+        threadId?: number;
+        expiresAt: string;
+      };
+      if (
+        action.chatId !== destination.chatId ||
+        action.threadId !== destination.threadId ||
+        action.expiresAt <= now()
+      )
+        throw new Error(this.t('This model selection expired. Open Models again.'));
+      const group = this.authorize(destination, action.groupId),
+        role = action.role,
         profile = {
           engine:
             role === 'daddy'
               ? group.daddy.engine
               : (group.worker ?? this.daddy.engine.defaultAgents().worker).engine,
         };
-      if (!modelDefault[3]) {
+      if (!modelDefault[2]) {
         await this.api.send(destination, {
           ...new TelegramText()
             .add(this.t('Use engine defaults'), 'bold')
@@ -2645,13 +2693,13 @@ export class TelegramWorkspace {
             [
               {
                 text: this.t('Use engine defaults'),
-                callback_data: `dad:model-default:${group.id}:${role}:save`,
+                callback_data: `${key}:save`,
               },
               ...(role === 'daddy'
                 ? [
                     {
                       text: this.t('Apply now · {effort}', { effort: this.t('Default') }),
-                      callback_data: `dad:model-default:${group.id}:${role}:force`,
+                      callback_data: `${key}:force`,
                     },
                   ]
                 : []),
@@ -2663,9 +2711,10 @@ export class TelegramWorkspace {
       }
       await this.daddy.settings(group.id, {
         profiles: { [role]: profile },
-        forceDaddy: role === 'daddy' && modelDefault[3] === 'force',
+        forceDaddy: role === 'daddy' && modelDefault[2] === 'force',
         applyWorkers: role === 'worker',
       });
+      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
       await this.models(group.id, destination);
       return true;
     }
@@ -3055,6 +3104,7 @@ export class TelegramWorkspace {
           !callback.data?.startsWith('dad:') &&
           !callback.data?.startsWith('dad-workspace:') &&
           !callback.data?.startsWith('dad-model:') &&
+          !callback.data?.startsWith('dad-default:') &&
           !callback.data?.startsWith('notifications:') &&
           !callback.data?.startsWith('language:')
         )
@@ -4132,7 +4182,7 @@ export class TelegramWorkspace {
             .add(worker ? this.t('Worker') : 'daddy', 'bold')
             .add(' · ')
             .add(taskReference(task), 'code')
-            .add('  ' + task.title + '\n\n')
+            .add('  ' + this.groupText(destination, task.title) + '\n\n')
             .markdown(this.t(redact(task.reason)));
         } else if (message) {
           text.add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold').add('\n\n');

@@ -47,9 +47,11 @@ import { queueDetail, activityStatus, taskActivity } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import {
   sessionInstructionsSchema,
+  sessionInstructionsPatchSchema,
   effectiveInstructions,
   withInstructions,
   type SessionInstructions,
+  type SessionInstructionsPatch,
 } from './instructions.js';
 
 export class Daddy {
@@ -507,7 +509,7 @@ export class Daddy {
       profiles?: Partial<AgentProfiles>;
       forceDaddy?: boolean;
       applyWorkers?: boolean;
-      instructions?: SessionInstructions;
+      instructions?: SessionInstructionsPatch;
       autoMerge?: boolean;
     },
     commit?: () => void,
@@ -515,7 +517,7 @@ export class Daddy {
     for (const profile of Object.values(input.profiles ?? {}))
       await this.catalogue.validate(profile);
     if (input.instructions)
-      input.instructions = sessionInstructionsSchema.parse(input.instructions);
+      input.instructions = sessionInstructionsPatchSchema.parse(input.instructions);
     await this.withSessionTasks(id, (group, tasks) => {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (input.autoMerge !== undefined && group.workspace?.provider !== 'github')
@@ -563,7 +565,11 @@ export class Daddy {
       const restartReviews: string[] = [];
       let restartCoordinator = false;
       this.store.transaction(() => {
-        if (input.instructions) group.instructions = input.instructions;
+        if (input.instructions)
+          group.instructions = sessionInstructionsSchema.parse({
+            ...(group.instructions ?? { daddy: {}, worker: {} }),
+            ...input.instructions,
+          });
         if (changeWorkers) {
           group.worker = nextWorker;
           for (const slot of group.workerSlots ?? []) delete slot.profile;

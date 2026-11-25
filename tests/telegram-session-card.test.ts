@@ -4,6 +4,7 @@ import { TelegramApi } from '../src/integrations/telegram.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
 import { TelegramProgress } from '../src/integrations/telegram-progress.js';
+import { rememberSecret } from '../src/core/security.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -16,6 +17,7 @@ it('pins one topic status card and edits it as the queue changes across restarts
     return Response.json({ ok: true, result: { message_id: 100 + sent.length } });
   });
   const route = { chatId: -10042, threadId: 17, ownerId: 7 };
+  const secret = rememberSecret('PRIVATE_PROGRESS_TITLE_12345');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: route.chatId, ownerId: 7 });
   const integration = () => {
@@ -29,7 +31,7 @@ it('pins one topic status card and edits it as the queue changes across restarts
     );
   };
   let progress = integration();
-  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Work' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: `Work ${secret}` });
   try {
     progress.start();
     await vi.advanceTimersByTimeAsync(5000);
@@ -50,12 +52,15 @@ it('pins one topic status card and edits it as the queue changes across restarts
       requirements: 'Show in pin',
       requestId: 'task',
     });
+    task.title = `Pinned task ${secret}`;
+    f.store.saveTask(task);
     progress.start();
     await vi.advanceTimersByTimeAsync(5000);
     expect(sent.at(-1)).toMatchObject({
       method: 'editMessageText',
       body: { message_id: 101, text: expect.stringContaining(task.source!.key) },
     });
+    expect(sent.some(({ body }) => String(body.text).includes(secret))).toBe(false);
     const queued = f.store.jobs(task.id)[0]!;
     f.store.saveJob({ ...queued, status: 'completed' });
     f.store.saveTask({ ...task, state: 'complete' });

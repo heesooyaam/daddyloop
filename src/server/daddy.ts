@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
 import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
 import { profileSchema, profilesSchema } from '../core/agents.js';
-import { sessionInstructionsSchema } from '../core/instructions.js';
+import { sessionInstructionsPatchSchema, sessionInstructionsSchema } from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
   const workerNumber = z.number().int().min(1).max(8);
@@ -113,7 +113,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
             forceDaddy: z.boolean().optional(),
             applyWorkers: z.boolean().optional(),
             autoMerge: z.boolean().optional(),
-            instructions: sessionInstructionsSchema.optional(),
+            instructions: sessionInstructionsPatchSchema.optional(),
           })
           .strict()
           .parse(request.body),

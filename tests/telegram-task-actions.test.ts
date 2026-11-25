@@ -72,7 +72,16 @@ it('redacts registered secrets from every group task card and button', async () 
     },
   });
   const safe = () => expect(JSON.stringify(telegram.sent.at(-1)!.card)).not.toContain(secret);
+  const messages = vi.spyOn(f.store, 'messages');
   try {
+    messages.mockClear();
+    await bot.handle(message('/status', topic!.threadId));
+    safe();
+    expect(messages).not.toHaveBeenCalled();
+    await bot.handle(click(`dad:open:${group.id}`, topic!.threadId));
+    safe();
+    await bot.handle(message(`/task Queue ${secret}`, topic!.threadId));
+    safe();
     await bot.handle(message('/tasks', topic!.threadId));
     safe();
     await bot.handle(
@@ -86,6 +95,19 @@ it('redacts registered secrets from every group task card and button', async () 
     safe();
     await bot.handle(message('/tasks'));
     safe();
+    messages.mockClear();
+    f.store.setSetting('telegram.currentDaddy', group.id);
+    await bot.handle({
+      update_id: id++,
+      message: {
+        message_id: id,
+        text: '/status',
+        from: { id: 7 },
+        chat: { id: 7, type: 'private' },
+      },
+    });
+    expect(JSON.stringify(telegram.sent.at(-1)!.card)).toContain(secret);
+    expect(messages).not.toHaveBeenCalled();
   } finally {
     await bot.stop();
     await f.close();
@@ -348,6 +370,86 @@ it('binds merge verification to the selected session and exact task version', as
     await bot.handle(click(freshPrepare.callback_data));
     await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
     expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'verify_merge', role: 'reviewer' }]);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('shows the same GitHub retry status when a task is opened from tasks or queue', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id }),
+    task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 77,
+        url: 'https://demo.local/pull/77',
+      },
+      repoPath: f.dir,
+      requirements: 'Show one retry time everywhere',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+  task.ref = {
+    provider: 'github',
+    host: 'github.com',
+    repo: 'test/repo',
+    number: 77,
+    url: 'https://github.com/test/repo/pull/77',
+  };
+  task.state = 'queued';
+  task.prLink = {
+    ref: task.ref,
+    head: task.revision!.head,
+    generation: task.generation,
+  };
+  f.store.saveTask(task);
+  const until = Date.now() + 60_000;
+  f.store.setSetting('github.read-backoff:github.com', {
+    until,
+    delay: 15_000,
+    status: 503,
+  });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 1300;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const retry = `PR #77 · GitHub HTTP 503 · retry at ${new Date(until).toISOString().slice(11, 19)} UTC`;
+  const openFromTasks = async () => {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    return telegram.sent.at(-1)!.card.text as string;
+  };
+  try {
+    expect(await openFromTasks()).toContain(retry);
+    await bot.handle(message('/queue'));
+    expect(telegram.sent.at(-1)!.card.text).toContain(retry);
+
+    f.store.setSetting('github.read-backoff:github.com', null);
+    expect(await openFromTasks()).not.toContain('retry at');
+    await bot.handle(message('/queue'));
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('retry at');
   } finally {
     await bot.stop();
     await f.close();
