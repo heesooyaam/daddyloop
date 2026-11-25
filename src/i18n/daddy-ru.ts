@@ -633,6 +633,12 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing conflict resolution after a timeout at {time} UTC':
+    'Продолжит исправлять конфликт после таймаута в {time} UTC',
+  'Continuing conflict resolution in the saved worker copy after a timeout':
+    'Воркер продолжает исправлять конфликт в сохранённой копии после таймаута',
+  'The PR head or target history changed. The partial merge is preserved in the worker copy.':
+    'Изменился коммит PR или история целевой ветки. Незавершённое слияние сохранено в копии воркера.',
   'Continuing the fix with the answer from the session':
     'Воркер продолжает исправление с ответом из сессии',
   'Waiting for your answer': 'Ждёт твоего ответа',

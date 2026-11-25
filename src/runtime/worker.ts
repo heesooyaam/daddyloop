@@ -230,6 +230,20 @@ export class Worker {
           }
           if (
             task.state === 'needs_input' &&
+            task.fixingMergeConflict &&
+            task.resumeState === 'fixing'
+          ) {
+            try {
+              await this.engine.restorePendingConflict(task.id, (t) =>
+                this.workspaces.pendingConflictBase(t),
+              );
+            } catch (error) {
+              store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          }
+          if (
+            task.state === 'needs_input' &&
             (task.resumeState === 'fixing' || task.resumeState === 'needs_input') &&
             !task.fixingMergeConflict &&
             task.ref.provider === 'github'
@@ -539,7 +553,10 @@ export class Worker {
       if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
-        !(job.kind === 'fix' && (await this.engine.publishedFixBaseAdvanced(task, startingPR)))
+        !(
+          job.kind === 'fix' &&
+          (await this.engine.fixCanContinueOnAdvancedBase(task, startingPR, job.timeoutRetry))
+        )
       ) {
         if (
           job.kind === 'review' &&
@@ -552,6 +569,11 @@ export class Worker {
             return;
           }
         }
+        if (job.kind === 'fix' && job.timeoutRetry && task.fixingMergeConflict)
+          throw new AppError(
+            'conflict_target_changed',
+            'The PR head or target history changed. The partial merge is preserved in the worker copy.',
+          );
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
