@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, rmSync, renameSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Store } from '../core/store.js';
-import { AppError, now, type Workspace, type ResourceStatus } from '../core/types.js';
+import {
+  AppError,
+  now,
+  type Workspace,
+  type TelegramReply,
+  type ResourceStatus,
+} from '../core/types.js';
 import type { Locale } from '../i18n/index.js';
 import type { Speech } from '../runtime/speech.js';
 import { redact } from '../core/security.js';
@@ -16,6 +22,8 @@ export interface VoiceRoute {
   locale: Locale;
 }
 export interface VoiceJob {
+  replyTo?: TelegramReply;
+  messageId?: number;
   id: string;
   receipt: string;
   route: VoiceRoute;
@@ -65,7 +73,7 @@ export class VoiceInbox {
   enqueue(
     receipt: string,
     route: VoiceRoute,
-    input: { fileId?: string; duration?: number; text?: string },
+    input: Pick<VoiceJob, 'fileId' | 'duration' | 'text' | 'replyTo' | 'messageId'>,
   ) {
     const id = createHash('sha256').update(receipt).digest('hex');
     if (this.store.db.prepare('SELECT 1 FROM voice_jobs WHERE id=?').get(id)) return false;

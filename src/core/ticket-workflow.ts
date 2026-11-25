@@ -10,6 +10,7 @@ import {
   type AgentProfiles,
   type PRRef,
   type Task,
+  type TelegramReply,
   type Workspace,
   type WorkerRequest,
   type TicketRef,
@@ -60,6 +61,7 @@ export class TicketWorkflow {
       reader ?? new TicketReader(undefined, undefined, undefined, repositories, engine.store);
   }
   async start(input: {
+    replyTo?: TelegramReply;
     source: string;
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
@@ -104,6 +106,7 @@ export class TicketWorkflow {
       startImplementation: input.startImplementation,
       parentTaskId: input.parentTaskId,
       requirements: input.requirements,
+      replyTo: input.replyTo,
       agents: input.agents,
       groupId: input.groupId,
       groupGeneration: input.groupGeneration,
@@ -115,6 +118,7 @@ export class TicketWorkflow {
     return task;
   }
   async local(input: {
+    replyTo?: TelegramReply;
     source?: string;
     workspace: Workspace;
     groupId: string;
@@ -192,6 +196,7 @@ export class TicketWorkflow {
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
       requirements: input.requirements,
+      replyTo: input.replyTo,
       source: {
         kind: 'local',
         key: ref.key,
