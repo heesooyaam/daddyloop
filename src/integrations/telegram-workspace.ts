@@ -1400,6 +1400,25 @@ export class TelegramWorkspace {
       ],
     });
   }
+  private appendPrivateTaskDetails(text: TelegramText, task: Task, destination: Destination) {
+    if (destination.chatId !== this.pair()?.chatId) return text;
+    text
+      .add('\n\n' + this.t('Original requirements'), 'bold')
+      .add('\n')
+      .markdown(task.requirements)
+      .add('\n\n' + this.t('Read-only worker reports'), 'bold');
+    const reports = this.store
+      .messages(task.id)
+      .filter((message) => message.sender === 'agent')
+      .slice(-8);
+    if (!reports.length) return text.add('\n' + this.t('No worker reports yet.'));
+    for (const report of reports)
+      text
+        .add('\n\n' + (report.role === 'reviewer' ? 'daddy' : this.t('Worker')), 'bold')
+        .add('\n')
+        .markdown(report.text);
+    return text;
+  }
   private async taskCard(task: Task, destination: Destination) {
     const group = this.authorizeControl(destination, task.groupId!);
     this.store.setSetting(this.selectedTaskKey(destination, task.groupId!), task.id);
@@ -1459,11 +1478,7 @@ export class TelegramWorkspace {
         .add('\n\n' + (this.locale() === 'ru' ? 'Сводка' : 'Summary'), 'bold')
         .add('\n')
         .markdown(task.summary.slice(0, 3000));
-    if (destination.chatId === this.pair()?.chatId)
-      text
-        .add('\n\n' + this.t('Original requirements'), 'bold')
-        .add('\n')
-        .markdown(task.requirements);
+    this.appendPrivateTaskDetails(text, task, destination);
     const buttons: TelegramButton[][] = this.availableTaskActions(task).map((action) => [
       {
         text: this.taskActionLabel(action),
@@ -1484,7 +1499,7 @@ export class TelegramWorkspace {
     if (destination.chatId !== this.pair()?.chatId)
       buttons.push([
         {
-          text: this.t('View original requirements'),
+          text: this.t('View task details'),
           url: `https://t.me/${this.username}?start=task_${task.id}`,
         },
       ]);
@@ -1779,13 +1794,13 @@ export class TelegramWorkspace {
     this.store.setSetting(this.selectedTaskKey(destination, groupId), task.id);
     const card = activityTaskCard(this.locale(), activity!, slot, merge, queuePage);
     if (destination.chatId === this.pair()?.chatId) {
-      const withRequirements = new TelegramText()
-        .append(card)
-        .add('\n\n' + this.t('Original requirements'), 'bold')
-        .add('\n')
-        .markdown(original.requirements);
-      card.text = withRequirements.text;
-      card.entities = withRequirements.entities;
+      const details = this.appendPrivateTaskDetails(
+        new TelegramText().append(card),
+        original,
+        destination,
+      );
+      card.text = details.text;
+      card.entities = details.entities;
     }
     const version = this.taskVersion(task);
     card.buttons = [
@@ -1810,7 +1825,7 @@ export class TelegramWorkspace {
     if (destination.chatId !== this.pair()?.chatId)
       card.buttons.push([
         {
-          text: this.t('View original requirements'),
+          text: this.t('View task details'),
           url: `https://t.me/${this.username}?start=task_${task.id}`,
         },
       ]);
@@ -2180,9 +2195,18 @@ export class TelegramWorkspace {
         id: choice.inputId,
         choice,
       });
-    const preview = choice.input
-      ? await this.daddy.workspaces.selection(choice.workspace, choice.input)
-      : choice.workspace;
+    const source = choice.input?.path ?? choice.workspace.repoPath;
+    const listing = browse
+      ? await this.daddy.workspaces.browse(isGitAddress(source) ? undefined : source)
+      : undefined;
+    let preview: Workspace | undefined;
+    try {
+      preview = choice.input
+        ? await this.daddy.workspaces.selection(choice.workspace, choice.input)
+        : choice.workspace;
+    } catch (error) {
+      if (!browse) throw error;
+    }
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
@@ -2202,42 +2226,48 @@ export class TelegramWorkspace {
         : `${this.locale() === 'ru' ? 'новая сессия' : 'new session'} · ${this.room()?.title ?? 'Telegram'}`;
       title.add(`\n${this.locale() === 'ru' ? 'Назначение' : 'Target'}: ${route}`, 'bold');
     }
-    title
-      .add('\n' + preview.repoPath + (preview.scope ? '/' + preview.scope : ''), 'code')
-      .add('\n' + this.t('Base branch') + ': ')
-      .add(preview.base ?? this.t('Default'), 'code')
-      .add('\n' + this.t('Scope') + ': ')
-      .add(preview.scope || '/', 'code')
-      .add(
-        '\n\n' +
-          this.t(
-            'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.',
-          ),
-      );
+    title.add(
+      '\n' + (preview ? preview.repoPath + (preview.scope ? '/' + preview.scope : '') : source),
+      'code',
+    );
+    if (preview)
+      title
+        .add('\n' + this.t('Base branch') + ': ')
+        .add(preview.base ?? this.t('Default'), 'code')
+        .add('\n' + this.t('Scope') + ': ')
+        .add(preview.scope || '/', 'code');
+    title.add(
+      '\n\n' +
+        this.t(
+          'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.',
+        ),
+    );
     title.add(
       '\n\n' +
         this.t(
           'For one branch or subfolder, send /repo --base BRANCH --scope SUBFOLDER -- REPOSITORY. Omit either option when it is not needed.',
         ),
     );
-    const buttons = [
-      [
-        button(
-          this.t(
-            choice.groupId
-              ? choice.input
-                ? 'Use this folder once'
-                : 'Use workspace defaults'
-              : 'Start session',
-          ),
-          choice,
-          'use',
-        ),
-      ],
-      ...(choice.input
-        ? [[button(this.t('Use workspace defaults'), { ...choice, input: undefined }, 'use')]]
-        : []),
-    ];
+    const buttons = preview
+      ? [
+          [
+            button(
+              this.t(
+                choice.groupId
+                  ? choice.input
+                    ? 'Use this folder once'
+                    : 'Use workspace defaults'
+                  : 'Start session',
+              ),
+              choice,
+              'use',
+            ),
+          ],
+          ...(choice.input
+            ? [[button(this.t('Use workspace defaults'), { ...choice, input: undefined }, 'use')]]
+            : []),
+        ]
+      : [];
     if (!choice.groupId && choice.workspace.vcs === 'arcadia' && choice.workspace.copyMode) {
       const mode = choice.input?.copyMode ?? choice.workspace.copyMode;
       title.add(
@@ -2287,20 +2317,18 @@ export class TelegramWorkspace {
       }
     }
     if (browse) {
-      const source = choice.input?.path ?? choice.workspace.repoPath;
-      const listing = await this.daddy.workspaces.browse(isGitAddress(source) ? undefined : source);
       const pageSize = 10,
-        pages = Math.max(1, Math.ceil(listing.directories.length / pageSize)),
+        pages = Math.max(1, Math.ceil(listing!.directories.length / pageSize)),
         page = Math.max(0, Math.min(choice.browsePage ?? 0, pages - 1));
-      if (listing.parent)
+      if (listing!.parent)
         buttons.push([
           button(
             '↑ ' + this.t('Parent folder'),
-            { ...choice, input: { ...choice.input, path: listing.parent }, browsePage: 0 },
+            { ...choice, input: { ...choice.input, path: listing!.parent }, browsePage: 0 },
             'browse',
           ),
         ]);
-      for (const entry of listing.directories.slice(page * pageSize, (page + 1) * pageSize))
+      for (const entry of listing!.directories.slice(page * pageSize, (page + 1) * pageSize))
         buttons.push([
           button(
             entry.name + ' →',

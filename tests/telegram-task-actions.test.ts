@@ -133,6 +133,8 @@ it('opens complete local task requirements from a group through the paired priva
       requirements,
       createdByAction: 'requirements-fixture',
     });
+  f.store.message(task.id, 'author', 'agent', 'First worker report from the task.');
+  f.store.message(task.id, 'reviewer', 'agent', 'Final reviewer summary for the task.');
   let id = 1500;
   const message = (text: string, chatId: number, threadId?: number): Update => ({
     update_id: id++,
@@ -150,13 +152,15 @@ it('opens complete local task requirements from a group through the paired priva
     expect(groupCard.text).not.toContain('Acceptance criterion');
     const open = groupCard.buttons
       .flat()
-      .find((button: any) => button.text === 'View original requirements');
+      .find((button: any) => button.text === 'View task details');
     expect(open.url).toContain(`start=task_${task.id}`);
 
     await bot.handle(message(`/start task_${task.id}`, 7));
     expect(telegram.sent.at(-1)!.card.text).toContain(
       'Acceptance criterion only visible in the full requirements.',
     );
+    expect(telegram.sent.at(-1)!.card.text).toContain('First worker report from the task.');
+    expect(telegram.sent.at(-1)!.card.text).toContain('Final reviewer summary for the task.');
     expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
   } finally {
     await bot.stop();

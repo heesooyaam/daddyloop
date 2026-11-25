@@ -57,6 +57,7 @@ import { FolderBrowser } from './folder-browser.js';
 import { InstructionFields } from './instructions.js';
 import { PresetLibrary } from './preset-library.js';
 import type { SessionInstructionChange, SessionInstructions } from '../core/instructions.js';
+import { instructionPresetFingerprint } from '../core/preset-fingerprint.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
@@ -1900,6 +1901,7 @@ function SessionSettings({
             value
               ? {
                   revision: value.preset.revision,
+                  snapshot: instructionPresetFingerprint(value.preset),
                   enabled: value.enabled,
                   omit: value.omit,
                 }
@@ -1917,7 +1919,10 @@ function SessionSettings({
         }
         const originalOrder = (before.presets ?? []).map((preset) => preset.preset.id),
           nextOrder = (after.presets ?? []).map((preset) => preset.preset.id);
-        if (JSON.stringify(originalOrder) !== JSON.stringify(nextOrder))
+        const sameMembers =
+          originalOrder.length === nextOrder.length &&
+          originalOrder.every((id) => nextOrder.includes(id));
+        if (sameMembers && JSON.stringify(originalOrder) !== JSON.stringify(nextOrder))
           instructionChanges.push({
             target: 'preset-order',
             before: originalOrder,

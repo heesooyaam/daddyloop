@@ -18,7 +18,7 @@ This page records current coverage. A check means that the capability is availab
 | Submit saved work and publish reviews      | Automatic | Automatic                                         | Automatic                                         | No manual action; revision and provider checks still apply  |
 | Approve a plan                             | Yes       | Yes, with a separate confirmation                 | Yes, with a separate confirmation                 | None                                                        |
 | View CI state and record a reasoned waiver | Yes       | Yes; `/waive <reason>` confirms the exact version | Yes; `/waive <reason>` confirms the exact version | None                                                        |
-| Read worker reports                        | Yes       | Latest task summary and daddy’s conversation      | Through daddy’s conversation                      | Dedicated Telegram history belongs to the neighboring task  |
+| Read worker reports                        | Yes       | Yes; the private task card shows the latest eight | Yes; the group card opens the same private detail | None                                                        |
 
 Telegram action buttons contain only a short-lived reference to service state. The saved reference binds the paired owner, chat, topic, session, task, revision and generation. The confirmation calls the same service method as the website. The coordinator’s ordinary reply never grants permission.
 

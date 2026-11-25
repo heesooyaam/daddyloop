@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { presetParts } from './preset-parts.js';
 import { effectiveInstructions } from './instruction-compose.js';
+import { instructionPresetFingerprint } from './preset-fingerprint.js';
 export { effectiveInstructions } from './instruction-compose.js';
 
 const text = z
@@ -115,6 +116,7 @@ const skillsChangeSchema = z
 const presetSelectionSchema = z
   .object({
     revision: z.number().int().positive(),
+    snapshot: z.string().regex(/^[a-f0-9]{16}$/),
     enabled: z.boolean(),
     omit: z.array(z.string().max(100)).max(26),
   })
@@ -174,6 +176,7 @@ export function applyInstructionChanges(
     entry
       ? {
           revision: entry.preset.revision,
+          snapshot: instructionPresetFingerprint(entry.preset),
           enabled: entry.enabled,
           omit: entry.omit,
         }
@@ -186,7 +189,7 @@ export function applyInstructionChanges(
     const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
-  for (const change of changes.filter((change) => change.target !== 'preset-order')) {
+  for (const change of changes) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
       throw new Error('instruction_conflict');
@@ -201,9 +204,12 @@ export function applyInstructionChanges(
       } else {
         const existing = index >= 0 ? presets[index] : undefined;
         const preset =
-          existing?.preset.revision === change.after.revision
+          existing?.preset.revision === change.after.revision &&
+          instructionPresetFingerprint(existing.preset) === change.after.snapshot
             ? existing.preset
             : resolvePreset(change.id, change.after.revision);
+        if (instructionPresetFingerprint(preset) !== change.after.snapshot)
+          throw new Error('instruction_conflict');
         const selected = {
           preset,
           enabled: change.after.enabled,

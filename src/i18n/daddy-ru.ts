@@ -465,6 +465,8 @@ export const daddyRu: Record<string, string> = {
   'Approve plan': 'Подтвердить план',
   'Original requirements': 'Исходные требования',
   'View original requirements': 'Открыть исходные требования',
+  'View task details': 'Открыть подробности задачи',
+  'No worker reports yet.': 'Отчётов воркеров пока нет.',
   'Use --base BRANCH and --scope SUBFOLDER before -- REPOSITORY.':
     'Укажи --base ВЕТКА и --scope ПОДПАПКА перед -- РЕПОЗИТОРИЙ.',
   'For one branch or subfolder, send /repo --base BRANCH --scope SUBFOLDER -- REPOSITORY. Omit either option when it is not needed.':

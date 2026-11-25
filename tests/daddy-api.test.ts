@@ -6,6 +6,7 @@ import { registerDaddy } from '../src/server/daddy.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { healthy, catalogue } from './planning-fixture.js';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
+import { instructionPresetFingerprint } from '../src/core/preset-fingerprint.js';
 
 it('lists session counts and running roles without reading job or conversation history', async () => {
   const f = daddyFixture(),
@@ -262,6 +263,7 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     selected = (preset: typeof presetA, enabled = true) => ({ preset, enabled, omit: [] }),
     state = (preset: typeof presetA, enabled = true) => ({
       revision: preset.revision,
+      snapshot: instructionPresetFingerprint(preset),
       enabled,
       omit: [],
     }),
@@ -282,6 +284,56 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     },
   });
   try {
+    const concurrent = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: { daddy: {}, worker: {}, presets: [selected(presetA)] },
+    });
+    for (const preset of [presetB, presetC]) {
+      const added = await app.inject({
+        method: 'POST',
+        url: `/api/daddy/sessions/${concurrent.id}/instructions-patch`,
+        payload: {
+          changes: [{ target: 'preset', id: preset.id, before: null, after: state(preset) }],
+        },
+      });
+      expect(added.statusCode).toBe(200);
+    }
+    expect(
+      f.daddy.group(concurrent.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetA.id, presetB.id, presetC.id]);
+    const originalOrder = [presetA.id, presetB.id, presetC.id],
+      firstOrder = [presetB.id, presetC.id, presetA.id];
+    const firstReorder = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${concurrent.id}/instructions-patch`,
+      payload: {
+        changes: [{ target: 'preset-order', before: originalOrder, after: firstOrder }],
+      },
+    });
+    expect(firstReorder.statusCode).toBe(200);
+    const staleReorder = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${concurrent.id}/instructions-patch`,
+      payload: {
+        changes: [
+          {
+            target: 'preset-order',
+            before: originalOrder,
+            after: [presetA.id, presetC.id, presetB.id],
+          },
+        ],
+      },
+    });
+    expect(staleReorder.statusCode).toBe(409);
+    const repeated = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${concurrent.id}/instructions-patch`,
+      payload: {
+        changes: [{ target: 'preset-order', before: originalOrder, after: firstOrder }],
+      },
+    });
+    expect(repeated.statusCode).toBe(200);
+
     const first = await app.inject({
       method: 'POST',
       url: `/api/daddy/sessions/${group.id}/instructions-patch`,
@@ -349,6 +401,37 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     expect(
       reordered.json().group.instructions.presets.map((entry: any) => entry.preset.id),
     ).toEqual([presetC.id, presetA.id, presetB.id]);
+
+    const imported = structuredClone(reordered.json().group.instructions);
+    const importedA = imported.presets.find((entry: any) => entry.preset.id === presetA.id);
+    importedA.preset.instructions.daddy.prompt = 'Imported text with the same ID and revision';
+    const fullImport = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/settings`,
+      payload: { instructions: imported },
+    });
+    expect(fullImport.statusCode).toBe(200);
+    const collision = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'worker.prompt', before: 'Changed prompt', after: 'Must not be saved' },
+          {
+            target: 'preset',
+            id: presetA.id,
+            before: state(presetA, false),
+            after: null,
+          },
+        ],
+      },
+    });
+    expect(collision.statusCode).toBe(409);
+    expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('Changed prompt');
+    expect(
+      f.daddy.group(group.id).instructions?.presets?.find((entry) => entry.preset.id === presetA.id)
+        ?.preset.instructions.daddy.prompt,
+    ).toBe('Imported text with the same ID and revision');
 
     const conflict = await app.inject({
       method: 'POST',

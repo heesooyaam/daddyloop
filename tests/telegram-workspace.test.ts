@@ -549,6 +549,76 @@ it('applies a one-task branch and subfolder without changing workspace defaults'
     await f.close();
   }
 });
+it('browses through a plain server directory before offering repository confirmation', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  vi.spyOn(f.workspaces, 'browse').mockImplementation(async (path?: string) => ({
+    path: path ?? '',
+    parent: path ? '/root' : null,
+    directories: path
+      ? [{ name: 'Nested repository', path: '/root/repo' }]
+      : [{ name: 'Plain root', path: '/root' }],
+    truncated: false,
+  }));
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => {
+    if (input?.path === '/root') throw new Error('Not a repository');
+    return {
+      ...workspace,
+      repoPath: input?.path ?? workspace.repoPath,
+      scope: '',
+      base: 'main',
+    };
+  });
+  let id = 520;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    await bot.handle(message('/repo https://example.test/source.git'));
+    await bot.handle(click(button('Browse server folders').callback_data));
+    await bot.handle(click(button('Plain root').callback_data));
+    expect(button('Nested repository')).toBeTruthy();
+    expect(button('Use this folder once')).toBeUndefined();
+    await bot.handle(click(button('Nested repository').callback_data));
+    expect(button('Use this folder once')).toBeTruthy();
+    expect(sent.at(-1).text).toContain('/root/repo');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
 it('expires, cancels and isolates private repository input for its original route', async () => {
   const f = daddyFixture(),
     sent: { destination: any; card: any }[] = [];
