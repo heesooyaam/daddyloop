@@ -507,6 +507,74 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
   }
 });
 
+it('reconciles the private recovery route as soon as a new topic is created', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 50;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    return Response.json({
+      ok: true,
+      result:
+        method === 'createForumTopic'
+          ? { message_thread_id: 31 }
+          : method === 'sendMessage'
+            ? { message_id: ++nextMessageId }
+            : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'New recovery topic' });
+  const reply = f.store.daddyMessage(group.id, 'agent', 'A1');
+  const privateNotification = `telegram:dialog:7:0:${reply.id}`;
+  const legacy = new TelegramDelivery(f.store, api, 'fixture_bot');
+  api.delivery = legacy;
+  await legacy.stop();
+  await legacy.send({ chatId: 7 }, new TelegramText().add(reply.text), {
+    groupId: group.id,
+    key: `message:${reply.id}`,
+    replace: true,
+    notificationId: privateNotification,
+  });
+  await legacy.send({ chatId: 7 }, new TelegramText().add('First menu'), { key: 'menu:first' });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  api.delivery = delivery;
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    const topic = await workspace.ensureTopic(group);
+    expect(topic).toMatchObject({ chatId: -10042, threadId: 31 });
+    await delivery.send({ chatId: 7 }, new TelegramText().add('Second menu'), {
+      key: 'menu:second',
+    });
+    await delivery.send(topic!, new TelegramText().add(reply.text), {
+      groupId: group.id,
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: `telegram:dialog:-10042:31:${reply.id}`,
+    });
+    await delivery.finishRecovery();
+    await delivery.flush(10);
+    const sent = calls.filter((call) => call.method === 'sendMessage');
+    expect(sent.filter((call) => call.body.chat_id === 7).map((call) => call.body.text)).toEqual([
+      'First menu',
+      'Second menu',
+    ]);
+    expect(
+      sent
+        .filter((call) => call.body.chat_id === -10042 && call.body.message_thread_id === 31)
+        .map((call) => call.body.text),
+    ).toEqual(['A1']);
+  } finally {
+    await workspace.stop();
+    await delivery.stop();
+    await legacy.stop();
+    await f.close();
+  }
+});
+
 it('migrates a queued legacy progress delivery when the same message becomes final', async () => {
   const f = daddyFixture();
   const calls: { method: string; body: Record<string, any> }[] = [];

@@ -351,6 +351,10 @@ export class TelegramWorkspace {
           return topic ? { found: true, value: topic } : { found: false };
         },
       )
+      .then((topic) => {
+        this.api.delivery?.reconcileGroupRoute(group.id, topic);
+        return topic;
+      })
       .catch((error) => {
         if (error instanceof AppError && error.code === 'telegram_error')
           this.store.db

@@ -819,6 +819,114 @@ it('releases private navigation after a saved reply moves to a topic', async () 
   }
 });
 
+it('reactivates an undelivered reply when its previous route becomes current again', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  let restarted: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const reply = f.store.daddyMessage('group', 'agent', 'A1');
+    const privateDestination = { chatId: 7 };
+    const privateNotification = `telegram:dialog:7:0:${reply.id}`;
+    await f.queue.send(privateDestination, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: privateNotification,
+    });
+    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 60000);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    const topic = { chatId: -10042, threadId: 4 };
+    restored.reconcileGroupRoute('group', topic);
+    const cancelled = f.store.db
+      .prepare(
+        "SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' AND json_extract(value,'$.options.notificationId')=?",
+      )
+      .get(privateNotification)!;
+    const legacyCancelled = JSON.parse(String(cancelled.value));
+    delete legacyCancelled.cancelledForRoute;
+    f.store.setSetting(String(cancelled.key), legacyCancelled);
+    await restored.send(topic, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: `telegram:dialog:-10042:4:${reply.id}`,
+    });
+    restored.reconcileGroupRoute('group', privateDestination);
+    await restored.send(privateDestination, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: privateNotification,
+    });
+    await restored.finishRecovery();
+    f.advance(60000);
+    await restored.flush(10);
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text, body.chat_id])).toEqual([
+      ['sendMessage', 'A1', 7],
+    ]);
+    await restored.stop();
+    restarted = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restarted.flush(10);
+    expect(f.call).toHaveBeenCalledOnce();
+  } finally {
+    await restarted?.stop();
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it.each([
+  ['private chat', { chatId: 7 }],
+  ['topic', { chatId: -10042, threadId: 4 }],
+])(
+  'reconciles a sent notification with its %s delivery after restart',
+  async (_route, destination) => {
+    const f = fixture();
+    let restored: TelegramDelivery | undefined;
+    let restarted: TelegramDelivery | undefined;
+    try {
+      const reply = f.store.daddyMessage('group', 'agent', 'A1');
+      const notificationId = `telegram:dialog:${destination.chatId}:${
+        'threadId' in destination ? destination.threadId : 0
+      }:${reply.id}`;
+      f.store.db
+        .prepare('INSERT INTO notifications VALUES(?,?,?)')
+        .run(notificationId, 'pending', reply.at);
+      await f.queue.send(destination, text(reply.text), {
+        groupId: 'group',
+        key: `message:${reply.id}`,
+        replace: true,
+        notificationId,
+      });
+      await f.queue.stop();
+      const row = f.store.db
+        .prepare(
+          "SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' AND json_extract(value,'$.options.notificationId')=?",
+        )
+        .get(notificationId)!;
+      const interrupted = JSON.parse(String(row.value));
+      interrupted.status = 'sending';
+      f.store.setSetting(String(row.key), interrupted);
+      await f.queue.send(destination, text('Menu'), { key: `menu:${destination.chatId}` });
+      restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restored.finishRecovery();
+      expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+        ['sendMessage', 'A1'],
+        ['sendMessage', 'Menu'],
+      ]);
+      await restored.stop();
+      restarted = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restarted.flush(10);
+      expect(f.call).toHaveBeenCalledTimes(2);
+    } finally {
+      await restarted?.stop();
+      await restored?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('keeps one canonical delivery across repeated owner-mention changes', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -966,6 +1074,52 @@ it('does not revive a cancelled progress tail after its late failure', async () 
     expect(f.call).toHaveBeenCalledTimes(4);
   } finally {
     rejectTail(new Error('cleanup'));
+    await f.close();
+  }
+});
+
+it('persists retry_after from an obsolete request before sending its replacement', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  let rejectProgress = (_error: Error) => {};
+  try {
+    const delayed = new Promise<never>((_resolve, reject) => {
+      rejectProgress = reject;
+    });
+    f.call.mockImplementationOnce(() => delayed);
+    const progress = f.queue.send({ chatId: 7 }, text('Progress'), {
+      key: 'message:reply',
+      replace: true,
+    });
+    await vi.waitFor(() => expect(f.call).toHaveBeenCalledOnce());
+    await f.queue.send({ chatId: 7 }, text('Final'), {
+      key: 'message:reply',
+      replace: true,
+      final: true,
+    });
+    await f.queue.send({ chatId: 7 }, text('Menu'), { key: 'menu' });
+    rejectProgress(
+      Object.assign(new Error('Too many requests'), { retryAfter: 60, telegramStatus: 429 }),
+    );
+    await progress;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(f.store.setting('telegram.deliveryLimit:test_bot')).toBe(f.clock() + 60000);
+    expect(f.call).toHaveBeenCalledOnce();
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(59999);
+    await restored.flush(10);
+    expect(f.call).toHaveBeenCalledOnce();
+    f.advance(1);
+    await restored.flush(10);
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', 'Progress'],
+      ['sendMessage', 'Final'],
+      ['sendMessage', 'Menu'],
+    ]);
+  } finally {
+    rejectProgress(new Error('cleanup'));
+    await restored?.stop();
     await f.close();
   }
 });

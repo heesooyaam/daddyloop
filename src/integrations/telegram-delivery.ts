@@ -42,6 +42,7 @@ type Delivery = {
   messages: { id: number; fingerprint: string }[];
   recoveryOrder?: number;
   queueOrder?: number;
+  cancelledForRoute?: boolean;
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -71,6 +72,7 @@ export class TelegramDelivery {
   private retainedDeferredKeys = new Set<string>();
   private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
+  private sentNotifications = new Set<string>();
   private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
@@ -126,6 +128,17 @@ export class TelegramDelivery {
             : undefined);
         if (groupId && deletedGroups.has(groupId)) {
           value.status = 'cancelled';
+          this.store.setSetting(key, value);
+          continue;
+        }
+        if (
+          value.options.notificationId &&
+          this.sentNotifications.has(value.options.notificationId) &&
+          this.fullyAcknowledged(value)
+        ) {
+          value.status = 'sent';
+          value.attempts = 0;
+          value.error = undefined;
           this.store.setSetting(key, value);
           continue;
         }
@@ -207,13 +220,14 @@ export class TelegramDelivery {
     this.releaseUnblocked(row.value.destination);
     if (flush) void this.flush();
   }
-  private cancel(key: string, value: Delivery) {
+  private cancel(key: string, value: Delivery, forRoute = false) {
     this.historyDeferredKeys.delete(key);
     this.deferredKeys.delete(key);
     this.deferredValues.delete(key);
     this.retainedDeferredKeys.delete(key);
     value.revision++;
     value.status = 'cancelled';
+    value.cancelledForRoute = forRoute || undefined;
     if (value.options.notificationId)
       this.store.db
         .prepare("UPDATE notifications SET status='superseded' WHERE id=? AND status!='sent'")
@@ -242,7 +256,7 @@ export class TelegramDelivery {
       )
         continue;
       released.set(this.route(value.destination), value.destination);
-      this.cancel(key, value);
+      this.cancel(key, value, true);
     }
     for (const previous of released.values()) this.releaseUnblocked(previous);
     if (released.size) void this.flush();
@@ -364,6 +378,9 @@ export class TelegramDelivery {
     return notificationIdentity(notificationId).split(':').at(-1);
   }
   private loadRecoveryIndex(deliveries: Delivery[]) {
+    const neededNotifications = new Set(
+      deliveries.map((value) => value.options.notificationId).filter((id): id is string => !!id),
+    );
     const needed = new Set(
       deliveries
         .map((value) => this.notificationMessageId(value))
@@ -406,7 +423,9 @@ export class TelegramDelivery {
     for (const row of this.store.db
       .prepare("SELECT id FROM notifications WHERE status='sent' AND id LIKE 'telegram:dialog:%'")
       .all()) {
-      const identity = notificationIdentity(String(row.id));
+      const notificationId = String(row.id);
+      if (neededNotifications.has(notificationId)) this.sentNotifications.add(notificationId);
+      const identity = notificationIdentity(notificationId);
       const parts = identity.split(':');
       const messageId = parts.at(-1);
       const message = messageId ? this.storedMessages.get(messageId) : undefined;
@@ -464,6 +483,12 @@ export class TelegramDelivery {
         !!chunks[index] &&
         message.fingerprint ===
           digest(this.messageBody(value.destination, value.content, chunks, index)),
+    );
+  }
+  private fullyAcknowledged(value: Delivery) {
+    return (
+      value.messages.length === splitTelegramText(value.content).length &&
+      this.acknowledgedPartsMatch(value)
     );
   }
   private acknowledgedPartsMatchSibling(value: Delivery) {
@@ -551,6 +576,7 @@ export class TelegramDelivery {
       const receipt = this.receiptFor(row.value.messages, row.value);
       row.value.revision++;
       row.value.status = 'cancelled';
+      row.value.cancelledForRoute = undefined;
       this.store.transaction(() => {
         if (receipt) this.store.setSetting(receipt.key, receipt.value);
         this.store.setSetting(row.key, row.value);
@@ -601,6 +627,11 @@ export class TelegramDelivery {
   }
   hasAcknowledgedMessage(destination: TelegramDestination, notificationId: string) {
     return !!this.messageDelivery(destination, notificationId)?.value.messages.length;
+  }
+  private notificationWasSent(notificationId: string) {
+    return !!this.store.db
+      .prepare('SELECT 1 FROM notifications WHERE id=? AND status=?')
+      .get(notificationId, 'sent');
   }
   private cancelAlternatePending(
     key: string,
@@ -664,6 +695,13 @@ export class TelegramDelivery {
     value.recoveryOrder = this.messageOrder(value);
     return value;
   }
+  private async kick() {
+    if (!this.recovering && !this.running && !this.stopped) await this.flush(1);
+    else if (!this.recovering && this.running && !this.stopped)
+      void this.running.then(() => {
+        if (!this.stopped) return this.flush(1);
+      });
+  }
   enqueueReaction(destination: TelegramDestination, messageId: number) {
     const key = prefix + digest([this.bot, 'reaction', destination.chatId, messageId]);
     if (this.pending.has(key) || this.store.setting<Delivery>(key)) return;
@@ -719,6 +757,18 @@ export class TelegramDelivery {
       options.notificationId?.startsWith('telegram:dialog:')
     )
       this.cancelAlternatePending(key, destination, options.notificationId);
+    if (
+      value?.status === 'cancelled' &&
+      (value.cancelledForRoute ||
+        (!!options.replace &&
+          !!options.notificationId?.startsWith('telegram:dialog:') &&
+          !this.notificationWasSent(options.notificationId)))
+    ) {
+      value.revision++;
+      value.status = 'queued';
+      value.cancelledForRoute = undefined;
+      this.save(key, value);
+    }
     if (value && this.deferredKeys.has(key)) {
       this.activateDeferred(key, value);
     }
@@ -733,8 +783,10 @@ export class TelegramDelivery {
       if (
         digest([value.content, value.options.final, value.options.pin]) ===
         digest([content, options.final, options.pin])
-      )
+      ) {
+        await this.kick();
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
+      }
       if (
         value.options.notificationId &&
         value.options.notificationId !== options.notificationId &&
@@ -750,6 +802,7 @@ export class TelegramDelivery {
       };
       value.revision++;
       value.status = 'queued';
+      value.cancelledForRoute = undefined;
       value.nextAttemptAt = this.clock();
     } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
@@ -763,11 +816,7 @@ export class TelegramDelivery {
         other.nextAttemptAt = this.clock();
         this.save(otherKey, other);
       }
-    if (!this.recovering && !this.running && !this.stopped) await this.flush(1);
-    else if (!this.recovering && this.running && !this.stopped)
-      void this.running.then(() => {
-        if (!this.stopped) return this.flush(1);
-      });
+    await this.kick();
     return {
       status: value.status === 'sent' ? 'sent' : 'queued',
       deliveryId: value.id,
@@ -975,9 +1024,9 @@ export class TelegramDelivery {
       } else if (!this.obsolete(value, revision)) value.status = 'queued';
       this.save(key, value);
     } catch (error) {
+      const rateLimitUntil = this.applyRateLimit(error);
       if (this.obsolete(value, revision)) return;
       const status = Number((error as { telegramStatus?: number })?.telegramStatus);
-      const rateLimitUntil = this.applyRateLimit(error);
       if (options.operation === 'pin') {
         const description = String(error);
         const previousError = value.error;
