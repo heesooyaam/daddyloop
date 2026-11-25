@@ -1,3 +1,5 @@
+import { dynamicTools } from '../core/broker.js';
+import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
@@ -678,6 +680,14 @@ export class Worker {
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }
+      const tools =
+        job.kind === 'verify_merge'
+          ? [reviewDecisionTool]
+          : isolatedReview
+            ? []
+            : isTicket(task)
+              ? dynamicTools
+              : [...dynamicTools, reviewDecisionTool];
       let reviewQuota: GitHubRetryError | undefined;
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
@@ -689,18 +699,15 @@ export class Worker {
               ...(this.workspaces.readPaths?.(task) ?? []),
               ...(preservedCopy ? [preservedCopy] : []),
             ],
-        prompt: [
-          buildContext(store, task, job),
+        prompt: buildContext(store, task, job, [
           preservedCopy &&
             `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
           job.kind === 'review' &&
             task.draftRecheck &&
             `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
-        ]
-          .filter(Boolean)
-          .join('\n\n'),
+        ]),
         signal: abort.signal,
-        tools: isolatedReview ? [] : undefined,
+        tools,
         onSession: (threadId, turnId) => {
           const current = store.getTask(job.taskId);
           if (current.generation !== job.generation || abort.signal.aborted) return;
@@ -736,6 +743,17 @@ export class Worker {
         onEvent: (type, data) => store.event(job.taskId, type, redactEvent(data), job.id),
         onTool: async (name, args, callId) => {
           try {
+            if (abort.signal.aborted)
+              throw new AppError('run_cancelled', 'Run is no longer active');
+            if (name === reviewDecisionTool.name) {
+              if (!tools.includes(reviewDecisionTool))
+                throw new AppError(
+                  'role_forbidden',
+                  'Decision history is unavailable to this run',
+                  403,
+                );
+              return this.engine.broker.readDecisions(job, task, args);
+            }
             return await this.engine.broker.call(job, name, args, callId);
           } catch (error) {
             if (job.kind === 'review' && error instanceof GitHubRetryError) reviewQuota = error;
