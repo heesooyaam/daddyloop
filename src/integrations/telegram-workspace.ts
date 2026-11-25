@@ -2230,12 +2230,18 @@ export class TelegramWorkspace {
           : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;
         const id = reminder ? nextReminderId(this.store, originalId, Date.now()) : originalId;
         if (!id) return;
+        // An edit to a progress message does not send a fresh mention notification.
+        const replaceMessage = !ping && message?.sender === 'agent';
+        const deliveryKey = replaceMessage ? `message:${message!.id}` : id;
         const notificationStatus = String(
           this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
         );
+        const routeCancelled =
+          notificationStatus === 'superseded' &&
+          !!this.api.delivery?.canReactivateRoute(destination, deliveryKey, id);
         if (
           notificationStatus === 'sent' ||
-          (notificationStatus === 'superseded' && message?.sender !== 'agent')
+          (notificationStatus === 'superseded' && message?.sender !== 'agent' && !routeCancelled)
         )
           return;
         this.store.db
@@ -2272,8 +2278,6 @@ export class TelegramWorkspace {
           if (message.sender === 'user') text.add(message.text);
           else text.markdown(message.text);
         }
-        // An edit to a progress message does not send a fresh mention notification.
-        const replaceMessage = !ping && message?.sender === 'agent';
         const url = task && task.ref.kind !== 'ticket' && safeLink(task.ref.url);
         const card = task
           ? {
@@ -2288,7 +2292,7 @@ export class TelegramWorkspace {
           : text;
         const result = await this.api.send(destination, card, undefined, {
           groupId: group.id,
-          key: replaceMessage ? `message:${message!.id}` : id,
+          key: deliveryKey,
           replace: replaceMessage,
           replacePending: message?.sender === 'agent',
           order: message?.at ?? event.at,

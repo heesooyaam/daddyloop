@@ -73,6 +73,7 @@ export class TelegramDelivery {
   private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
   private sentNotifications = new Set<string>();
+  private cancelledRouteNotifications = new Set<string>();
   private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
@@ -116,6 +117,8 @@ export class TelegramDelivery {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       value.recoveryOrder = this.messageOrder(value);
       value.queueOrder = queueOrder;
+      if (value.status === 'cancelled' && value.cancelledForRoute && value.options.notificationId)
+        this.cancelledRouteNotifications.add(value.options.notificationId);
       const restoreThroughHistory =
         value.options.notificationId?.startsWith('telegram:dialog:') &&
         this.storedMessage(value) !== undefined;
@@ -228,6 +231,8 @@ export class TelegramDelivery {
     value.revision++;
     value.status = 'cancelled';
     value.cancelledForRoute = forRoute || undefined;
+    if (forRoute && value.options.notificationId)
+      this.cancelledRouteNotifications.add(value.options.notificationId);
     if (value.options.notificationId)
       this.store.db
         .prepare("UPDATE notifications SET status='superseded' WHERE id=? AND status!='sent'")
@@ -633,6 +638,20 @@ export class TelegramDelivery {
       .prepare('SELECT 1 FROM notifications WHERE id=? AND status=?')
       .get(notificationId, 'sent');
   }
+  canReactivateRoute(
+    destination: TelegramDestination,
+    deliveryKey: string,
+    notificationId: string,
+  ) {
+    destination = {
+      chatId: destination.chatId,
+      ...(destination.threadId === undefined ? {} : { threadId: destination.threadId }),
+    };
+    const key = prefix + digest([this.bot, destination, deliveryKey]);
+    const value = this.store.setting<Delivery>(key);
+    if (value?.status === 'cancelled' && value.cancelledForRoute) return true;
+    return this.cancelledRouteNotifications.has(notificationId);
+  }
   private cancelAlternatePending(
     key: string,
     destination: TelegramDestination,
@@ -778,8 +797,10 @@ export class TelegramDelivery {
         (options.order && value.options.order && options.order < value.options.order)
       )
         return { status: 'superseded', deliveryId: value.id };
-      if (!options.replace && !(options.replacePending && value.status !== 'sent'))
+      if (!options.replace && !(options.replacePending && value.status !== 'sent')) {
+        if (value.status === 'queued') await this.kick();
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
+      }
       if (
         digest([value.content, value.options.final, value.options.pin]) ===
         digest([content, options.final, options.pin])

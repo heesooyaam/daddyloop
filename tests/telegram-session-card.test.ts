@@ -78,6 +78,99 @@ it('pins one topic status card and edits it as the queue changes across restarts
   }
 });
 
+it.each(['en', 'ru'] as const)(
+  'reuses one pinned status card per route after switching back and restarting: %s',
+  async (locale) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const f = daddyFixture();
+    const sent: { method: string; body: Record<string, any> }[] = [];
+    let nextMessageId = 100;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      sent.push({ method, body });
+      return Response.json({
+        ok: true,
+        result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+      });
+    });
+    const privateRoute = { chatId: 7, ownerId: 7 };
+    const topicRoute = { chatId: -10042, threadId: 17, ownerId: 7 };
+    let route = privateRoute;
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    const integration = () => {
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+      return new TelegramProgress(
+        f.store,
+        api,
+        'telegram.progress:fixture_bot:',
+        () => locale,
+        () => route,
+      );
+    };
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Route status' });
+    let progress = integration();
+    try {
+      await progress.ensure(group.id);
+      await api.delivery!.flush(10);
+      const progressKey = `telegram.progress:fixture_bot:${group.id}`;
+      const firstFormat = f.store.setting<{ cards: unknown[] }>(progressKey)!;
+      f.store.setSetting(progressKey, firstFormat.cards[0]);
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+      route = topicRoute;
+      vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+      await progress.ensure(group.id);
+      await api.delivery!.flush(10);
+      await progress.stop();
+      await api.delivery!.stop();
+
+      progress = integration();
+      f.store.setSetting('telegram.group', null);
+      route = privateRoute;
+      vi.setSystemTime(new Date('2026-01-01T00:02:00.000Z'));
+      await progress.ensure(group.id);
+      await api.delivery!.flush(10);
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+      route = topicRoute;
+      vi.setSystemTime(new Date('2026-01-01T00:03:00.000Z'));
+      await progress.ensure(group.id);
+      await api.delivery!.flush(10);
+
+      expect(sent.map(({ method }) => method)).toEqual([
+        'sendMessage',
+        'pinChatMessage',
+        'sendMessage',
+        'pinChatMessage',
+        'editMessageText',
+        'editMessageText',
+      ]);
+      expect(
+        sent
+          .filter(({ method }) => method === 'pinChatMessage')
+          .map(({ body }) => [body.chat_id, body.message_id]),
+      ).toEqual([
+        [7, 101],
+        [-10042, 102],
+      ]);
+      expect(
+        sent
+          .filter(({ method }) => method === 'editMessageText')
+          .map(({ body }) => [body.chat_id, body.message_id]),
+      ).toEqual([
+        [7, 101],
+        [-10042, 102],
+      ]);
+      expect(sent.some(({ method }) => method.startsWith('unpin'))).toBe(false);
+    } finally {
+      await progress.stop();
+      await api.delivery?.stop();
+      await f.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();
   const sent: { method: string; body: Record<string, any> }[] = [];

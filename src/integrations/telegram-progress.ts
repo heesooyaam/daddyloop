@@ -199,6 +199,20 @@ type LiveCard = {
   signature?: string;
   updatedAt?: number;
 };
+type StoredCards = { cards: LiveCard[] };
+
+function storedCards(value: string): LiveCard[] {
+  const parsed = JSON.parse(value) as LiveCard | StoredCards;
+  return 'cards' in parsed ? parsed.cards : [parsed];
+}
+
+function sameRoute(left: StatusRoute, right: StatusRoute) {
+  return (
+    left.ownerId === right.ownerId &&
+    left.chatId === right.chatId &&
+    left.threadId === right.threadId
+  );
+}
 
 export class TelegramProgress {
   private timer?: NodeJS.Timeout;
@@ -255,10 +269,7 @@ export class TelegramProgress {
       this.store.db
         .prepare('SELECT key,value FROM settings WHERE key GLOB ?')
         .all(this.prefix + '*')
-        .map((row) => [
-          String(row.key).slice(this.prefix.length),
-          JSON.parse(String(row.value)) as LiveCard,
-        ]),
+        .map((row) => [String(row.key).slice(this.prefix.length), storedCards(String(row.value))]),
     );
     const liveGroups = this.store
       .groups()
@@ -272,18 +283,14 @@ export class TelegramProgress {
     for (const group of groups) {
       if (!this.timer && !forcedGroupId) return;
       const key = this.prefix + group.id;
-      let card = cards.get(group.id);
-      const route = this.destination(group.id, card?.route);
-      if (!route) continue;
-      if (
-        card &&
-        (card.route.ownerId !== route.ownerId ||
-          card.route.chatId !== route.chatId ||
-          card.route.threadId !== route.threadId)
-      ) {
-        this.clearCard(key);
-        card = undefined;
+      const groupCards = cards.get(group.id) ?? [];
+      let route = this.destination(group.id);
+      for (const previous of groupCards) {
+        if (route) break;
+        route = this.destination(group.id, previous.route);
       }
+      if (!route) continue;
+      let card = groupCards.find((candidate) => sameRoute(candidate.route, route));
       const status = snapshot(this.store, group, jobs, coordination);
       const topic = route.threadId !== undefined;
       if (!card && !topic && !status.active && forcedGroupId !== group.id) continue;
@@ -298,7 +305,8 @@ export class TelegramProgress {
         continue;
       if (!card) {
         card = { id: randomUUID(), route };
-        this.store.setSetting(key, card);
+        groupCards.push(card);
+        this.store.setSetting(key, { cards: groupCards } satisfies StoredCards);
       }
       await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
         key: `progress:${card.id}`,
@@ -309,7 +317,7 @@ export class TelegramProgress {
       });
       card.signature = signature;
       card.updatedAt = now;
-      this.store.setSetting(key, card);
+      this.store.setSetting(key, { cards: groupCards } satisfies StoredCards);
     }
   }
 

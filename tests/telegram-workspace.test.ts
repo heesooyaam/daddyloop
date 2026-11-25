@@ -575,6 +575,148 @@ it('reconciles the private recovery route as soon as a new topic is created', as
   }
 });
 
+it.each(['en', 'ru'] as const)(
+  'requeues an open task question and a web message after both route changes: %s',
+  async (locale) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 70;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Moving route' });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Choose the layout',
+      requestId: 'question-task',
+    });
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      reason: 'Which layout?',
+      inputRequest: { runId: 'question', role: 'author', generation: task.generation },
+    });
+    const planTask = await f.daddy.createTask(group.id, {
+      requirements: 'Approve the implementation plan',
+      requestId: 'plan-task',
+    });
+    f.store.saveTask({
+      ...planTask,
+      state: 'awaiting_plan_approval',
+      reason: 'Approve the plan?',
+    });
+    const user = f.store.daddyMessage(group.id, 'user', 'Message from web');
+    const taskNotification = `telegram:question:7:${task.id}:question`;
+    const planRequest = `plan:${planTask.contextVersion}:${planTask.revision?.head}:${planTask.revision?.base}:`;
+    const planNotification = `telegram:question:7:${planTask.id}:${planRequest}`;
+    const privateUserNotification = `telegram:dialog:7:0:${user.id}`;
+    const topicUserNotification = `telegram:dialog:-10042:31:${user.id}`;
+    f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const deliveryStatusAt = (chatId: number, notificationId: string) =>
+      f.store.db
+        .prepare(
+          `SELECT json_extract(value,'$.status') AS status FROM settings
+           WHERE key LIKE 'telegram.delivery:%'
+           AND json_extract(value,'$.destination.chatId')=?
+           AND json_extract(value,'$.options.notificationId')=?`,
+        )
+        .get(chatId, notificationId)?.status;
+    try {
+      workspace.replay();
+      await vi.waitFor(() => {
+        expect(deliveryStatusAt(7, taskNotification)).toBe('queued');
+        expect(deliveryStatusAt(7, planNotification)).toBe('queued');
+        expect(deliveryStatusAt(7, privateUserNotification)).toBe('queued');
+      });
+
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+      workspace.replay();
+      await vi.waitFor(() => {
+        expect(deliveryStatusAt(-10042, taskNotification)).toBe('queued');
+        expect(deliveryStatusAt(-10042, planNotification)).toBe('queued');
+        expect(deliveryStatusAt(-10042, topicUserNotification)).toBe('queued');
+      });
+
+      f.store.setSetting('telegram.group', null);
+      workspace.replay();
+      await vi.waitFor(() => {
+        expect(deliveryStatusAt(7, taskNotification)).toBe('queued');
+        expect(deliveryStatusAt(7, planNotification)).toBe('queued');
+        expect(deliveryStatusAt(7, privateUserNotification)).toBe('queued');
+      });
+      clock += 60000;
+      await api.delivery.flush(100);
+      const questions = calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.includes('Which layout?'),
+      );
+      const webMessages = calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.includes('Message from web'),
+      );
+      const planQuestions = calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.includes('Approve the plan?'),
+      );
+      expect(questions).toHaveLength(1);
+      expect(planQuestions).toHaveLength(1);
+      expect(webMessages).toHaveLength(1);
+      expect(questions[0].body).toMatchObject({ chat_id: 7 });
+      expect(planQuestions[0].body).toMatchObject({ chat_id: 7 });
+      expect(webMessages[0].body).toMatchObject({ chat_id: 7 });
+
+      f.store.saveTask({
+        ...f.store.getTask(task.id),
+        state: 'fixing',
+        inputRequest: undefined,
+      });
+      f.store.saveTask({ ...f.store.getTask(planTask.id), state: 'fixing' });
+      await workspace.stop();
+      await api.delivery.stop();
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+      workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+      workspace.replay();
+      await new Promise((resolve) => setImmediate(resolve));
+      await api.delivery.flush(100);
+      expect(
+        calls.filter(
+          (call) => call.method === 'sendMessage' && call.body.text?.includes('Which layout?'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) => call.method === 'sendMessage' && call.body.text?.includes('Approve the plan?'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) => call.method === 'sendMessage' && call.body.text?.includes('Message from web'),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await workspace.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('migrates a queued legacy progress delivery when the same message becomes final', async () => {
   const f = daddyFixture();
   const calls: { method: string; body: Record<string, any> }[] = [];
