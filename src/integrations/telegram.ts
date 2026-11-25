@@ -507,6 +507,7 @@ export class Telegram {
         this.username,
         () => this.locale(),
         value.usage,
+        () => this.refreshCommandMenus(),
       );
     if (value.voice)
       this.workspace?.configureVoice(
@@ -568,8 +569,7 @@ export class Telegram {
     this.api.delivery?.start();
     this.engine.store.changes.on('event', this.onEvent);
     this.polling = this.poll();
-    this.menuController = new AbortController();
-    this.menuSetup = this.installCommandMenus(this.menuController.signal);
+    this.refreshCommandMenus();
     this.currentUpdates();
     this.workspace?.start();
     const cleanup = lastScheduledCleanup(this.engine.store);
@@ -933,32 +933,94 @@ export class Telegram {
       .catch((error) => store.setSetting('telegram.error', redact(String(error))));
   }
   private async installCommandMenus(signal: AbortSignal) {
-    for (const scope of ['private', 'group'] as const) {
-      for (const language of ['', 'ru', 'en'] as const) {
-        const commands = telegramCommands(language || 'en', scope);
-        let delayMs = 3000;
-        while (!signal.aborted) {
-          try {
-            await this.api.call(
-              'setMyCommands',
+    const room = this.workspace?.room(),
+      installedChatIds = new Set([
+        ...(this.engine.store.setting<number[]>('telegram.menuGroupChatIds') ?? []),
+        ...(this.engine.store.setting<number>('telegram.menuGroupChatId')
+          ? [this.engine.store.setting<number>('telegram.menuGroupChatId')!]
+          : []),
+      ]);
+    const operations = (['', 'ru', 'en'] as const).flatMap((language) => {
+      const localized = language ? { language_code: language } : {};
+      return [
+        {
+          method: 'deleteMyCommands',
+          body: { scope: { type: 'all_group_chats' }, ...localized },
+        },
+        ...[...installedChatIds]
+          .filter((chatId) => chatId !== room?.chatId)
+          .map((chatId) => ({
+            method: 'deleteMyCommands',
+            body: { scope: { type: 'chat', chat_id: chatId }, ...localized },
+          })),
+        {
+          method: 'setMyCommands',
+          body: {
+            scope: { type: 'all_private_chats' },
+            ...localized,
+            commands: telegramCommands(language || 'en', 'private'),
+          },
+        },
+        ...(room
+          ? [
               {
-                scope: { type: scope === 'private' ? 'all_private_chats' : 'all_group_chats' },
-                ...(language ? { language_code: language } : {}),
-                commands,
+                method: 'setMyCommands',
+                body: {
+                  scope: { type: 'chat', chat_id: room.chatId },
+                  ...localized,
+                  commands: telegramCommands(language || 'en', 'group'),
+                },
               },
-              signal,
-            );
-            break;
-          } catch (error) {
-            if (signal.aborted) return;
-            this.menuError = redact(String(error));
-            await delay(delayMs, undefined, { signal }).catch(() => {});
-            delayMs = Math.min(delayMs * 2, 300000);
+            ]
+          : []),
+      ];
+    });
+    for (const operation of operations) {
+      let delayMs = 3000;
+      while (!signal.aborted) {
+        try {
+          await this.api.call(operation.method, operation.body, signal);
+          if (operation.method === 'setMyCommands' && operation.body.scope.type === 'chat') {
+            installedChatIds.add(operation.body.scope.chat_id!);
+            this.engine.store.setSetting('telegram.menuGroupChatIds', [...installedChatIds]);
           }
+          break;
+        } catch (error) {
+          if (signal.aborted) return;
+          this.menuError = redact(String(error));
+          const databaseLocked = /database is locked/i.test(String(error));
+          await delay(databaseLocked ? 50 : delayMs, undefined, { signal }).catch(() => {});
+          if (!databaseLocked) delayMs = Math.min(delayMs * 2, 300000);
         }
       }
     }
-    if (!signal.aborted) this.menuError = undefined;
+    let delayMs = 3000;
+    while (!signal.aborted) {
+      try {
+        this.engine.store.transaction(() => {
+          this.engine.store.setSetting('telegram.menuGroupChatId', room?.chatId ?? null);
+          this.engine.store.setSetting('telegram.menuGroupChatIds', room ? [room.chatId] : []);
+        });
+        this.menuError = undefined;
+        break;
+      } catch (error) {
+        if (signal.aborted) return;
+        this.menuError = redact(String(error));
+        const databaseLocked = /database is locked/i.test(String(error));
+        await delay(databaseLocked ? 50 : delayMs, undefined, { signal }).catch(() => {});
+        if (!databaseLocked) delayMs = Math.min(delayMs * 2, 300000);
+      }
+    }
+  }
+  private refreshCommandMenus() {
+    const previous = this.menuSetup;
+    this.menuController?.abort();
+    const controller = new AbortController();
+    this.menuController = controller;
+    this.menuSetup = (async () => {
+      await previous?.catch(() => {});
+      if (!controller.signal.aborted) await this.installCommandMenus(controller.signal);
+    })();
   }
   private async poll() {
     const store = this.engine.store;

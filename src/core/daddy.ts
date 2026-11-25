@@ -238,6 +238,8 @@ export class Daddy {
           id: task.id,
           title: task.title,
           state: task.state,
+          generation: task.generation,
+          pendingAuthorHead: task.pendingAuthorHead,
           statusLabel:
             githubActivityStatus(task, autoMerge, githubWait(this.store, task.ref)) ??
             activityStatus(item),

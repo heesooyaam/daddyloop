@@ -18,7 +18,16 @@ it('serves scoped Russian help and installs localized suggestions without consum
     sent.push({ method, body });
     return Response.json({
       ok: true,
-      result: method === 'setMyCommands' ? true : { message_id: sent.length },
+      result:
+        method === 'getChat'
+          ? { type: 'supergroup', is_forum: true, title: 'Replacement group' }
+          : method === 'getChatMember'
+            ? body.user_id === 7
+              ? { status: 'creator' }
+              : { status: 'administrator', can_manage_topics: true }
+            : ['setMyCommands', 'deleteMyCommands'].includes(method)
+              ? true
+              : { message_id: sent.length },
     });
   });
   const bot = new Telegram(f.engine, api, 'fixture_bot');
@@ -26,6 +35,7 @@ it('serves scoped Russian help and installs localized suggestions without consum
   setLocale(f.store, 'ru');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Fixture', ownerId: 7 });
+  f.store.setSetting('telegram.botId', 101);
   let id = 0;
   const msg = (text: string, group = false): Update => ({
     update_id: ++id,
@@ -48,7 +58,14 @@ it('serves scoped Russian help and installs localized suggestions without consum
         body.scope.type === 'all_private_chats',
       );
       expect(body.commands.some((x: { command: string }) => x.command === 'help')).toBe(true);
+      if (body.scope.type === 'chat') expect(body.scope.chat_id).toBe(-10042);
+      else expect(body.scope.type).toBe('all_private_chats');
     }
+    expect(
+      sent.filter(
+        (x) => x.method === 'deleteMyCommands' && x.body.scope.type === 'all_group_chats',
+      ),
+    ).toHaveLength(3);
     await bot.handle(msg('/help'));
     expect(messages().at(-1)?.body.text).toContain('/cleanup');
     await bot.handle(msg('/help@fixture_bot', true));
@@ -65,6 +82,39 @@ it('serves scoped Russian help and installs localized suggestions without consum
     await bot.handle(msg('/help@other_bot task', true));
     expect(messages()).toHaveLength(count);
     expect(f.store.jobs()).toHaveLength(0);
+
+    await bot.handle(msg('/group'));
+    const request = f.store.setting<{ id: number }>('telegram.workspaceRequest')!;
+    await bot.handle({
+      update_id: ++id,
+      message: {
+        message_id: id,
+        chat: { id: 7, type: 'private' },
+        from: { id: 7 },
+        chat_shared: {
+          request_id: request.id,
+          chat_id: -10099,
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        sent.filter(
+          (x) =>
+            x.method === 'setMyCommands' &&
+            x.body.scope.type === 'chat' &&
+            x.body.scope.chat_id === -10099,
+        ),
+      ).toHaveLength(3),
+    );
+    expect(
+      sent.filter(
+        (x) =>
+          x.method === 'deleteMyCommands' &&
+          x.body.scope.type === 'chat' &&
+          x.body.scope.chat_id === -10042,
+      ),
+    ).toHaveLength(3);
   } finally {
     await bot.stop();
     await f.close();

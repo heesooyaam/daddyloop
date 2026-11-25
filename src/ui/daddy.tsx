@@ -1540,40 +1540,74 @@ function TaskReport({
   onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
-    [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
+    [value, setValue] = useState<{ task: Task; messages: Message[]; statusLabel?: string }>(),
     [error, setError] = useState(''),
+    [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
     [waiverReason, setWaiverReason] = useState('');
   const live = board?.tasks.find((task) => task.id === id);
+  const liveVersion = live
+    ? [
+        live.state,
+        live.generation,
+        live.head ?? '',
+        live.pendingAuthorHead ?? '',
+        live.ref.kind,
+        live.policy.publication,
+        String(live.policy.autoPush),
+        live.reason,
+      ].join(':')
+    : '';
+  const reloadVersion = liveVersion + ':' + (live?.statusLabel ?? '');
+  const detail = value?.task.id === id ? value : undefined;
+  const detailVersion = detail
+    ? [
+        detail.task.state,
+        detail.task.generation,
+        detail.task.revision?.head ?? '',
+        detail.task.pendingAuthorHead ?? '',
+        detail.task.ref.kind,
+        detail.task.policy.publication,
+        String(detail.task.policy.autoPush),
+        detail.task.reason,
+      ].join(':')
+    : '';
+  const current = !!detail && (!live || detailVersion === liveVersion);
+  const controlsDisabled = busy || loading || !!error || !current;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
-  const request = live?.workerRequest ?? value?.task.workerRequest;
+  const request = live?.workerRequest ?? detail?.task.workerRequest;
   const worker = slot?.number ?? request?.slot;
   const profile = slot ? live?.worker : request?.profile;
-  const ref = live?.ref ?? value?.task.ref;
+  const ref = detail?.task.ref;
   const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError('');
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
       .then((result) => {
-        if (active) setValue(result);
+        if (active) setValue({ ...result, statusLabel: live?.statusLabel });
       })
       .catch((error) => {
         if (active) setError(error.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
       });
     return () => {
       active = false;
     };
-  }, [id]);
+  }, [id, reloadVersion]);
   const action = async (action: string, reason?: string) => {
-    if (!board || !value) return;
+    if (!board || !detail || !current || error) return;
     setBusy(true);
     try {
       await api(`/daddy/sessions/${board.group.id}/task-action`, {
         taskId: id,
         action,
-        expectedHead: value.task.revision?.head ?? '',
-        expectedGeneration: value.task.generation,
-        expectedPendingHead: value.task.pendingAuthorHead,
+        expectedHead: detail.task.revision?.head ?? '',
+        expectedGeneration: detail.task.generation,
+        expectedPendingHead: detail.task.pendingAuthorHead,
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
       });
       await onChange();
@@ -1592,45 +1626,45 @@ function TaskReport({
           {t(error)}
         </p>
       )}
-      {value ? (
+      {detail ? (
         <>
-          <h3>{value.task.title}</h3>
+          <h3>{detail.task.title}</h3>
           <div className="daddy-task-meta">
-            <code>{taskReference(value.task)}</code>
+            <code>{taskReference(detail.task)}</code>
             <span className="daddy-status-pill">
-              {t(live?.statusLabel ?? taskStatus(value.task.state))}
+              {t(detail.statusLabel ?? taskStatus(detail.task.state))}
             </span>
             {worker !== undefined && <span>{t('Worker {number}', { number: worker })}</span>}
             {profile && <span>{profileText(profile)}</span>}
           </div>
-          <p>{t(live?.reason ?? value.task.reason)}</p>
+          <p>{t(detail.task.reason)}</p>
           <dl className="daddy-task-version">
             <div>
               <dt>{t('Exact revision')}</dt>
               <dd>
-                <code>{value.task.revision?.head ?? t('Not created yet')}</code>
+                <code>{detail.task.revision?.head ?? t('Not created yet')}</code>
               </dd>
             </div>
             <div>
               <dt>{t('Generation')}</dt>
-              <dd>{value.task.generation}</dd>
+              <dd>{detail.task.generation}</dd>
             </div>
-            {value.task.pr && (
+            {detail.task.pr && (
               <div>
                 <dt>{t('CI checks')}</dt>
-                <dd>{t(value.task.pr.checks)}</dd>
+                <dd>{t(detail.task.pr.checks)}</dd>
               </div>
             )}
           </dl>
-          {value.task.pendingAuthorHead &&
-            value.task.pendingAuthorHead !== value.task.revision?.head && (
+          {detail.task.pendingAuthorHead &&
+            detail.task.pendingAuthorHead !== detail.task.revision?.head && (
               <p className="daddy-muted">
-                {t('Saved commit')}: <code>{value.task.pendingAuthorHead}</code>
+                {t('Saved commit')}: <code>{detail.task.pendingAuthorHead}</code>
               </p>
             )}
-          {!!value.task.pr?.checkDetails.length && (
+          {!!detail.task.pr?.checkDetails.length && (
             <ul className="daddy-check-list">
-              {value.task.pr.checkDetails.map((check) => (
+              {detail.task.pr.checkDetails.map((check) => (
                 <li key={`${check.name}:${check.url ?? ''}`}>
                   {check.url && safeUrl(check.url) ? (
                     <a href={safeUrl(check.url)} target="_blank" rel="noreferrer">
@@ -1649,7 +1683,7 @@ function TaskReport({
               {t('Auto-merge GitHub PRs')}
               <select
                 value={live.autoMerge.mode}
-                disabled={busy || !!board.group.deletion}
+                disabled={controlsDisabled || !!board.group.deletion}
                 onChange={async (event) => {
                   const mode = event.target.value;
                   setBusy(true);
@@ -1687,44 +1721,44 @@ function TaskReport({
               <ArrowUpRight size={15} />
             </a>
           )}
-          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+          {prUrl && detail.task.state === 'needs_input' && (
             <button
               className="daddy-button outline"
-              disabled={busy}
+              disabled={controlsDisabled}
               onClick={() => void action('verify-merge')}
             >
               {t('Verify merge')}
             </button>
           )}
-          {value.task.state === 'awaiting_plan_approval' && (
+          {detail.task.state === 'awaiting_plan_approval' && (
             <button
-              disabled={busy}
+              disabled={controlsDisabled}
               className="daddy-button primary"
               onClick={() => void action('approve-plan')}
             >
               {t('Approve plan')}
             </button>
           )}
-          {value.task.state === 'awaiting_publication' &&
-            value.task.policy.publication === 'human' && (
+          {detail.task.state === 'awaiting_publication' &&
+            detail.task.policy.publication === 'human' && (
               <button
-                disabled={busy}
+                disabled={controlsDisabled}
                 className="daddy-button primary"
                 onClick={() => void action('publish')}
               >
                 {t('Publish review')}
               </button>
             )}
-          {canSubmitTask(value.task) && value.task.policy.autoPush === false && (
+          {canSubmitTask(detail.task) && detail.task.policy.autoPush === false && (
             <button
-              disabled={busy}
+              disabled={controlsDisabled}
               className="daddy-button primary"
               onClick={() => void action('submit')}
             >
               {t('Submit for review')}
             </button>
           )}
-          {value.task.state === 'awaiting_checks' && (
+          {detail.task.state === 'awaiting_checks' && (
             <div className="daddy-waiver">
               <label>
                 {t('Reason for allowing this revision without passing CI')}
@@ -1739,7 +1773,7 @@ function TaskReport({
                 {t('This exception applies only to the exact revision and generation shown above.')}
               </p>
               <button
-                disabled={busy || !waiverReason.trim()}
+                disabled={controlsDisabled || !waiverReason.trim()}
                 className="daddy-button primary"
                 onClick={() => void action('waive-checks', waiverReason)}
               >
@@ -1749,13 +1783,13 @@ function TaskReport({
           )}
           <h4>{t('Original requirements')}</h4>
           <div className="daddy-prose">
-            <Markdown remarkPlugins={[remarkGfm]}>{value.task.requirements}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>{detail.task.requirements}</Markdown>
           </div>
           <h4>{t('Read-only worker reports')}</h4>
           <p className="daddy-muted">
             {t('Bring it to daddy in the main chat. I’ll get the right worker on it.')}
           </p>
-          {value.messages
+          {detail.messages
             .filter((message) => message.sender === 'agent')
             .slice(-8)
             .map((message) => (

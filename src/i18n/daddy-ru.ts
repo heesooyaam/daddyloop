@@ -712,10 +712,14 @@ export const daddyRu: Record<string, string> = {
     'Укажи точное название задачи или однозначное начало её ID.',
   'This task action expired. Open the task again.':
     'Срок действия этой кнопки истёк. Открой задачу заново.',
+  'The selected session changed. Open the task again.':
+    'Выбранная сессия изменилась. Открой задачу заново.',
   'This action is not available for the current task state.':
     'Для текущего состояния задачи это действие недоступно.',
   'Open a task with /task before confirming an action.':
     'Перед подтверждением открой задачу командой /task.',
+  'Repository paths and server folders are available only in the paired private chat.':
+    'Пути репозиториев и папки сервера доступны только в привязанной личке с ботом.',
   'Exact revision': 'Точная ревизия',
   Generation: 'Поколение',
   'CI checks': 'CI-проверки',

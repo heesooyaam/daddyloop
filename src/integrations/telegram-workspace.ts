@@ -66,6 +66,7 @@ type Topic = { chatId: number; threadId: number; groupId: string; ownerId: numbe
 type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
+  controlDestination?: Destination;
   ownerId: number;
   workspace: Workspace;
   groupId?: string;
@@ -84,6 +85,7 @@ type TaskControl = {
   expectedGeneration?: number;
   expectedPendingHead?: string;
   reason?: string;
+  cancels?: string;
   expiresAt: string;
   outcome?: 'completed' | 'stale';
 };
@@ -122,6 +124,7 @@ export class TelegramWorkspace {
     private username: string,
     private locale: () => Locale,
     private usage?: UsageBackend,
+    private onRoomChange?: () => void,
   ) {
     this.progress = new TelegramProgress(
       daddy.engine.store,
@@ -488,6 +491,7 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.group', room);
       this.store.setSetting('telegram.workspaceRequest', null);
     });
+    this.onRoomChange?.();
     await this.api.call('sendMessage', {
       chat_id: pair.chatId,
       text: this.t('Workspace connected: {name}', { name: room.title }),
@@ -1091,6 +1095,16 @@ export class TelegramWorkspace {
     )
       throw new Error(this.t('This task action expired. Open the task again.'));
     this.authorizeControl(destination, control.groupId);
+    if (
+      destination.chatId === this.pair()?.chatId &&
+      this.store.setting<string>('telegram.currentDaddy') !== control.groupId &&
+      !(control.kind === 'task' && control.cancels)
+    )
+      throw new AppError(
+        'stale_task_session',
+        'The selected session changed. Open the task again.',
+        409,
+      );
     this.daddy.task(control.groupId, control.taskId);
     return { id, control, consumed: !!row.consumed };
   }
@@ -1140,6 +1154,23 @@ export class TelegramWorkspace {
     this.store.db
       .prepare('UPDATE bot_actions SET data=?,consumed=1 WHERE id=?')
       .run(JSON.stringify({ ...control, outcome }), id);
+  }
+  private cancelTaskControl(id: string, control: TaskControl) {
+    this.store.transaction(() => {
+      const row = this.store.db
+        .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
+        .get(control.cancels!);
+      if (row && !row.consumed) {
+        const confirmation = JSON.parse(String(row.data)) as TaskControl;
+        if (
+          confirmation.kind === 'confirm' &&
+          confirmation.groupId === control.groupId &&
+          confirmation.taskId === control.taskId
+        )
+          this.finishTaskControl(control.cancels!, confirmation, 'stale');
+      }
+      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+    });
   }
   private async tasksCard(group: ReviewGroup, destination: Destination, page = 0) {
     this.authorizeControl(destination, group.id);
@@ -1287,6 +1318,7 @@ export class TelegramWorkspace {
     const text = new TelegramText()
       .add(this.taskActionLabel(action), 'bold')
       .add('\n\n' + task.title)
+      .add('\n' + this.daddy.group(task.groupId!).title)
       .add(
         '\n\n' + (this.locale() === 'ru' ? 'Подтверждается версия' : 'Confirming version') + ':\n',
       )
@@ -1301,6 +1333,17 @@ export class TelegramWorkspace {
           ? 'Сервис ещё раз проверит сессию, задачу и эту точную версию. Изменившееся подтверждение будет отклонено.'
           : 'The service will recheck the session, task and exact version. A changed confirmation will be rejected.'),
     );
+    const confirmation = this.taskControl({
+      kind: 'confirm',
+      destination,
+      groupId: task.groupId!,
+      taskId: task.id,
+      action,
+      expectedHead: version.head,
+      expectedGeneration: version.generation,
+      expectedPendingHead: version.pendingHead,
+      reason: reason?.trim(),
+    });
     await this.api.send(destination, {
       ...text,
       buttons: [
@@ -1309,17 +1352,7 @@ export class TelegramWorkspace {
             text:
               (this.locale() === 'ru' ? 'Подтвердить: ' : 'Confirm: ') +
               this.taskActionLabel(action).toLowerCase(),
-            callback_data: this.taskControl({
-              kind: 'confirm',
-              destination,
-              groupId: task.groupId!,
-              taskId: task.id,
-              action,
-              expectedHead: version.head,
-              expectedGeneration: version.generation,
-              expectedPendingHead: version.pendingHead,
-              reason: reason?.trim(),
-            }),
+            callback_data: confirmation,
           },
         ],
         [
@@ -1330,6 +1363,7 @@ export class TelegramWorkspace {
               destination,
               groupId: task.groupId!,
               taskId: task.id,
+              cancels: confirmation.slice('dad:task:'.length),
             }),
           },
         ],
@@ -1342,6 +1376,7 @@ export class TelegramWorkspace {
     const { id, control } = entry;
     let task = this.daddy.task(control.groupId, control.taskId);
     if (control.kind === 'task') {
+      if (control.cancels) this.cancelTaskControl(id, control);
       await this.taskCard(task, destination);
       return true;
     }
@@ -1744,8 +1779,55 @@ export class TelegramWorkspace {
   private registrationKey(destination: Destination) {
     return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
   }
-  private async repository(choice: RepoChoice, browse = false, copies = false) {
+  private repositoryButton(
+    text: string,
+    choice: RepoChoice,
+    action: 'use' | 'browse' | 'mode' | 'copies' | 'show',
+  ) {
+    const id = randomBytes(12).toString('base64url');
+    this.store.setSetting(`telegram.repo:${id}`, choice);
+    return { text, callback_data: `dad:repo:${id}:${action}` };
+  }
+  private async repositoryEntry(choice: RepoChoice): Promise<void> {
+    if (choice.destination.chatId === this.pair()?.chatId) return this.repository(choice);
+    const pair = this.pair()!;
+    const privateChoice = {
+      ...choice,
+      controlDestination: { chatId: pair.chatId },
+    };
+    const id = randomBytes(12).toString('base64url');
+    this.store.setSetting(`telegram.repo:${id}`, privateChoice);
+    await this.api.send(choice.destination, {
+      ...new TelegramText()
+        .add('📁 ' + this.t('Repository for this request'), 'bold')
+        .add('\n\n' + choice.workspace.name)
+        .add(
+          '\n\n' +
+            this.t(
+              'Repository paths and server folders are available only in the paired private chat.',
+            ),
+        ),
+      buttons: [
+        [
+          this.repositoryButton(
+            this.t(choice.groupId ? 'Use workspace defaults' : 'Start session'),
+            { ...choice, input: undefined },
+            'use',
+          ),
+        ],
+        [
+          {
+            text: this.t('Open private chat'),
+            url: `https://t.me/${this.username}?start=repo_${id}`,
+          },
+        ],
+      ],
+    });
+  }
+  private async repository(choice: RepoChoice, browse = false, copies = false): Promise<void> {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
+    const controlDestination = choice.controlDestination ?? choice.destination;
+    if (controlDestination.chatId !== this.pair()?.chatId) return this.repositoryEntry(choice);
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
@@ -1755,11 +1837,7 @@ export class TelegramWorkspace {
       text: string,
       next: RepoChoice,
       action: 'use' | 'browse' | 'mode' | 'copies' | 'show',
-    ) => {
-      const id = randomBytes(12).toString('base64url');
-      this.store.setSetting(`telegram.repo:${id}`, next);
-      return { text, callback_data: `dad:repo:${id}:${action}` };
-    };
+    ) => this.repositoryButton(text, next, action);
     const title = new TelegramText()
       .add('📁 ' + this.t('Repository for this request'), 'bold')
       .add('\n\n' + choice.workspace.name)
@@ -1805,7 +1883,7 @@ export class TelegramWorkspace {
           ),
       );
       if (copies) {
-        await this.api.send(choice.destination, {
+        await this.api.send(controlDestination, {
           ...new TelegramText()
             .add('⚙️ ' + this.t('Working copy settings'), 'bold')
             .add(
@@ -1863,7 +1941,7 @@ export class TelegramWorkspace {
     } else buttons.push([button(this.t('Browse server folders'), choice, 'browse')]);
     if (!choice.groupId && choice.workspace.vcs === 'arcadia')
       buttons.push([button('⚙️ ' + this.t('Working copy settings'), choice, 'copies')]);
-    await this.api.send(choice.destination, { ...title, buttons });
+    await this.api.send(controlDestination, { ...title, buttons });
   }
   private async repositoryCallback(data: string, destination: Destination) {
     const match = data.match(/^dad:repo:([A-Za-z0-9_-]+):(use|browse|mode|copies|show)$/);
@@ -1874,14 +1952,14 @@ export class TelegramWorkspace {
       !choice ||
       choice.expiresAt <= now() ||
       choice.ownerId !== this.pair()?.userId ||
-      choice.destination.chatId !== destination.chatId ||
-      choice.destination.threadId !== destination.threadId
+      (choice.controlDestination ?? choice.destination).chatId !== destination.chatId ||
+      (choice.controlDestination ?? choice.destination).threadId !== destination.threadId
     )
       throw new Error(this.t('This selection expired. Choose the repository again.'));
-    if (choice.groupId) this.authorize(destination, choice.groupId);
+    if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     else if (
       !choice.creationExpiresAt ||
-      this.store.setting<{ expiresAt: string }>(this.creationKey(destination))?.expiresAt !==
+      this.store.setting<{ expiresAt: string }>(this.creationKey(choice.destination))?.expiresAt !==
         choice.creationExpiresAt
     )
       throw new Error(this.t('This selection expired. Start a new session again.'));
@@ -1890,21 +1968,23 @@ export class TelegramWorkspace {
     else {
       const selected = await this.daddy.workspaces.selection(choice.workspace, choice.input);
       if (choice.groupId) {
-        this.store.setSetting(this.repoKey(destination, choice.groupId), {
+        this.store.setSetting(this.repoKey(choice.destination, choice.groupId), {
           workspace: selected,
           expiresAt: choice.expiresAt,
         });
-        await this.api.send(
-          destination,
-          new TelegramText()
-            .add('📁 ' + this.t('Repository for next task'), 'bold')
-            .add('\n\n' + selected.repoPath + (selected.scope ? '/' + selected.scope : ''), 'code')
-            .add(
-              '\n\n' +
-                this.t('Send the task now. The following message will use the defaults again.'),
-            ),
+        const response = new TelegramText()
+          .add('📁 ' + this.t('Repository for next task'), 'bold')
+          .add('\n\n' + choice.workspace.name);
+        if (destination.chatId === this.pair()?.chatId)
+          response.add(
+            '\n' + selected.repoPath + (selected.scope ? '/' + selected.scope : ''),
+            'code',
+          );
+        response.add(
+          '\n\n' + this.t('Send the task now. The following message will use the defaults again.'),
         );
-      } else await this.newSession(choice.workspace.id, destination, selected);
+        await this.api.send(destination, response);
+      } else await this.newSession(choice.workspace.id, choice.destination, selected);
       this.store.setSetting(key, null);
     }
     return true;
@@ -2626,6 +2706,23 @@ export class TelegramWorkspace {
           destination,
           commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
         );
+        return true;
+      }
+      const repositoryStart = privateChat
+        ? /^\/start\s+repo_([A-Za-z0-9_-]{16})$/.exec(text)
+        : undefined;
+      if (repositoryStart) {
+        const key = `telegram.repo:${repositoryStart[1]}`,
+          choice = this.store.setting<RepoChoice>(key);
+        if (
+          !choice ||
+          choice.expiresAt <= now() ||
+          choice.ownerId !== pair.userId ||
+          choice.controlDestination?.chatId !== pair.chatId
+        )
+          throw new Error(this.t('This selection expired. Choose the repository again.'));
+        await this.repository(choice);
+        this.store.setSetting(key, null);
         return true;
       }
       const registrationKey = this.registrationKey(destination);

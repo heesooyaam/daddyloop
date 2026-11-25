@@ -144,6 +144,88 @@ it('binds a Telegram submit confirmation to its owner, topic, task and exact rev
   }
 });
 
+it('persists cancellation and rejects a private confirmation after the selected session changes', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session A', autoPush: false }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session B', autoPush: false });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  const create = async (groupId: string, title: string) => {
+    const task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId,
+      groupGeneration: f.daddy.group(groupId).generation,
+      title,
+      requirements: title,
+      createdByAction: title,
+    });
+    task.state = 'ready_for_review';
+    task.policy.autoPush = false;
+    task.revision!.head = 'b'.repeat(40);
+    task.pendingAuthorHead = task.revision!.head;
+    f.store.saveTask(task);
+    return task;
+  };
+  const firstTask = await create(first.id, 'Shared task title'),
+    secondTask = await create(second.id, 'Shared task title');
+  const submit = vi.spyOn(f.tickets, 'submit').mockResolvedValue(firstTask);
+  let bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  let id = 350;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const button = (text: string) =>
+    telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((item: any) => item.text === text).callback_data;
+  try {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    await bot.handle(click(button('Submit for review')));
+    const confirmation = button('Confirm: submit for review'),
+      cancel = button('Cancel');
+    expect(telegram.sent.at(-1)!.card.text).toContain('Session A');
+
+    await bot.handle(click(cancel));
+    expect(submit).not.toHaveBeenCalled();
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+    await bot.handle(click(confirmation));
+    expect(submit).not.toHaveBeenCalled();
+    expect(telegram.sent.at(-2)!.card.text).toContain('already stale');
+
+    await bot.handle(message('/submit'));
+    const freshConfirmation = button('Confirm: submit for review');
+    expect(freshConfirmation).not.toBe(confirmation);
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(click(freshConfirmation));
+    expect(submit).not.toHaveBeenCalled();
+    expect(telegram.sent.at(-1)!.card.text).toContain('selected session changed');
+    expect(f.store.getTask(firstTask.id).state).toBe('ready_for_review');
+    expect(f.store.getTask(secondTask.id).state).toBe('ready_for_review');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('requires an explicit session outside a topic and ignores commands for another bot', async () => {
   const f = daddyFixture(),
     telegram = telegramFixture(),

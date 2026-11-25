@@ -159,7 +159,8 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     expect(f.store.setting('telegram.group')).toMatchObject({ chatId: -10042, ownerId: 7 });
     await bot.handle(message('/new'));
     await bot.handle(click(`dad:new:${f.workspace.id}`));
-    const start = sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data;
+    const start = sent.filter((item) => item.method === 'sendMessage').at(-1)!.body.reply_markup
+      .inline_keyboard[0][0].callback_data;
     await bot.handle(click(start));
     const group = f.daddy.sessions()[0];
     await vi.waitFor(() =>
@@ -294,6 +295,86 @@ it('scopes a one-message repository selection to its owner and conversation, the
     expect(f.workspaces.get(f.workspace.id)).toEqual(f.workspace);
   } finally {
     await workspace.stop();
+    await f.close();
+  }
+});
+it('keeps repository paths private for topic, general-group and new-session choices', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method: string) =>
+      method === 'createForumTopic' ? { message_thread_id: 41 } : true,
+    ),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Repository session' }),
+    topic = await bot.ensureTopic(group);
+  let id = 180;
+  const message = (text: string, chatId = -10042, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  const click = (data: string, chatId = -10042, threadId?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+        message_thread_id: threadId,
+      },
+    },
+  });
+  try {
+    await bot.handle(message('/repo', -10042, topic!.threadId));
+    const topicCard = sent.at(-1)!.card;
+    expect(topicCard.text).toContain(f.workspace.name);
+    expect(topicCard.text).not.toContain(f.workspace.repoPath);
+    expect(topicCard.buttons[0][0].text).toBe('Use workspace defaults');
+    const privateUrl = topicCard.buttons[1][0].url as string;
+
+    await bot.handle(message(`/session ${group.id.slice(0, 8)}`));
+    await bot.handle(message('/repo'));
+    expect(sent.at(-1)!.card.text).not.toContain(f.workspace.repoPath);
+
+    const payload = new URL(privateUrl).searchParams.get('start');
+    await bot.handle(message(`/start ${payload}`, 7));
+    expect(sent.at(-1)!.destination).toEqual({ chatId: 7, threadId: undefined });
+    expect(sent.at(-1)!.card.text).toContain(f.workspace.repoPath);
+    expect(
+      sent
+        .at(-1)!
+        .card.buttons.flat()
+        .map((button: any) => button.text),
+    ).toContain('Browse server folders');
+    await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
+    expect(
+      f.store.setting(`telegram.nextRepo:7:-10042:${topic!.threadId}:${group.id}`),
+    ).toBeTruthy();
+
+    await bot.handle(message('/new', -10042));
+    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    expect(sent.at(-1)!.card.text).toContain(f.workspace.name);
+    expect(sent.at(-1)!.card.text).not.toContain(f.workspace.repoPath);
+
+    for (const item of sent.filter(({ destination }) => destination.chatId === -10042))
+      expect(item.card.text ?? item.card).not.toContain(f.workspace.repoPath);
+  } finally {
+    await bot.stop();
     await f.close();
   }
 });

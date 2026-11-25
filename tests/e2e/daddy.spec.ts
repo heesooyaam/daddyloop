@@ -446,6 +446,127 @@ test('offers retry submit only for a saved ticket across locales and layouts', a
   await page.getByLabel('Язык', { exact: true }).selectOption('en');
 });
 
+test('keeps an open task report on one revision while board state changes', async ({ page }) => {
+  await login(page);
+  await create(page, 'Live task report', Date.now());
+  const { sessionId, taskId } = await page.evaluate(async () => {
+    const sessionId = location.hash.slice('#session/'.length);
+    const board = await fetch(`/api/daddy/sessions/${sessionId}`).then((response) =>
+      response.json(),
+    );
+    return { sessionId, taskId: board.tasks[0].id as string };
+  });
+  const snapshot = {
+    state: 'ready_for_review',
+    generation: 10,
+    head: '1'.repeat(40),
+    pendingAuthorHead: '1'.repeat(40) as string | undefined,
+    reason: 'Ready on the first revision',
+    checks: 'passing',
+  };
+  let hold = false,
+    fail = false,
+    releaseDetail: (() => void) | undefined,
+    detailStarted: (() => void) | undefined;
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch(),
+      board = await response.json();
+    const task = board.tasks.find((item: { id: string }) => item.id === taskId);
+    Object.assign(task, {
+      state: snapshot.state,
+      generation: snapshot.generation,
+      head: snapshot.head,
+      pendingAuthorHead: snapshot.pendingAuthorHead,
+      reason: snapshot.reason,
+      policy: { ...task.policy, autoPush: false },
+    });
+    await route.fulfill({ response, json: board });
+  });
+  await page.route(`**/api/tasks/${taskId}`, async (route) => {
+    detailStarted?.();
+    detailStarted = undefined;
+    if (hold)
+      await new Promise<void>((resolve) => {
+        releaseDetail = resolve;
+      });
+    if (fail) {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Fixture detail refresh failed' }),
+      });
+      return;
+    }
+    const response = await route.fetch(),
+      detail = await response.json();
+    Object.assign(detail.task, {
+      state: snapshot.state,
+      generation: snapshot.generation,
+      pendingAuthorHead: snapshot.pendingAuthorHead,
+      reason: snapshot.reason,
+      revision: { ...detail.task.revision, head: snapshot.head },
+      policy: { ...detail.task.policy, autoPush: false },
+      pr: {
+        checks: snapshot.checks,
+        checkDetails: [
+          {
+            name: `Fixture ${snapshot.generation}`,
+            status: snapshot.checks === 'passing' ? 'success' : 'failed',
+          },
+        ],
+      },
+    });
+    await route.fulfill({ response, json: detail });
+  });
+
+  await page.locator('.daddy-work-item').first().click();
+  const report = page.getByRole('dialog', { name: 'Work item' });
+  await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
+  const submit = report.getByRole('button', { name: 'Submit for review' });
+  await expect(submit).toBeEnabled();
+
+  let started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  hold = true;
+  Object.assign(snapshot, {
+    state: 'awaiting_checks',
+    generation: 11,
+    head: '2'.repeat(40),
+    pendingAuthorHead: undefined,
+    reason: 'Waiting for checks on the second revision',
+    checks: 'failing',
+  });
+  await started;
+  await expect(submit).toBeDisabled();
+  hold = false;
+  releaseDetail?.();
+  await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
+  await expect(submit).toHaveCount(0);
+  await expect(report.getByText('Fixture 11')).toBeVisible();
+  const reason = report.getByLabel('Reason for allowing this revision without passing CI');
+  await reason.fill('Verified offline');
+  const waive = report.getByRole('button', { name: 'Allow without passing CI' });
+  await expect(waive).toBeEnabled();
+
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  fail = true;
+  Object.assign(snapshot, {
+    state: 'complete',
+    generation: 12,
+    head: '3'.repeat(40),
+    reason: 'Complete on the third revision',
+    checks: 'passing',
+  });
+  await started;
+  await expect(report.getByRole('alert')).toContainText('Request failed');
+  await expect(waive).toBeDisabled();
+  await expect(report.getByText('2'.repeat(40), { exact: true })).toBeVisible();
+  await expect(report.getByText('3'.repeat(40), { exact: true })).toHaveCount(0);
+});
+
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
   await login(page);
   await create(page, 'GitHub auto-merge settings', Date.now());
