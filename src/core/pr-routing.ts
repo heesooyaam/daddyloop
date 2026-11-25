@@ -46,6 +46,7 @@ export interface PrEvidence {
   // Supplied after reading the native review. Cached task.snapshot is not fresh publication evidence.
   nativeReview?: ReviewSnapshot;
   resumeRepair?: boolean;
+  confirmedFix?: boolean;
   report?: { kind: 'review' | 'fix'; result: AgentResult };
 }
 
@@ -218,7 +219,7 @@ export function nextPrAction(
     return wait('Waiting for queued worker instructions');
   if (
     conflict &&
-    repairableStates.has(task.state) &&
+    (repairableStates.has(task.state) || (facts.confirmedFix && task.state === 'needs_input')) &&
     !jobs.length &&
     (!task.review || task.snapshot?.status === 'published') &&
     (!task.pendingAuthorHead || task.pendingAuthorHead === pr.head)

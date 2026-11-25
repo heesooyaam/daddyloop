@@ -716,53 +716,67 @@ describe('opt-in GitHub merging', () => {
     },
   );
 
-  it('archives a stale service draft before deletion and opens a fresh draft only on the confirmed saved head', async () => {
-    const f = await setup();
-    try {
-      const t = f.store.getTask(f.task.id),
-        old = t.review!,
-        head = 'e'.repeat(40);
-      await f.daddy.settings(f.group.id, { autoMerge: true });
-      old.authorId = '123';
-      t.state = 'needs_input';
-      t.pendingFix = { revision: t.revision! };
-      t.pendingAuthorHead = head;
-      t.pr = { ...t.pr!, head };
-      t.revision = { ...t.revision!, head };
-      t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
-      f.setRemote({ head, mergeConflict: true });
-      const key = 'demo-review:' + old.id,
-        snapshot = await f.provider.getReview(prRef(t), old);
-      const draft = {
-        ...snapshot,
-        status: 'draft',
-        body: `Review in progress.\n\n<!-- ${old.marker} -->`,
-      };
-      const discard = vi.fn(async () => {
-        expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
-        f.store.setSetting(key, { ...draft, status: 'missing' });
-      });
-      Object.assign(f.provider, { discardSupersededDraft: discard });
-      f.store.saveTask(t);
-      f.store.setSetting(key, { ...draft, body: 'Human edit' });
-      await f.engine.review(t.id, true);
-      expect(discard).not.toHaveBeenCalled();
-      f.store.saveTask(t);
-      f.store.setSetting(key, draft);
-      await f.engine.review(t.id, true);
-      expect(discard).toHaveBeenCalledTimes(1);
-      const current = f.store.getTask(t.id);
-      expect(current).toMatchObject({
-        state: 'reviewing',
-        review: { revision: { head } },
-        reviewFinished: false,
-      });
-      expect(current.review!.id).not.toBe(old.id);
-      expect(f.store.activeJobs(t.id)).toHaveLength(1);
-    } finally {
-      await f.close();
-    }
-  });
+  it.each([false, true])(
+    'archives a stale service draft before dispatching work on the confirmed saved head (conflict: %s)',
+    async (mergeConflict) => {
+      const f = await setup();
+      try {
+        const t = f.store.getTask(f.task.id),
+          old = t.review!,
+          head = 'e'.repeat(40);
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        old.authorId = '123';
+        t.state = 'needs_input';
+        t.pendingFix = { revision: t.revision! };
+        t.pendingAuthorHead = head;
+        t.pr = { ...t.pr!, head };
+        t.revision = { ...t.revision!, head };
+        t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
+        f.setRemote({ head, mergeConflict, mergeable: !mergeConflict });
+        const key = 'demo-review:' + old.id,
+          snapshot = await f.provider.getReview(prRef(t), old);
+        const draft = {
+          ...snapshot,
+          status: 'draft',
+          body: `Review in progress.\n\n<!-- ${old.marker} -->`,
+        };
+        const discard = vi.fn(async () => {
+          expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
+          f.store.setSetting(key, { ...draft, status: 'missing' });
+        });
+        Object.assign(f.provider, { discardSupersededDraft: discard });
+        f.store.saveTask(t);
+        f.store.setSetting(key, { ...draft, body: 'Human edit' });
+        await f.engine.review(t.id, true);
+        expect(discard).not.toHaveBeenCalled();
+        expect(f.store.activeJobs(t.id)).toHaveLength(0);
+        f.store.saveTask(t);
+        f.store.setSetting(key, draft);
+        await f.engine.review(t.id, true);
+        expect(discard).toHaveBeenCalledTimes(1);
+        const current = f.store.getTask(t.id);
+        if (mergeConflict) {
+          expect(current).toMatchObject({
+            state: 'fixing',
+            fixingMergeConflict: true,
+            revision: { head },
+          });
+          expect(current.review).toBeUndefined();
+          expect(f.store.activeJobs(t.id)).toMatchObject([{ kind: 'fix', role: 'author' }]);
+        } else {
+          expect(current).toMatchObject({
+            state: 'reviewing',
+            review: { revision: { head } },
+            reviewFinished: false,
+          });
+          expect(current.review!.id).not.toBe(old.id);
+          expect(f.store.activeJobs(t.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
 
   it.each(['stale admission', 'restart on same base', 'restart with advanced base'] as const)(
     'continues a published fix after %s while keeping its original head',
@@ -1042,3 +1056,80 @@ describe('opt-in GitHub merging', () => {
     }
   });
 });
+
+it.each(['review', 'reconcile then review', 'old draft', 'auto-merge disabled'] as const)(
+  'routes a confirmed saved fix on a conflicting revision (%s)',
+  async (entry) => {
+    const f = await setup();
+    try {
+      const enabled = entry !== 'auto-merge disabled';
+      await f.daddy.settings(f.group.id, { autoMerge: enabled });
+      const task = f.store.getTask(f.task.id);
+      const original = task.revision!;
+      task.state = 'fixing';
+      f.store.saveTask(task);
+      f.store.enqueue(task, 'author', 'fix', 'Fix the reported issue');
+      const fix = f.store.claim()!;
+      const saved = 'f'.repeat(40);
+      await f.engine.completeJob(
+        fix,
+        {
+          status: 'completed',
+          summary: 'Fix saved',
+          checkedHead: original.head,
+        },
+        { head: saved, revision: original },
+      );
+      f.store.saveJob({ ...fix, status: 'completed' });
+      await f.engine.submitSavedFix(
+        task.id,
+        async () => async () => f.setRemote({ head: saved, mergeConflict: true, mergeable: false }),
+      );
+      if (entry === 'reconcile then review') await f.engine.reconcile(task.id);
+      if (entry === 'old draft') {
+        const ref = prRef(task);
+        const staleDraft = await f.provider.createReview(ref, original, 'old-draft');
+        const confirmed = f.store.getTask(task.id);
+        confirmed.pendingAuthorFix!.staleDraft = staleDraft;
+        f.store.saveTask(confirmed);
+        expect(await f.engine.review(task.id)).toMatchObject({ state: 'needs_input' });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        await f.provider.publish(ref, staleDraft);
+      }
+      const routed = await f.engine.review(task.id, entry === 'old draft');
+      expect(routed.revision?.head).toBe(saved);
+      if (!enabled) {
+        expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
+        return;
+      }
+      expect(routed).toMatchObject({ state: 'fixing', fixingMergeConflict: true });
+      expect(routed.review).toBeUndefined();
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix', role: 'author' }]);
+
+      const repair = f.store.claim()!;
+      const resolved = 'e'.repeat(40);
+      await f.engine.completeJob(
+        repair,
+        {
+          status: 'completed',
+          summary: 'Conflict resolved',
+          checkedHead: saved,
+        },
+        { head: resolved, revision: routed.revision! },
+      );
+      f.store.saveJob({ ...repair, status: 'completed' });
+      await f.engine.submitSavedFix(
+        task.id,
+        async () => async () =>
+          f.setRemote({ head: resolved, mergeConflict: false, mergeable: true }),
+      );
+      expect(await f.engine.review(task.id)).toMatchObject({
+        state: 'reviewing',
+        review: { revision: { head: resolved } },
+      });
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
+    } finally {
+      await f.close();
+    }
+  },
+);

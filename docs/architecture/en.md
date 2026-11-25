@@ -186,8 +186,6 @@ The service checks the PR revision before publishing a review or automatically p
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
-The worker records a saved correction and its starting revision under the task lock. The service submits that exact commit and verifies the PR head before starting another review. A changed target or an unconfirmed submission leaves the task waiting with the saved commit ID. Earlier native drafts stay available for inspection.
-
 For example, GitHub may still be calculating mergeability when findings are published. The service waits for the result. A confirmed conflict assigns one integration job to the existing worker. The same decision applies at review start and during the final merge check. With no conflict the author can address the published findings. A merge request requires a fresh published review with no findings and passing CI on the pinned revision. An uncertain previous write is reconciled with GitHub first.
 
 [nextPrAction](../../src/core/pr-routing.ts) defines the order of decisions. [Engine](../../src/core/engine.ts) preserves drafts or local changes and assigns the worker. [Auto-merge](../../src/core/auto-merge.ts) consults the same rule after reading the review and immediately before writing to GitHub. The [regression tests](../../tests/auto-merge.test.ts) exercise the same conflict through different entry points.

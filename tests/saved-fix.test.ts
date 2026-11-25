@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { GitHubQuota, GitHubQuotaError, githubWait } from '../src/providers/github-quota.js';
 import { fixture } from './helpers.js';
 import { Engine } from '../src/core/engine.js';
 import { prRef } from '../src/core/types.js';
@@ -626,6 +627,79 @@ it.each([
         revision: { head: savedHead },
       });
     } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([
+  ['PR read', false],
+  ['base comparison', false],
+  ['base comparison', true],
+] as const)(
+  'automatically retries a throttled preflight (%s, already pushed: %s)',
+  async (where, visible) => {
+    const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider: 'github' as const };
+      const observed = {
+        ...task.pr!,
+        head: visible ? savedHead : task.revision!.head,
+        base: 'c'.repeat(40),
+      };
+      f.store.saveTask({
+        ...task,
+        ref,
+        pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+      });
+      f.store.setSetting('demo-pr:1', observed);
+      const quota = new GitHubQuota(f.store, ref.host);
+      let limited = true;
+      const read = () => {
+        quota.check('GET');
+        if (limited)
+          quota.observe(
+            new Response(null, { status: 429, headers: { 'Retry-After': '2' } }),
+            'GET',
+            '',
+          );
+      };
+      const getPR = f.provider.getPR.bind(f.provider);
+      vi.spyOn(f.provider, 'getPR').mockImplementation(async (ref) => {
+        if (where === 'PR read') read();
+        return getPR(ref);
+      });
+      Object.assign(f.provider, {
+        targetAdvanced: async () => {
+          if (where === 'base comparison') read();
+          return true;
+        },
+      });
+      const send = vi.fn(async () =>
+        f.store.setSetting('demo-pr:1', { ...observed, head: savedHead }),
+      );
+      await expect(f.engine.reconcile(task.id)).rejects.toBeInstanceOf(GitHubQuotaError);
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'awaiting_push',
+        pendingAuthorHead: savedHead,
+      });
+      const retryAt = githubWait(f.store, ref)!;
+      expect(retryAt).toBeGreaterThan(Date.now());
+      now.mockReturnValue(retryAt + 1);
+      limited = false;
+      const restarted = new Engine(f.store, () => f.provider);
+      await restarted.reconcile(task.id);
+      await restarted.submitSavedFix(task.id, async () => send);
+      await restarted.submitSavedFix(task.id, async () => send);
+      expect(send).toHaveBeenCalledTimes(visible ? 0 : 1);
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'queued',
+        revision: { head: savedHead },
+      });
+    } finally {
+      now.mockRestore();
       f.store.close();
     }
   },

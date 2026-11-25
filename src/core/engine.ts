@@ -8,7 +8,7 @@ import {
   type PrEvidence,
 } from './pr-routing.js';
 import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
-import { legacyQuotaRead } from '../providers/github-quota.js';
+import { GitHubQuotaError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
@@ -547,6 +547,21 @@ export class Engine {
         this.retainPreviousReviewFeedback(task, task.review, snapshot);
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
+      }
+      if (pending) {
+        const repair = this.prAction(task, pr, { confirmedFix: true });
+        if (repair.kind === 'repair') {
+          if (attempt && recoveredSnapshot?.status !== 'published') {
+            this.blockSavedFix(task, pending, staleDraftReason);
+            return task;
+          }
+          if (recoveredSnapshot) retainPublishedFeedback(task, recoveredSnapshot, true);
+          await this.applyRepair(task, pr, repair, {
+            snapshot: recoveredSnapshot,
+            confirmedFix: true,
+          });
+          return task;
+        }
       }
       if (task.review && !retry && !changed)
         throw new AppError(
@@ -1260,6 +1275,7 @@ export class Engine {
       snapshot?: ReviewSnapshot;
       checkpoint?: (task: Task) => Promise<string>;
       finishingRun?: boolean;
+      confirmedFix?: boolean;
     } = {},
   ) {
     if (action.preparation === 'retire-draft') {
@@ -1284,6 +1300,10 @@ export class Engine {
       if (action.preparation !== 'resume') {
         this.invalidate(task, pr, !options.finishingRun);
         task.pendingFix = undefined;
+        if (options.confirmedFix) {
+          task.pendingAuthorFix = undefined;
+          task.resumeState = undefined;
+        }
         task.conflictCheckpoint = checkpoint;
         if (feedback?.status === 'published' && feedback.revision.head === pr.head)
           task.feedback =
@@ -2098,7 +2118,9 @@ export class Engine {
     try {
       return await this.provider(ref).getPR(ref);
     } catch (error) {
-      const until = task.pendingAuthorFix?.confirmUntil;
+      const pending = task.pendingAuthorFix;
+      if (error instanceof GitHubQuotaError && !pending?.pushStarted && !pending?.sent) throw error;
+      const until = pending?.confirmUntil;
       if (until !== undefined && Date.now() < until) throw error;
       this.blockSavedFix(task, head, `Could not confirm the PR revision. ${redact(String(error))}`);
     }
@@ -2162,6 +2184,7 @@ export class Engine {
       if (!(await this.provider(ref).targetAdvanced?.(ref, pending.revision.base, pr.base)))
         return check;
     } catch (error) {
+      if (error instanceof GitHubQuotaError && !pending.pushStarted && !pending.sent) throw error;
       if (pending.confirmUntil !== undefined && Date.now() < pending.confirmUntil) throw error;
       return {
         status: 'blocked',
