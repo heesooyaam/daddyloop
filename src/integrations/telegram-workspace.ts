@@ -1316,14 +1316,10 @@ export class TelegramWorkspace {
       task.pendingAuthorHead === control.expectedPendingHead
     );
   }
-  private taskActionCompleted(task: Task, control: TaskControl) {
-    if (control.action === 'approve-plan') return !!task.approvedAt;
-    if (control.action === 'waive-checks') return !!task.checksWaivedAt;
-    if (control.action === 'verify-merge')
-      return (
-        task.state === 'reviewing' && task.generation === (control.expectedGeneration ?? 0) + 1
-      );
-    return false;
+  private taskActionCompleted(taskId: string, actionId: string) {
+    return !!this.store.db
+      .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='human.task_action'")
+      .get(taskId, actionId);
   }
   private finishTaskControl(id: string, control: TaskControl, outcome: 'completed' | 'stale') {
     this.store.db
@@ -1632,6 +1628,19 @@ export class TelegramWorkspace {
     }
     if (!['approve-plan', 'waive-checks', 'verify-merge'].includes(control.action ?? ''))
       throw new Error(this.t('This action is not available for the current task state.'));
+    if (this.taskActionCompleted(control.taskId, id)) {
+      this.finishTaskControl(id, control, 'completed');
+      await this.api.send(
+        destination,
+        new TelegramText().add(
+          this.locale() === 'ru'
+            ? 'Это подтверждение уже выполнено.'
+            : 'This confirmation was already completed.',
+        ),
+      );
+      await show();
+      return true;
+    }
     if (!this.sameTaskVersion(task, control)) {
       this.finishTaskControl(id, control, 'stale');
       await this.api.send(
@@ -1665,12 +1674,13 @@ export class TelegramWorkspace {
           generation: control.expectedGeneration!,
         },
         control.reason,
+        id,
       );
     } catch (error) {
       task = this.daddy.task(control.groupId, control.taskId);
-      if (!this.taskActionCompleted(task, control)) throw error;
+      if (!this.taskActionCompleted(control.taskId, id)) throw error;
     }
-    if (!this.taskActionCompleted(task, control)) {
+    if (!this.taskActionCompleted(control.taskId, id)) {
       await show();
       return true;
     }
@@ -2022,8 +2032,19 @@ export class TelegramWorkspace {
       });
       return;
     }
-    const models = await this.daddy.catalogue.list(true),
-      pageSize = 10,
+    let models: Awaited<ReturnType<typeof this.daddy.catalogue.list>> = [];
+    try {
+      models = await this.daddy.catalogue.list(true);
+    } catch {
+      // Engine defaults remain selectable when every model catalogue is unavailable.
+    }
+    const currentEngine = role === 'daddy' ? group.daddy.engine : defaults.engine;
+    const engines =
+      this.daddy.catalogue.engines?.() ??
+      [...new Set(models.map((model) => model.engine))].map((id) => ({ id, name: id }));
+    if (!engines.some((engine) => engine.id === currentEngine))
+      engines.unshift({ id: currentEngine, name: currentEngine });
+    const pageSize = 10,
       pages = Math.max(1, Math.ceil(models.length / pageSize));
     page = Math.max(0, Math.min(page, pages - 1));
     this.authorize(destination, groupId);
@@ -2043,23 +2064,30 @@ export class TelegramWorkspace {
       );
       return [{ text: model.engine + ' · ' + model.name, callback_data: id }];
     });
-    const defaultId = 'dad-default:' + randomBytes(12).toString('base64url');
-    this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
-      defaultId,
-      JSON.stringify({
-        groupId,
-        role,
-        chatId: destination.chatId,
-        threadId: destination.threadId,
-        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
-      }),
-    );
-    buttons.unshift([
-      {
-        text: this.t('Use engine defaults'),
-        callback_data: defaultId,
-      },
-    ]);
+    const engineDefaults = engines.map((engine) => {
+      const id = 'dad-default:' + randomBytes(12).toString('base64url');
+      this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
+        id,
+        JSON.stringify({
+          groupId,
+          role,
+          engine: engine.id,
+          chatId: destination.chatId,
+          threadId: destination.threadId,
+          expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+        }),
+      );
+      return [
+        {
+          text:
+            engine.id === currentEngine
+              ? this.t('Use engine defaults')
+              : `${engine.name} · ${this.t('Engine configuration')}`,
+          callback_data: id,
+        },
+      ];
+    });
+    buttons.unshift(...engineDefaults);
     const navigation = [
       ...(page > 0
         ? [{ text: '←', callback_data: `dad:models:${groupId}:${role}:${page - 1}` }]
@@ -2563,7 +2591,7 @@ export class TelegramWorkspace {
       .add(
         '\n\n' +
           this.t(
-            'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use clear to remove scope or base.',
+            'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Clear scope or base with /workspace <ID> clear scope|base.',
           ),
       );
     await this.api.send(destination, {
@@ -2576,6 +2604,7 @@ export class TelegramWorkspace {
     field: 'name' | 'path' | 'scope' | 'base' | 'provider' | 'copies',
     raw: string,
     destination: Destination,
+    clear = false,
   ) {
     if (destination.chatId !== this.pair()?.chatId)
       return this.privateStep(
@@ -2583,15 +2612,15 @@ export class TelegramWorkspace {
         this.t('Repository paths and defaults are available in the private bot chat.'),
       );
     const value = raw.trim();
-    if (!value) throw new Error(this.t('Send a value to save.'));
+    if (!value && !clear) throw new Error(this.t('Send a value to save.'));
     if (field === 'copies' && !['session', 'pool'].includes(value))
       throw new Error(this.t('Choose session or pool copy mode.'));
     const saved = await this.daddy.workspaces.register(
       {
         name: field === 'name' ? value : workspace.name,
         path: field === 'path' ? value : workspace.repoPath,
-        scope: field === 'scope' ? (value === 'clear' ? '' : value) : workspace.scope,
-        base: field === 'base' ? (value === 'clear' ? undefined : value) : workspace.base,
+        scope: field === 'scope' ? (clear ? '' : value) : workspace.scope,
+        base: field === 'base' ? (clear ? undefined : value) : workspace.base,
         copyMode:
           field === 'copies'
             ? value === 'session' || value === 'pool'
@@ -2819,6 +2848,7 @@ export class TelegramWorkspace {
       const action = JSON.parse(row.data as string) as {
         groupId: string;
         role: 'worker' | 'daddy';
+        engine: string;
         chatId: number;
         threadId?: number;
         expiresAt: string;
@@ -2831,17 +2861,13 @@ export class TelegramWorkspace {
         throw new Error(this.t('This model selection expired. Open Models again.'));
       const group = this.authorizeModelControl(destination, action.groupId),
         role = action.role,
-        profile = {
-          engine:
-            role === 'daddy'
-              ? group.daddy.engine
-              : (group.worker ?? this.daddy.engine.defaultAgents().worker).engine,
-        };
+        profile = { engine: action.engine };
       if (!modelDefault[2]) {
         await this.api.send(destination, {
           ...new TelegramText()
             .add(this.t('Use engine defaults'), 'bold')
             .add('\n' + this.groupText(destination, group.title))
+            .add('\n' + action.engine, 'code')
             .add('\n\n' + this.t('Model') + ': ' + this.t('Engine configuration'))
             .add('\n' + this.t('Reasoning effort') + ': ' + this.t('Default')),
           buttons: [
@@ -3021,6 +3047,29 @@ export class TelegramWorkspace {
         .modules()
         .find((module) => module.id === data.slice('dad:workspace-module:'.length));
       if (!module) throw new Error(this.t('Choose an enabled repository service.'));
+      if (destination.chatId !== this.pair()?.chatId) {
+        const id = randomBytes(12).toString('base64url');
+        this.store.setSetting(`telegram.workspacePrivate:${id}`, {
+          provider: module.id,
+          origin: destination,
+          ownerId: this.pair()!.userId,
+          expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+        });
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.t('Repository source and name are entered in the paired private chat.'),
+          ),
+          buttons: [
+            [
+              {
+                text: this.t('Open private chat'),
+                url: `https://t.me/${this.username}?start=workspace_${id}`,
+              },
+            ],
+          ],
+        });
+        return true;
+      }
       this.store.setSetting(this.registrationKey(destination), {
         provider: module.id,
         expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
@@ -3346,6 +3395,31 @@ export class TelegramWorkspace {
         ? /^\/start\s+repo_([A-Za-z0-9_-]{16})$/.exec(text)
         : undefined;
       const taskStart = privateChat ? /^\/start\s+task_([a-f0-9-]{36})$/.exec(text) : undefined;
+      const workspaceStart = privateChat
+        ? /^\/start\s+workspace_([A-Za-z0-9_-]{16})$/.exec(text)
+        : undefined;
+      if (workspaceStart) {
+        const key = `telegram.workspacePrivate:${workspaceStart[1]}`,
+          pending = this.store.setting<{
+            provider: string;
+            origin: Destination;
+            ownerId: number;
+            expiresAt: string;
+          }>(key);
+        if (!pending || pending.ownerId !== pair.userId || pending.expiresAt <= now())
+          throw new Error(this.t('This selection expired. Open repository registration again.'));
+        this.store.setSetting(key, null);
+        this.store.setSetting(this.registrationKey(destination), {
+          provider: pending.provider,
+          origin: pending.origin,
+          expiresAt: pending.expiresAt,
+        });
+        await this.api.send(
+          destination,
+          this.t('Send a repository URL or an absolute server path.'),
+        );
+        return true;
+      }
       if (taskStart) {
         const task = this.store.getTask(taskStart[1]);
         if (!task.groupId) throw new Error(this.t('Task not found in this session'));
@@ -3371,6 +3445,7 @@ export class TelegramWorkspace {
       const registration = this.store.setting<{
         provider: string;
         path?: string;
+        origin?: Destination;
         expiresAt: string;
       }>(registrationKey);
       if (registration) {
@@ -3402,7 +3477,13 @@ export class TelegramWorkspace {
             provider: registration.provider,
           });
           this.store.setSetting(registrationKey, null);
-          await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
+          const target = registration.origin ?? destination;
+          await this.api.send(target, this.workspacePickerCard(target, [workspace]));
+          if (registration.origin)
+            await this.api.send(
+              destination,
+              this.t('Repository saved. Continue the new session in the original chat.'),
+            );
           return true;
         }
       }
@@ -3486,22 +3567,29 @@ export class TelegramWorkspace {
       const workspaceEdit = text.match(
         /^\/workspace\s+(\S+)\s+(name|path|scope|base|provider|copies)\s+([\s\S]+)$/,
       );
+      const workspaceClear = text.match(/^\/workspace\s+(\S+)\s+clear\s+(scope|base)$/);
       const workspaceCommand = text.match(/^\/workspace(?:\s+([\s\S]+))?$/);
-      if (workspaceEdit || workspaceCommand) {
+      if (workspaceEdit || workspaceClear || workspaceCommand) {
         if (!workspaceEdit && !workspaceCommand?.[1]) {
           await this.workspacesCard(destination);
           return true;
         }
         const workspace = this.findWorkspace(
-          workspaceEdit ? workspaceEdit[1] : workspaceCommand![1],
+          workspaceEdit
+            ? workspaceEdit[1]
+            : workspaceClear
+              ? workspaceClear[1]
+              : workspaceCommand![1],
         );
-        if (!workspaceEdit) await this.workspaceCard(workspace, destination);
+        if (!workspaceEdit && !workspaceClear) await this.workspaceCard(workspace, destination);
         else
           await this.editWorkspace(
             workspace,
-            workspaceEdit[2] as 'name' | 'path' | 'scope' | 'base' | 'provider' | 'copies',
-            workspaceEdit[3],
+            (workspaceEdit?.[2] ?? workspaceClear![2]) as
+              'name' | 'path' | 'scope' | 'base' | 'provider' | 'copies',
+            workspaceEdit?.[3] ?? '',
             destination,
+            !!workspaceClear,
           );
         return true;
       }

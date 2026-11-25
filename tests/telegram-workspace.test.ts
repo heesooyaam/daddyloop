@@ -659,10 +659,13 @@ it('stores literal workspace defaults and clears them only with an explicit valu
     expect(f.workspaces.get(f.workspace.id)).toMatchObject({ base: 'default', scope: 'root' });
     await bot.handle(message(`/workspace ${f.workspace.id} base clear`));
     await bot.handle(message(`/workspace ${f.workspace.id} scope clear`));
+    expect(f.workspaces.get(f.workspace.id)).toMatchObject({ base: 'clear', scope: 'clear' });
+    await bot.handle(message(`/workspace ${f.workspace.id} clear base`));
+    await bot.handle(message(`/workspace ${f.workspace.id} clear scope`));
     expect(f.workspaces.get(f.workspace.id).base).toBeUndefined();
     expect(f.workspaces.get(f.workspace.id).scope).toBe('');
     await bot.handle(message(`/workspace ${f.workspace.id}`));
-    expect(sent.at(-1).text).toContain('Use clear to remove scope or base');
+    expect(sent.at(-1).text).toContain('/workspace <ID> clear scope|base');
   } finally {
     await bot.stop();
     await f.close();
@@ -1117,12 +1120,14 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
         .some((button: any) => button.callback_data === 'dad:workspace-module:gitlab'),
     ).toBe(true);
     await bot.handle(click('dad:workspace-module:gitlab', 7, 12));
+    const privateUrl = sent.at(-1).buttons[0][0].url as string;
     await bot.handle(message('https://code.example.test/team/sub/app', 99, 12));
     await bot.handle(message('https://code.example.test/team/sub/app', 7, 12));
+    expect(JSON.stringify(sent.at(-1))).not.toContain('Workspace name');
+    await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
+    await bot.handle(message('https://code.example.test/team/sub/app'));
     expect(sent.at(-1).text).toContain('Workspace name');
-    await bot.handle(message('Company', 7, 13));
-    expect(f.workspaces.list().some((workspace) => workspace.name === 'Company')).toBe(false);
-    await bot.handle(message('Company', 7, 12));
+    await bot.handle(message('Company'));
     expect(f.workspaces.list().find((workspace) => workspace.name === 'Company')).toMatchObject({
       provider: 'gitlab',
       repoPath: 'https://code.example.test/team/sub/app.git',
@@ -1736,7 +1741,7 @@ it('pages through every model and supports profiles without effort and engine de
     defaultEffort: '',
     isDefault: false,
   });
-  vi.spyOn(f.daddy.catalogue, 'list').mockResolvedValue(models);
+  const list = vi.spyOn(f.daddy.catalogue, 'list').mockResolvedValue(models);
   let n = 1400;
   const press = (data: string) =>
     bot.handle({
@@ -1820,6 +1825,29 @@ it('pages through every model and supports profiles without effort and engine de
       model: 'codex-1',
     });
     expect(f.daddy.group(group.id).worker?.effort).toBeUndefined();
+
+    const empty = f.daddy.create({ workspaceId: f.workspace.id, title: 'Empty catalogues' });
+    f.store.setSetting('telegram.currentDaddy', empty.id);
+    (f.daddy.catalogue as any).engines = () => [
+      { id: 'codex', name: 'Codex' },
+      { id: 'claude', name: 'Claude' },
+    ];
+    list.mockRejectedValue(new Error('All model catalogues are unavailable'));
+    for (const role of ['daddy', 'worker'] as const) {
+      await press(`dad:models:${empty.id}:${role}`);
+      const claude = button('Claude · Engine configuration');
+      expect(claude).toBeTruthy();
+      await press(claude.callback_data);
+      await press(
+        sent
+          .at(-1)
+          .buttons.flat()
+          .find((item: any) => item.callback_data?.endsWith(':save')).callback_data,
+      );
+      expect(
+        role === 'daddy' ? f.daddy.group(empty.id).daddy : f.daddy.group(empty.id).worker,
+      ).toEqual({ engine: 'claude' });
+    }
   } finally {
     await bot.stop();
     await f.close();

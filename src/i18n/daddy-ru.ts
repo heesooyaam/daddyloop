@@ -905,8 +905,16 @@ export const daddyRu: Record<string, string> = {
   Scope: 'Scope',
   'Base branch': 'Базовая ветка',
   'Working copies': 'Рабочие копии',
-  'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use clear to remove scope or base.':
-    'Измени одно сохранённое значение командой /workspace <ID> name|path|scope|base|provider|copies <значение>. clear очищает scope или базовую ветку.',
+  'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Clear scope or base with /workspace <ID> clear scope|base.':
+    'Измени одно сохранённое значение командой /workspace <ID> name|path|scope|base|provider|copies <значение>. Очисти scope или базовую ветку командой /workspace <ID> clear scope|base.',
+  'The selected preset changed in the shared library. Reopen settings and try again.':
+    'Выбранный пресет изменён в общей библиотеке. Открой настройки заново и попробуй снова.',
+  'Repository source and name are entered in the paired private chat.':
+    'Источник и имя репозитория вводятся в привязанной личке.',
+  'This selection expired. Open repository registration again.':
+    'Выбор устарел. Открой добавление репозитория заново.',
+  'Repository saved. Continue the new session in the original chat.':
+    'Репозиторий сохранён. Продолжи создание сессии в исходном чате.',
   'Send /repo followed by the exact server path to continue.':
     'Чтобы продолжить, отправь /repo с точным путём на сервере.',
   'These instructions changed in another client. Review the latest value and try again.':

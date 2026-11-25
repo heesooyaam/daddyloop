@@ -244,10 +244,6 @@ export function applyInstructionChanges(
     else delete next[role].skills;
   }
   if (order) {
-    const shared = order.before.filter((id) => order.after.includes(id)),
-      beforeShared = order.before.filter((id) => shared.includes(id)),
-      afterShared = order.after.filter((id) => shared.includes(id));
-    if (sameValue(beforeShared, afterShared)) return sessionInstructionsSchema.parse(next);
     const presets = next.presets ?? [],
       byId = new Map(presets.map((entry) => [entry.preset.id, entry]));
     if (order.after.some((id) => !byId.has(id))) throw new Error('instruction_conflict');

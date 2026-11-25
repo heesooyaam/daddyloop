@@ -83,7 +83,7 @@ For Arcadia, choose Work and keep automatic session copies enabled, then use **S
 
 To register a repository from your phone, open **Settings → Repositories → Add repository**. Choose GitHub or GitLab and send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md)
 
-In the private chat, `/workspace <name or ID>` shows saved defaults. Change one field with `/workspace <ID> name|path|scope|base|provider|copies <value>`; use `root` or `default` to clear the scope or base branch.
+In the private chat, `/workspace <name or ID>` shows saved defaults. Change one field with `/workspace <ID> name|path|scope|base|provider|copies <value>`. Clear only the scope or base branch with `/workspace <ID> clear scope` or `/workspace <ID> clear base`; `clear`, `root` and `default` remain valid literal values in the normal value position.
 
 The bot never prints credentials or tokens in a group. CLI updates, browser login links and group connection stay in the paired private chat. A group command that needs one of these steps links to the private chat instead. The current and remaining cross-client coverage is tracked in [Web and Telegram control coverage](../control-surfaces/en.md).
 

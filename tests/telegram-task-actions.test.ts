@@ -273,6 +273,7 @@ it.each([
         expectedAction,
         { head: task.revision!.head, generation: task.generation },
         expectedReason,
+        expect.any(String),
       );
     } finally {
       await bot.stop();
@@ -339,6 +340,72 @@ it('rejects legacy submit and publish commands and confirmation records', async 
     expect(telegram.sent.at(-1)!.card.text).toContain('not available');
     expect(submit).not.toHaveBeenCalled();
     expect(publish).not.toHaveBeenCalled();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('does not reuse a completed waiver receipt for another reason', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id }),
+    task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 64,
+        url: 'https://demo.local/pull/64',
+      },
+      repoPath: f.dir,
+      requirements: 'Keep waiver receipts distinct',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+  task.state = 'awaiting_checks';
+  f.store.saveTask(task);
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 1200;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    await bot.handle(message('/waive First offline verification'));
+    const first = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(message('/waive Different reason'));
+    const second = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(click(first));
+    await bot.handle(click(second));
+    const waivers = f.store.events(task.id).filter((event) => event.type === 'checks.waived');
+    expect(waivers).toHaveLength(1);
+    expect(waivers[0]!.data).toMatchObject({ reason: 'First offline verification' });
+    const secondId = second.slice('dad:task:'.length);
+    expect(
+      f.store.db.prepare('SELECT consumed FROM bot_actions WHERE id=?').get(secondId)!.consumed,
+    ).toBe(0);
+    expect(String(telegram.sent.at(-1)!.card.text ?? telegram.sent.at(-1)!.card)).not.toContain(
+      'Done: allow CI waiver',
+    );
   } finally {
     await bot.stop();
     await f.close();
@@ -422,8 +489,23 @@ it('binds merge verification to the selected session and exact task version', as
       .card.buttons.flat()
       .find((button: any) => button.text === 'Verify merge');
     await bot.handle(click(freshPrepare.callback_data));
-    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    const confirmation = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(click(confirmation));
     expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'verify_merge', role: 'reviewer' }]);
+    const receiptId = confirmation.slice('dad:task:'.length),
+      saved = f.store.db.prepare('SELECT data FROM bot_actions WHERE id=?').get(receiptId);
+    const control = JSON.parse(String(saved!.data));
+    delete control.outcome;
+    f.store.db
+      .prepare('UPDATE bot_actions SET data=?,consumed=0 WHERE id=?')
+      .run(JSON.stringify(control), receiptId);
+    await bot.handle(click(confirmation));
+    expect(f.store.activeJobs(task.id)).toHaveLength(1);
+    expect(
+      JSON.parse(
+        String(f.store.db.prepare('SELECT data FROM bot_actions WHERE id=?').get(receiptId)!.data),
+      ).outcome,
+    ).toBe('completed');
   } finally {
     await bot.stop();
     await f.close();

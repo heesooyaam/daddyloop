@@ -2423,6 +2423,7 @@ export class Engine {
     action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
     reason = '',
     expected?: ExpectedTask,
+    actionId?: string,
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -2431,10 +2432,20 @@ export class Engine {
         if (group.deletedAt || group.deletion)
           throw new AppError('session_deleting', 'This session is being deleted');
       }
+      if (
+        actionId &&
+        this.store.db
+          .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='human.task_action'")
+          .get(id, actionId)
+      )
+        return task;
       assertTaskVersion(task, expected);
       if (action === 'verify-merge') {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
-        return this.queueMergeVerification(task, pr);
+        const result = this.queueMergeVerification(task, pr);
+        if (actionId)
+          this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
+        return result;
       }
       if (action === 'pause') {
         task.resumeState = task.state;
@@ -2583,6 +2594,8 @@ export class Engine {
         }
       }
       this.store.event(id, `human.${action}`, { reason });
+      if (actionId)
+        this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
       return task;
     });
   }

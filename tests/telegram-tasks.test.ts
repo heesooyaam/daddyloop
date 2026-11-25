@@ -203,11 +203,17 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await bot.handle(click(verifyButton));
     const confirmation = callbacks().find((data) => data.startsWith('dad:task:'))!;
     await bot.handle(click(confirmation));
-    expect(action).toHaveBeenCalledWith(withPr.id, 'verify-merge', '', {
-      groupId: group.id,
-      head: withPr.revision!.head,
-      generation: withPr.generation,
-    });
+    expect(action).toHaveBeenCalledWith(
+      withPr.id,
+      'verify-merge',
+      '',
+      {
+        groupId: group.id,
+        head: withPr.revision!.head,
+        generation: withPr.generation,
+      },
+      expect.any(String),
+    );
     expect(callbacks()).toContain(backToQueue);
     action.mockRestore();
     f.store.saveTask({ ...tenth, state: 'complete' });

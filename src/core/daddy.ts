@@ -298,6 +298,7 @@ export class Daddy {
     action: HumanTaskAction,
     expected: { head: string; generation: number },
     reason = '',
+    actionId?: string,
   ) {
     if (reason.length > 2000)
       throw new AppError(
@@ -307,7 +308,7 @@ export class Daddy {
       );
     const task = this.task(groupId, taskId);
     const version = { ...expected, groupId };
-    return this.engine.action(task.id, action, reason, version);
+    return this.engine.action(task.id, action, reason, version, actionId);
   }
   async createTask(
     id: string,
