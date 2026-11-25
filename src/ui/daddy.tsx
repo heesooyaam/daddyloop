@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   Check,
   CircleCheck,
+  Info,
   Folder,
   FolderGit2,
   HardDrive,
@@ -66,16 +67,26 @@ function safeUrl(value: string) {
     return;
   }
 }
+function NoticeRetry({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button className="daddy-notice-retry" aria-label={label} title={label} onClick={onClick}>
+      <RefreshCw size={16} aria-hidden="true" />
+      <span>{label}</span>
+    </button>
+  );
+}
 function SessionMaintenanceError({
   title,
   reason,
   retryLabel,
   onRetry,
+  onDetails,
 }: {
   title: string;
   reason?: string;
   retryLabel: string;
   onRetry: () => void;
+  onDetails: (title: string, text: string) => void;
 }) {
   const { t } = useLocale();
   return (
@@ -88,7 +99,19 @@ function SessionMaintenanceError({
           </div>
         )}
       </div>
-      <button onClick={onRetry}>{t(retryLabel)}</button>
+      <div className="daddy-notice-actions">
+        {reason && (
+          <button
+            className="daddy-notice-details"
+            aria-label={t('View details')}
+            title={t('View details')}
+            onClick={() => onDetails(title, reason)}
+          >
+            <Info size={16} aria-hidden="true" />
+          </button>
+        )}
+        <NoticeRetry label={t(retryLabel)} onClick={onRetry} />
+      </div>
     </div>
   );
 }
@@ -122,6 +145,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
   const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const [noticeDetails, setNoticeDetails] = useState<{ title: string; text: string }>();
+  const showNoticeDetails = (title: string, text: string) => setNoticeDetails({ title, text });
+  const tasksPanel = useRef<HTMLElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const firstMenuItem = useRef<HTMLButtonElement>(null);
   const wasMenuOpen = useRef(false);
@@ -197,6 +223,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   };
   const paused = board?.group.daddyState === 'paused';
   const resourceWait = board?.group.resourceWait;
+  const resourceExplanation =
+    'The monitor has asked daddy to recover resources. Your messages and working files are saved.';
   const deletion = board?.group.deletion;
   const preparation = deletion ? undefined : board?.group.workspacePreparation;
   const deleting = deletion?.state === 'pending' || deletion?.state === 'running';
@@ -215,6 +243,39 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
       (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
   );
+  const firstTaskId = workItems?.[0]?.id;
+  useLayoutEffect(() => {
+    const panel = tasksPanel.current;
+    const workspace = panel?.parentElement;
+    const list = panel?.querySelector('.daddy-work-items');
+    const first = list?.querySelector('.daddy-work-item');
+    if (!panel || !workspace || !list || !first) return;
+
+    const measure = () => {
+      const listStyle = getComputedStyle(list);
+      const height = panel.getClientRects().length
+        ? list.getBoundingClientRect().top -
+          panel.getBoundingClientRect().top +
+          first.getBoundingClientRect().height +
+          parseFloat(listStyle.paddingTop) +
+          parseFloat(listStyle.paddingBottom) +
+          parseFloat(getComputedStyle(first).marginBottom) +
+          parseFloat(getComputedStyle(panel).paddingBottom) +
+          1
+        : 0;
+      workspace.style.setProperty('--first-task-space', Math.ceil(height) + 'px');
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    observer.observe(first);
+    for (const header of panel.querySelectorAll('.daddy-board-controls, .daddy-board-heading'))
+      observer.observe(header);
+    measure();
+    return () => {
+      observer.disconnect();
+      workspace.style.removeProperty('--first-task-space');
+    };
+  }, [firstTaskId, pane, tasksCollapsed]);
   return (
     <div className="daddy-app">
       <aside
@@ -336,7 +397,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main" inert={menu}>
+      <main className="daddy-main" data-pane={pane} inert={menu}>
         <header className="daddy-topbar">
           <button
             ref={menuButton}
@@ -417,8 +478,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         >
           {state.error && (modal !== 'workers' || !board) && (
             <div className="daddy-error" role="alert">
-              {t(state.error)}
-              <button onClick={() => void model.refresh()}>{t('Retry')}</button>
+              <span className="daddy-notice-message">{t(state.error)}</span>
+              <div className="daddy-notice-actions">
+                <button
+                  className="daddy-notice-details"
+                  aria-label={t('View details')}
+                  title={t('View details')}
+                  onClick={() => showNoticeDetails('Session status', state.error!)}
+                >
+                  <Info size={16} aria-hidden="true" />
+                </button>
+                <NoticeRetry label={t('Retry')} onClick={() => void model.refresh()} />
+              </div>
             </div>
           )}
           {preparation?.state === 'error' && (
@@ -426,6 +497,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               title="Could not prepare the session copy"
               reason={preparation.error}
               retryLabel="Retry"
+              onDetails={showNoticeDetails}
               onRetry={() => void model.action('resume')}
             />
           )}
@@ -434,6 +506,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               title="Session deletion stopped; working copies were preserved"
               reason={deletion.error}
               retryLabel="Retry deletion"
+              onDetails={showNoticeDetails}
               onRetry={() => setModal('delete')}
             />
           )}
@@ -448,11 +521,23 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   </>
                 )}
               </div>
-              <span>
-                {t(
-                  'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-                )}
-              </span>
+              <span className="daddy-resource-explanation">{t(resourceExplanation)}</span>
+              <button
+                className="daddy-notice-details"
+                aria-label={t('View details')}
+                title={t('View details')}
+                onClick={() =>
+                  showNoticeDetails(
+                    'Waiting for server resources',
+                    [
+                      ...resourceWait.reasons.map((reason) => t(reason)),
+                      t(resourceExplanation),
+                    ].join('\n'),
+                  )
+                }
+              >
+                <Info size={16} aria-hidden="true" />
+              </button>
             </div>
           )}
           {(preparing || deleting) && (
@@ -625,6 +710,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 )}
               </section>
               <aside
+                ref={tasksPanel}
                 id="daddy-tasks-panel"
                 className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
                 aria-labelledby="daddy-task-heading"
@@ -813,6 +899,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               if (!model.snapshot().error) setModal(null);
             }}
           />
+        </Dialog>
+      )}
+      {noticeDetails && (
+        <Dialog title={t(noticeDetails.title)} onClose={() => setNoticeDetails(undefined)}>
+          <p className="daddy-notice-detail-text">{t(noticeDetails.text)}</p>
         </Dialog>
       )}
       {modal === 'queue-task' && board && (

@@ -2413,28 +2413,6 @@ body {
   }
 }
 
-@media (width > 650px) and (height <= 420px) {
-  .daddy-topbar {
-    min-block-size: 3.5rem;
-    padding-block: 6px;
-  }
-  .daddy-workspace:has(.daddy-board:not(.collapsed)) {
-    min-block-size: 15rem;
-  }
-}
-
-@media (width <= 650px) and (height <= 600px) {
-  .daddy-workspace[data-pane='chat'] {
-    min-block-size: 45dvh;
-  }
-}
-
-@media (width > 650px) and (420px < height <= 600px) {
-  .daddy-workspace {
-    min-block-size: 16rem;
-  }
-}
-
 @media (width > 650px) and (height <= 600px) {
   .daddy-board {
     padding-inline: 12px;
@@ -2446,5 +2424,160 @@ body {
     min-inline-size: 0;
     flex: 1 1 0;
     padding-inline: 4px;
+  }
+}
+
+.daddy-session-notices {
+  flex-shrink: 0;
+}
+.daddy-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: auto;
+  flex-shrink: 0;
+}
+.daddy-session-notices .daddy-notice-details {
+  display: none;
+}
+.daddy-notice-detail-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (height <= 625px) {
+  .daddy-session-overview {
+    min-block-size: min(2.5rem, 40px);
+  }
+  .daddy-main .daddy-topbar {
+    display: flex;
+    min-height: 0;
+    padding: 3px 8px;
+    gap: 5px;
+  }
+  .daddy-topbar .daddy-eyebrow {
+    display: none;
+  }
+  .daddy-topbar .daddy-title h1 {
+    margin: 0;
+    -webkit-line-clamp: 1;
+  }
+  .daddy-mobile-tabs button {
+    padding-block: 3px;
+  }
+  .daddy-main .daddy-workspace {
+    min-block-size: max(var(--first-task-space, 0px), 8rem);
+  }
+  .daddy-main .daddy-workspace[data-pane='chat'] {
+    min-block-size: max(var(--first-task-space, 0px), 10rem);
+  }
+  .daddy-session-notices .daddy-error,
+  .daddy-session-notices > .daddy-session-progress {
+    margin: 0;
+    padding: 3px 8px;
+    gap: 4px;
+    font: var(--type-caption);
+  }
+  .daddy-session-notices:not(:empty) {
+    min-block-size: 0;
+  }
+  .daddy-session-notices .daddy-notice-details {
+    display: inline-flex;
+    padding: 4px;
+  }
+  .daddy-notice-message {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .daddy-session-notices:has(> :nth-child(2)) .daddy-session-error-reason,
+  .daddy-session-notices .daddy-resource-explanation {
+    display: none;
+  }
+  .daddy-session-notices .daddy-resource-wait {
+    display: flex;
+  }
+  .daddy-board-controls {
+    flex-wrap: nowrap;
+  }
+  .daddy-board-controls > .daddy-button {
+    flex: 1 1 auto;
+    padding-inline: 4px;
+  }
+  .daddy-work-items .daddy-work-item {
+    gap: 3px;
+    padding-block: 5px;
+  }
+}
+
+/* At landscape heights give tasks a column of their own. */
+@media (height <= 425px) and (width >= 500px), (height <= 625px) and (width > 650px) {
+  .daddy-main:has(.daddy-board):is([data-pane='tasks'], :has(.daddy-board:not(.collapsed))) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) min(46%, 20rem);
+    grid-template-rows: max-content max-content minmax(2.5rem, 1fr) max-content minmax(0, 1fr);
+  }
+  .daddy-main:has(.daddy-board):is([data-pane='tasks'], :has(.daddy-board:not(.collapsed)))
+    > .daddy-workspace {
+    display: contents;
+  }
+  .daddy-main .daddy-board {
+    grid-area: 1 / 2 / -1;
+    width: 100%;
+    height: 100dvh;
+  }
+  .daddy-main > .daddy-topbar {
+    grid-area: 1 / 1;
+  }
+  .daddy-main > .daddy-session-notices {
+    grid-area: 2 / 1;
+  }
+  .daddy-main > .daddy-session-overview {
+    grid-area: 3 / 1;
+  }
+  .daddy-main > .daddy-mobile-tabs {
+    grid-area: 4 / 1;
+  }
+  .daddy-main .daddy-conversation {
+    grid-area: 5 / 1;
+  }
+}
+
+@media (height <= 425px) and (500px <= width <= 650px) {
+  .daddy-main[data-pane='chat']:has(.daddy-board) {
+    display: flex;
+  }
+  .daddy-main[data-pane='chat']:has(.daddy-board) > .daddy-workspace {
+    display: flex;
+  }
+}
+
+@media (height <= 625px) and (width > 650px) {
+  .daddy-main:has(.daddy-board.collapsed) {
+    display: flex;
+  }
+  .daddy-main:has(.daddy-board.collapsed) > .daddy-workspace {
+    display: flex;
+  }
+}
+
+.daddy-notice-retry svg {
+  display: none;
+}
+
+@media (height <= 625px) and (width <= 400px) {
+  .daddy-session-notices:has(> :nth-child(2)) .daddy-notice-retry {
+    display: inline-flex;
+    padding: 4px;
+  }
+  .daddy-session-notices:has(> :nth-child(2)) .daddy-notice-retry svg {
+    display: block;
+  }
+  .daddy-session-notices:has(> :nth-child(2)) .daddy-notice-retry span {
+    display: none;
+  }
+  .daddy-board-heading {
+    margin-block-start: 2px;
   }
 }

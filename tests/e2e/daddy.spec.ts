@@ -326,6 +326,8 @@ test('shows a full card on short screens and keeps actions available in a dense 
   }
   const path = `/test-workspaces${'/long-working-copy-directory'.repeat(9)}/session`;
   let constrained = false;
+  let copyFailed = false;
+  const copyFailure = 'The session copy could not be written';
   const longStatus = 'Waiting for GitHub to confirm the previous merge request';
   await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
     const response = await route.fetch();
@@ -342,7 +344,9 @@ test('shows a full card on short screens and keeps actions available in a dense 
         ...board,
         group: {
           ...board.group,
-          workspacePreparation: { state: 'ready', path },
+          workspacePreparation: copyFailed
+            ? { state: 'error', error: copyFailure }
+            : { state: 'ready', path },
           ...(constrained
             ? {
                 resourceWait: {
@@ -446,6 +450,8 @@ test('shows a full card on short screens and keeps actions available in a dense 
   await expect(first.locator('.daddy-work-state')).toHaveText(longStatus);
   const overview = page.getByRole('region', { name: 'Session overview' });
   for (const viewport of [
+    { width: 568, height: 320 },
+    { width: 640, height: 360 },
     { width: 667, height: 375 },
     { width: 700, height: 375 },
     { width: 844, height: 390 },
@@ -475,6 +481,35 @@ test('shows a full card on short screens and keeps actions available in a dense 
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: 'daddy' }).click();
   await overview.getByRole('button', { name: 'Usage details for Claude' }).click();
   await expect(page.getByRole('dialog', { name: 'Limits' })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  copyFailed = true;
+  await page.route('**/api/daddy/sessions/*/chat', (route) =>
+    route.fulfill({
+      status: 503,
+      json: { error: { code: 'unavailable', message: 'Request failed' } },
+    }),
+  );
+  const composer = page.getByLabel('Message daddy');
+  await composer.fill('Keep this draft');
+  await composer.press('Enter');
+  const notices = page.getByRole('region', { name: 'Session status' });
+  const failedCopy = notices
+    .getByRole('alert')
+    .filter({ hasText: 'Could not prepare the session copy' });
+  await expect(failedCopy).toBeVisible();
+  await expect(notices.getByText('Request failed', { exact: true })).toBeVisible();
+  await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+  await expect(first).toBeInViewport({ ratio: 1 });
+  await expect(notices.getByText('Waiting for server resources')).toBeInViewport({ ratio: 1 });
+  for (const retry of await notices.getByRole('button', { name: 'Retry', exact: true }).all()) {
+    await expect(retry).toBeInViewport({ ratio: 1 });
+    await expect(retry).toBeEnabled();
+  }
+  await failedCopy.getByRole('button', { name: 'View details' }).click();
+  await expect(page.getByRole('dialog').getByText(copyFailure)).toBeInViewport({ ratio: 1 });
 });
 test('shows message send errors without scrolling on short screens', async ({ page }) => {
   const message = 'The server is temporarily unavailable';
