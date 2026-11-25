@@ -55,6 +55,16 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
     if (originalDataDir === undefined) delete process.env.DADDYLOOP_DATA_DIR;
     else process.env.DADDYLOOP_DATA_DIR = originalDataDir;
 
+    const relative = loadConfig();
+    relative.dataDir = 'relative-state';
+    saveConfig(relative);
+    await expect(
+      program().parseAsync(['node', 'daddy', 'arcadia', 'setup', '--lease-helper', candidate]),
+    ).rejects.toMatchObject({ code: 'service_data_dir_unknown' });
+    expect(doctor).not.toHaveBeenCalled();
+    expect(loadConfig().arcadia).toMatchObject({ enabled: true, leaseHelper: previous });
+    saveConfig(configured);
+
     for (const message of ['Arcanum is temporarily unavailable', 'lease helper failed']) {
       doctor.mockImplementationOnce(async function (this: ArcBridge) {
         expect(Reflect.get(this, 'leaseHelperPath')).toBe(candidate);
@@ -76,6 +86,7 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
         user_login: 'tester',
         hash: 'a'.repeat(40),
         branch: 'trunk',
+        source: '/source-arcadia',
       };
     });
     await expect(run()).rejects.toMatchObject({ code: 'arcadia_setup_changed' });
@@ -97,6 +108,7 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
         user_login: 'tester',
         hash: 'a'.repeat(40),
         branch: 'trunk',
+        source: '/source-arcadia',
       };
     });
     await run();

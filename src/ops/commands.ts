@@ -4,7 +4,7 @@ import { checkedModules } from '../modules/catalogue.js';
 import type { Command } from 'commander';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
@@ -515,10 +515,10 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
-      if (!config.dataDir)
+      if (!config.dataDir || !isAbsolute(config.dataDir))
         throw new AppError(
           'service_data_dir_unknown',
-          'Run daddy init before configuring Arcadia for this service',
+          'Run daddy init with an absolute data directory before configuring Arcadia',
           422,
         );
       const serviceDataDir = resolve(config.dataDir);

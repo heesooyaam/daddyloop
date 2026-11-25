@@ -227,26 +227,30 @@ export class ArcBridge {
     return String(value.id);
   }
   async doctor(workspace?: string) {
-    let sourcePath: string | undefined;
+    const sources = await this.sourceMounts();
+    let sourcePath: string;
     if (workspace) {
       const selected = realpathSync(workspace);
-      const source = (await this.sourceMounts()).find(
+      const source = sources.find(
         (mount) =>
           mount.status === 'mounted' &&
           (selected === mount.mount || selected.startsWith(mount.mount + '/')),
       );
       if (!source) throw new Error('The selected Arcadia source is not mounted');
       sourcePath = source.mount;
+    } else {
+      const source = sources.find((mount) => mount.status === 'mounted');
+      if (!source) throw new Error('Choose an existing mounted Arcadia source with --workspace');
+      sourcePath = source.mount;
     }
-    // Verify the review transport before allocating a temporary managed copy.
+    // Verify the review transport, helper and existing journals without creating a probe copy.
     await this.api(['repo', 'list', '--fields', 'repos(id)']);
-    return this.withMount(async (mount) => {
-      const identity = JSON.parse(await this.native(['info', '--json'], mount)) as {
-        user_login: string;
-        hash: string;
-        branch: string;
-      };
-      return sourcePath ? { ...identity, source: sourcePath } : identity;
-    });
+    await this.mounts();
+    const identity = JSON.parse(await this.native(['info', '--json'], sourcePath)) as {
+      user_login: string;
+      hash: string;
+      branch: string;
+    };
+    return { ...identity, source: sourcePath };
   }
 }
