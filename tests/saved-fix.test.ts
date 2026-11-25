@@ -704,3 +704,76 @@ it.each([
     }
   },
 );
+
+it.each(['advance', 'rollback', 'divergence'] as const)(
+  'uses the last confirmed base after upgrading a queued fix (%s)',
+  async (movement) => {
+    const f = await fixture();
+    try {
+      const task = f.store.getTask(f.task.id);
+      const original = task.revision!;
+      const base = 'c'.repeat(40);
+      const confirmed = { ...task.pr!, head: savedHead, base, start: base };
+      const author = f.store.enqueue(task, 'author', 'fix', 'Save the fix');
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.event(
+        task.id,
+        'author.fixes_saved',
+        { head: savedHead, revision: original },
+        author.id,
+      );
+      f.store.event(task.id, 'author.submitted', { head: savedHead, pushed: true });
+      task.generation++;
+      f.store.event(task.id, 'revision.changed', {
+        revision: confirmed,
+        generation: task.generation,
+      });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'New revision is ready for review',
+        generation: task.generation,
+        head: savedHead,
+      });
+      const ref = { ...prRef(task), provider: 'github' as const };
+      f.store.saveTask({
+        ...task,
+        ref,
+        state: 'queued',
+        pr: confirmed,
+        revision: confirmed,
+        pendingAuthorHead: savedHead,
+        pendingFix: { revision: original, attempted: true },
+      });
+      const nextBase = movement === 'rollback' ? original.base : 'e'.repeat(40);
+      f.store.setSetting('demo-pr:1', { ...confirmed, base: nextBase, start: nextBase });
+      const targetAdvanced = vi.fn(
+        async (_ref: unknown, before: string) => before === original.base || movement === 'advance',
+      );
+      Object.assign(f.provider, { targetAdvanced });
+      const first = await f.engine.review(task.id);
+      if (movement === 'advance') {
+        expect(first).toMatchObject({
+          state: 'reviewing',
+          review: { revision: { head: savedHead, base: nextBase } },
+        });
+        expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      } else {
+        expect(first).toMatchObject({ state: 'needs_input', revision: { base } });
+        expect(first.reason).toContain(savedHead);
+        const restarted = new Engine(f.store, () => f.provider);
+        await restarted.action(task.id, 'resume');
+        const held = await restarted.review(task.id, true);
+        expect(held).toMatchObject({ state: 'needs_input', revision: { base } });
+        expect(held.reason).toContain(savedHead);
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      }
+      expect(targetAdvanced).toHaveBeenCalledWith(ref, base, nextBase);
+      expect(targetAdvanced).not.toHaveBeenCalledWith(ref, original.base, nextBase);
+      expect(
+        f.store.events(task.id).filter(({ type }) => type === 'author.submitted'),
+      ).toHaveLength(1);
+    } finally {
+      f.store.close();
+    }
+  },
+);

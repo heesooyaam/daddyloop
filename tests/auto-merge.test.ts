@@ -1062,6 +1062,9 @@ const savedFixReviewCases = [
   'reconcile then review',
   'old draft',
   'published before recovery',
+  'published on old base with conflict',
+  'published on old base without auto-merge',
+  'published after recovery on old base',
   'auto-merge disabled',
   'advanced with conflict',
   'advanced after resume',
@@ -1075,7 +1078,7 @@ it.each(savedFixReviewCases)(
   async (entry) => {
     const f = await setup();
     try {
-      const enabled = entry !== 'auto-merge disabled' && entry !== 'advanced without auto-merge';
+      const enabled = entry !== 'auto-merge disabled' && !entry.endsWith('without auto-merge');
       await f.daddy.settings(f.group.id, { autoMerge: enabled });
       const task = f.store.getTask(f.task.id);
       const original = task.revision!;
@@ -1111,26 +1114,29 @@ it.each(savedFixReviewCases)(
       }
       const confirmed = f.store.getTask(task.id);
       let recoveredFinding: string | undefined;
-      if (entry === 'published before recovery') {
+      const publishedAfterRecovery = entry === 'published after recovery on old base';
+      const recoveredReview = entry.startsWith('published')
+        ? await f.engine.broker.ensureReview({ ...confirmed, round: confirmed.round + 1 })
+        : undefined;
+      if (recoveredReview) {
         const ref = prRef(task);
-        const review = await f.engine.broker.ensureReview({
-          ...confirmed,
-          round: confirmed.round + 1,
-        });
-        if (!review) throw new Error('Expected a persisted review creation');
         const finding = await f.provider.createComment(
           ref,
-          review,
+          recoveredReview,
           'Check the changed code',
-          review.marker + ':comment:R1',
+          recoveredReview.marker + ':comment:R1',
         );
-        await f.provider.publish(ref, review);
+        if (!publishedAfterRecovery) await f.provider.publish(ref, recoveredReview);
         recoveredFinding = finding.id;
       }
+      const recoveredOnNewBase = !!recoveredReview && entry !== 'published before recovery';
       const moved =
-        entry.startsWith('advanced') || entry === 'rewritten base' || entry === 'retargeted';
+        recoveredOnNewBase ||
+        entry.startsWith('advanced') ||
+        entry === 'rewritten base' ||
+        entry === 'retargeted';
       const base = moved ? 'c'.repeat(40) : original.base;
-      const targetAdvanced = vi.fn(async () => entry.startsWith('advanced'));
+      const targetAdvanced = vi.fn(async () => recoveredOnNewBase || entry.startsWith('advanced'));
       Object.assign(f.provider, { targetAdvanced });
       if (moved)
         f.setRemote({
@@ -1143,6 +1149,16 @@ it.each(savedFixReviewCases)(
         expect(await f.engine.review(task.id)).toMatchObject({ state: 'needs_input' });
         expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
         targetAdvanced.mockClear();
+      }
+      if (recoveredOnNewBase) {
+        expect(await f.engine.review(task.id)).toMatchObject({
+          state: 'needs_input',
+          round: confirmed.round + 1,
+          review: { id: recoveredReview.id },
+        });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        if (publishedAfterRecovery) await f.provider.publish(prRef(task), recoveredReview);
+        expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
       }
       const routed = await f.engine.review(task.id, entry === 'old draft');
       if (entry === 'rewritten base' || entry === 'retargeted') {
@@ -1161,9 +1177,19 @@ it.each(savedFixReviewCases)(
       expect(
         f.store.events(task.id).filter(({ type }) => type === 'author.submitted'),
       ).toHaveLength(1);
-      if (recoveredFinding) expect(routed.round).toBe(confirmed.round + 1);
+      if (recoveredFinding && enabled) expect(routed.round).toBe(confirmed.round + 1);
       if (!enabled) {
         expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
+        if (recoveredFinding) {
+          expect(routed.round).toBe(confirmed.round + 2);
+          expect(routed.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
+          await f.engine.completeJob(f.store.claim()!, {
+            status: 'completed',
+            summary: 'Checked without the recovered finding',
+            checkedHead: saved,
+          });
+          expect(f.store.getTask(task.id).state).toBe('needs_input');
+        }
         return;
       }
       expect(routed).toMatchObject({ state: 'fixing', fixingMergeConflict: true });
@@ -1197,6 +1223,14 @@ it.each(savedFixReviewCases)(
         expect(next.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
       }
       expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
+      if (recoveredFinding) {
+        await f.engine.completeJob(f.store.claim()!, {
+          status: 'completed',
+          summary: 'Checked without the recovered finding',
+          checkedHead: resolved,
+        });
+        expect(f.store.getTask(task.id).state).toBe('needs_input');
+      }
     } finally {
       await f.close();
     }

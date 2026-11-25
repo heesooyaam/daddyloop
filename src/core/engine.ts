@@ -495,8 +495,11 @@ export class Engine {
             return task;
           }
           task.review = attempted;
-          if (attempt.revision) task.revision = attempt.revision;
-          task.snapshot = undefined;
+          // The recovered review may use an older comparison than the confirmed fix.
+          if (pending !== pr.head && attempt.revision) task.revision = attempt.revision;
+          task.snapshot = pending === pr.head ? completedSnapshot : undefined;
+          if (pending === pr.head && completedSnapshot)
+            retainPublishedFeedback(task, completedSnapshot, true);
           task.reviewFinished = false;
           task.generation = Math.max(task.generation, attempt.generation);
           task.round++;
@@ -2133,10 +2136,13 @@ export class Engine {
 
   private queueConfirmedFixReview(task: Task, pr: PullRequest, head: string, original: Revision) {
     this.store.transaction(() => {
-      const sent = task.pendingAuthorFix?.sent === true;
+      const pending = task.pendingAuthorFix;
+      const sent = pending?.sent === true;
+      const staleDraft = task.review?.revision.head === head ? task.review : pending?.staleDraft;
       this.invalidate(task, pr, false);
       task.pendingAuthorFix = {
-        ...task.pendingAuthorFix,
+        ...pending,
+        staleDraft,
         revision: original,
         generation: task.generation,
         sent,
@@ -2468,12 +2474,53 @@ export class Engine {
       .get(task.id, after, head, pr.base, pr.start, pr.revisionId ?? null);
   }
 
+  private confirmedLegacyFixRevision(task: Task, head: string): Revision | undefined {
+    const revision = task.revision;
+    if (
+      task.ref.provider !== 'github' ||
+      revision?.head !== head ||
+      task.pr?.state !== 'open' ||
+      !sameRevision(revision, task.pr)
+    )
+      return;
+    const saved = this.savedFixEvent(task, head);
+    if (!saved) return;
+    // Older versions saved the remote comparison in the queued transition while
+    // leaving the original comparison in pendingFix.
+    const confirmed = this.store.db
+      .prepare(
+        `SELECT 1 FROM events observed JOIN events queued ON queued.task_id=observed.task_id
+         AND queued.id>observed.id AND queued.type='task.state'
+         AND json_extract(queued.data, '$.state')='queued'
+         AND json_extract(queued.data, '$.reason')='New revision is ready for review'
+         AND json_extract(queued.data, '$.head')=?
+         AND json_extract(queued.data, '$.generation')=json_extract(observed.data, '$.generation')
+         WHERE observed.task_id=? AND observed.id>? AND observed.type='revision.changed'
+         AND json_extract(observed.data, '$.revision.head')=?
+         AND json_extract(observed.data, '$.revision.base')=?
+         AND json_extract(observed.data, '$.revision.start')=?
+         AND json_extract(observed.data, '$.revision.revisionId') IS ? LIMIT 1`,
+      )
+      .get(
+        head,
+        task.id,
+        saved.id!,
+        head,
+        revision.base,
+        revision.start,
+        revision.revisionId ?? null,
+      );
+    return confirmed ? revision : undefined;
+  }
+
   private adoptPendingFix(task: Task) {
     const previous = task.pendingFix;
     if (!previous) return;
     const deadline = Date.parse(previous.confirmUntil ?? '');
+    const confirmed =
+      task.pendingAuthorHead && this.confirmedLegacyFixRevision(task, task.pendingAuthorHead);
     task.pendingAuthorFix ??= {
-      revision: previous.revision,
+      revision: confirmed || previous.revision,
       generation: task.generation,
       targetBranch: task.pr?.targetBranch,
       pushStarted: previous.attempted,
