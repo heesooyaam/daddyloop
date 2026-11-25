@@ -25,7 +25,7 @@ Install the supported Arcanum CLI from the internal npm registry. The similarly 
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-Before installing SkillStore, check the helper and the Arcadia source separately:
+Before installing SkillStore, look for an existing helper. Check the saved `arcadia.leaseHelper`, `command -v arcadia-mount-lease`, the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
 
 ```bash
 source="$HOME/arcadia2"
@@ -35,7 +35,9 @@ bash "$helper" --json status
 arc mount -l --json
 ```
 
-A successful `status` confirms that the helper works. In the separate Arc output, find an entry whose `mount` is `$HOME/arcadia2` and whose `status` is `mounted`. The source does not have to appear in the helper lease inventory. If both checks pass, connect the existing helper directly:
+A successful `status` confirms that the helper works. If a discovered helper fails, preserve its diagnostic output, fix the reported cause—for example, the path from `ARCADIA_MOUNT_CONFIG`—and retry the same command. Do not install a second copy of the skill to fix the configuration of a helper that was already found.
+
+In the separate Arc output, find an entry whose `mount` is `$HOME/arcadia2` and whose `status` is `mounted`. The source does not have to appear in the helper lease inventory. If both checks pass, connect the existing helper directly:
 
 ```bash
 source="$HOME/arcadia2"
@@ -43,7 +45,7 @@ helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mou
 daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
 ```
 
-If the file is absent or `bash "$helper" --json status` fails, install the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
+Only if no helper was found through any of those locations, install the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
 
 ```bash
 SKILLS_DIR="$HOME/.codex/skills"
