@@ -21,7 +21,8 @@ export function taskRequestKey(store: Store, task: Task) {
 
 export function reminderOpen(store: Store, question: OwnerQuestion) {
   if (!notificationPreferences(store).enabled) return false;
-  const group = store.getGroup(question.groupId);
+  const group = store.groups().find((g) => g.id === question.groupId);
+  if (!group) return false;
   if (
     group.deletedAt ||
     group.deletion ||
@@ -30,8 +31,24 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
   )
     return false;
   if ('taskId' in question) {
-    const task = store.getTask(question.taskId);
-    return task.groupId === group.id && taskRequestKey(store, task) === question.request;
+    const task = store.tasks(group.id).find((t) => t.id === question.taskId);
+    if (!task || taskRequestKey(store, task) !== question.request) return false;
+    const owner = store.setting<{ userId: number }>('telegram.pairing')?.userId;
+    if (!owner) return false;
+    const original = `telegram:question:${owner}:${task.id}:${question.request}`;
+    // An explicit reply acknowledges this occurrence even while daddy is still processing it.
+    // Match the trusted outgoing receipt and the native chat/message IDs, never the quoted text.
+    return !store.db
+      .prepare(
+        `SELECT 1 FROM messages m WHERE m.task_id=?
+      AND json_extract(m.data,'$.sender')='user' AND json_extract(m.data,'$.origin.replyTo.messageId') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM settings s WHERE s.key GLOB 'telegram.delivery:*'
+        AND (json_extract(s.value,'$.options.key')=? OR json_extract(s.value,'$.options.key') GLOB ?)
+        AND json_extract(s.value,'$.destination.chatId')=json_extract(m.data,'$.origin.chatId')
+        AND EXISTS(SELECT 1 FROM json_each(s.value,'$.messages') delivered
+          WHERE json_extract(delivered.value,'$.id')=json_extract(m.data,'$.origin.replyTo.messageId'))) LIMIT 1`,
+      )
+      .get(group.id, original, original + ':reminder:*');
   }
   const message = store.messageById(group.id, question.messageId);
   if (!message?.needsReply || message.phase !== 'final' || message.sender !== 'agent') return false;
@@ -45,8 +62,8 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
   if (group.daddyState === 'needs_input') return true;
   const job = store.daddyJobs(group.id).find((j) => j.id === message.runId);
   if (!job?.waitingTaskId) return false;
-  const task = store.getTask(job.waitingTaskId);
-  return task.state === 'needs_input' && !taskRequestKey(store, task);
+  const task = store.tasks(group.id).find((t) => t.id === job.waitingTaskId);
+  return task?.state === 'needs_input' && !taskRequestKey(store, task);
 }
 
 export function nextReminderId(store: Store, originalId: string, time: number) {

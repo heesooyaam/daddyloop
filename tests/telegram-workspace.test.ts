@@ -1,3 +1,4 @@
+import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
@@ -945,6 +946,36 @@ it('repeats only an open owner question after 30 minutes, once across replays an
     expect(pings()).toHaveLength(2);
   } finally {
     await bot.stop();
+    await f.close();
+  }
+});
+
+it('acknowledges an explicit reply to the matching task ping while its answer is being processed', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.daddy.createTask(group.id, { requirements: 'Task', requestId: 'asked' });
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      inputRequest: { runId: 'question', role: 'author', generation: task.generation },
+    });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    const q = { groupId: group.id, taskId: task.id, request: 'question' };
+    f.store.setSetting('telegram.delivery:test', {
+      destination: { chatId: -1001 },
+      options: { key: 'telegram:question:7:' + task.id + ':question' },
+      messages: [{ id: 42 }],
+    });
+    f.store.daddyMessage(group.id, 'user', 'Another reply', undefined, undefined, {
+      origin: { channel: 'telegram', chatId: 7, replyTo: { messageId: 42 } },
+    });
+    expect(reminderOpen(f.store, q)).toBe(true);
+    f.store.daddyMessage(group.id, 'user', 'Use main', undefined, undefined, {
+      origin: { channel: 'telegram', chatId: -1001, replyTo: { messageId: 42 } },
+    });
+    expect(reminderOpen(f.store, q)).toBe(false);
+  } finally {
     await f.close();
   }
 });
