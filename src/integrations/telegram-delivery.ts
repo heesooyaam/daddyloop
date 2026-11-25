@@ -180,6 +180,13 @@ export class TelegramDelivery {
           store.setSetting(key, value);
         }
     }
+    const recoveryDeliveries = deliveries.filter(
+      ({ value }) =>
+        ['queued', 'sending'].includes(value.status) &&
+        value.options.notificationId?.startsWith('telegram:dialog:'),
+    );
+    if (recoveryDeliveries.length)
+      this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
     const queuedDialogs = new Map<string, { key: string; value: Delivery }[]>();
     for (const row of deliveries) {
       const notificationId = row.value.options.notificationId;
@@ -194,7 +201,7 @@ export class TelegramDelivery {
       queuedDialogs.set(identity, rows);
     }
     for (const rows of queuedDialogs.values()) {
-      const question = rows.find(({ value }) => isSeparateQuestion(value));
+      const question = rows.find(({ value }) => this.isQuestionDelivery(value));
       if (!question) continue;
       const sources = rows
         .filter(
@@ -225,7 +232,7 @@ export class TelegramDelivery {
         .filter(
           ({ value }) =>
             ['queued', 'sending'].includes(value.status) &&
-            isSeparateQuestion(value) &&
+            this.isQuestionDelivery(value) &&
             !value.options.questionSourceKey &&
             !!value.options.notificationId,
         )
@@ -250,13 +257,6 @@ export class TelegramDelivery {
       if (!existing || value.options.key.startsWith('message:'))
         this.storedQuestionSources.set(identity, key);
     }
-    const recoveryDeliveries = deliveries.filter(
-      ({ value }) =>
-        ['queued', 'sending'].includes(value.status) &&
-        value.options.notificationId?.startsWith('telegram:dialog:'),
-    );
-    if (recoveryDeliveries.length)
-      this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
     const deliveredNotifications = new Set(
       deliveries
         .filter(({ value }) => value.status === 'sent' && !!value.options.notificationId)
@@ -619,6 +619,13 @@ export class TelegramDelivery {
       .prepare("SELECT json_extract(data,'$.deletedAt') AS deletedAt FROM review_groups WHERE id=?")
       .get(groupId);
     return !row || !row.deletedAt;
+  }
+  private isQuestionDelivery(value: Delivery) {
+    if (isSeparateQuestion(value)) return true;
+    if (!value.options.notificationId || value.options.key !== value.options.notificationId)
+      return false;
+    const message = this.storedMessage(value);
+    return message?.sender === 'agent' && message.phase === 'final' && message.needsReply;
   }
   private restoreQuestionOptions(key: string, value: Delivery, deliveryKeys: Set<string>) {
     let changed = false;
