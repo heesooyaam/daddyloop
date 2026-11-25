@@ -331,14 +331,16 @@ it('recovers a plan approval when its confirmation receipt write is interrupted'
     const confirmation = telegram.sent.at(-1)!.card.buttons[0][0].callback_data,
       actionId = confirmation.slice('dad:task:'.length),
       event = f.store.event.bind(f.store);
-    let failReceipt = true;
+    let failEvidence = true;
     vi.spyOn(f.store, 'event').mockImplementation((taskId, type, data, runId) => {
-      if (type === 'human.task_action' && failReceipt) {
-        failReceipt = false;
-        throw new Error('fixture receipt write failed');
+      if (type === 'human.approve-plan' && failEvidence) {
+        failEvidence = false;
+        throw new Error('fixture approval evidence write failed');
       }
       return event(taskId, type, data, runId);
     });
+    await bot.handle(click(confirmation));
+    expect(f.store.getTask(task.id).state).toBe('awaiting_plan_approval');
     await bot.handle(click(confirmation));
     expect(f.store.getTask(task.id).state).toBe('complete');
     expect(
@@ -464,15 +466,17 @@ it('does not reuse a completed waiver receipt for another reason', async () => {
     const first = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle(message('/waive Different reason'));
     const second = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
-    const event = f.store.event.bind(f.store);
-    let failReceipt = true;
-    vi.spyOn(f.store, 'event').mockImplementation((taskId, type, data, runId) => {
-      if (type === 'human.task_action' && failReceipt) {
-        failReceipt = false;
-        throw new Error('fixture receipt write failed');
+    const saveTask = f.store.saveTask.bind(f.store);
+    let failTask = true;
+    vi.spyOn(f.store, 'saveTask').mockImplementation((changed) => {
+      if (changed.id === task.id && changed.checksWaivedAt && failTask) {
+        failTask = false;
+        throw new Error('fixture task write failed');
       }
-      return event(taskId, type, data, runId);
+      return saveTask(changed);
     });
+    await bot.handle(click(first));
+    expect(f.store.getTask(task.id).state).toBe('awaiting_checks');
     await bot.handle(click(first));
     await bot.handle(click(second));
     const waivers = f.store.events(task.id).filter((event) => event.type === 'checks.waived');
@@ -578,6 +582,8 @@ it('binds merge verification to the selected session and exact task version', as
       }
       return event(taskId, type, data, runId);
     });
+    await bot.handle(click(confirmation));
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
     await bot.handle(click(confirmation));
     expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'verify_merge', role: 'reviewer' }]);
     const receiptId = confirmation.slice('dad:task:'.length),

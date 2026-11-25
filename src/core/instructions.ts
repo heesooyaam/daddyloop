@@ -166,6 +166,29 @@ export type SessionInstructionChange = z.infer<
 >['changes'][number];
 
 const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+const commonSubsequence = (left: string[], right: string[]) => {
+  const lengths = Array.from({ length: left.length + 1 }, () =>
+    Array<number>(right.length + 1).fill(0),
+  );
+  for (let l = left.length - 1; l >= 0; l--)
+    for (let r = right.length - 1; r >= 0; r--)
+      lengths[l]![r] =
+        left[l] === right[r]
+          ? lengths[l + 1]![r + 1]! + 1
+          : Math.max(lengths[l + 1]![r]!, lengths[l]![r + 1]!);
+  const result: string[] = [];
+  for (let l = 0, r = 0; l < left.length && r < right.length;) {
+    if (left[l] === right[r]) {
+      result.push(left[l]!);
+      l++;
+      r++;
+    } else if (lengths[l + 1]![r]! >= lengths[l]![r + 1]!) l++;
+    else r++;
+  }
+  return result;
+};
+const relativePosition = (order: string[], id: string, anchors: string[]) =>
+  anchors.map((anchor) => order.indexOf(id) < order.indexOf(anchor));
 export function applyInstructionChanges(
   current: SessionInstructions | undefined,
   changes: SessionInstructionChange[],
@@ -189,6 +212,7 @@ export function applyInstructionChanges(
     const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
+  let orderMoves = new Set<string>();
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
@@ -200,16 +224,22 @@ export function applyInstructionChanges(
       presetChanges = new Map(
         changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
       ),
-      shared = order.before.filter((id) => order.after.includes(id) && actualOrder.includes(id)),
+      shared = order.before.filter((id) => order.after.includes(id)),
       beforeShared = order.before.filter((id) => shared.includes(id)),
       afterShared = order.after.filter((id) => shared.includes(id)),
-      actualShared = actualOrder.filter((id) => shared.includes(id));
-    if (
-      !sameValue(beforeShared, afterShared) &&
-      !sameValue(actualShared, beforeShared) &&
-      !sameValue(actualShared, afterShared)
-    )
-      throw new Error('instruction_conflict');
+      anchors = commonSubsequence(beforeShared, afterShared),
+      presentAnchors = anchors.filter((id) => actualOrder.includes(id));
+    orderMoves = new Set(
+      order.after.filter((id) => !order.before.includes(id) && !actualOrder.includes(id)),
+    );
+    for (const id of shared.filter((id) => !anchors.includes(id) && actualOrder.includes(id))) {
+      const before = relativePosition(order.before, id, presentAnchors),
+        after = relativePosition(order.after, id, presentAnchors),
+        actual = relativePosition(actualOrder, id, presentAnchors);
+      if (sameValue(actual, after)) continue;
+      if (!sameValue(actual, before)) throw new Error('instruction_conflict');
+      orderMoves.add(id);
+    }
     for (const id of order.after.filter((id) => !order.before.includes(id))) {
       if (!actualOrder.includes(id)) {
         if (!presetChanges.get(id)?.after) throw new Error('instruction_conflict');
@@ -268,37 +298,18 @@ export function applyInstructionChanges(
   if (order) {
     const presets = next.presets ?? [],
       byId = new Map(presets.map((entry) => [entry.preset.id, entry])),
-      shared = order.before.filter((id) => order.after.includes(id)),
-      beforeShared = order.before.filter((id) => shared.includes(id)),
-      afterShared = order.after.filter((id) => shared.includes(id));
-    if (!sameValue(beforeShared, afterShared)) {
-      const ordered = order.after.flatMap((id) => {
-          const entry = byId.get(id);
-          return entry ? [entry] : [];
-        }),
-        known = new Set(order.after),
-        merged = presets.slice();
-      let index = 0;
-      for (let slot = 0; slot < merged.length; slot++)
-        if (known.has(merged[slot]!.preset.id)) merged[slot] = ordered[index++]!;
-      next.presets = merged;
-    } else {
-      const added = order.after.filter((id) => !order.before.includes(id));
-      for (const id of added) {
-        const entry = byId.get(id);
-        if (!entry) continue;
-        const current = next.presets ?? [],
-          index = current.findIndex((preset) => preset.preset.id === id);
-        if (index >= 0) current.splice(index, 1);
-        const following = order.after
-          .slice(order.after.indexOf(id) + 1)
-          .find((candidate) => current.some((preset) => preset.preset.id === candidate));
-        const followingIndex = following
-          ? current.findIndex((preset) => preset.preset.id === following)
-          : -1;
-        current.splice(followingIndex < 0 ? current.length : followingIndex, 0, entry);
-      }
+      current = presets.filter((entry) => !orderMoves.has(entry.preset.id));
+    for (const id of order.after.filter((id) => orderMoves.has(id))) {
+      const entry = byId.get(id);
+      if (!entry) continue;
+      const following = new Set(order.after.slice(order.after.indexOf(id) + 1)),
+        followingIndexes = current.flatMap((preset, index) =>
+          following.has(preset.preset.id) ? [index] : [],
+        ),
+        followingIndex = followingIndexes.length ? Math.min(...followingIndexes) : -1;
+      current.splice(followingIndex < 0 ? current.length : followingIndex, 0, entry);
     }
+    next.presets = current;
   }
   return sessionInstructionsSchema.parse(next);
 }

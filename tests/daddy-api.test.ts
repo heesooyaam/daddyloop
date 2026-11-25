@@ -275,7 +275,13 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       source: { kind: 'text' as const },
     }),
     firstSkill = skill('First'),
-    secondSkill = skill('Second');
+    secondSkill = skill('Second'),
+    patchInstructions = (groupId: string, changes: unknown[]) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/daddy/sessions/${groupId}/instructions-patch`,
+        payload: { changes },
+      });
   const group = f.daddy.create({
     workspaceId: f.workspace.id,
     instructions: {
@@ -497,6 +503,161 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     expect(
       f.daddy.group(concurrentDelete.id).instructions?.presets?.map((entry) => entry.preset.id),
     ).toEqual([presetA.id, presetC.id]);
+
+    for (const scenario of [
+      {
+        before: [presetA],
+        changes: [
+          { target: 'preset', id: presetB.id, before: null, after: state(presetB) },
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id],
+            after: [presetB.id, presetC.id, presetA.id],
+          },
+        ],
+        after: [presetB.id, presetC.id, presetA.id],
+      },
+      {
+        before: [presetA, presetB],
+        changes: [
+          { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetA.id, presetB.id, presetD.id, presetC.id],
+          },
+        ],
+        after: [presetA.id, presetB.id, presetD.id, presetC.id],
+      },
+      {
+        before: [presetA, presetB],
+        changes: [
+          { target: 'preset', id: presetA.id, before: state(presetA), after: null },
+          { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetB.id, presetD.id, presetC.id],
+          },
+        ],
+        after: [presetB.id, presetD.id, presetC.id],
+      },
+    ]) {
+      const session = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: {},
+            presets: scenario.before.map((preset) => selected(preset)),
+          },
+        }),
+        saved = await patchInstructions(session.id, scenario.changes);
+      expect(saved.statusCode, saved.body).toBe(200);
+      expect(
+        f.daddy.group(session.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual(scenario.after);
+    }
+
+    const overlappingAdd = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: { daddy: {}, worker: {}, presets: [selected(presetA)] },
+    });
+    expect(
+      (
+        await patchInstructions(overlappingAdd.id, [
+          { target: 'preset', id: presetB.id, before: null, after: state(presetB) },
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id],
+            after: [presetA.id, presetB.id, presetC.id],
+          },
+        ])
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await patchInstructions(overlappingAdd.id, [
+          { target: 'preset', id: presetB.id, before: null, after: state(presetB) },
+          {
+            target: 'preset-order',
+            before: [presetA.id],
+            after: [presetA.id, presetB.id],
+          },
+        ])
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      f.daddy.group(overlappingAdd.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetA.id, presetB.id, presetC.id]);
+
+    for (const reverse of [false, true]) {
+      const compatible = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: {},
+            presets: [selected(presetA), selected(presetB), selected(presetC)],
+          },
+        }),
+        addMiddle = [
+          { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetA.id, presetB.id, presetD.id, presetC.id],
+          },
+        ],
+        moveFirst = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetB.id, presetC.id, presetA.id],
+          },
+        ];
+      for (const changes of reverse ? [moveFirst, addMiddle] : [addMiddle, moveFirst]) {
+        const saved = await patchInstructions(compatible.id, changes);
+        expect(saved.statusCode, saved.body).toBe(200);
+      }
+      expect(
+        f.daddy.group(compatible.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual([presetB.id, presetD.id, presetC.id, presetA.id]);
+    }
+
+    for (const reverse of [false, true]) {
+      const swaps = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: {},
+            presets: [selected(presetA), selected(presetB), selected(presetC), selected(presetD)],
+          },
+        }),
+        firstSwap = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id],
+            after: [presetB.id, presetA.id, presetC.id, presetD.id],
+          },
+        ],
+        secondSwap = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id],
+            after: [presetA.id, presetB.id, presetD.id, presetC.id],
+          },
+        ];
+      for (const changes of reverse ? [secondSwap, firstSwap] : [firstSwap, secondSwap]) {
+        const saved = await patchInstructions(swaps.id, changes);
+        expect(saved.statusCode, saved.body).toBe(200);
+      }
+      expect(
+        f.daddy.group(swaps.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual([presetB.id, presetA.id, presetD.id, presetC.id]);
+    }
 
     const first = await app.inject({
       method: 'POST',

@@ -1195,7 +1195,11 @@ it('expires private repository registration without routing its input into a ses
       ...registration,
       expiresAt: '2000-01-01T00:00:00.000Z',
     });
-    await bot.handle(message('https://example.test/expired/repository'));
+    const expiredAddress = message('https://example.test/expired/repository');
+    await bot.handle(expiredAddress);
+    const expiredAddressReplies = sent.length;
+    await bot.handle(expiredAddress);
+    expect(sent).toHaveLength(expiredAddressReplies);
     expect(sent.at(-1)!.card).toContain('Repository registration expired');
     expect(f.store.messages(current.id)).toHaveLength(0);
 
@@ -1206,10 +1210,29 @@ it('expires private repository registration without routing its input into a ses
       ...waitingForName,
       expiresAt: '2000-01-01T00:00:00.000Z',
     });
-    await bot.handle(message('Expired name'));
+    const expiredName = message('Expired name');
+    await bot.handle(expiredName);
+    const expiredNameReplies = sent.length;
+    await bot.handle(expiredName);
+    expect(sent).toHaveLength(expiredNameReplies);
     expect(sent.at(-1)!.card).toContain('Repository registration expired');
     expect(f.store.messages(current.id)).toHaveLength(0);
     expect(f.workspaces.list().some((workspace) => workspace.name === 'Expired name')).toBe(false);
+
+    await openPrivateRegistration();
+    const repeatedAddress = message('https://example.test/idempotent/repository');
+    await bot.handle(repeatedAddress);
+    await bot.handle(repeatedAddress);
+    expect(
+      f.workspaces.list().some((workspace) => workspace.repoPath.includes('idempotent/repository')),
+    ).toBe(false);
+    const repeatedName = message('Idempotent registration');
+    await bot.handle(repeatedName);
+    await bot.handle(repeatedName);
+    expect(
+      f.workspaces.list().filter((workspace) => workspace.name === 'Idempotent registration'),
+    ).toHaveLength(1);
+    expect(f.store.messages(current.id)).toHaveLength(0);
 
     await bot.handle(click('dad:add-workspace', 12));
     await bot.handle(click('dad:workspace-module:github', 12));
@@ -1243,7 +1266,8 @@ it('expires private repository registration without routing its input into a ses
 
 it('continues repository registration only for its exact new-session draft', async () => {
   const f = daddyFixture(),
-    sent: { destination: any; card: any }[] = [];
+    sent: { destination: any; card: any }[] = [],
+    secret = rememberSecret('PRIVATE_REPOSITORY_NAME_12345');
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send: vi.fn(async (destination, card) => {
@@ -1303,12 +1327,67 @@ it('continues repository registration only for its exact new-session draft', asy
     const validPrivateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(validPrivateUrl).searchParams.get('start')}`));
     await bot.handle(message('https://example.test/new/valid-session'));
-    await bot.handle(message('Valid session repository'));
-    const validContinuation = sent.filter((item) => item.destination.chatId === -10042).at(-1)!.card
-      .buttons[0][0].callback_data as string;
+    await bot.handle(message(`Valid ${secret}`));
+    const groupContinuation = sent.filter((item) => item.destination.chatId === -10042).at(-1)!;
+    expect(JSON.stringify(groupContinuation.card)).not.toContain(secret);
+    const validContinuation = groupContinuation.card.buttons[0][0].callback_data as string,
+      saveGroup = f.store.saveGroup.bind(f.store);
+    let failCreation = true;
+    vi.spyOn(f.store, 'saveGroup').mockImplementation((group) => {
+      if (group.orchestrated && failCreation) {
+        failCreation = false;
+        throw new Error('fixture session insert failed');
+      }
+      return saveGroup(group);
+    });
+    await bot.handle(click(validContinuation, 12));
+    expect(f.daddy.sessions()).toHaveLength(0);
     await bot.handle(click(validContinuation, 12));
     expect(f.daddy.sessions()).toHaveLength(1);
     expect(f.store.messages(f.daddy.sessions()[0]!.id)[0].text).toBe('Keep the valid instruction');
+
+    await bot.handle(message('/new Private original instruction'));
+    await bot.handle(click('dad:add-workspace'));
+    await bot.handle(click('dad:workspace-module:github'));
+    await bot.handle(message('https://example.test/new/private-stale'));
+    await bot.handle(message('Private stale repository'));
+    const privateStale = sent.at(-1)!.card.buttons[0][0].callback_data as string;
+    await bot.handle(message('/new Replacement private instruction'));
+    await bot.handle(click(privateStale));
+    expect(f.daddy.sessions()).toHaveLength(1);
+    expect(sent.at(-1)!.card.text ?? sent.at(-1)!.card).toContain(
+      'original new-session draft expired',
+    );
+
+    await bot.handle(message('/new Private valid instruction'));
+    await bot.handle(click('dad:add-workspace'));
+    await bot.handle(click('dad:workspace-module:github'));
+    await bot.handle(message('https://example.test/new/private-valid'));
+    await bot.handle(message('Private valid repository'));
+    const privateValid = sent.at(-1)!.card.buttons[0][0].callback_data as string;
+    await bot.handle(click(privateValid));
+    expect(f.daddy.sessions()).toHaveLength(2);
+    const privateSession = f.daddy
+      .sessions()
+      .find((session) =>
+        f.store.messages(session.id).some((entry) => entry.text === 'Private valid instruction'),
+      );
+    expect(privateSession).toBeTruthy();
+
+    f.store.setSetting('telegram.newSession:7:-10042:13', {
+      id: 'legacy-draft',
+      text: 'Legacy instruction',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    f.store.setSetting('telegram.addWorkspace:7:7:0', {
+      provider: 'github',
+      path: 'https://example.test/new/legacy',
+      origin: { chatId: -10042, threadId: 13 },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await bot.handle(message('Legacy repository'));
+    expect(f.daddy.sessions()).toHaveLength(2);
+    expect(sent.at(-1)!.card).toContain('original new-session draft expired');
   } finally {
     await bot.stop();
     await f.close();

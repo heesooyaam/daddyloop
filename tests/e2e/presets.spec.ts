@@ -130,6 +130,82 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test('merges a stale preset addition without undoing the order saved in another tab', async ({
+  page,
+  context,
+}) => {
+  await login(page);
+  const suffix = Date.now(),
+    headers = { 'X-daddyloop-Request': '1' },
+    presets: any[] = [];
+  for (const name of ['A', 'B', 'C', 'D']) {
+    const response = await page.request.post('/api/instructions/presets', {
+      headers,
+      data: {
+        name: `Concurrent ${name} ${suffix}`,
+        description: '',
+        instructions: { daddy: { prompt: name }, worker: {} },
+      },
+    });
+    expect(response.status()).toBe(201);
+    presets.push(await response.json());
+  }
+  const workspaces = await (await page.request.get('/api/workspaces')).json(),
+    created = await page.request.post('/api/daddy/sessions', {
+      headers,
+      data: {
+        workspaceId: workspaces[0].id,
+        title: `Concurrent preset order ${suffix}`,
+        instructions: {
+          daddy: {},
+          worker: {},
+          presets: presets.slice(0, 3).map((preset) => ({ preset, enabled: true, omit: [] })),
+        },
+      },
+    });
+  expect(created.status()).toBe(201);
+  const session = (await created.json()).group;
+  await page.goto(`/#session/${session.id}`);
+  await expect(page.getByRole('heading', { name: session.title })).toBeVisible();
+  const other = await context.newPage();
+  await other.goto(`/#session/${session.id}`);
+  await expect(other.getByRole('heading', { name: session.title })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const first = page.getByRole('dialog', { name: 'Session settings' });
+  await first.getByText('Style and skills for this session', { exact: true }).click();
+  await first.getByRole('button', { name: 'Add presets', exact: true }).click();
+  await first
+    .getByRole('button', {
+      name: `Remove preset Concurrent B ${suffix} from this session`,
+      exact: true,
+    })
+    .click();
+  await first
+    .getByRole('checkbox', { name: `Use preset Concurrent B ${suffix}`, exact: true })
+    .check();
+
+  await other.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const second = other.getByRole('dialog', { name: 'Session settings' });
+  await second.getByText('Style and skills for this session', { exact: true }).click();
+  await second.getByRole('button', { name: 'Add presets', exact: true }).click();
+  await second
+    .getByRole('checkbox', { name: `Use preset Concurrent D ${suffix}`, exact: true })
+    .check();
+
+  await first.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(first).toHaveCount(0);
+  await second.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(second).toHaveCount(0);
+  const board = await (await page.request.get(`/api/daddy/sessions/${session.id}`)).json();
+  expect(board.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
+    `Concurrent A ${suffix}`,
+    `Concurrent C ${suffix}`,
+    `Concurrent B ${suffix}`,
+    `Concurrent D ${suffix}`,
+  ]);
+  await other.close();
+});
 test('selects a local folder, uploads only checked Markdown files, and keeps their relative paths', async ({
   page,
 }) => {

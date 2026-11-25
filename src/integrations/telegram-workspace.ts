@@ -1330,9 +1330,11 @@ export class TelegramWorkspace {
   private recoverTaskAction(task: Task, control: TaskControl, actionId: string) {
     let recovered = false;
     if (control.action === 'waive-checks')
-      recovered = !!this.store.db
-        .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='checks.waived'")
-        .get(task.id, actionId);
+      recovered =
+        !!task.checksWaivedAt &&
+        !!this.store.db
+          .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='checks.waived'")
+          .get(task.id, actionId);
     else if (control.action === 'approve-plan')
       recovered =
         !!task.approvedAt &&
@@ -2144,20 +2146,34 @@ export class TelegramWorkspace {
     if (navigation.length) buttons.push(navigation);
     await this.api.send(destination, { ...text, buttons });
   }
-  private async newSession(workspaceId: string, destination: Destination, workspace?: Workspace) {
-    const pending = this.store.setting<NewSessionDraft>(this.creationKey(destination));
-    if (!pending || pending.expiresAt <= now())
+  private async newSession(
+    workspaceId: string,
+    destination: Destination,
+    workspace?: Workspace,
+    operation?: { id: string; draft: NewSessionDraft },
+  ) {
+    const pending =
+        operation?.draft ?? this.store.setting<NewSessionDraft>(this.creationKey(destination)),
+      saved = operation
+        ? this.store.setting<{ groupId: string }>(`daddy.create:${operation.id}`)
+        : undefined;
+    if (!saved && (!pending || pending.expiresAt <= now()))
       throw new Error(this.t('This selection expired. Start a new session again.'));
-    const text = pending && pending.expiresAt > now() ? pending.text : undefined;
-    const group = this.daddy.create({
-      workspaceId,
-      workspace,
-      requirements: text,
-    });
-    this.store.setSetting(this.creationKey(destination), null);
+    const text = pending?.text,
+      group = saved
+        ? this.daddy.group(saved.groupId)
+        : this.daddy.create({
+            workspaceId,
+            workspace,
+            requirements: text,
+            ...(operation ? { message: text, requestId: operation.id } : {}),
+          });
+    const current = this.store.setting<NewSessionDraft>(this.creationKey(destination));
+    if (!operation || current?.id === pending?.id)
+      this.store.setSetting(this.creationKey(destination), null);
     if (destination.chatId === this.pair()?.chatId)
       this.selectPrivateSession(destination, group.id);
-    if (text)
+    if (text && !operation)
       this.daddy.chat(group.id, text, undefined, undefined, {
         channel: 'telegram',
         ...destination,
@@ -2173,9 +2189,10 @@ export class TelegramWorkspace {
         ),
         buttons: [[{ text: this.t('Open session topic'), url: this.link(topic) }]],
       });
-      return;
+      return group;
     }
     await this.sessionBoard(group.id, destination, topic ? this.link(topic) : undefined);
+    return group;
   }
   private repoKey(destination: Destination, groupId: string) {
     return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
@@ -3067,25 +3084,41 @@ export class TelegramWorkspace {
       const action = JSON.parse(String(row.data)) as {
         workspaceId: string;
         destination: Destination;
-        creationId: string;
+        creationId?: string;
+        creationText?: string;
         creationExpiresAt: string;
         ownerId: number;
         expiresAt: string;
       };
-      const draft = this.store.setting<NewSessionDraft>(this.creationKey(destination));
+      const draft = this.store.setting<NewSessionDraft>(this.creationKey(destination)),
+        saved = this.store.setting<{ groupId: string }>(`daddy.create:${data}`);
       if (
         action.ownerId !== this.pair()?.userId ||
         action.destination.chatId !== destination.chatId ||
         action.destination.threadId !== destination.threadId ||
-        action.expiresAt <= now() ||
-        !draft ||
-        draft.id !== action.creationId ||
-        draft.expiresAt !== action.creationExpiresAt ||
-        draft.expiresAt <= now()
+        !action.creationId ||
+        (!saved &&
+          (action.expiresAt <= now() ||
+            !draft ||
+            draft.id !== action.creationId ||
+            draft.expiresAt !== action.creationExpiresAt ||
+            draft.expiresAt <= now()))
       )
         throw new Error(this.t('The original new-session draft expired. Start /new again.'));
-      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(data);
-      await this.newSession(action.workspaceId, destination);
+      const group = await this.newSession(action.workspaceId, destination, undefined, {
+        id: data,
+        draft:
+          draft?.id === action.creationId
+            ? draft
+            : {
+                id: action.creationId,
+                text: action.creationText,
+                expiresAt: action.creationExpiresAt,
+              },
+      });
+      this.store.db
+        .prepare('UPDATE bot_actions SET data=?,consumed=1 WHERE id=?')
+        .run(JSON.stringify({ ...action, groupId: group.id }), data);
       return true;
     }
     if (!data.startsWith('dad:')) return false;
@@ -3131,7 +3164,9 @@ export class TelegramWorkspace {
         this.store.setSetting(`telegram.workspacePrivate:${id}`, {
           provider: module.id,
           origin: destination,
+          creationBound: !!creation,
           creationId: creation?.id,
+          creationText: creation?.text,
           creationExpiresAt: creation?.expiresAt,
           ownerId: this.pair()!.userId,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
@@ -3151,8 +3186,18 @@ export class TelegramWorkspace {
         });
         return true;
       }
+      const creation = this.store.setting<NewSessionDraft>(this.creationKey(destination));
       this.store.setSetting(this.registrationKey(destination), {
         provider: module.id,
+        ...(creation
+          ? {
+              origin: destination,
+              creationBound: true,
+              creationId: creation.id,
+              creationText: creation.text,
+              creationExpiresAt: creation.expiresAt,
+            }
+          : {}),
         expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
       });
       await this.api.send(destination, {
@@ -3456,6 +3501,18 @@ export class TelegramWorkspace {
         ? normalizeTelegramCommand(message.text, this.username)
         : undefined;
       if (!text) return false;
+      const privateInput = privateChat && !text.startsWith('/') ? update.update_id : undefined;
+      if (
+        privateInput !== undefined &&
+        this.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(privateInput)
+      )
+        return true;
+      const recordPrivateInput = () => {
+        if (privateInput !== undefined)
+          this.store.db
+            .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+            .run(privateInput, now());
+      };
       if (text === '/cancel') {
         const document = this.store.setting(this.documentKey(destination)),
           repository = privateChat ? this.store.setting(this.repoInputKey(destination)) : undefined;
@@ -3489,7 +3546,9 @@ export class TelegramWorkspace {
           pending = this.store.setting<{
             provider: string;
             origin: Destination;
+            creationBound?: boolean;
             creationId?: string;
+            creationText?: string;
             creationExpiresAt?: string;
             ownerId: number;
             expiresAt: string;
@@ -3502,7 +3561,9 @@ export class TelegramWorkspace {
         this.store.setSetting(this.registrationKey(destination), {
           provider: pending.provider,
           origin: pending.origin,
+          creationBound: pending.creationBound,
           creationId: pending.creationId,
+          creationText: pending.creationText,
           creationExpiresAt: pending.creationExpiresAt,
           expiresAt: pending.expiresAt,
         });
@@ -3538,13 +3599,18 @@ export class TelegramWorkspace {
         provider: string;
         path?: string;
         origin?: Destination;
+        creationBound?: boolean;
         creationId?: string;
+        creationText?: string;
         creationExpiresAt?: string;
         expiresAt: string;
       }>(registrationKey);
       if (registration) {
         if (registration.expiresAt <= now()) {
-          this.store.setSetting(registrationKey, null);
+          this.store.transaction(() => {
+            this.store.setSetting(registrationKey, null);
+            recordPrivateInput();
+          });
           await this.api.send(
             destination,
             this.t('Repository registration expired. Start it again.'),
@@ -3564,7 +3630,10 @@ export class TelegramWorkspace {
           const path = isGitAddress(text) ? parseGitSource(text).url : text;
           if (path.length > 4000 || (!isGitAddress(path) && !/^(\/|~\/)/.test(path)))
             throw new Error(this.t('Send a repository URL or an absolute server path.'));
-          this.store.setSetting(registrationKey, { ...registration, path });
+          this.store.transaction(() => {
+            this.store.setSetting(registrationKey, { ...registration, path });
+            recordPrivateInput();
+          });
           await this.api.send(destination, {
             ...new TelegramText()
               .add('📦 ' + this.t('Workspace name'), 'bold')
@@ -3573,45 +3642,65 @@ export class TelegramWorkspace {
           });
           return true;
         } else {
-          const workspace = await this.daddy.workspaces.register({
-            name: text,
-            path: registration.path,
-            provider: registration.provider,
-          });
-          this.store.setSetting(registrationKey, null);
           const target = registration.origin ?? destination;
-          if (registration.origin && registration.creationId && registration.creationExpiresAt) {
-            const draft = this.store.setting<NewSessionDraft>(this.creationKey(target));
+          let draft: NewSessionDraft | undefined;
+          if (registration.origin && registration.creationBound !== false) {
+            draft = this.store.setting<NewSessionDraft>(this.creationKey(target));
             if (
+              registration.creationBound !== true ||
+              !registration.creationId ||
+              !registration.creationExpiresAt ||
               !draft ||
               draft.id !== registration.creationId ||
               draft.expiresAt !== registration.creationExpiresAt ||
               draft.expiresAt <= now()
             ) {
+              this.store.transaction(() => {
+                this.store.setSetting(registrationKey, null);
+                recordPrivateInput();
+              });
               await this.api.send(
                 destination,
                 this.t('The original new-session draft expired. Start /new again.'),
               );
               return true;
             }
-            const actionId = 'dad-workspace-new:' + randomBytes(12).toString('base64url');
-            this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
-              actionId,
-              JSON.stringify({
-                workspaceId: workspace.id,
-                destination: target,
-                creationId: registration.creationId,
-                creationExpiresAt: registration.creationExpiresAt,
-                ownerId: pair.userId,
-                expiresAt: registration.creationExpiresAt,
-              }),
-            );
+          }
+          const workspace = await this.daddy.workspaces.register({
+            name: text,
+            path: registration.path,
+            provider: registration.provider,
+          });
+          const actionId = registration.creationBound
+            ? 'dad-workspace-new:' + randomBytes(12).toString('base64url')
+            : undefined;
+          this.store.transaction(() => {
+            this.store.setSetting(registrationKey, null);
+            recordPrivateInput();
+            if (actionId)
+              this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
+                actionId,
+                JSON.stringify({
+                  workspaceId: workspace.id,
+                  destination: target,
+                  creationId: registration.creationId,
+                  creationText: draft!.text,
+                  creationExpiresAt: registration.creationExpiresAt,
+                  ownerId: pair.userId,
+                  expiresAt: registration.creationExpiresAt,
+                }),
+              );
+          });
+          if (actionId) {
             await this.api.send(target, {
-              ...new TelegramText().add(workspace.name, 'bold'),
+              ...new TelegramText().add(this.groupText(target, workspace.name), 'bold'),
               buttons: [[{ text: this.t('Continue new session'), callback_data: actionId }]],
             });
           } else await this.api.send(target, this.workspacePickerCard(target, [workspace]));
-          if (registration.origin)
+          if (
+            actionId &&
+            (target.chatId !== destination.chatId || target.threadId !== destination.threadId)
+          )
             await this.api.send(
               destination,
               this.t('Repository saved. Continue the new session in the original chat.'),

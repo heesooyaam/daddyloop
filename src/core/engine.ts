@@ -1035,7 +1035,21 @@ export class Engine {
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
-  private queueMergeVerification(task: Task, pr: PullRequest, actionId?: string) {
+  private recordTaskAction(
+    id: string,
+    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
+    reason: string,
+    expected?: ExpectedTask,
+    actionId?: string,
+  ) {
+    this.store.event(id, `human.${action}`, { reason }, actionId);
+    if (actionId) this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
+  }
+  private queueMergeVerification(
+    task: Task,
+    pr: PullRequest,
+    receipt?: { reason: string; expected?: ExpectedTask; actionId?: string },
+  ) {
     if (task.state !== 'needs_input' || this.store.busy(task.id))
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
     if (pr.state !== 'merged' || pr.head !== task.revision?.head)
@@ -1065,8 +1079,16 @@ export class Engine {
         'reviewer',
         'verify_merge',
         'Verify the delivered PR diff and the original task outcome, including requested deployment checks. Use read-only evidence. Check prior published findings and return their verified IDs. Report incomplete if any required result cannot be verified.',
-        actionId,
+        receipt?.actionId,
       );
+      if (receipt)
+        this.recordTaskAction(
+          task.id,
+          'verify-merge',
+          receipt.reason,
+          receipt.expected,
+          receipt.actionId,
+        );
     });
     return task;
   }
@@ -1694,7 +1716,7 @@ export class Engine {
         this.finishReviewedTask(task);
   }
 
-  private async finish(task: Task) {
+  private finish(task: Task) {
     const gate = completionGate(task);
     if (gate) this.state(task, gate.state, gate.reason);
     else {
@@ -2443,10 +2465,7 @@ export class Engine {
       assertTaskVersion(task, expected);
       if (action === 'verify-merge') {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
-        const result = this.queueMergeVerification(task, pr, actionId);
-        if (actionId)
-          this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
-        return result;
+        return this.queueMergeVerification(task, pr, { reason, expected, actionId });
       }
       if (action === 'pause') {
         task.resumeState = task.state;
@@ -2556,9 +2575,13 @@ export class Engine {
             (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
-        task.approvedAt = now();
-        task.pr = current;
-        this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
+        return this.store.transaction(() => {
+          task.approvedAt = now();
+          task.pr = current;
+          this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
+          this.recordTaskAction(id, action, reason, expected, actionId);
+          return task;
+        });
       } else if (action === 'waive-checks') {
         if (task.state !== 'awaiting_checks' || !reason.trim())
           throw new AppError(
@@ -2572,17 +2595,21 @@ export class Engine {
             'stale_revision',
             'The PR changed; a waiver cannot apply to a new revision',
           );
-        task.checksWaivedAt = now();
-        this.store.event(
-          id,
-          'checks.waived',
-          {
-            reason,
-            head: task.revision?.head,
-          },
-          actionId,
-        );
-        await this.finish(task);
+        return this.store.transaction(() => {
+          task.checksWaivedAt = now();
+          this.store.event(
+            id,
+            'checks.waived',
+            {
+              reason,
+              head: task.revision?.head,
+            },
+            actionId,
+          );
+          this.finish(task);
+          this.recordTaskAction(id, action, reason, expected, actionId);
+          return task;
+        });
       } else {
         if (task.state !== 'complete')
           throw new AppError('not_complete', 'Only completed tasks can be reopened');
@@ -2599,9 +2626,7 @@ export class Engine {
           this.state(task, 'queued', reason || 'Reopened by the user');
         }
       }
-      this.store.event(id, `human.${action}`, { reason }, actionId);
-      if (actionId)
-        this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
+      this.recordTaskAction(id, action, reason, expected, actionId);
       return task;
     });
   }
