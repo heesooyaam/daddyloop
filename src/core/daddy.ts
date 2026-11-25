@@ -1,5 +1,5 @@
 import { pauseSessionWork, restoreSessionWork } from './session-pause.js';
-import { githubWait } from '../providers/github-quota.js';
+import { githubBackoff } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -43,7 +43,7 @@ import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
 import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
-import { activityStatus, taskActivity } from './task-activity.js';
+import { queueDetail, activityStatus, taskActivity } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import {
   sessionInstructionsSchema,
@@ -231,6 +231,7 @@ export class Daddy {
         .map(({ task }) => task.id),
       tasks: tasks.map((task) => {
         const item = activeByTask.get(task.id)!;
+        const detail = queueDetail(task);
         const autoMerge = autoMergeSettings(this.store, group, task);
         return {
           id: task.id,
@@ -239,10 +240,11 @@ export class Daddy {
           generation: task.generation,
           pendingAuthorHead: task.pendingAuthorHead,
           statusLabel:
-            githubActivityStatus(task, autoMerge, githubWait(this.store, task.ref)) ??
+            githubActivityStatus(task, autoMerge, githubBackoff(this.store, task.ref)) ??
             activityStatus(item),
           autoMerge,
           reason: task.reason,
+          queueDetail: detail && redact(detail).slice(0, 400),
           blocker: this.engine.coordinationBlocker(task),
           workspaceId: task.workspaceId,
           repoPath: task.repoPath,
@@ -1115,7 +1117,7 @@ export class Daddy {
         workspace: job.workspace ?? board.workspace,
         workerPool: board.workers,
         requirements: group.requirements,
-        tasks: board.tasks.map(({ source, summary, reason, ...task }) => ({
+        tasks: board.tasks.map(({ source, summary, reason, queueDetail, ...task }) => ({
           ...task,
           source: source && { title: source.title, url: source.url, key: source.key },
         })),
@@ -1325,7 +1327,7 @@ export class Daddy {
           worker: group.worker,
           daddy: group.daddy,
         },
-        tasks: board.tasks.map(({ summary, reason, ...task }) => task),
+        tasks: board.tasks.map(({ summary, reason, queueDetail, ...task }) => task),
         recentMessages: messages.slice(-6),
         recentJobs: jobs.slice(-3),
       };
@@ -1344,6 +1346,7 @@ export class Daddy {
           id: task.id,
           title: task.title,
           requirements: task.requirements,
+          clarification: task.latestClarification,
           source: task.source,
           ref: task.ref,
           state: task.state,

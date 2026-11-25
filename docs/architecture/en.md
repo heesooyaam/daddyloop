@@ -184,7 +184,7 @@ After a saved fix is confirmed, a pending GitHub review on the previous head can
 
 With GitHub auto-merge enabled, successful review and checks move the task to `awaiting_merge`. The pool keeps the assigned worker through conflict repairs and releases the slot on confirmed completion. Dependent tasks wait for completion as well.
 
-By default, the service publishes a completed review and pushes the saved commit automatically after checking the PR revision. An explicitly manual session waits for its human action instead. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
+The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
@@ -195,6 +195,10 @@ For example, GitHub may still be calculating mergeability when findings are publ
 [nextPrAction](../../src/core/pr-routing.ts) defines the order of decisions. [Engine](../../src/core/engine.ts) preserves drafts or local changes and assigns the worker. [Auto-merge](../../src/core/auto-merge.ts) consults the same rule after reading the review and immediately before writing to GitHub. The [regression tests](../../tests/auto-merge.test.ts) exercise the same conflict through different entry points.
 
 Sensitive configuration uses the paired private chat. Telegram instruction imports are bounded UTF-8 documents; the service validates them with the same instruction and skill schemas used by the website before saving snapshots. Files, saved prompts and repository defaults are not echoed to a group. Group commands can still update an explicitly supplied prompt, but their response contains no saved instruction text. Document bytes are never passed to an agent as an executable plugin.
+
+A transient GitHub read failure is retried by the scheduler, with a persistent backoff. When a PR was already created the service records its URL, submitted commit and task generation and retries only the read needed to attach it. If the response to PR creation was lost, daddy searches for the original submission using its marker, branch and author before taking further action. The queue displays the retry time or an actual owner question.
+
+When a conflict repair times out, the same worker resumes in its existing checkout after 30 seconds, or after five minutes on subsequent timeouts. If the target branch advanced, the service verifies ancestry before continuing and reviews the result against the current base.
 
 ## 5. Which runs can work in parallel
 

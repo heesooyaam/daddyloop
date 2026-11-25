@@ -64,9 +64,24 @@ export function taskActivity(
   return [...new Set([...ordered, ...byId.values()])];
 }
 
+export function queueDetail(task: Task): string | undefined {
+  if (task.prLink && task.state === 'submitting' && !task.prLink.ref)
+    return 'Checking GitHub for the result of the previous PR creation';
+  if (task.prLink && task.state === 'submitting')
+    return 'The PR already exists. daddy will connect it automatically.';
+  if (task.state !== 'needs_input') return;
+  // Private reviewer reports are not group notifications. Show an explicit owner question or an operational error.
+  if (task.inputRequest?.generation === task.generation || task.resumeState !== 'reviewing')
+    return task.reason;
+}
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
+  if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
+    return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (task.state === 'submitting' && task.prLink?.ref && task.prLink.retryAt)
+    return `PR #${task.prLink.ref.number} · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
   if (task.state === 'needs_input') {
+    if (task.inputRequest?.generation === task.generation) return 'Waiting for your answer';
     if (task.reason === draftSyncPending) return 'Checking the GitHub draft';
     if (task.reason.startsWith('PR changed while a draft existed'))
       return 'The PR changed during draft review';
@@ -87,6 +102,8 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {
+    if (job?.timeoutRetry && job.status === 'queued' && job.notBefore)
+      return `Continuing conflict resolution after a timeout at ${new Date(job.notBefore).toISOString().slice(11, 19)} UTC`;
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
       ? `Conflict repair queued for worker ${assignedWorker}`

@@ -240,6 +240,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  latestClarification?: { text: string; question?: string };
   openReviewQuestion?: { head: string; text: string };
   partialReview?: {
     reviewId: string;
@@ -259,6 +260,14 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  prLink?: {
+    ref?: PRRef;
+    head: string;
+    generation: number;
+    retryAt?: number;
+    delay?: number;
+    failure?: string;
+  };
   fixingMergeConflict?: boolean;
   conflictCheckpoint?: string;
   deferredWorkerInstructions?: { id: string; text: string }[];

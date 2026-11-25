@@ -1,4 +1,4 @@
-import { githubWait } from '../providers/github-quota.js';
+import { githubWait, type githubBackoff } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
 import {
@@ -42,10 +42,10 @@ export function autoMergeSettings(store: Store, group: ReviewGroup, task: Task) 
 export function githubActivityStatus(
   task: Task,
   settings: ReturnType<typeof autoMergeSettings>,
-  until?: number,
+  backoff?: ReturnType<typeof githubBackoff>,
 ) {
   if (
-    until &&
+    backoff &&
     [
       'queued',
       'fixing',
@@ -57,8 +57,14 @@ export function githubActivityStatus(
       'ready_for_review',
       'submitting',
     ].includes(task.state)
-  )
-    return `Waiting for GitHub API quota until ${new Date(until).toISOString().slice(11, 16)} UTC`;
+  ) {
+    const time = new Date(backoff.until).toISOString().slice(11, 19);
+    if (task.prLink?.ref && backoff.kind === 'read')
+      return `PR #${task.prLink.ref.number} · GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
+    if (backoff.kind === 'read')
+      return `GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
+    return `Waiting for GitHub API quota until ${time.slice(0, 5)} UTC`;
+  }
   if (!reviewed(task) || task.ref.provider !== 'github') return;
   if (settings.result?.state === 'merged') return settings.result.message;
   if (settings.enabled && task.pr?.state === 'open')

@@ -524,6 +524,7 @@ export const daddyRu: Record<string, string> = {
   'Voice recognition is busy. Try again shortly.':
     'Распознаватель занят. Попробуй ещё раз чуть позже.',
   'Session owner': 'Владелец сессии',
+  'Reminder: your reply is still needed': 'Напоминание: всё ещё нужен твой ответ',
   'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':
     'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
@@ -634,6 +635,26 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing conflict resolution after a timeout at {time} UTC':
+    'Продолжит исправлять конфликт после таймаута в {time} UTC',
+  'Continuing conflict resolution in the saved worker copy after a timeout':
+    'Воркер продолжает исправлять конфликт в сохранённой копии после таймаута',
+  'The PR head or target history changed. The partial merge is preserved in the worker copy.':
+    'Изменился коммит PR или история целевой ветки. Незавершённое слияние сохранено в копии воркера.',
+  'Continuing the fix with the answer from the session':
+    'Воркер продолжает исправление с ответом из сессии',
+  'Waiting for your answer': 'Ждёт твоего ответа',
+  'The PR already exists. daddy will connect it automatically.':
+    'PR уже создан. daddy привяжет его автоматически.',
+  'Checking GitHub for the result of the previous PR creation':
+    'daddy проверяет, создался ли PR при прошлой попытке',
+  'GitHub · retry at {time} UTC': 'GitHub · повтор в {time} UTC',
+  'PR #{number} · GitHub {failure} · retry at {time} UTC':
+    'PR #{number} · GitHub {failure} · повтор в {time} UTC',
+  'Waiting to retry the connection to the existing PR':
+    'Автоматически повторит привязку созданного PR',
+  'PR #{number} · retry at {time} UTC': 'PR #{number} · повтор в {time} UTC',
+  'GitHub {failure} · retry at {time} UTC': 'GitHub {failure} · повтор в {time} UTC',
   'Checking the GitHub draft': 'Сверяет черновик с GitHub',
   'Waiting to confirm the GitHub draft or its target branch before restarting review.':
     'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
