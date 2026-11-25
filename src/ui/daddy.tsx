@@ -1546,31 +1546,31 @@ function TaskReport({
     [busy, setBusy] = useState(false),
     [waiverReason, setWaiverReason] = useState('');
   const live = board?.tasks.find((task) => task.id === id);
-  const liveVersion = live
-    ? [
-        live.state,
-        live.generation,
-        live.head ?? '',
-        live.pendingAuthorHead ?? '',
-        live.ref.kind,
-        live.policy.publication,
-        String(live.policy.autoPush),
-        live.reason,
-      ].join(':')
-    : '';
+  const boardVersion = (task: NonNullable<typeof live>) =>
+    [
+      task.state,
+      task.generation,
+      task.head ?? '',
+      task.pendingAuthorHead ?? '',
+      task.ref.kind,
+      task.policy.publication,
+      String(task.policy.autoPush),
+      task.reason,
+    ].join(':');
+  const detailVersionOf = (task: Task) =>
+    [
+      task.state,
+      task.generation,
+      task.revision?.head ?? '',
+      task.pendingAuthorHead ?? '',
+      task.ref.kind,
+      task.policy.publication,
+      String(task.policy.autoPush),
+      task.reason,
+    ].join(':');
+  const liveVersion = live ? boardVersion(live) : '';
   const detail = value?.task.id === id ? value : undefined;
-  const detailVersion = detail
-    ? [
-        detail.task.state,
-        detail.task.generation,
-        detail.task.revision?.head ?? '',
-        detail.task.pendingAuthorHead ?? '',
-        detail.task.ref.kind,
-        detail.task.policy.publication,
-        String(detail.task.policy.autoPush),
-        detail.task.reason,
-      ].join(':')
-    : '';
+  const detailVersion = detail ? detailVersionOf(detail.task) : '';
   const current = !!detail && !!live && detailVersion === liveVersion;
   const controlsDisabled = busy || loading || !!error || !current;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
@@ -1579,24 +1579,64 @@ function TaskReport({
   const profile = slot ? live?.worker : request?.profile;
   const ref = detail?.task.ref;
   const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
+  const liveRef = useRef(live);
+  const reloadRef = useRef<() => void>(() => {});
+  const requestedVersion = useRef('');
+  liveRef.current = live;
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError('');
-    void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
-      .then((result) => {
-        if (active) setValue({ ...result, statusLabel: live?.statusLabel });
-      })
-      .catch((error) => {
-        if (active) setError(error.message);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    let inFlight = false,
+      pendingVersion = false;
+    const controller = new AbortController();
+    const load = async (versionChanged: boolean) => {
+      if (inFlight) {
+        if (versionChanged) pendingVersion = true;
+        return;
+      }
+      inFlight = true;
+      setLoading(true);
+      setError('');
+      try {
+        const result = await api<{ task: Task; messages: Message[] }>(
+          `/tasks/${id}`,
+          undefined,
+          controller.signal,
+        );
+        if (!active) return;
+        const latest = liveRef.current;
+        if (latest && detailVersionOf(result.task) === boardVersion(latest)) {
+          pendingVersion = false;
+          setValue({ ...result, statusLabel: latest.statusLabel });
+        } else pendingVersion = true;
+      } catch (error) {
+        if (active) setError((error as Error).message);
+      } finally {
+        if (active) {
+          inFlight = false;
+          setLoading(false);
+          if (pendingVersion) {
+            pendingVersion = false;
+            void load(true);
+          }
+        }
+      }
+    };
+    requestedVersion.current = liveVersion;
+    reloadRef.current = () => void load(true);
+    void load(true);
+    const timer = setInterval(() => void load(false), 2000);
     return () => {
       active = false;
+      clearInterval(timer);
+      controller.abort();
+      reloadRef.current = () => {};
     };
-  }, [id, board]);
+  }, [id]);
+  useEffect(() => {
+    if (requestedVersion.current === liveVersion) return;
+    requestedVersion.current = liveVersion;
+    reloadRef.current();
+  }, [id, liveVersion]);
   useEffect(() => {
     setWaiverReason('');
   }, [id, live?.generation, live?.head]);

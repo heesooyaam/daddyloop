@@ -417,6 +417,95 @@ it('keeps repository paths private for topic, general-group and new-session choi
     await f.close();
   }
 });
+it('expires, cancels and isolates private repository input for its original route', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method: string) =>
+      method === 'createForumTopic' ? { message_thread_id: 51 } : true,
+    ),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session A' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session B' }),
+    topic = await bot.ensureTopic(first);
+  f.store.setSetting('telegram.currentDaddy', second.id);
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => ({
+    ...workspace,
+    repoPath: input?.path ?? workspace.repoPath,
+  }));
+  let id = 260;
+  const message = (text: string, chatId = 7, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const inputKey = 'telegram.repoInput:7:7';
+  const open = async () => {
+    await bot.handle(message('/repo', -10042, topic!.threadId));
+    const url = sent.at(-1)!.card.buttons[1][0].url as string;
+    await bot.handle(message(`/start ${new URL(url).searchParams.get('start')}`));
+    expect(sent.at(-1)!.card.text).toContain('Target: Session A · topic');
+    return sent.at(-1)!.card.buttons[0][0].callback_data as string;
+  };
+  try {
+    await open();
+    const expired = f.store.setting<{ id: string; choice: { expiresAt: string } }>(inputKey)!;
+    expired.choice.expiresAt = '2000-01-01T00:00:00.000Z';
+    f.store.setSetting(inputKey, expired);
+    await bot.handle(message('/repo /server/expired'));
+    expect(sent.at(-1)!.card.text).toContain('selection expired');
+    expect(f.workspaces.selection).not.toHaveBeenCalled();
+    expect(f.store.setting(inputKey)).toBeNull();
+
+    await open();
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    expect(f.store.setting(inputKey)).toBeNull();
+
+    await open();
+    await bot.handle(message('/cancel'));
+    expect(sent.at(-1)!.card).toContain('Repository selection cancelled');
+    expect(f.store.setting(inputKey)).toBeNull();
+
+    const oldUse = await open();
+    await open();
+    const latest = f.store.setting<{ id: string }>(inputKey)!;
+    await bot.handle(click(oldUse));
+    expect(f.store.setting<{ id: string }>(inputKey)?.id).toBe(latest.id);
+    await bot.handle(message('/repo /server/latest'));
+    await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data));
+    expect(
+      f.store.setting<{ workspace: { repoPath: string } }>(
+        `telegram.nextRepo:7:-10042:${topic!.threadId}:${first.id}`,
+      )?.workspace.repoPath,
+    ).toBe('/server/latest');
+    expect(f.store.setting(`telegram.nextRepo:7:7:0:${second.id}`)).toBeUndefined();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
 it('shows shared limits and only the paired owner can confirm consuming a reset', async () => {
   const f = daddyFixture(),
     sent: any[] = [];

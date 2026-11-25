@@ -381,16 +381,38 @@ test('shows the same enabled module summary available from Telegram', async ({ p
 test('offers retry submit only for a saved ticket across locales and layouts', async ({ page }) => {
   await login(page);
   await create(page, 'Retry submission states', Date.now());
-  const taskId = await page.evaluate(async () => {
+  const { sessionId, taskId } = await page.evaluate(async () => {
     const sessionId = location.hash.slice('#session/'.length);
     const board = await fetch(`/api/daddy/sessions/${sessionId}`).then((response) =>
       response.json(),
     );
-    return board.tasks[0].id as string;
+    return { sessionId, taskId: board.tasks[0].id as string };
   });
   let state = 'ready_for_review';
   let pending = true;
   let pullRequest = false;
+  let boardSeen: (() => void) | undefined;
+  const pullRequestRef = () => ({
+    kind: 'pull_request',
+    provider: 'github',
+    host: 'github.com',
+    repo: 'fixture/planning',
+    number: 77,
+    url: 'https://github.com/fixture/planning/pull/77',
+  });
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch(),
+      board = await response.json(),
+      task = board.tasks.find((item: { id: string }) => item.id === taskId);
+    task.state = state;
+    task.reason = `Fixture ${state}`;
+    task.policy = { ...task.policy, autoPush: false };
+    task.pendingAuthorHead = pending ? 'd'.repeat(40) : undefined;
+    if (pullRequest) task.ref = pullRequestRef();
+    await route.fulfill({ response, json: board });
+    boardSeen?.();
+    boardSeen = undefined;
+  });
   await page.route(`**/api/tasks/${taskId}`, async (route) => {
     const response = await route.fetch();
     const detail = await response.json();
@@ -398,15 +420,7 @@ test('offers retry submit only for a saved ticket across locales and layouts', a
     detail.task.reason = `Fixture ${state}`;
     detail.task.policy = { ...detail.task.policy, autoPush: false };
     detail.task.pendingAuthorHead = pending ? 'd'.repeat(40) : undefined;
-    if (pullRequest)
-      detail.task.ref = {
-        kind: 'pull_request',
-        provider: 'github',
-        host: 'github.com',
-        repo: 'fixture/planning',
-        number: 77,
-        url: 'https://github.com/fixture/planning/pull/77',
-      };
+    if (pullRequest) detail.task.ref = pullRequestRef();
     await route.fulfill({ response, json: detail });
   });
   const cases = [
@@ -428,6 +442,10 @@ test('offers retry submit only for a saved ticket across locales and layouts', a
     state = nextState;
     pending = hasPending;
     pullRequest = existingPr;
+    const refreshed = new Promise<void>((resolve) => {
+      boardSeen = resolve;
+    });
+    await refreshed;
     if (width < 700)
       await page
         .locator('.daddy-mobile-tabs')
@@ -464,10 +482,12 @@ test('keeps an open task report on one revision while board state changes', asyn
     reason: 'Ready on the first revision',
     checks: 'passing',
     checkName: 'Check on the first revision',
+    statusLabel: 'Ready for review',
   };
   let hold = false,
     fail = false,
     missing = false,
+    responseDelay = 3200,
     releaseDetail: (() => void) | undefined,
     detailStarted: (() => void) | undefined;
   await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
@@ -485,6 +505,7 @@ test('keeps an open task report on one revision while board state changes', asyn
       head: snapshot.head,
       pendingAuthorHead: snapshot.pendingAuthorHead,
       reason: snapshot.reason,
+      statusLabel: snapshot.statusLabel,
       policy: { ...task.policy, autoPush: false },
     });
     await route.fulfill({ response, json: board });
@@ -496,6 +517,7 @@ test('keeps an open task report on one revision while board state changes', asyn
       await new Promise<void>((resolve) => {
         releaseDetail = resolve;
       });
+    if (responseDelay) await new Promise((resolve) => setTimeout(resolve, responseDelay));
     if (fail) {
       await route.fulfill({
         status: 500,
@@ -529,6 +551,7 @@ test('keeps an open task report on one revision while board state changes', asyn
   await page.locator('.daddy-work-item').first().click();
   const report = page.getByRole('dialog', { name: 'Work item' });
   await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
+  await expect(report.getByText(snapshot.statusLabel, { exact: true })).toBeVisible();
   const submit = report.getByRole('button', { name: 'Submit for review' });
   await expect(submit).toBeEnabled();
 
@@ -544,12 +567,15 @@ test('keeps an open task report on one revision while board state changes', asyn
     reason: 'Waiting for checks on the second revision',
     checks: 'failing',
     checkName: 'Check A',
+    statusLabel: 'Waiting for checks',
   });
   await started;
   await expect(submit).toBeDisabled();
   hold = false;
   releaseDetail?.();
-  await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
+  await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible({ timeout: 10000 });
+  await expect(report.getByText(snapshot.statusLabel, { exact: true })).toBeVisible();
+  responseDelay = 0;
   await expect(submit).toHaveCount(0);
   await expect(report.getByText('Check A')).toBeVisible();
   const reason = report.getByLabel('Reason for allowing this revision without passing CI');

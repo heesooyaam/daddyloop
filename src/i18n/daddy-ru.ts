@@ -756,6 +756,7 @@ export const daddyRu: Record<string, string> = {
   'Instruction set imported for {title}.': 'Набор инструкций импортирован для «{title}».',
   'Skill imported for {title}.': 'Навык импортирован для «{title}».',
   'File import cancelled.': 'Импорт файла отменён.',
+  'Repository selection cancelled.': 'Выбор репозитория отменён.',
   'Instruction exports are available only in the paired private chat.':
     'Экспорт инструкций доступен только в привязанной личке с ботом.',
   'Instructions for {title}': 'Инструкции для {title}',

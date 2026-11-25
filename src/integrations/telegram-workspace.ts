@@ -67,6 +67,7 @@ type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
   controlDestination?: Destination;
+  inputId?: string;
   ownerId: number;
   workspace: Workspace;
   groupId?: string;
@@ -553,6 +554,7 @@ export class TelegramWorkspace {
     const pending = this.store.setting<PendingDocument>(this.documentKey(destination));
     if (pending && pending.groupId !== groupId)
       this.store.setSetting(this.documentKey(destination), null);
+    this.store.setSetting(this.repoInputKey(destination), null);
     this.store.setSetting('telegram.currentDaddy', groupId);
   }
   private requirePendingDocument(destination: Destination, pending: PendingDocument) {
@@ -1793,12 +1795,13 @@ export class TelegramWorkspace {
   }
   private async repositoryEntry(choice: RepoChoice): Promise<void> {
     if (choice.destination.chatId === this.pair()?.chatId) return this.repository(choice);
-    const pair = this.pair()!;
+    const pair = this.pair()!,
+      id = randomBytes(12).toString('base64url');
     const privateChoice = {
       ...choice,
       controlDestination: { chatId: pair.chatId },
+      inputId: id,
     };
-    const id = randomBytes(12).toString('base64url');
     this.store.setSetting(`telegram.repo:${id}`, privateChoice);
     await this.api.send(choice.destination, {
       ...new TelegramText()
@@ -1831,8 +1834,15 @@ export class TelegramWorkspace {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     const controlDestination = choice.controlDestination ?? choice.destination;
     if (controlDestination.chatId !== this.pair()?.chatId) return this.repositoryEntry(choice);
-    if (choice.controlDestination && choice.destination.chatId !== controlDestination.chatId)
-      this.store.setSetting(this.repoInputKey(controlDestination), choice);
+    if (
+      choice.controlDestination &&
+      choice.inputId &&
+      choice.destination.chatId !== controlDestination.chatId
+    )
+      this.store.setSetting(this.repoInputKey(controlDestination), {
+        id: choice.inputId,
+        choice,
+      });
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
@@ -1845,7 +1855,14 @@ export class TelegramWorkspace {
     ) => this.repositoryButton(text, next, action);
     const title = new TelegramText()
       .add('📁 ' + this.t('Repository for this request'), 'bold')
-      .add('\n\n' + choice.workspace.name)
+      .add('\n\n' + choice.workspace.name);
+    if (choice.inputId) {
+      const route = choice.groupId
+        ? `${this.daddy.group(choice.groupId).title} · ${choice.destination.threadId ? (this.locale() === 'ru' ? 'тема' : 'topic') : this.locale() === 'ru' ? 'общая группа' : 'general group'}`
+        : `${this.locale() === 'ru' ? 'новая сессия' : 'new session'} · ${this.room()?.title ?? 'Telegram'}`;
+      title.add(`\n${this.locale() === 'ru' ? 'Назначение' : 'Target'}: ${route}`, 'bold');
+    }
+    title
       .add(
         '\n' +
           (choice.input?.path ??
@@ -1990,8 +2007,13 @@ export class TelegramWorkspace {
         );
         await this.api.send(destination, response);
       } else await this.newSession(choice.workspace.id, choice.destination, selected);
-      if (choice.controlDestination)
-        this.store.setSetting(this.repoInputKey(choice.controlDestination), null);
+      if (choice.controlDestination && choice.inputId) {
+        const pending = this.store.setting<{ id: string }>(
+          this.repoInputKey(choice.controlDestination),
+        );
+        if (pending?.id === choice.inputId)
+          this.store.setSetting(this.repoInputKey(choice.controlDestination), null);
+      }
       this.store.setSetting(key, null);
     }
     return true;
@@ -2702,10 +2724,18 @@ export class TelegramWorkspace {
         ? normalizeTelegramCommand(message.text, this.username)
         : undefined;
       if (!text) return false;
-      if (text === '/cancel' && this.store.setting(this.documentKey(destination))) {
-        this.store.setSetting(this.documentKey(destination), null);
-        await this.api.send(destination, this.t('File import cancelled.'));
-        return true;
+      if (text === '/cancel') {
+        const document = this.store.setting(this.documentKey(destination)),
+          repository = privateChat ? this.store.setting(this.repoInputKey(destination)) : undefined;
+        if (document) this.store.setSetting(this.documentKey(destination), null);
+        if (repository) this.store.setSetting(this.repoInputKey(destination), null);
+        if (document || repository) {
+          await this.api.send(
+            destination,
+            this.t(document ? 'File import cancelled.' : 'Repository selection cancelled.'),
+          );
+          return true;
+        }
       }
       const help = /^\/help(?:\s+([\s\S]*))?$/i.exec(text);
       if (help) {
@@ -2996,17 +3026,18 @@ export class TelegramWorkspace {
       const repo = text.match(/^\/repo(?:\s+(.+))?$/);
       if (repo) {
         const contextual = privateChat
-          ? this.store.setting<RepoChoice>(this.repoInputKey(destination))
+          ? this.store.setting<{ id: string; choice: RepoChoice }>(this.repoInputKey(destination))
           : undefined;
         if (contextual) {
-          if (contextual.expiresAt <= now())
+          if (contextual.choice.expiresAt <= now()) {
             this.store.setSetting(this.repoInputKey(destination), null);
-          else {
+            throw new Error(this.t('This selection expired. Choose the repository again.'));
+          } else {
             await this.repository({
-              ...contextual,
+              ...contextual.choice,
               input:
                 repo[1] === undefined
-                  ? contextual.input
+                  ? contextual.choice.input
                   : repo[1] === 'default'
                     ? undefined
                     : { path: repo[1] },
