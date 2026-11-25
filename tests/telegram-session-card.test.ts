@@ -171,6 +171,79 @@ it.each(['en', 'ru'] as const)(
   },
 );
 
+it.each([
+  [
+    'en',
+    'private chat to topic',
+    { chatId: 7, ownerId: 7 },
+    { chatId: -10042, threadId: 17, ownerId: 7 },
+  ],
+  [
+    'ru',
+    'topic to private chat',
+    { chatId: -10042, threadId: 17, ownerId: 7 },
+    { chatId: 7, ownerId: 7 },
+  ],
+] as const)(
+  'serializes a slow status refresh while switching %s: %s',
+  async (locale, _direction, initialRoute, nextRoute) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const f = daddyFixture();
+    let finishFirst = () => {};
+    const first = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const sent: { destination: typeof initialRoute | typeof nextRoute; key?: string }[] = [];
+    let block = true;
+    const api = {
+      send: vi.fn(async (destination, _card, _buttons, options) => {
+        sent.push({ destination, key: options?.key });
+        if (block) {
+          block = false;
+          await first;
+        }
+        return { message_id: sent.length };
+      }),
+    } as unknown as TelegramApi;
+    let route: typeof initialRoute | typeof nextRoute = initialRoute;
+    const progress = new TelegramProgress(
+      f.store,
+      api,
+      'telegram.progress:fixture_bot:',
+      () => locale,
+      () => route,
+    );
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Slow status' });
+    group.workspacePreparation = { state: 'preparing' };
+    f.store.saveGroup(group);
+    try {
+      progress.start();
+      const initial = progress.ensure(group.id);
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      route = nextRoute;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(sent).toHaveLength(1);
+      finishFirst();
+      await initial;
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(sent).toHaveLength(2);
+      route = initialRoute;
+      vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+      await progress.ensure(group.id);
+      expect(sent).toHaveLength(3);
+      expect(sent.map(({ key }) => key)).toEqual([sent[0].key, sent[1].key, sent[0].key]);
+    } finally {
+      finishFirst();
+      await progress.stop();
+      await f.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();
   const sent: { method: string; body: Record<string, any> }[] = [];

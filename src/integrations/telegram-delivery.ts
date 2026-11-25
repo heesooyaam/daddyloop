@@ -366,8 +366,7 @@ export class TelegramDelivery {
     this.lastCreatedAt = Math.max(this.clock(), this.lastCreatedAt + 1);
     return this.lastCreatedAt;
   }
-  private valid(value: Delivery) {
-    if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
+  private routeValid(value: Delivery) {
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
@@ -375,6 +374,12 @@ export class TelegramDelivery {
       !pair ||
       value.destination.chatId === pair.chatId ||
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
+    );
+  }
+  private valid(value: Delivery) {
+    return (
+      this.routeValid(value) &&
+      (!value.options.reminder || reminderOpen(this.store, value.options.reminder))
     );
   }
   private notificationMessageId(value: Delivery) {
@@ -738,7 +743,18 @@ export class TelegramDelivery {
   }
   private enqueuePin(destination: TelegramDestination, messageId: number) {
     const key = prefix + digest([this.bot, 'pin', destination.chatId, messageId]);
-    if (this.pending.has(key) || this.store.setting<Delivery>(key)) return;
+    if (this.pending.has(key)) return;
+    const existing = this.store.setting<Delivery>(key);
+    if (existing) {
+      if (existing.status !== 'cancelled' || !existing.cancelledForRoute) return;
+      existing.revision++;
+      existing.status = 'queued';
+      existing.cancelledForRoute = undefined;
+      existing.error = undefined;
+      existing.nextAttemptAt = this.clock();
+      this.save(key, existing);
+      return;
+    }
     this.save(
       key,
       this.createDelivery(
@@ -904,6 +920,7 @@ export class TelegramDelivery {
     if (!this.valid(value)) {
       if (value.options.operation === 'pin') this.clearPinError(value.error);
       value.status = 'cancelled';
+      value.cancelledForRoute = !this.routeValid(value) || undefined;
       if (value.options.reminder && value.options.notificationId)
         this.store.db
           .prepare("UPDATE notifications SET status='superseded',at=? WHERE id=?")

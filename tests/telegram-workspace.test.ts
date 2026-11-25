@@ -575,9 +575,14 @@ it('reconciles the private recovery route as soon as a new topic is created', as
   }
 });
 
-it.each(['en', 'ru'] as const)(
-  'requeues an open task question and a web message after both route changes: %s',
-  async (locale) => {
+it.each([
+  ['en', false],
+  ['ru', false],
+  ['en', true],
+  ['ru', true],
+] as const)(
+  'rechecks task questions after both route changes: %s, closed=%s',
+  async (locale, closeBeforeSend) => {
     const f = daddyFixture();
     const calls: { method: string; body: Record<string, any> }[] = [];
     let clock = 1000;
@@ -663,6 +668,14 @@ it.each(['en', 'ru'] as const)(
         expect(deliveryStatusAt(7, planNotification)).toBe('queued');
         expect(deliveryStatusAt(7, privateUserNotification)).toBe('queued');
       });
+      if (closeBeforeSend) {
+        f.store.saveTask({
+          ...f.store.getTask(task.id),
+          state: 'fixing',
+          inputRequest: undefined,
+        });
+        f.store.saveTask({ ...f.store.getTask(planTask.id), state: 'fixing' });
+      }
       clock += 60000;
       await api.delivery.flush(100);
       const questions = calls.filter(
@@ -674,19 +687,23 @@ it.each(['en', 'ru'] as const)(
       const planQuestions = calls.filter(
         (call) => call.method === 'sendMessage' && call.body.text?.includes('Approve the plan?'),
       );
-      expect(questions).toHaveLength(1);
-      expect(planQuestions).toHaveLength(1);
+      expect(questions).toHaveLength(closeBeforeSend ? 0 : 1);
+      expect(planQuestions).toHaveLength(closeBeforeSend ? 0 : 1);
       expect(webMessages).toHaveLength(1);
-      expect(questions[0].body).toMatchObject({ chat_id: 7 });
-      expect(planQuestions[0].body).toMatchObject({ chat_id: 7 });
+      if (!closeBeforeSend) {
+        expect(questions[0].body).toMatchObject({ chat_id: 7 });
+        expect(planQuestions[0].body).toMatchObject({ chat_id: 7 });
+      }
       expect(webMessages[0].body).toMatchObject({ chat_id: 7 });
 
-      f.store.saveTask({
-        ...f.store.getTask(task.id),
-        state: 'fixing',
-        inputRequest: undefined,
-      });
-      f.store.saveTask({ ...f.store.getTask(planTask.id), state: 'fixing' });
+      if (!closeBeforeSend) {
+        f.store.saveTask({
+          ...f.store.getTask(task.id),
+          state: 'fixing',
+          inputRequest: undefined,
+        });
+        f.store.saveTask({ ...f.store.getTask(planTask.id), state: 'fixing' });
+      }
       await workspace.stop();
       await api.delivery.stop();
       api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
@@ -698,12 +715,12 @@ it.each(['en', 'ru'] as const)(
         calls.filter(
           (call) => call.method === 'sendMessage' && call.body.text?.includes('Which layout?'),
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(closeBeforeSend ? 0 : 1);
       expect(
         calls.filter(
           (call) => call.method === 'sendMessage' && call.body.text?.includes('Approve the plan?'),
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(closeBeforeSend ? 0 : 1);
       expect(
         calls.filter(
           (call) => call.method === 'sendMessage' && call.body.text?.includes('Message from web'),

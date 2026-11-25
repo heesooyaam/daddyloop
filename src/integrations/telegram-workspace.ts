@@ -2169,13 +2169,11 @@ export class TelegramWorkspace {
             .some((entry) => entry.sender === 'user' && entry.at > message.at);
         const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
         if (task && !ping) return;
-        const question: OwnerQuestion | undefined = reminder
-          ? task && request
-            ? { groupId: group.id, taskId: task.id, request }
-            : message
-              ? { groupId: group.id, messageId: message.id }
-              : undefined
-          : undefined;
+        const question: OwnerQuestion | undefined = task
+          ? { groupId: group.id, taskId: task.id, request: request! }
+          : message?.needsReply && ping
+            ? { groupId: group.id, messageId: message.id }
+            : undefined;
         if (reminder && (!ping || !question || !reminderOpen(this.store, question))) return;
         const topic = await this.ensureTopic(group);
         const destination = topic

@@ -240,26 +240,34 @@ export class TelegramProgress {
     if (this.timer) return;
     this.timer = setInterval(() => {
       if (this.pending) return;
-      this.pending = this.refresh()
-        .catch((error) => {
-          try {
-            this.store.event('_system', 'telegram.progress_failed', {
-              error: redact(String(error)),
-            });
-          } catch {
-            // Retry the refresh on the next tick if SQLite is temporarily unavailable.
-          }
-        })
-        .finally(() => {
-          this.pending = undefined;
-        });
+      void this.enqueueRefresh().catch((error) => {
+        try {
+          this.store.event('_system', 'telegram.progress_failed', {
+            error: redact(String(error)),
+          });
+        } catch {
+          // Retry the refresh on the next tick if SQLite is temporarily unavailable.
+        }
+      });
     }, 5000);
     this.timer.unref();
   }
 
+  private enqueueRefresh(forcedGroupId?: string) {
+    const previous = this.pending ?? Promise.resolve();
+    let current: Promise<void>;
+    current = previous
+      .catch(() => {})
+      .then(() => this.refresh(forcedGroupId))
+      .finally(() => {
+        if (this.pending === current) this.pending = undefined;
+      });
+    this.pending = current;
+    return current;
+  }
+
   async ensure(groupId: string) {
-    await this.pending;
-    await this.refresh(groupId);
+    await this.enqueueRefresh(groupId);
   }
 
   private async refresh(forcedGroupId?: string) {
@@ -328,6 +336,6 @@ export class TelegramProgress {
   async stop() {
     clearInterval(this.timer);
     this.timer = undefined;
-    await this.pending;
+    await this.pending?.catch(() => {});
   }
 }
