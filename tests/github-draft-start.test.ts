@@ -5,6 +5,9 @@ import { Engine } from '../src/core/engine.js';
 import { GitHubProvider } from '../src/providers/github.js';
 import { AppError, prRef } from '../src/core/types.js';
 import { activityStatus } from '../src/core/task-activity.js';
+import { Worker } from '../src/runtime/worker.js';
+import { Workspaces } from '../src/runtime/workspaces.js';
+import type { AgentInput } from '../src/runtime/agent.js';
 
 async function reviewFixture() {
   const f = await fixture();
@@ -469,3 +472,109 @@ it.each(['deleted', 'edited', 'unchanged'] as const)(
     }
   },
 );
+
+it.each(
+  (
+    ['ordinary fix', 'retarget during preparation', 'retarget after capacity wait'] as const
+  ).flatMap((path) =>
+    (['deleted', 'edited', 'unchanged'] as const).map((change) => [path, change] as const),
+  ),
+)('passes current published feedback to the reviewer (%s, %s)', async (path, change) => {
+  const f = await reviewFixture();
+  const engine = f.engine();
+  const workspaces = new Workspaces('/tmp');
+  const runtime = {
+    run: vi.fn(async (input: AgentInput) => f.result({ checkedHead: input.task.revision!.head })),
+  };
+  const worker = new Worker(
+    engine,
+    workspaces,
+    runtime,
+    runtime,
+    () => ({
+      ok: true,
+      reasons: [],
+      diskAvailableGiB: 10,
+      diskTotalGiB: 10,
+      memoryAvailableGiB: 10,
+      memoryTotalGiB: 10,
+      diskUsedPercent: 0,
+    }),
+    0,
+  );
+  try {
+    f.accept();
+    await engine.review(f.task.id);
+    f.due();
+    f.comments.push({ id: 202, body: 'Original finding', html_url: f.task.ref.url });
+    if (path === 'ordinary fix') {
+      // Attach the lost review before publishing, then confirm a saved correction.
+      const savedTask = f.store.getTask(f.task.id);
+      const original = savedTask.revision!;
+      const review = {
+        id: '123',
+        marker: savedTask.draftStart!.marker,
+        targetBranch: f.remote.targetBranch,
+        authorId: '12',
+        revision: original,
+      };
+      f.reviews[0].state = 'COMMENTED';
+      const snapshot = await f.github.getReview(prRef(savedTask), review);
+      const saved = 'f'.repeat(40);
+      f.store.saveTask({
+        ...savedTask,
+        state: 'awaiting_push',
+        draftStart: undefined,
+        review,
+        snapshot,
+        feedback: snapshot,
+        reviewFinished: true,
+        pendingAuthorHead: saved,
+        pendingAuthorFix: { revision: original, generation: savedTask.generation },
+      });
+      f.remote.head = saved;
+      await engine.reconcile(f.task.id);
+      expect(f.store.getTask(f.task.id).savedFixReview?.handle.id).toBe('123');
+    } else {
+      f.remote.targetBranch = 'release';
+      expect(await engine.review(f.task.id)).toMatchObject({ state: 'needs_input' });
+      f.reviews[0].state = 'COMMENTED';
+      expect(await engine.review(f.task.id, true)).toMatchObject({ state: 'queued' });
+    }
+    expect(await engine.review(f.task.id)).toMatchObject({ state: 'reviewing' });
+    const changeFinding = () => {
+      if (change === 'deleted') f.comments.splice(0);
+      if (change === 'edited') f.comments[0].body = 'Updated finding';
+    };
+    const prepare = vi.spyOn(workspaces, 'prepare').mockImplementation(async () => {
+      if (path === 'retarget during preparation') changeFinding();
+      return '/tmp';
+    });
+    if (path === 'ordinary fix') changeFinding();
+    if (path === 'retarget after capacity wait') {
+      prepare.mockRejectedValueOnce(
+        new AppError('workspace_capacity', 'Wait for workspace capacity'),
+      );
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([{ status: 'queued' }]),
+      );
+      expect(runtime.run).not.toHaveBeenCalled();
+      changeFinding();
+      const retry = f.store.activeJobs(f.task.id)[0];
+      f.store.saveJob({ ...retry, notBefore: undefined });
+    }
+    await worker.tick();
+    await vi.waitFor(() => expect(runtime.run).toHaveBeenCalledOnce());
+    const feedback = runtime.run.mock.calls[0][0].task.feedback;
+    expect(feedback?.comments.map(({ id, body }) => ({ id, body }))).toEqual(
+      change === 'deleted'
+        ? []
+        : [{ id: '202', body: change === 'edited' ? 'Updated finding' : 'Original finding' }],
+    );
+    await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});

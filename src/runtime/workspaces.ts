@@ -370,7 +370,16 @@ export class Workspaces {
           'An unfinished merge in the worker copy needs inspection.',
         );
       if (!(await run(['status', '--porcelain']))) return run(['rev-parse', 'HEAD']);
-      await run(['diff', '--check']);
+      try {
+        await run(['diff', '--check']);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new AppError(
+          'fix_precommit_rejected',
+          (error instanceof Error ? error.message : String(error)) +
+            '\nThe worker copy was preserved.',
+        );
+      }
       await run(['add', '--all', '--', '.']);
     }
     await run([

@@ -36,6 +36,7 @@ export class Worker {
   private runningJobs = new Map<string, Job>();
   private finalizing = new Set<string>();
   private pendingRuns = new Set<Promise<void>>();
+  private pendingJobOutcomes = new Map<string, Job>();
   private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
@@ -118,14 +119,19 @@ export class Worker {
     this.engine.recoverInterruptedJobs();
     this.engine.restoreMergeWaits();
     this.engine.recoverReviewRoundLimits();
-    this.timer = setInterval(() => {
-      void this.tick().catch((error) =>
-        this.engine.store.event('_system', 'worker.error', { error: redact(String(error)) }),
-      );
-    }, 1000);
-    void this.tick().catch((error) =>
-      this.engine.store.event('_system', 'worker.error', { error: redact(String(error)) }),
-    );
+    const poll = () => {
+      void this.tick().catch((error) => {
+        if (isSqliteBusy(error)) return;
+        const message = redact(String(error));
+        try {
+          this.engine.store.event('_system', 'worker.error', { error: message });
+        } catch {
+          console.error('Could not record worker error:', message);
+        }
+      });
+    };
+    this.timer = setInterval(poll, 1000);
+    poll();
   }
   async tick() {
     if (this.ticking || this.stopped) return;
@@ -136,6 +142,7 @@ export class Worker {
     });
     try {
       const store = this.engine.store;
+      for (const job of this.pendingJobOutcomes.values()) this.writeJobOutcome(job);
       const resources = this.resourceCheck();
       if (Date.now() - this.lastArcRelease > 15000) {
         this.lastArcRelease = Date.now();
@@ -210,7 +217,7 @@ export class Worker {
       if (poll) {
         this.lastPoll = Date.now();
         for (const job of store.pendingFixSaves()) {
-          if (this.active.has(job.taskId)) continue;
+          if (this.active.has(job.taskId) || this.pendingJobOutcomes.has(job.id)) continue;
           try {
             await this.engine.recoverPendingSavedFix(job, (task, revision) =>
               this.workspaces.inspectSavedFixHead(task, revision),
@@ -502,7 +509,10 @@ export class Worker {
           },
         );
         if (job) {
-          const running = this.run(job);
+          const running = this.run(job).catch((error) => {
+            // Reporting a failed final write must not leave a rejected background promise.
+            console.error('Could not finalize worker job:', redact(String(error)));
+          });
           this.pendingRuns.add(running);
           this.track(job.taskId, running);
           void running.finally(() => this.pendingRuns.delete(running));
@@ -525,6 +535,20 @@ export class Worker {
       finishTick();
     }
   }
+  private writeJobOutcome(job: Job) {
+    const store = this.engine.store;
+    try {
+      store.transaction(() => {
+        store.saveJob(job);
+        store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
+      });
+      this.pendingJobOutcomes.delete(job.id);
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      this.pendingJobOutcomes.set(job.id, job);
+    }
+  }
+
   private async run(job: Job) {
     const abort = new AbortController();
     this.active.set(job.taskId, abort);
@@ -660,13 +684,6 @@ export class Worker {
           'conflict_repair_unavailable',
           'Check the PR branches and auto-merge setting before resuming conflict resolution.',
         );
-      if (job.kind === 'review' && startingPR) {
-        if (!(await this.engine.refreshQueuedReviewFeedback(job))) {
-          job.status = 'cancelled';
-          return;
-        }
-        task = store.getTask(job.taskId);
-      }
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir
@@ -755,6 +772,15 @@ export class Worker {
         agentCwd = realpathSync(join(cwd, workspaceScope(task.scope)));
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
+      }
+      if (job.kind === 'review' && startingPR) {
+        if (!(await this.engine.refreshQueuedReviewFeedback(job))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
+        if (abort.signal.aborted || task.generation !== job.generation)
+          throw new AppError('run_cancelled', 'Task changed while feedback was being read');
       }
       const tools =
         job.kind === 'verify_merge'
@@ -898,7 +924,6 @@ export class Worker {
       if (savedFix) {
         try {
           await this.engine.recordSavedFix(job, savedFix);
-          delete job.fixSaveRevision;
         } catch (receiptError) {
           if (!isSqliteBusy(receiptError)) throw receiptError;
           // The receipt or the durable save intent remains available to the next poll.
@@ -915,34 +940,40 @@ export class Worker {
       if (quota) job.notBefore = new Date(error.until).toISOString();
       else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
+      if (savedFix) delete job.fixSaveRevision;
     } finally {
-      if (job.role === 'reviewer') {
-        const task = store.getTask(job.taskId);
-        if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
-          try {
-            await this.workspaces.releaseArc(task, 'reviewer');
-            const latest = store.getTask(task.id);
-            latest.arcWorkspaces = task.arcWorkspaces;
-            latest.reviewerWorktree = undefined;
-            store.saveTask(latest);
-          } catch (error) {
-            store.event(
-              task.id,
-              'reviewer.workspace_preserved',
-              { error: redact(String(error)) },
-              job.id,
-            );
+      try {
+        if (job.role === 'reviewer') {
+          const task = store.getTask(job.taskId);
+          if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
+            try {
+              await this.workspaces.releaseArc(task, 'reviewer');
+              const latest = store.getTask(task.id);
+              latest.arcWorkspaces = task.arcWorkspaces;
+              latest.reviewerWorktree = undefined;
+              store.saveTask(latest);
+            } catch (error) {
+              store.event(
+                task.id,
+                'reviewer.workspace_preserved',
+                { error: redact(String(error)) },
+                job.id,
+              );
+            }
           }
         }
+      } finally {
+        try {
+          if (!awaitingReceiptRecovery) {
+            job.finishedAt = now();
+            this.writeJobOutcome(job);
+          }
+        } finally {
+          this.active.delete(job.taskId);
+          this.runningJobs.delete(job.taskId);
+          this.finalizing.delete(job.id);
+        }
       }
-      if (!awaitingReceiptRecovery) {
-        job.finishedAt = now();
-        store.saveJob(job);
-        store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
-      }
-      this.active.delete(job.taskId);
-      this.runningJobs.delete(job.taskId);
-      this.finalizing.delete(job.id);
     }
   }
   async stop() {

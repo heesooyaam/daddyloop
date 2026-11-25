@@ -345,11 +345,13 @@ export async function createBackup(dataDir: string, output: string, config: Conf
       }
       const receiptDirectory = 'daddyloop.sqlite.saved-fixes';
       const receipts = join(dataDir, receiptDirectory);
-      if (existsSync(receipts)) {
-        for (const entry of await readdir(receipts, { withFileTypes: true })) {
-          if (entry.isFile() && /^[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.name))
-            await builder.add(join(receipts, entry.name), `data/${receiptDirectory}/${entry.name}`);
-        }
+      const receiptEntries = await readdir(receipts, { withFileTypes: true }).catch((error) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return [];
+        throw error;
+      });
+      for (const entry of receiptEntries) {
+        if (entry.isFile() && /^[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.name))
+          await builder.add(join(receipts, entry.name), `data/${receiptDirectory}/${entry.name}`);
       }
       for (const source of builder.manifest.sources)
         if (source.warning)

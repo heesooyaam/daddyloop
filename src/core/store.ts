@@ -222,25 +222,37 @@ export class Store {
   }
 
   restoreSavedFixReceipts(taskId: string) {
-    if (!this.savedFixDirectory) return;
+    if (!this.savedFixDirectory) return true;
     let files: string[];
     try {
       files = readdirSync(this.savedFixDirectory);
     } catch (error) {
-      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return true;
+      if (code === 'EACCES' || code === 'EPERM') return false;
       throw error;
     }
     const prefix = this.savedFixFilePrefix(taskId);
     for (const file of files) {
       if (!file.startsWith(prefix) || !file.endsWith('.json')) continue;
       const path = join(this.savedFixDirectory, file);
-      const receipt = JSON.parse(readFileSync(path, 'utf8')) as {
+      let content: string;
+      try {
+        content = readFileSync(path, 'utf8');
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') continue;
+        if (code === 'EACCES' || code === 'EPERM') return false;
+        throw error;
+      }
+      const receipt = JSON.parse(content) as {
         taskId: string;
         runId: string;
         fix: { head: string; revision: Revision };
       };
       if (receipt.taskId === taskId) this.journalSavedFix(taskId, receipt.runId, receipt.fix, path);
     }
+    return true;
   }
 
   event(taskId: string, type: string, data: unknown = {}, runId?: string) {

@@ -376,7 +376,7 @@ export class Engine {
     return this.lock(job.taskId, async () => {
       const current = this.store.jobs(job.taskId).find(({ id }) => id === job.id);
       const revision = current?.fixSaveRevision;
-      if (!current || !revision) return;
+      if (!current || !revision || current.errorCode === 'fix_precommit_rejected') return;
       const task = this.store.getTask(job.taskId);
       const recorded = this.savedFixEvent(task);
       let head: string | undefined;
@@ -846,6 +846,7 @@ export class Engine {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state !== 'reviewing') return false;
+      this.recoverSavedFixReviews(task);
       if (!task.retiredReviewHandles?.length) return true;
       if (!(await this.refreshRetiredReviewFeedback(task, task.review))) return false;
       task.retiredReviewHandles = undefined;
@@ -4331,7 +4332,19 @@ export class Engine {
           return task;
         }
         const saved = pending ?? lost?.head;
-        if (!saved && this.hasUnconfirmedFixSave(task)) {
+        const outstanding = this.store.pendingFixSaves(id);
+        const resumePrecommit =
+          !saved &&
+          outstanding.length > 0 &&
+          outstanding.every(
+            (job) =>
+              job.errorCode === 'fix_precommit_rejected' &&
+              sameRevision(job.fixSaveRevision, task.revision),
+          ) &&
+          !task.fixingMergeConflict &&
+          hasReleasedReview(task) &&
+          task.snapshot?.status === 'published';
+        if (!saved && outstanding.length && !resumePrecommit) {
           this.state(
             task,
             'needs_input',
@@ -4375,11 +4388,16 @@ export class Engine {
           return task;
         }
         if (
-          task.resumeState === 'fixing' &&
+          (task.resumeState === 'fixing' || resumePrecommit) &&
           hasReleasedReview(task) &&
           task.snapshot?.status === 'published'
         ) {
           this.store.transaction(() => {
+            if (resumePrecommit)
+              for (const job of outstanding) {
+                delete job.fixSaveRevision;
+                this.store.saveJob(job);
+              }
             this.state(task, 'fixing', 'Resuming the author against the published feedback');
             this.store.enqueue(
               task,
@@ -4581,7 +4599,15 @@ export class Engine {
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
         const task = this.store.getTask(job.taskId);
+        const receiptsReadable = this.store.restoreSavedFixReceipts(task.id);
         const head = this.interruptedFixHead(task, job);
+        if (
+          !receiptsReadable &&
+          job.role === 'author' &&
+          job.kind === 'fix' &&
+          this.savedFixEvent(task)?.run_id !== job.id
+        )
+          job.fixSaveRevision ??= task.revision;
         const restartReason =
           'Server restarted during this run. Its external effects must be reconciled before retry.';
         const reason = head ? `${restartReason} Saved fix ${head} is preserved.` : restartReason;

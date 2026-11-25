@@ -290,43 +290,55 @@ it('rejects tampered blobs and archive symlinks before exposing a restored direc
   }
 });
 
-it('restores an unjournaled saved-fix receipt with a portable backup', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'daddyloop-backup-fix-receipt-'));
-  const data = join(root, 'data');
-  const target = join(root, 'restored');
-  const archive = join(root, 'snapshot.tar.gz');
-  const f = await fixture({ state: 'fixing' }, join(data, 'daddyloop.sqlite'));
-  try {
-    const task = f.store.getTask(f.task.id);
-    const saved = 'f'.repeat(40);
-    f.store.enqueue(task, 'author', 'fix', 'Save a correction');
-    const job = f.store.claim()!;
-    const receipt = f.store.stageSavedFixReceipt(job, { head: saved, revision: task.revision! })!;
-    writeFileSync(receipt + '.ignored.tmp', 'incomplete receipt');
-    expect(f.store.events(task.id).some(({ type }) => type === 'author.fixes_saved')).toBe(false);
-    await createBackup(data, archive, config, 1);
-    await restoreBackup(archive, target, {}, 1, 0);
-    const restored = new Store(join(target, 'daddyloop.sqlite'));
+it.each(['file receipt', 'journal with a file at the receipt path'] as const)(
+  'restores the saved SHA from a portable backup (%s)',
+  async (source) => {
+    const root = mkdtempSync(join(tmpdir(), 'daddyloop-backup-fix-receipt-'));
+    const data = join(root, 'data');
+    const target = join(root, 'restored');
+    const archive = join(root, 'snapshot.tar.gz');
+    const f = await fixture({ state: 'fixing' }, join(data, 'daddyloop.sqlite'));
     try {
-      const files = readdirSync(join(target, 'daddyloop.sqlite.saved-fixes'));
-      expect(files).toHaveLength(1);
-      const engine = new Engine(restored, () => new DemoProvider(restored));
-      engine.recoverInterruptedJobs();
-      expect(restored.getTask(task.id)).toMatchObject({
-        state: 'paused',
-        reason: expect.stringContaining(saved),
-      });
-      await engine.action(task.id, 'resume');
-      await expect(engine.review(task.id, true)).rejects.toMatchObject({
-        code: 'fix_pending',
-        message: expect.stringContaining(saved),
-      });
-      expect(restored.activeJobs(task.id)).toHaveLength(0);
+      const task = f.store.getTask(f.task.id);
+      const saved = 'f'.repeat(40);
+      f.store.enqueue(task, 'author', 'fix', 'Save a correction');
+      const job = f.store.claim()!;
+      const fix = { head: saved, revision: task.revision! };
+      if (source === 'file receipt') {
+        const receipt = f.store.stageSavedFixReceipt(job, fix)!;
+        writeFileSync(receipt + '.ignored.tmp', 'incomplete receipt');
+      } else {
+        writeFileSync(join(data, 'daddyloop.sqlite.saved-fixes'), 'not a directory');
+        await f.engine.recordSavedFix(job, fix);
+      }
+      expect(f.store.events(task.id).some(({ type }) => type === 'author.fixes_saved')).toBe(
+        source !== 'file receipt',
+      );
+      await createBackup(data, archive, config, 1);
+      await restoreBackup(archive, target, {}, 1, 0);
+      const restored = new Store(join(target, 'daddyloop.sqlite'));
+      try {
+        if (source === 'file receipt')
+          expect(readdirSync(join(target, 'daddyloop.sqlite.saved-fixes'))).toHaveLength(1);
+        else expect(existsSync(join(target, 'daddyloop.sqlite.saved-fixes'))).toBe(false);
+        const engine = new Engine(restored, () => new DemoProvider(restored));
+        engine.recoverInterruptedJobs();
+        expect(restored.getTask(task.id)).toMatchObject({
+          state: 'paused',
+          reason: expect.stringContaining(saved),
+        });
+        await engine.action(task.id, 'resume');
+        await expect(engine.review(task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+          message: expect.stringContaining(saved),
+        });
+        expect(restored.activeJobs(task.id)).toHaveLength(0);
+      } finally {
+        restored.close();
+      }
     } finally {
-      restored.close();
+      f.store.close();
+      rmSync(root, { recursive: true, force: true });
     }
-  } finally {
-    f.store.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+  },
+);
