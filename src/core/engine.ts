@@ -55,6 +55,10 @@ const reviewRetryInstruction =
 const clarifiedReviewPrefix =
   reviewRetryInstruction +
   '\nClarification from the session coordinator; verify it against the task: ';
+const resumedProviderState = 'Resumed by the user; current provider state will be reconciled';
+const mismatchedDraftRevision = 'Review points to a different revision';
+const staleNativeDraft =
+  'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.';
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
@@ -249,6 +253,7 @@ export class Engine {
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
         throw new AppError('task_paused', 'Resume this task before starting a review');
+      if (this.reviewWaitingForResources(task)) return task;
       if (task.draftStart && !this.currentReviewStart(task)) return task;
       if (task.partialReview && task.state === 'awaiting_publication')
         throw new AppError('publication_pending', 'The recorded findings are being published.');
@@ -326,6 +331,8 @@ export class Engine {
         sameRevision(task.revision, pr) &&
         !sameRevision(task.review.revision, pr)
       ) {
+        if (retry && (await this.resumeReviewAfterResourcePause(task, pr, clarification)))
+          return task;
         const previous = await provider.getReview(prRef(task), task.review);
         if (previous.status === 'draft' || previous.status === 'partial')
           throw new AppError(
@@ -341,7 +348,7 @@ export class Engine {
         task.review &&
         task.snapshot?.status !== 'published'
       ) {
-        await this.changeReviewRevision(task, pr);
+        await this.changeReviewRevision(task, pr, retry ? clarification : undefined);
         return task;
       }
       if (changed) this.invalidate(task, pr);
@@ -551,6 +558,84 @@ export class Engine {
       ),
     );
   }
+  private matchesLatestDraftWrites(task: Task, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (!handle.authorId || draft.authorId !== handle.authorId) return false;
+    const prefix = handle.marker + ':';
+    const writes = this.store.db
+      .prepare(
+        `WITH confirmations AS MATERIALIZED (
+           SELECT json_extract(data,'$.operationId') AS operation_id, MAX(id) AS confirmed
+           FROM events
+           WHERE task_id=? AND type IN ('operation.completed','operation.recovered')
+           GROUP BY operation_id
+         )
+         SELECT o.id, o.request, o.result, c.confirmed
+         FROM operations o LEFT JOIN confirmations c ON c.operation_id=o.id
+         WHERE o.task_id=? AND o.status='done' AND
+           (o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ?)
+         ORDER BY c.confirmed`,
+      )
+      .all(
+        task.id,
+        task.id,
+        prefix + 'comment:*',
+        prefix + '*:edit_comment:*',
+        prefix + '*:remove_comment:*',
+        prefix + '*:set_summary:*',
+      );
+    const comments = new Map<string, string>();
+    let summaryRequest: string | undefined;
+    let legacyRemovals: Map<string, string> | undefined;
+    for (const write of writes) {
+      if (write.confirmed == null) return false;
+      const [scope, tool] = String(write.id).slice(prefix.length).split(':');
+      if (scope !== 'comment' && tool === 'set_summary') {
+        summaryRequest = String(write.request);
+        continue;
+      }
+      const result = JSON.parse(String(write.result)) as { id: string; body?: string } | null;
+      if (scope !== 'comment' && tool === 'remove_comment') {
+        // Older removal receipts only stored null. Match the confirmed request to its decision.
+        legacyRemovals ??= new Map(
+          this.store.decisions(task.id).flatMap(({ commentId, reason, outcome }) =>
+            commentId && ['withdrawn', 'deferred', 'rejected'].includes(outcome)
+              ? [
+                  [
+                    createHash('sha256')
+                      .update(JSON.stringify({ id: commentId, reason, outcome }))
+                      .digest('hex'),
+                    commentId,
+                  ],
+                ]
+              : [],
+          ),
+        );
+        const id = result?.id ?? legacyRemovals.get(String(write.request));
+        if (!id || !comments.delete(id)) return false;
+      } else {
+        if (!result?.id || typeof result.body !== 'string') return false;
+        if (comments.has(result.id) !== (scope !== 'comment')) return false;
+        comments.set(result.id, result.body);
+      }
+    }
+    for (const { id, body } of draft.comments) {
+      if (comments.get(id) !== body) return false;
+      comments.delete(id);
+    }
+    if (comments.size) return false;
+    const suffix = `
+
+<!-- ${handle.marker} -->`;
+    if (!summaryRequest) return draft.body === 'Review in progress.' + suffix;
+    return (
+      draft.body.endsWith(suffix) &&
+      createHash('sha256')
+        .update(JSON.stringify({ body: draft.body.slice(0, -suffix.length) }))
+        .digest('hex') === summaryRequest
+    );
+  }
+
   private draftRechecked(task: Task, runId: string, snapshot: ReviewSnapshot) {
     if (!task.draftRecheck) return true;
     const key = task.review!.marker + ':' + runId;
@@ -829,6 +914,200 @@ export class Engine {
     )
       return draftSyncPending;
   }
+  matchesResourcePause(task: Task) {
+    const pause = task.resourcePause;
+    if (!pause) return false;
+    if (pause.generation === task.generation) return true;
+    if (
+      task.ref.provider !== 'github' ||
+      task.state !== 'needs_input' ||
+      task.resumeState !== 'reviewing' ||
+      task.inputRequest ||
+      task.reviewFinished ||
+      task.pendingFix ||
+      task.partialReview ||
+      task.snapshot?.status === 'published' ||
+      pause.generation > task.generation
+    )
+      return false;
+    // Legacy reconciliation could advance the pinned base before the monitor resumed the task.
+    const history = this.resourceReviewHistory(task);
+    return !!history && !history.resumed && history.pausedGeneration === pause.generation;
+  }
+
+  private reviewWaitingForResources(task: Task) {
+    return (
+      task.ref.provider === 'github' &&
+      task.state === 'needs_input' &&
+      task.resumeState === 'reviewing' &&
+      !!task.review &&
+      this.matchesResourcePause(task)
+    );
+  }
+
+  private resourceReviewHistory(task: Task) {
+    const original = task.review?.revision;
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const job = this.store.jobs(task.id).findLast((run) => run.kind !== 'chat');
+    if (
+      !original ||
+      job?.kind !== 'review' ||
+      job.status !== 'cancelled' ||
+      job.groupId !== task.groupId ||
+      job.groupGeneration !== group?.generation ||
+      group?.deletedAt ||
+      group?.deletion ||
+      group?.daddyState === 'paused' ||
+      group?.daddyState === 'archived'
+    )
+      return;
+    const history = this.store.db
+      .prepare(
+        `SELECT type, data FROM events
+         WHERE task_id=? AND type IN ('resource.pause','task.state','revision.changed')
+           AND id>(SELECT id FROM events WHERE task_id=? AND run_id=? AND type='job.queued')
+         ORDER BY id`,
+      )
+      .all(task.id, task.id, job.id);
+    const pauseIndex = history.findIndex((event) => event.type === 'resource.pause');
+    const stopped = history[pauseIndex - 1];
+    if (stopped?.type !== 'task.state') return;
+    const pause = JSON.parse(String(history[pauseIndex].data)) as { reason: string };
+    const before = JSON.parse(String(stopped.data));
+    if (
+      before.state !== 'needs_input' ||
+      before.generation !== job.generation + 1 ||
+      before.head !== original.head ||
+      before.reason !== pause.reason
+    )
+      return;
+
+    let generation = before.generation;
+    let revision = original;
+    let resumed = false;
+    let awaitingStaleState = false;
+    const bases = [original.base];
+    for (const event of history.slice(pauseIndex + 1)) {
+      const data = JSON.parse(String(event.data));
+      if (event.type === 'revision.changed') {
+        if (
+          awaitingStaleState ||
+          data.generation !== generation + 1 ||
+          data.revision?.head !== original.head ||
+          !data.revision.base ||
+          data.revision.base === revision.base
+        )
+          return;
+        generation = data.generation;
+        revision = data.revision;
+        bases.push(revision.base);
+        awaitingStaleState = true;
+      } else if (
+        event.type !== 'task.state' ||
+        data.state !== 'needs_input' ||
+        data.generation !== generation ||
+        data.head !== original.head
+      ) {
+        return;
+      } else if (awaitingStaleState) {
+        if (data.reason !== staleNativeDraft) return;
+        awaitingStaleState = false;
+      } else if (data.reason === resumedProviderState) {
+        resumed = true;
+      } else if (data.reason !== mismatchedDraftRevision || bases.length === 1) {
+        return;
+      }
+    }
+    if (
+      !awaitingStaleState &&
+      generation === task.generation &&
+      sameRevision(revision, task.revision)
+    )
+      return { bases, resumed, pausedGeneration: job.generation + 1 };
+  }
+
+  private async resumeReviewAfterResourcePause(
+    task: Task,
+    observed?: PullRequest,
+    clarification?: string,
+  ) {
+    const handle = task.review;
+    if (
+      task.ref.provider !== 'github' ||
+      task.state !== 'needs_input' ||
+      task.resumeState !== 'reviewing' ||
+      task.inputRequest ||
+      task.reviewFinished ||
+      task.pendingFix ||
+      task.partialReview ||
+      !handle?.authorId ||
+      task.snapshot?.status === 'published' ||
+      !task.revision ||
+      task.revision.head !== handle.revision.head ||
+      this.reviewWaitingForResources(task) ||
+      this.store.busy(task.id)
+    )
+      return false;
+
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const history = this.resourceReviewHistory(task);
+    if (!history?.resumed) return false;
+    const { bases } = history;
+
+    const ref = prRef(task),
+      provider = this.provider(ref);
+    const pr = observed ?? (await provider.getPR(ref));
+    if (
+      !sameOpenTarget(task.pr, pr) ||
+      pr.draft !== false ||
+      pr.head !== handle.revision.head ||
+      pr.base === handle.revision.base
+    )
+      return false;
+    const action = this.prAction(task, pr);
+    if (action.kind !== 'refresh' && action.kind !== 'continue') return false;
+    // Check each persisted base change as well as any advance since the last reconciliation.
+    if (bases.at(-1) !== pr.base) bases.push(pr.base);
+    for (let i = 1; i < bases.length; i++)
+      if (!(await provider.targetAdvanced?.(ref, bases[i - 1], bases[i]))) return false;
+    const draft = await provider.getReview(ref, handle);
+    if (draft.status !== 'draft' || draft.revision.head !== pr.head) return false;
+    this.broker.reconcileDraftEdits(task, draft);
+    if (
+      this.store.pendingReviewWrites(task.id, handle.marker).length ||
+      !this.matchesLatestDraftWrites(task, draft)
+    )
+      return false;
+
+    const currentPR = await provider.getPR(ref);
+    const current = this.store.getTask(task.id);
+    const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    if (
+      !sameRevision(currentPR, pr) ||
+      !sameOpenTarget(task.pr, currentPR) ||
+      currentPR.draft !== false ||
+      current.generation !== task.generation ||
+      current.state !== task.state ||
+      current.reason !== task.reason ||
+      currentGroup?.generation !== group?.generation ||
+      currentGroup?.deletedAt ||
+      currentGroup?.deletion ||
+      currentGroup?.daddyState === 'paused' ||
+      currentGroup?.daddyState === 'archived'
+    )
+      return false;
+    this.store.transaction(() => {
+      if (clarification?.trim()) this.rememberClarification(task, clarification);
+      delete task.resourcePause;
+      this.restartNativeReview(
+        task,
+        currentPR,
+        draft,
+        'The target branch advanced. Reviewing the updated change.',
+      );
+    });
+    return true;
+  }
   async retryInterruptedStep(id: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -846,6 +1125,8 @@ export class Engine {
         group.daddyState === 'paused' ||
         group.daddyState === 'archived'
       )
+        return;
+      if (this.reviewWaitingForResources(task) || (await this.resumeReviewAfterResourcePause(task)))
         return;
       const job = this.store.jobs(id).at(-1);
       if (!job || job.groupGeneration !== group.generation) return;
@@ -899,8 +1180,7 @@ export class Engine {
         job.kind === 'review' &&
         job.status === 'cancelled' &&
         job.generation + 1 === task.generation &&
-        (task.reason ===
-          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
+        (task.reason === staleNativeDraft ||
           task.reason === draftInspectionRequired ||
           task.reason === draftSyncPending) &&
         !!task.review &&
@@ -1328,7 +1608,11 @@ export class Engine {
     });
   }
 
-  private async changeReviewRevision(task: Task, pr: PullRequest) {
+  private async changeReviewRevision(task: Task, pr: PullRequest, clarification?: string) {
+    if (task.state === 'needs_input' && task.resumeState === 'reviewing') {
+      if (await this.resumeReviewAfterResourcePause(task, pr, clarification)) return;
+      if (this.store.getTask(task.id).generation !== task.generation) return;
+    }
     const handle = task.review;
     if (
       task.ref.provider === 'github' &&
@@ -1382,15 +1666,14 @@ export class Engine {
     this.state(
       task,
       hadUnpublished ? 'needs_input' : 'queued',
-      hadUnpublished
-        ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
-        : 'New revision is ready for review',
+      hadUnpublished ? staleNativeDraft : 'New revision is ready for review',
     );
   }
   private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
     let task = this.store.getTask(id);
     if (task.draftStart) return task; // Draft creation reconciles its own outstanding native write.
-    if (task.state === 'paused' || isTicket(task)) return task;
+    if (task.state === 'paused' || isTicket(task) || this.reviewWaitingForResources(task))
+      return task;
     if (task.state === 'awaiting_publication' && task.partialReview) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
@@ -1508,7 +1791,7 @@ export class Engine {
       });
     task.snapshot = snapshot;
     if (!sameRevision(snapshot.revision, task.revision)) {
-      this.state(task, 'needs_input', 'Review points to a different revision');
+      this.state(task, 'needs_input', mismatchedDraftRevision);
       return task;
     }
     if (snapshot.status === 'partial' || snapshot.status === 'missing') {
@@ -2533,7 +2816,15 @@ export class Engine {
               ? 'awaiting_push'
               : 'awaiting_publication'
           : 'queued';
-        this.state(task, target, 'Resumed by the user; current provider state will be reconciled');
+        if (this.reviewWaitingForResources(task)) {
+          this.store.transaction(() => {
+            delete task.resourcePause;
+            this.state(task, target, resumedProviderState);
+            this.store.event(id, 'human.resume', { reason });
+          });
+          return task;
+        }
+        this.state(task, target, resumedProviderState);
       } else if (action === 'approve-plan') {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');

@@ -342,11 +342,11 @@ export class Broker {
         data,
         async () => {
           await provider.deleteComment(prRef(task), task.review!, data.id, old);
-          return null;
+          return { id: data.id };
         },
         async () => ({
           found: !(await refresh()).comments.some((c) => c.id === data.id),
-          value: null,
+          value: { id: data.id },
         }),
       );
       this.store.decision(task, {
