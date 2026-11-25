@@ -113,7 +113,7 @@ Choose **Change theme** in the settings at the bottom of the sidebar. On a narro
 
 The web palettes cover the conversation, task board, dialogs, forms and login screen. The terminal separately supports `daddy --theme dark` and `daddy --theme light`.
 
-The panel above the conversation shows [agent quotas](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).
+Hover over or focus the gauge in the workspace header to see remaining quotas. Select the gauge for provider details and a link to the [limits page](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).
 
 ## Interface typography
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Mic, Square, LoaderCircle, X } from 'lucide-react';
 import { useLocale } from './i18n.js';
 
@@ -74,7 +74,7 @@ export function VoiceInput({
       release(rec);
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (disabled) {
       cancel();
       setPhase('idle');

@@ -11,7 +11,7 @@ async function login(page: Page) {
   await page.getByRole('button', { name: 'Connect to workspace' }).click();
   await expect(page.locator('.daddy-app')).toBeVisible();
 }
-test('the reported weekly/Spark/zero-credit layout explains balances and opens the clicked provider', async ({
+test('the reported weekly/Spark/zero-credit layout explains balances and keeps provider details accessible', async ({
   page,
 }) => {
   // Exercise the empty dashboard, independent of sessions created by earlier scenarios.
@@ -60,26 +60,20 @@ test('the reported weekly/Spark/zero-credit layout explains balances and opens t
   await login(page);
   await expect(page.getByRole('heading', { name: 'Your dashboard' })).toBeVisible();
   await expect(page.getByText('Shared account · remaining')).toHaveCount(0);
-  const codex = page.getByRole('region', { name: 'Current usage' }).first();
-  await expect(codex.getByRole('progressbar')).toHaveCount(3);
-  await expect(codex.getByText('82% left')).toBeVisible();
-  await expect(codex.locator('.daddy-credit-summary')).toHaveCount(0);
-  await codex
-    .getByRole('button', { name: 'Details: GPT-5.3-Codex-Spark, 5 hours', exact: true })
-    .click();
-  let dialog = page.getByRole('dialog');
-  await expect(dialog.getByLabel('Agent usage')).toHaveValue('codex');
-  await expect(dialog.getByText('Credit balance: 0')).toBeVisible();
+  await page.getByRole('button', { name: 'Agent limits' }).click();
+  const details = page.getByRole('region', { name: 'Agent limit details' });
+  await expect(details.getByRole('progressbar')).toHaveCount(3);
+  await expect(details.getByText('7 days: 82% remaining')).toBeVisible();
+  await expect(details.getByText('Credit balance: 0')).toHaveCount(0);
+  await details.getByRole('link', { name: 'Open limits page' }).click();
+  const main = page.getByRole('main');
+  await expect(main.getByLabel('Agent usage')).toHaveValue('codex');
+  await expect(main.getByText('Credit balance: 0')).toBeVisible();
   await expect(
-    dialog.getByText('Credits are a separate payment balance', { exact: false }),
+    main.getByText('Credits are a separate payment balance', { exact: false }),
   ).toBeVisible();
-  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
-  const unavailable = page.locator('.daddy-usage-strip.unavailable');
-  expect((await unavailable.boundingBox())!.height).toBeLessThan(80);
-  await unavailable.getByRole('button', { name: 'View Claude limits' }).click();
-  dialog = page.getByRole('dialog');
-  await expect(dialog.getByLabel('Agent usage')).toHaveValue('claude');
-  await expect(dialog.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
+  await main.getByLabel('Agent usage').selectOption('claude');
+  await expect(main.getByRole('button', { name: 'Use a reset', exact: true })).toBeDisabled();
 });
 test('workspace cards separate names, repository types and server paths', async ({ page }) => {
   await page.route('**/api/workspaces', async (route) => {

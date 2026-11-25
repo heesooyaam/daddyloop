@@ -1,17 +1,26 @@
-import { test, expect, type Locator } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import type { DaddyBoard } from '../../src/client/daddy.js';
 import { mockTwoProviders } from './usage-helpers.js';
 import type { ReviewGroup } from '../../src/core/types.js';
 import { translator } from '../../src/i18n/index.js';
 
-async function login(page: import('@playwright/test').Page) {
+async function login(page: Page) {
   await page.goto('/');
   await page
     .getByLabel('Local access token')
     .fill(readFileSync('.daddyloop/e2e/access-token', 'utf8'));
   await page.getByRole('button', { name: 'Connect to workspace' }).click();
   await expect(page.locator('.daddy-app')).toBeVisible();
+}
+async function createFixtureSession(page: Page, title: string) {
+  const [workspace] = await (await page.request.get('/api/workspaces')).json();
+  const response = await page.request.post('/api/daddy/sessions', {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { workspaceId: workspace.id, title },
+  });
+  await expect(response).toBeOK();
+  return ((await response.json()) as DaddyBoard).group;
 }
 test('offers automatic Arc session copies and sends the selected mode', async ({ page }) => {
   await page.route('**/api/workspaces', async (route) => {
@@ -78,6 +87,13 @@ test('keeps copy preparation and retry visible and shows the ready path in sessi
   await expect(progress).toHaveCount(0);
   await expect(page.getByText('Session copy ready', { exact: true })).toHaveCount(0);
   await expect(page.getByText(copyPath, { exact: true })).toHaveCount(0);
+  const limits = page.getByRole('button', { name: 'Agent limits', exact: true });
+  await limits.hover();
+  await expect(page.getByRole('tooltip')).toBeVisible();
+  await limits.click();
+  await page.getByRole('link', { name: 'Open limits page', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
   await page.getByRole('button', { name: 'Session settings' }).click();
   const settings = page.getByRole('dialog', { name: 'Session settings' });
   await expect(settings.getByText('Session copy ready', { exact: true })).toBeVisible();
@@ -262,7 +278,8 @@ for (const locale of ['en', 'ru'] as const) {
     for (const example of cases) {
       status = example.status;
       await page.reload();
-      await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(2);
+      const indicator = page.getByRole('button', { name: t('Agent limits'), exact: true });
+      await expect(indicator).toBeVisible();
       const notice = page
         .getByRole(example.retry ? 'alert' : 'status')
         .filter({ hasText: t(example.notice) });
@@ -280,6 +297,13 @@ for (const locale of ['en', 'ru'] as const) {
         });
       }
       if (example.retry) await expectFullReason(notice, error);
+      if (example.retry) {
+        await indicator.click();
+        const details = page.getByRole('region', { name: t('Agent limit details') });
+        await expect(details.getByRole('heading', { name: 'Codex', exact: true })).toBeVisible();
+        await expect(details.getByRole('heading', { name: 'Claude', exact: true })).toBeVisible();
+        await indicator.click();
+      }
     }
 
     status = { workspacePreparation: copyFailure };
@@ -310,6 +334,207 @@ for (const locale of ['en', 'ru'] as const) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
+  });
+}
+
+test('closes session dialogs and task reports when history switches the selected session', async ({
+  page,
+}) => {
+  await login(page);
+  const a = await createFixtureSession(page, 'History limits session');
+  const b = await createFixtureSession(page, 'History chat session');
+  const task = await page.request.post(`/api/daddy/sessions/${b.id}/tasks`, {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { requirements: 'History task fixture', requestId: crypto.randomUUID() },
+  });
+  await expect(task).toBeOK();
+  const removals: string[] = [];
+  await page.route('**/api/daddy/sessions/*/delete', (route) => {
+    removals.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ status: 202, json: { accepted: true } });
+  });
+  await page.route(`**/api/daddy/sessions/${b.id}`, async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), canDelete: true } });
+  });
+  await page.goto(`/limits#session/${a.id}`);
+  const dialog = page.getByRole('dialog');
+  await page
+    .getByRole('navigation', { name: 'Sessions' })
+    .getByRole('button', { name: /History chat session/ })
+    .click();
+  const title = page.getByRole('heading', { name: b.title, exact: true });
+  for (const control of [
+    'Delete session',
+    'Session settings',
+    /^Workers \d/,
+    'Queue a task',
+    'History task fixture',
+  ]) {
+    await expect(title).toBeVisible();
+    if (control === 'History task fixture') {
+      await page.locator('.daddy-work-item').getByText(control, { exact: true }).click();
+    } else {
+      await page.getByRole('button', { name: control, exact: true }).click();
+    }
+    await expect(dialog).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(
+      (url) => url.pathname === '/limits' && url.hash === `#session/${a.id}`,
+    );
+    await expect(dialog).toHaveCount(0);
+    await page.goForward();
+    await expect(title).toBeVisible();
+    await expect(dialog).toHaveCount(0);
+  }
+  expect(removals).toEqual([]);
+});
+
+for (const width of [390, 1280]) {
+  test(`scrolls to newly loaded messages on return from limits at ${width}px and preserves an unchanged position`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 540 });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await login(page);
+    const session = await createFixtureSession(page, `Long chat at ${width}px`);
+    let count = 45;
+    await page.route(`**/api/daddy/sessions/${session.id}`, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        json: {
+          ...(await response.json()),
+          messages: Array.from({ length: count }, (_, index) => ({
+            id: String(index),
+            sender: 'agent',
+            text: `Fixture message ${index + 1}`,
+            at: new Date(0).toISOString(),
+          })),
+        },
+      });
+    });
+    await page.goto(`/limits#session/${session.id}`);
+    const chat = page.locator('.daddy-chat-scroll');
+    const back = page.getByRole('link', { name: 'Back to workspace' });
+    const scrollTop = () => chat.evaluate((node) => node.scrollTop);
+    const distanceFromEnd = () =>
+      chat.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+    const openLimits = async () => {
+      if (width === 390) await page.getByRole('button', { name: 'Sessions', exact: true }).click();
+      await page.getByRole('link', { name: 'Limits', exact: true }).click();
+    };
+    await expect(chat.getByText('Fixture message 45', { exact: true })).toHaveCount(1);
+    await back.click();
+    await expect.poll(distanceFromEnd).toBeLessThan(2);
+    expect(await scrollTop()).toBeGreaterThan(0);
+    const previous = await chat.evaluate((node) => {
+      node.scrollTop = Math.floor(node.scrollTop / 2);
+      return node.scrollTop;
+    });
+    await openLimits();
+    await back.click();
+    await expect.poll(scrollTop).toBe(previous);
+    await openLimits();
+    count++;
+    await expect(chat.getByText('Fixture message 46', { exact: true })).toHaveCount(1);
+    await back.click();
+    await expect.poll(distanceFromEnd).toBeLessThan(2);
+  });
+}
+
+for (const route of ['Forward', 'workspace link'] as const) {
+  test(`a deleted session reached through the ${route} stays selected until the user chooses another`, async ({
+    page,
+  }) => {
+    await login(page);
+    const a = await createFixtureSession(page, 'First session for ' + route);
+    const b = await createFixtureSession(page, 'Second session for ' + route);
+    const removed = route === 'Forward' ? b : a;
+    const survivor = route === 'Forward' ? a : b;
+    let gone = false;
+    let hideFromList = false;
+    await page.route('**/api/daddy/sessions', async (request) => {
+      if (!hideFromList || request.request().method() !== 'GET') return request.continue();
+      const response = await request.fetch();
+      const sessions = (await response.json()) as { id: string }[];
+      return request.fulfill({ response, json: sessions.filter(({ id }) => id !== removed.id) });
+    });
+    await page.route(`**/api/daddy/sessions/${removed.id}`, (request) =>
+      gone
+        ? request.fulfill({ status: 404, json: { error: { message: 'Session not found' } } })
+        : request.continue(),
+    );
+    const sessions = page.getByRole('navigation', { name: 'Sessions' });
+    await page.goto(`/limits#session/${a.id}`);
+    await expect(sessions.getByRole('button', { name: new RegExp(a.title) })).toBeVisible();
+    if (route === 'Forward') {
+      await sessions.getByRole('button', { name: new RegExp(b.title) }).click();
+      await expect(page.getByRole('heading', { name: b.title, exact: true })).toBeVisible();
+      await page.goBack();
+      await expect(page).toHaveURL(`/limits#session/${a.id}`);
+      gone = true;
+      await page.goForward();
+    } else {
+      gone = hideFromList = true;
+      await expect(sessions.getByRole('button', { name: new RegExp(a.title) })).toHaveCount(0);
+      await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
+    }
+    const warning = page.getByRole('alert').filter({ hasText: removed.id });
+    await expect(warning).toContainText('Choose a session from the list.');
+    hideFromList = true;
+    await expect(sessions.getByRole('button', { name: new RegExp(removed.title) })).toHaveCount(0);
+    await expect(page).toHaveURL(`/#session/${removed.id}`);
+    await expect(warning).toBeVisible();
+    await expect(page.getByLabel('Message daddy')).toHaveCount(0);
+    await sessions.getByRole('button', { name: new RegExp(survivor.title) }).click();
+    await expect(page.getByRole('heading', { name: survivor.title, exact: true })).toBeVisible();
+    await expect(page.getByLabel('Message daddy')).toBeEditable();
+  });
+}
+
+for (const removeOriginal of [false, true]) {
+  test(`pins the short limits link before an ID collision (original removed: ${removeOriginal})`, async ({
+    page,
+  }) => {
+    await login(page);
+    const a = await createFixtureSession(page, 'Pinned short chat');
+    const b = await createFixtureSession(page, 'Other chat with matching prefix');
+    const prefix = a.id.slice(0, 8);
+    let collide = false;
+    await page.route('**/api/daddy/sessions', async (route) => {
+      const response = await route.fetch();
+      const sessions = (await response.json()) as { id: string }[];
+      const visible =
+        collide && removeOriginal ? sessions.filter(({ id }) => id !== a.id) : sessions;
+      await route.fulfill({
+        response,
+        json: visible.map((entry) =>
+          entry.id === b.id && collide ? { ...entry, id: prefix + b.id.slice(8) } : entry,
+        ),
+      });
+    });
+    await page.goto(`/limits#session/${prefix}`);
+    const back = page.getByRole('link', { name: 'Back to workspace', exact: true });
+    await expect(back).toHaveAttribute('href', `/#session/${a.id}`);
+    collide = true;
+    const updated = await page.waitForResponse(
+      async (response) =>
+        response.url().endsWith('/api/daddy/sessions') &&
+        ((await response.json()) as { id: string }[]).some(
+          ({ id }) => id === prefix + b.id.slice(8),
+        ),
+    );
+    await updated.finished();
+    await back.click();
+    await expect(page).toHaveURL(`/#session/${a.id}`);
+    if (removeOriginal) {
+      await expect(page.getByRole('alert').filter({ hasText: a.id })).toBeVisible();
+      await expect(page.getByLabel('Message daddy')).toHaveCount(0);
+    } else {
+      await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+      await expect(page.getByLabel('Message daddy')).toBeEditable();
+    }
   });
 }
 
@@ -346,11 +571,11 @@ test('shows copy preparation and deletion progress without scrolling on short sc
   ] satisfies { group: Partial<DaddyBoard['group']>; heading: string }[]) {
     groupPatch = group;
     await page.reload();
-    await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+    await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
 
     const notice = page.getByRole('status').filter({ hasText: heading });
     const composer = page.getByLabel('Message daddy');
-    const overview = page.getByRole('region', { name: 'Session overview' });
+    const main = page.getByRole('main');
     for (const viewport of [
       { width: 390, height: 540 },
       { width: 1024, height: 480 },
@@ -368,7 +593,7 @@ test('shows copy preparation and deletion progress without scrolling on short sc
       }
       await expect(notice).toBeInViewport({ ratio: 1 });
       await expect(firstTask).toBeInViewport({ ratio: 1 });
-      expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+      expect(await main.evaluate((element) => element.scrollTop)).toBe(0);
     }
   }
 });
