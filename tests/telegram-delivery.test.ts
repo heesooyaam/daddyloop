@@ -347,6 +347,34 @@ it('indexes legacy recovery with a constant number of SQLite queries', async () 
   }
 });
 
+it('keeps a deferred reply queued when its replay is temporarily skipped', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const message = f.store.daddyMessage('group', 'agent', 'Saved reply');
+    const options = {
+      groupId: 'group',
+      key: `message:${message.id}`,
+      replace: true,
+      final: true,
+      notificationId: `telegram:dialog:7:0:${message.id}`,
+    };
+    await f.queue.send({ chatId: 7 }, text(message.text), options);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.finishRecovery();
+    expect(f.call).not.toHaveBeenCalled();
+    await restored.send({ chatId: 7 }, text(message.text), options);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', 'Saved reply'],
+    ]);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('preserves acknowledged final chunks despite an older delivered sibling', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -406,16 +434,16 @@ it('restores one private-chat queue by saved order across sessions', async () =>
         final: true,
         notificationId: `telegram:dialog:7:0:${message.id}`,
       });
-    await enqueue(a1, 'group-a', '2026-01-01T00:00:01.000Z');
-    await enqueue(b1, 'group-b', '2026-01-01T00:00:02.000Z');
-    await enqueue(a2, 'group-a', '2026-01-01T00:00:03.000Z');
-    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 10000);
+    const sameTime = '2026-01-01T00:00:01.000Z';
+    await enqueue(a1, 'group-a', sameTime);
+    await enqueue(b1, 'group-b', sameTime);
+    await enqueue(a2, 'group-a', sameTime);
     restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
     await restored.send({ chatId: 7 }, text(a1.text), {
       groupId: 'group-a',
       key: `message:${a1.id}`,
       replace: true,
-      order: '2026-01-01T00:00:01.000Z',
+      order: sameTime,
       final: true,
       notificationId: `telegram:dialog:7:0:${a1.id}`,
     });
@@ -423,7 +451,7 @@ it('restores one private-chat queue by saved order across sessions', async () =>
       groupId: 'group-a',
       key: `message:${a2.id}`,
       replace: true,
-      order: '2026-01-01T00:00:03.000Z',
+      order: sameTime,
       final: true,
       notificationId: `telegram:dialog:7:0:${a2.id}`,
     });
@@ -431,13 +459,11 @@ it('restores one private-chat queue by saved order across sessions', async () =>
       groupId: 'group-b',
       key: `message:${b1.id}`,
       replace: true,
-      order: '2026-01-01T00:00:02.000Z',
+      order: sameTime,
       final: true,
       notificationId: `telegram:dialog:7:0:${b1.id}`,
     });
     await restored.finishRecovery();
-    f.advance(10000);
-    await restored.flush();
     expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual(['A1', 'B1', 'A2']);
   } finally {
     await restored?.stop();
@@ -465,7 +491,6 @@ it('keeps an older dialog reply ahead of a queued resource notice', async () => 
       replace: true,
       order: '2026-01-01T00:00:02.000Z',
     });
-    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 10000);
     restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
     await restored.send(destination, text(reply.text), {
       groupId: 'group',
@@ -476,8 +501,6 @@ it('keeps an older dialog reply ahead of a queued resource notice', async () => 
       notificationId: `telegram:dialog:-10042:4:${reply.id}`,
     });
     await restored.finishRecovery();
-    f.advance(10000);
-    await restored.flush();
     expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual([
       'Agent reply',
       'Resources restored',

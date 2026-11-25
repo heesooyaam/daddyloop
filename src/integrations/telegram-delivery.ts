@@ -33,6 +33,7 @@ type Delivery = {
   nextAttemptAt: number;
   error?: string;
   messages: { id: number; fingerprint: string }[];
+  recoveryOrder?: number;
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -59,8 +60,9 @@ export class TelegramDelivery {
   private deferredKeys = new Set<string>();
   private historyDeferredKeys = new Set<string>();
   private legacyDeliveredSibling = new Set<string>();
-  private storedMessages = new Map<string, { id: string; runId?: string }>();
+  private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
+  private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
   private controller?: AbortController;
@@ -74,12 +76,12 @@ export class TelegramDelivery {
     private bot: string,
     private clock = Date.now,
   ) {
-    this.loadRecoveryIndex();
     const deliveries = store.db
       .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' ORDER BY rowid")
       .all()
       .map((row) => ({ key: String(row.key), value: JSON.parse(String(row.value)) as Delivery }))
       .filter(({ value }) => value?.bot === bot);
+    this.loadRecoveryIndex();
     this.recovering = deliveries.some(
       ({ value }) =>
         ['queued', 'sending'].includes(value.status) &&
@@ -88,6 +90,7 @@ export class TelegramDelivery {
     );
     for (const { key, value } of deliveries) {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
+      value.recoveryOrder = this.messageOrder(value);
       const restoreThroughHistory =
         value.options.notificationId?.startsWith('telegram:dialog:') &&
         this.storedMessage(value) !== undefined;
@@ -110,6 +113,16 @@ export class TelegramDelivery {
       if (value.options?.key?.startsWith('turn:') && this.hasDeliveredSibling(value))
         this.legacyDeliveredSibling.add(key);
       if (
+        value.messages.length &&
+        this.acknowledgedPartsMatch(value) &&
+        (!value.options.key?.startsWith('turn:') ||
+          !this.hasDeliveredSibling(value) ||
+          value.attempts > 0)
+      )
+        this.acknowledgedCurrent.add(
+          digest([value.destination, notificationIdentity(value.options.notificationId ?? '')]),
+        );
+      if (
         ['queued', 'sending'].includes(value.status) &&
         value.options.notificationId?.startsWith('telegram:dialog:')
       )
@@ -131,16 +144,13 @@ export class TelegramDelivery {
   }
   async finishRecovery() {
     if (!this.recovering) return;
-    for (const key of this.deferredKeys) {
+    for (const key of [...this.deferredKeys]) {
+      if (this.historyDeferredKeys.has(key)) continue;
       const value = this.store.setting<Delivery>(key);
       if (!value) continue;
-      if (this.historyDeferredKeys.has(key)) {
-        value.status = 'cancelled';
-        this.save(key, value);
-      } else this.remember(key, value);
+      this.deferredKeys.delete(key);
+      this.remember(key, value);
     }
-    this.deferredKeys.clear();
-    this.historyDeferredKeys.clear();
     this.recovering = false;
     await this.flush();
   }
@@ -211,9 +221,17 @@ export class TelegramDelivery {
     return notificationIdentity(notificationId).split(':').at(-1);
   }
   private loadRecoveryIndex() {
-    for (const row of this.store.db.prepare('SELECT data FROM messages').all()) {
-      const message = JSON.parse(String(row.data)) as { id: string; runId?: string };
-      this.storedMessages.set(message.id, message);
+    let order = 0;
+    for (const row of this.store.db
+      .prepare("SELECT id,json_extract(data,'$.runId') AS runId FROM messages ORDER BY rowid")
+      .all()) {
+      order++;
+      const id = String(row.id);
+      this.storedMessages.set(id, {
+        id,
+        ...(typeof row.runId === 'string' ? { runId: row.runId } : {}),
+        order,
+      });
     }
     for (const row of this.store.db
       .prepare("SELECT id FROM notifications WHERE status='sent' AND id LIKE 'telegram:dialog:%'")
@@ -232,6 +250,9 @@ export class TelegramDelivery {
   private storedMessage(value: Delivery) {
     const id = this.notificationMessageId(value);
     return id ? this.storedMessages.get(id) : undefined;
+  }
+  private messageOrder(value: Delivery) {
+    return this.storedMessage(value)?.order;
   }
   private hasDeliveredSibling(value: Delivery) {
     const message = this.storedMessage(value);
@@ -304,13 +325,10 @@ export class TelegramDelivery {
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
     if (row.value.options.key?.startsWith('turn:')) {
       const partsMatch = this.acknowledgedPartsMatch(row.value);
-      const allPartsAcknowledged =
-        row.value.messages.length === splitTelegramText(row.value.content).length;
-      if (!partsMatch || (this.legacyDeliveredSibling.has(row.key) && allPartsAcknowledged)) {
+      if (!partsMatch || (this.legacyDeliveredSibling.has(row.key) && row.value.attempts === 0)) {
         receipt = this.receiptFor(row.value.messages, row.value);
         row.value.messages = [];
       }
-      row.value.createdAt = this.createdAt();
     }
     row.value.options.key = deliveryKey;
     row.value.options.groupId = groupId ?? row.value.options.groupId;
@@ -356,15 +374,14 @@ export class TelegramDelivery {
   }
   hasAcknowledgedParts(destination: TelegramDestination, notificationId: string) {
     const key = digest([destination, notificationIdentity(notificationId)]);
-    const row = this.pendingByNotification.get(key) ?? this.legacyByNotification.get(key);
-    return !!row?.value.messages.length;
+    return this.acknowledgedCurrent.has(key);
   }
   private createDelivery(
     destination: TelegramDestination,
     content: Delivery['content'],
     options: DeliveryOptions,
   ): Delivery {
-    return {
+    const value: Delivery = {
       id: randomUUID(),
       bot: this.bot,
       ownerId: this.store.setting<{ userId: number }>('telegram.pairing')?.userId,
@@ -378,6 +395,8 @@ export class TelegramDelivery {
       nextAttemptAt: this.clock(),
       messages: [],
     };
+    value.recoveryOrder = this.messageOrder(value);
+    return value;
   }
   enqueueReaction(destination: TelegramDestination, messageId: number) {
     const key = prefix + digest([this.bot, 'reaction', destination.chatId, messageId]);
@@ -428,7 +447,6 @@ export class TelegramDelivery {
       );
     if (value && this.deferredKeys.delete(key)) {
       this.historyDeferredKeys.delete(key);
-      value.createdAt = this.createdAt();
       this.remember(key, value);
     }
     if (value) {
@@ -518,6 +536,10 @@ export class TelegramDelivery {
             const pinOrder =
               Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin');
             if (pinOrder) return pinOrder;
+            const aRecovery = a[1].recoveryOrder;
+            const bRecovery = b[1].recoveryOrder;
+            if (aRecovery !== undefined && bRecovery !== undefined && aRecovery !== bRecovery)
+              return aRecovery - bRecovery;
             const aOrder = a[1].options.order;
             const bOrder = b[1].options.order;
             if (aOrder && bOrder && aOrder !== bOrder) return aOrder.localeCompare(bOrder);
