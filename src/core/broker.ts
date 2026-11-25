@@ -217,12 +217,16 @@ export class Broker {
       revision = task.revision!,
       targetBranch = task.pr?.targetBranch;
     const intentBranch = this.reviewIntent(task.id, marker).targetBranch;
+    const draftGeneration = Number(marker.split(':').at(-2));
     const legacyQueuedStart =
       ref.provider === 'github' &&
       !!targetBranch &&
       !intentBranch &&
       !!task.draftStart?.owner &&
-      task.draftStart.marker === this.reviewMarker(task, task.generation, task.round) &&
+      Number.isSafeInteger(draftGeneration) &&
+      draftGeneration >= 0 &&
+      draftGeneration <= task.generation &&
+      marker === this.reviewMarker(task, draftGeneration, task.round) &&
       sameRevision(task.draftStart.revision, revision);
     if (
       this.outbox.hasOperation(marker, revision) &&

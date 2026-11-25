@@ -11,7 +11,7 @@ import {
 import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
 import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { Store } from './store.js';
+import { isSqliteBusy, Store } from './store.js';
 import { Broker } from './broker.js';
 import { autoMergeEnabled, autoMergeRequested, pendingMerge } from './auto-merge.js';
 import {
@@ -361,6 +361,7 @@ export class Engine {
     }
   }
   async review(id: string, retry = false, clarification?: string) {
+    const explicitRetry = retry;
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       const entryGeneration = task.generation;
@@ -423,7 +424,7 @@ export class Engine {
           pr.draft ||
           this.prAction(task, pr).kind === 'repair'
         )
-          return this.settleMovedDraftStart(task, pr, provider);
+          return this.settleMovedDraftStart(task, pr, provider, explicitRetry);
       }
       if (pending && confirmedSupersededDraft(task) && task.review) {
         if (!(await this.retireSupersededDraft(task, this.provider(prRef(task))))) return task;
@@ -820,10 +821,17 @@ export class Engine {
     );
   }
 
-  private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
+  private async settleMovedDraftStart(
+    task: Task,
+    pr: PullRequest,
+    provider: ReviewProvider,
+    explicitRetry: boolean,
+  ) {
     // Settle the old intent before routing the new revision. Never replay an old POST.
     const intent = task.draftStart!;
-    if (intent.owner && pr.state === 'open' && !sameOpenTarget(task.pr, pr)) {
+    const retargeted = pr.state === 'open' && !sameOpenTarget(task.pr, pr);
+    const inspectRetarget = retargeted && explicitRetry && task.state === 'needs_input';
+    if (intent.owner && retargeted && !inspectRetarget) {
       this.state(
         task,
         'needs_input',
@@ -831,8 +839,38 @@ export class Engine {
       );
       return task;
     }
-    const existing = await provider.findReview(prRef(task), intent.marker);
+    const existing = await provider.findReview(prRef(task), intent.marker, {
+      revision: intent.revision,
+      targetBranch: task.pr?.targetBranch,
+      owner: intent.owner,
+    });
     if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+    if (inspectRetarget) {
+      if (existing) {
+        const handle = {
+          ...existing,
+          revision: intent.revision,
+          targetBranch: task.pr?.targetBranch,
+        };
+        const snapshot = await provider.getReview(prRef(task), handle);
+        if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+        if (
+          snapshot.revision.head !== intent.revision.head ||
+          (intent.owner && snapshot.authorId !== intent.owner) ||
+          snapshot.status === 'draft' ||
+          snapshot.status === 'partial'
+        ) {
+          this.state(task, 'needs_input', draftInspectionRequired);
+          return task;
+        }
+        retainPublishedFeedback(task, snapshot, true);
+      }
+      if (pr.draft) return task;
+      delete task.draftStart;
+      this.invalidate(task, pr);
+      this.state(task, 'queued', 'New revision is ready for review');
+      return task;
+    }
     if (existing) {
       if (
         existing.revision.head !== intent.revision.head ||
@@ -1770,22 +1808,43 @@ export class Engine {
     });
     return task;
   }
-  private recoverSavedFixReview(task: Task, head: string) {
+  private trackedMergeFindingIds(task: Task) {
+    return new Set(Object.values(task.retiredReviewCommentIds ?? {}).flat());
+  }
+
+  private recoverSavedFixReviews(task: Task) {
     const feedback = task.feedback;
-    if (
-      !feedback?.comments.length ||
-      feedback.revision.head === head ||
-      feedback.status !== 'published' ||
-      task.savedFixReview
-    )
-      return;
+    if (feedback?.status !== 'published' || !feedback.comments.length) return;
+    const tracked = this.trackedMergeFindingIds(task);
+    const remaining = new Set(
+      feedback.comments.map(({ id }) => id).filter((id) => !tracked.has(id)),
+    );
+    const track = (review: ReviewHandle, ids: string[]) => {
+      const relevant = ids.filter((id) => remaining.has(id));
+      if (!relevant.length) return;
+      this.trackRecoveredReview(task, review);
+      const records = (task.retiredReviewCommentIds ??= {});
+      records[review.marker] = [...(records[review.marker] ?? []), ...relevant];
+      for (const id of relevant) remaining.delete(id);
+    };
+    const origin = task.savedFixReview;
+    if (origin) track(origin.handle, origin.commentIds);
     if (task.review && sameRevision(task.review.revision, feedback.revision)) {
-      task.savedFixReview = {
-        handle: task.review,
-        commentIds: feedback.comments.map(({ id }) => id),
-      };
-      return;
+      const published =
+        task.snapshot?.status === 'published' &&
+        sameRevision(task.snapshot.revision, task.review.revision)
+          ? task.snapshot
+          : task.reviewFinished &&
+              !task.retiredReviewHandles?.some(({ marker }) => marker === task.review?.marker)
+            ? feedback
+            : undefined;
+      if (published)
+        track(
+          task.review,
+          published.comments.map(({ id }) => id),
+        );
     }
+    if (!remaining.size) return;
 
     const rows = this.store.db
       .prepare(
@@ -1793,31 +1852,30 @@ export class Engine {
          FROM events e JOIN operations o ON o.task_id=e.task_id AND o.status='done'
            AND json_extract(o.result,'$.id')=json_extract(e.data,'$.reviewId')
          WHERE e.task_id=? AND e.type='review.published'
-           AND json_extract(e.data,'$.snapshot.revision.head')=?
          ORDER BY e.id DESC`,
       )
-      .all(task.id, feedback.revision.head);
-    const ids = new Set(feedback.comments.map(({ id }) => id));
+      .all(task.id);
     for (const row of rows) {
       if (typeof row.handle !== 'string' || typeof row.publication !== 'string') continue;
       const review = JSON.parse(row.handle) as ReviewHandle;
       const { snapshot } = JSON.parse(row.publication) as { snapshot: ReviewSnapshot };
       if (
         !review.marker ||
-        !sameRevision(snapshot.revision, feedback.revision) ||
-        review.revision?.head !== feedback.revision.head
+        snapshot.status !== 'published' ||
+        review.revision?.head !== snapshot.revision.head
       )
         continue;
-      const commentIds = snapshot.comments.map(({ id }) => id).filter((id) => ids.has(id));
-      if (!commentIds.length) continue;
-      task.savedFixReview = { handle: { ...review, revision: snapshot.revision }, commentIds };
-      return;
+      track(
+        { ...review, revision: snapshot.revision },
+        snapshot.comments.map(({ id }) => id),
+      );
+      if (!remaining.size) return;
     }
   }
 
   private async prepareMergeVerificationFeedback(task: Task, pr: PullRequest): Promise<boolean> {
     if (task.pendingAuthorHead === pr.head) {
-      this.recoverSavedFixReview(task, pr.head);
+      this.recoverSavedFixReviews(task);
       if (task.review?.revision.head === pr.head)
         this.trackRecoveredReview(task, task.review, task.snapshot);
       const stale = task.pendingAuthorFix?.staleDraft;
@@ -1827,15 +1885,6 @@ export class Engine {
       }
       if (hasSharedDraftSlot(task) && !(await this.recoverReviewBeforeMerge(task, pr)))
         return false;
-    }
-    const origin = task.savedFixReview;
-    if (
-      origin &&
-      !task.retiredReviewHandles?.some(({ marker }) => marker === origin.handle.marker) &&
-      task.feedback?.comments.some(({ id }) => origin.commentIds.includes(id))
-    ) {
-      this.trackRecoveredReview(task, origin.handle);
-      (task.retiredReviewCommentIds ??= {})[origin.handle.marker] = origin.commentIds;
     }
     return this.refreshRetiredReviewFeedback(task);
   }
@@ -3152,6 +3201,7 @@ export class Engine {
   }
 
   private savedFixEvent(task: Task, head?: string) {
+    this.store.restoreSavedFixReceipts(task.id);
     return this.store.db
       .prepare(
         `SELECT saved.id, saved.run_id, json_extract(saved.data, '$.head') AS head,
@@ -3717,22 +3767,14 @@ export class Engine {
     });
   }
   async recordSavedFix(job: Job, savedFix: { head: string; revision: Revision }) {
+    // The checkout can outlive this process even when SQLite is unavailable.
+    const receipt = this.store.stageSavedFixReceipt(job, savedFix);
     for (let attempt = 0; ; attempt++) {
       try {
-        const recorded = this.store.db
-          .prepare(
-            "SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved' AND json_extract(data,'$.head')=? LIMIT 1",
-          )
-          .get(job.taskId, job.id, savedFix.head);
-        if (!recorded) this.store.event(job.taskId, 'author.fixes_saved', savedFix, job.id);
+        this.store.journalSavedFix(job.taskId, job.id, savedFix, receipt);
         return;
       } catch (error) {
-        const busy =
-          error instanceof Error &&
-          'errcode' in error &&
-          typeof error.errcode === 'number' &&
-          (error.errcode & 255) === 5;
-        if (!busy || attempt === 4) throw error;
+        if (!isSqliteBusy(error) || attempt === 4) throw error;
         await delaySavedFixReceipt(25 * 2 ** attempt);
       }
     }
@@ -3865,8 +3907,7 @@ export class Engine {
           task.pendingAuthorHead === pr.head &&
           task.feedback?.status === 'published' &&
           task.feedback.revision.head !== pr.head &&
-          task.feedback.comments.length &&
-          !task.savedFixReview &&
+          task.feedback.comments.some(({ id }) => !this.trackedMergeFindingIds(task).has(id)) &&
           this.savedFixEvent(task, pr.head)
         ) {
           this.state(

@@ -1,7 +1,15 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, chmodSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import {
+  mkdirSync,
+  chmodSync,
+  writeFileSync,
+  renameSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { effectiveInstructions } from './instructions.js';
 import {
@@ -10,6 +18,7 @@ import {
   type Task,
   type Event,
   type Job,
+  type Revision,
   type Message,
   type Decision,
   type ReviewGroup,
@@ -30,11 +39,22 @@ const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
   ${table}.rowid
 )`;
 
+export function isSqliteBusy(error: unknown) {
+  return (
+    error instanceof Error &&
+    'errcode' in error &&
+    typeof error.errcode === 'number' &&
+    (error.errcode & 255) === 5
+  );
+}
+
 export class Store {
   readonly db: DatabaseSync;
   readonly changes = new EventEmitter();
   private transactionEvents: Event[] | undefined;
+  private readonly savedFixDirectory?: string;
   constructor(path: string) {
+    if (path !== ':memory:') this.savedFixDirectory = path + '.saved-fixes';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version ?? 0);
@@ -154,6 +174,73 @@ export class Store {
       .prepare('INSERT INTO tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
       .run(task.id, JSON.stringify(task));
   }
+  private savedFixFilePrefix(taskId: string) {
+    return createHash('sha256').update(taskId).digest('hex') + '-';
+  }
+
+  stageSavedFixReceipt(job: Job, fix: { head: string; revision: Revision }): string | undefined {
+    if (!this.savedFixDirectory) return;
+    mkdirSync(this.savedFixDirectory, { recursive: true, mode: 0o700 });
+    const path = join(
+      this.savedFixDirectory,
+      this.savedFixFilePrefix(job.taskId) +
+        createHash('sha256').update(job.id).digest('hex') +
+        '.json',
+    );
+    const temporary = path + '.' + randomUUID() + '.tmp';
+    writeFileSync(temporary, JSON.stringify({ taskId: job.taskId, runId: job.id, fix }), {
+      flag: 'wx',
+      flush: true,
+      mode: 0o600,
+    });
+    renameSync(temporary, path);
+    return path;
+  }
+
+  journalSavedFix(
+    taskId: string,
+    runId: string,
+    fix: { head: string; revision: Revision },
+    path?: string,
+  ) {
+    const recorded = this.db
+      .prepare(
+        "SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved' AND json_extract(data,'$.head')=? LIMIT 1",
+      )
+      .get(taskId, runId, fix.head);
+    if (!recorded) this.event(taskId, 'author.fixes_saved', fix, runId);
+    // A rolled-back event must not consume the only durable copy.
+    if (path && !this.db.isTransaction) {
+      try {
+        unlinkSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  }
+
+  restoreSavedFixReceipts(taskId: string) {
+    if (!this.savedFixDirectory) return;
+    let files: string[];
+    try {
+      files = readdirSync(this.savedFixDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const prefix = this.savedFixFilePrefix(taskId);
+    for (const file of files) {
+      if (!file.startsWith(prefix) || !file.endsWith('.json')) continue;
+      const path = join(this.savedFixDirectory, file);
+      const receipt = JSON.parse(readFileSync(path, 'utf8')) as {
+        taskId: string;
+        runId: string;
+        fix: { head: string; revision: Revision };
+      };
+      if (receipt.taskId === taskId) this.journalSavedFix(taskId, receipt.runId, receipt.fix, path);
+    }
+  }
+
   event(taskId: string, type: string, data: unknown = {}, runId?: string) {
     const at = now();
     const result = this.db

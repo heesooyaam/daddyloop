@@ -338,52 +338,100 @@ it('recovers a lost create for the saved fix before starting a new draft on the 
   }
 });
 
-it.each(['accepted', 'not accepted', 'owner changed', 'target changed'] as const)(
-  'reconciles a queued pre-upgrade draft creation (%s)',
-  async (scenario) => {
+it.each([
+  'accepted',
+  'not accepted',
+  'owner changed',
+  'target changed',
+  'accepted and paused before upgrade',
+  'not accepted and paused before upgrade',
+  'accepted and paused after upgrade',
+  'not accepted and paused after upgrade',
+] as const)('reconciles a queued pre-upgrade draft creation (%s)', async (scenario) => {
+  const f = await reviewFixture();
+  try {
+    const accepted = !scenario.startsWith('not accepted');
+    if (accepted) f.accept();
+    const original = f.engine();
+    await original.review(f.task.id);
+    if (scenario.endsWith('before upgrade')) {
+      await original.action(f.task.id, 'pause');
+      await original.action(f.task.id, 'resume');
+    }
+    const pending = f.store.getTask(f.task.id);
+    expect(pending.draftStart?.owner).toBe('12');
+    f.store.db
+      .prepare(
+        "UPDATE events SET data=json_remove(data,'$.targetBranch','$.revision') WHERE task_id=? AND type='operation.started'",
+      )
+      .run(pending.id);
+    f.due();
+    if (scenario === 'owner changed') {
+      const changed = f.store.getTask(pending.id);
+      changed.draftStart!.owner = '34';
+      f.store.saveTask(changed);
+    }
+    if (scenario === 'target changed') f.remote.targetBranch = 'release';
+    const restored = f.engine();
+    if (scenario.endsWith('after upgrade')) {
+      await restored.action(f.task.id, 'pause');
+      await restored.action(f.task.id, 'resume');
+    }
+    if (scenario === 'owner changed') {
+      await expect(restored.review(pending.id)).rejects.toMatchObject({
+        code: 'draft_owner_changed',
+      });
+      expect(f.store.activeJobs(pending.id)).toHaveLength(0);
+      expect(f.posts).toHaveLength(1);
+      expect(f.reviews[0].state).toBe('PENDING');
+      return;
+    }
+    const result = await restored.review(pending.id);
+    if (scenario === 'target changed') {
+      expect(result.state).toBe('needs_input');
+      expect(f.store.activeJobs(pending.id)).toHaveLength(0);
+      expect(f.posts).toHaveLength(1);
+      expect(f.reviews[0].state).toBe('PENDING');
+    } else {
+      expect(result).toMatchObject({
+        state: 'reviewing',
+        review: { marker: pending.draftStart!.marker },
+      });
+      expect(f.store.activeJobs(pending.id)).toHaveLength(1);
+      expect(f.posts).toHaveLength(accepted ? 1 : 2);
+    }
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each([false, true])(
+  'starts a separate draft on the new target after inspecting the prior operation (created: %s)',
+  async (created) => {
     const f = await reviewFixture();
     try {
-      if (scenario !== 'not accepted') f.accept();
-      const original = f.engine();
-      await original.review(f.task.id);
-      const pending = f.store.getTask(f.task.id);
-      expect(pending.draftStart?.owner).toBe('12');
-      f.store.db
-        .prepare(
-          "UPDATE events SET data=json_remove(data,'$.targetBranch','$.revision') WHERE task_id=? AND type='operation.started'",
-        )
-        .run(pending.id);
+      if (created) f.accept();
+      const engine = f.engine();
+      await engine.review(f.task.id);
       f.due();
-      if (scenario === 'owner changed') {
-        const changed = f.store.getTask(pending.id);
-        changed.draftStart!.owner = '34';
-        f.store.saveTask(changed);
-      }
-      if (scenario === 'target changed') f.remote.targetBranch = 'release';
-      const restored = f.engine();
-      if (scenario === 'owner changed') {
-        await expect(restored.review(pending.id)).rejects.toMatchObject({
-          code: 'draft_owner_changed',
-        });
-        expect(f.store.activeJobs(pending.id)).toHaveLength(0);
-        expect(f.posts).toHaveLength(1);
+      const initial = f.store.getTask(f.task.id).draftStart!;
+      f.remote.targetBranch = 'release';
+      expect(await engine.review(f.task.id)).toMatchObject({ state: 'needs_input' });
+      expect(f.posts).toHaveLength(1);
+      if (created) {
+        expect(await engine.review(f.task.id, true)).toMatchObject({ state: 'needs_input' });
         expect(f.reviews[0].state).toBe('PENDING');
-        return;
+        f.reviews.splice(0);
       }
-      const result = await restored.review(pending.id);
-      if (scenario === 'target changed') {
-        expect(result.state).toBe('needs_input');
-        expect(f.store.activeJobs(pending.id)).toHaveLength(0);
-        expect(f.posts).toHaveLength(1);
-        expect(f.reviews[0].state).toBe('PENDING');
-      } else {
-        expect(result).toMatchObject({
-          state: 'reviewing',
-          review: { marker: pending.draftStart!.marker },
-        });
-        expect(f.store.activeJobs(pending.id)).toHaveLength(1);
-        expect(f.posts).toHaveLength(scenario === 'accepted' ? 1 : 2);
-      }
+      expect(await engine.review(f.task.id, true)).toMatchObject({
+        state: 'queued',
+        pr: { targetBranch: 'release' },
+      });
+      expect(f.posts).toHaveLength(1);
+      const next = await engine.review(f.task.id);
+      expect(next).toMatchObject({ state: 'reviewing', review: { targetBranch: 'release' } });
+      expect(next.review?.marker).not.toBe(initial.marker);
+      expect(f.posts).toHaveLength(2);
     } finally {
       f.store.close();
     }

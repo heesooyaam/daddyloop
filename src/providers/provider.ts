@@ -18,7 +18,7 @@ export interface ReviewProvider {
   findReview(
     ref: PRRef,
     marker: string,
-    intent?: { revision: Revision; targetBranch?: string },
+    intent?: { revision: Revision; targetBranch?: string; owner?: string },
   ): Promise<ReviewHandle | undefined>;
   createReview(
     ref: PRRef,

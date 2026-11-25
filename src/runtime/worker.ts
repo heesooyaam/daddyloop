@@ -1,3 +1,4 @@
+import { isSqliteBusy } from '../core/store.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
@@ -518,6 +519,7 @@ export class Worker {
     this.runningJobs.set(job.taskId, job);
     const store = this.engine.store;
     let savedFix: { head: string; revision: Revision } | undefined;
+    let awaitingReceiptRecovery = false;
     try {
       let task = store.getTask(job.taskId);
       const isolatedReview =
@@ -854,7 +856,16 @@ export class Worker {
       }
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
-      if (savedFix) await this.engine.recordSavedFix(job, savedFix);
+      if (savedFix) {
+        try {
+          await this.engine.recordSavedFix(job, savedFix);
+        } catch (receiptError) {
+          if (!isSqliteBusy(receiptError)) throw receiptError;
+          // The file receipt is durable. Keep the run fenced until startup restores it.
+          awaitingReceiptRecovery = true;
+          return;
+        }
+      }
       const capacity =
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       const quota = error instanceof GitHubRetryError && !abort.signal.aborted;
@@ -884,9 +895,11 @@ export class Worker {
           }
         }
       }
-      job.finishedAt = now();
-      store.saveJob(job);
-      store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
+      if (!awaitingReceiptRecovery) {
+        job.finishedAt = now();
+        store.saveJob(job);
+        store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
+      }
       this.active.delete(job.taskId);
       this.runningJobs.delete(job.taskId);
       this.finalizing.delete(job.id);

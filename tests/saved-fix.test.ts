@@ -1154,3 +1154,116 @@ it.each([
     }
   },
 );
+
+it.each(
+  (['github', 'gitlab', 'arcadia'] as const).flatMap((provider) =>
+    (['edited', 'edited after restart', 'unchanged after restart'] as const).map(
+      (scenario) => [provider, scenario] as const,
+    ),
+  ),
+)(
+  'checks findings from both reviews after a second saved fix (%s, %s)',
+  async (provider, scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-second-fix-findings-'));
+    const path = join(dir, 'state.sqlite');
+    const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead }, path);
+    let store = f.store;
+    try {
+      const task = store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider };
+      const first = { ...task.pr!, revisionId: provider === 'arcadia' ? 'diff-1' : undefined };
+      const second = {
+        ...first,
+        head: 'e'.repeat(40),
+        revisionId: provider === 'arcadia' ? 'diff-2' : undefined,
+      };
+      const merged = {
+        ...second,
+        head: savedHead,
+        state: 'merged' as const,
+        revisionId: provider === 'arcadia' ? 'diff-3' : undefined,
+        mergeCommit: provider === 'arcadia' ? undefined : 'merge',
+      };
+      const firstReview = await f.engine.broker.ensureReview({
+        ...task,
+        ref,
+        pr: first,
+        revision: first,
+        round: 1,
+      });
+      const secondReview = await f.engine.broker.ensureReview({
+        ...task,
+        ref,
+        pr: second,
+        revision: second,
+        round: 2,
+      });
+      if (!firstReview || !secondReview) throw new Error('Expected both published reviews');
+      const firstFinding = await f.provider.createComment(
+        ref,
+        firstReview,
+        'Check the first fix',
+        firstReview.marker + ':comment:R1',
+      );
+      const secondFinding = await f.provider.createComment(
+        ref,
+        secondReview,
+        'Check the saved SHA',
+        secondReview.marker + ':comment:R2',
+      );
+      await f.provider.publish(ref, firstReview);
+      await f.provider.publish(ref, secondReview);
+      const snapshot = await f.provider.getReview(ref, secondReview);
+      store.saveTask({
+        ...task,
+        ref,
+        pr: second,
+        revision: second,
+        round: 2,
+        review: secondReview,
+        snapshot,
+        feedback: { ...snapshot, comments: [firstFinding, secondFinding] },
+        savedFixReview: { handle: firstReview, commentIds: [firstFinding.id] },
+        pendingAuthorFix: { revision: second, generation: task.generation },
+      });
+      store.setSetting('demo-pr:1', merged);
+      expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'reviewing' });
+      const job = store.claim()!;
+      expect(await f.engine.canStartMergeVerification(job, merged)).toBe(true);
+      const result = f.result({
+        checkedHead: savedHead,
+        verifiedCommentIds: [firstFinding.id, secondFinding.id],
+      });
+      if (scenario.startsWith('edited'))
+        await f.provider.updateComment(
+          ref,
+          secondReview,
+          secondFinding.id,
+          'Verify recovery after a restart',
+        );
+      let engine = f.engine;
+      if (scenario.endsWith('after restart')) {
+        store.saveJob({ ...job, deferredResult: result });
+        store.close();
+        store = new Store(path);
+        engine = new Engine(store, () => new DemoProvider(store));
+      }
+      const restored = store.jobs(task.id).find(({ id }) => id === job.id)!;
+      await engine.completeJob(restored, restored.deferredResult ?? result);
+      const completed = store.getTask(task.id);
+      expect(completed.feedback?.comments.map(({ id }) => id)).toEqual([
+        firstFinding.id,
+        secondFinding.id,
+      ]);
+      if (scenario.startsWith('edited')) {
+        expect(completed).toMatchObject({
+          state: 'needs_input',
+          reason: expect.stringContaining('Published findings changed'),
+        });
+      } else expect(completed.state).toBe('complete');
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

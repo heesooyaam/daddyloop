@@ -235,8 +235,13 @@ export class GitHubProvider implements ReviewProvider {
     ]);
     return { owner: user.id, reviews: list.filter((r) => r.user.id === user.id) };
   }
-  async findReview(ref: PRRef, marker: string) {
-    const { reviews } = await this.ownReviews(ref);
+  async findReview(ref: PRRef, marker: string, intent?: { owner?: string }) {
+    const { owner, reviews } = await this.ownReviews(ref);
+    if (intent?.owner && intent.owner !== String(owner))
+      throw new AppError(
+        'draft_owner_changed',
+        'The GitHub account changed during draft recovery.',
+      );
     const review = reviews.find((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
     return review ? this.handle(review, marker) : undefined;
   }
