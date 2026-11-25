@@ -6,7 +6,7 @@ import { defaultDataDir, loadConfig } from '../ops/config.js';
 import { credential } from '../core/security.js';
 import { AppError } from '../core/types.js';
 import { resources } from '../core/resources.js';
-import { leaseHelper } from './arc-lease.js';
+import { leaseHelper, runLeaseHelper } from './arc-lease.js';
 import { ManagedArcMounts, type ArcCheckpoint } from './arc-managed.js';
 import type { Role, Task } from '../core/types.js';
 export { leaseHelper } from './arc-lease.js';
@@ -40,7 +40,7 @@ export class ArcBridge {
     return new ManagedArcMounts(this.dataDir, undefined, undefined, () => this.selectedHelper());
   }
   private helper(args: string[], options: Parameters<typeof command>[2] = {}) {
-    return command('bash', [this.selectedHelper(), ...args], options);
+    return runLeaseHelper(this.selectedHelper(), args, options);
   }
   async mounts() {
     const r = await this.helper(['--json', 'status']);

@@ -27,7 +27,8 @@ import { command } from './process.js';
 import { TelegramApi } from '../integrations/telegram.js';
 import { setupTailscale } from './network.js';
 import { openWebTunnel, webConnectionText } from './web.js';
-import { ArcBridge, leaseHelper } from '../integrations/arcadia.js';
+import { ArcBridge } from '../integrations/arcadia.js';
+import { leaseHelper, resolveLeaseHelperPath } from '../integrations/arc-lease.js';
 import { AppError } from '../core/types.js';
 
 export async function promptSecret(label: string): Promise<string> {
@@ -511,7 +512,7 @@ export function registerOperations(program: Command) {
   arcadia
     .command('setup')
     .option('--workspace <path>', 'existing source Arc mount')
-    .option('--lease-helper <path>')
+    .option('--lease-helper <path-or-name>', 'override the lease helper')
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
@@ -534,7 +535,13 @@ export function registerOperations(program: Command) {
         arcadia: config.arcadia,
         moduleEnabled: config.modules.includes('arcadia'),
       });
-      const selectedHelper = options.leaseHelper ? resolve(options.leaseHelper) : leaseHelper();
+      const selectedHelper = resolveLeaseHelperPath(options.leaseHelper || leaseHelper());
+      if (!selectedHelper)
+        throw new AppError(
+          'arcadia_lease_helper_missing',
+          'The selected Arc lease helper was not found in the working directory or PATH',
+          422,
+        );
       const identity = await new ArcBridge(serviceDataDir, selectedHelper).doctor(
         options.workspace,
       );

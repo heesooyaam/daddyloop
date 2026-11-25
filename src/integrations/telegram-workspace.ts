@@ -93,6 +93,7 @@ type TaskControl = {
   expectedGeneration?: number;
   expectedPendingHead?: string;
   reason?: string;
+  queuePage?: number;
   cancels?: string;
   expiresAt: string;
   outcome?: 'completed' | 'stale';
@@ -1191,9 +1192,9 @@ export class TelegramWorkspace {
       pr: task.pr
         ? {
             ...task.pr,
-            title: redact(task.pr.title),
-            body: redact(task.pr.body),
-            checkDetails: task.pr.checkDetails.map((check) => ({
+            title: task.pr.title ? redact(task.pr.title) : '',
+            body: task.pr.body ? redact(task.pr.body) : '',
+            checkDetails: (task.pr.checkDetails ?? []).map((check) => ({
               ...check,
               name: redact(check.name),
             })),
@@ -1493,6 +1494,7 @@ export class TelegramWorkspace {
     destination: Destination,
     action: HumanTaskAction,
     reason?: string,
+    queuePage?: number,
   ) {
     const version = this.taskVersion(task);
     if (!this.availableTaskActions(task).includes(action))
@@ -1547,6 +1549,7 @@ export class TelegramWorkspace {
       expectedGeneration: version.generation,
       expectedPendingHead: version.pendingHead,
       reason: reason?.trim(),
+      queuePage,
     });
     await this.api.send(destination, {
       ...text,
@@ -1568,6 +1571,7 @@ export class TelegramWorkspace {
               groupId: task.groupId!,
               taskId: task.id,
               cancels: confirmation.slice('dad:task:'.length),
+              queuePage,
             }),
           },
         ],
@@ -1579,9 +1583,13 @@ export class TelegramWorkspace {
     if (!entry) return false;
     const { id, control } = entry;
     let task = this.daddy.task(control.groupId, control.taskId);
+    const show = () =>
+      control.queuePage === undefined
+        ? this.taskCard(task, destination)
+        : this.showTask(control.groupId, control.taskId, destination, control.queuePage);
     if (control.kind === 'task') {
       if (control.cancels) this.cancelTaskControl(id, control);
-      await this.taskCard(task, destination);
+      await show();
       return true;
     }
     if (entry.consumed) {
@@ -1597,7 +1605,7 @@ export class TelegramWorkspace {
               : 'This confirmation is already stale.',
         ),
       );
-      await this.taskCard(task, destination);
+      await show();
       return true;
     }
     if (!['approve-plan', 'waive-checks', 'verify-merge'].includes(control.action ?? ''))
@@ -1612,11 +1620,17 @@ export class TelegramWorkspace {
             : 'The task changed. Open the new version and confirm it separately.',
         ),
       );
-      await this.taskCard(task, destination);
+      await show();
       return true;
     }
     if (control.kind === 'prepare') {
-      await this.taskConfirmation(task, destination, control.action!, control.reason);
+      await this.taskConfirmation(
+        task,
+        destination,
+        control.action!,
+        control.reason,
+        control.queuePage,
+      );
       return true;
     }
     try {
@@ -1635,7 +1649,7 @@ export class TelegramWorkspace {
       if (!this.taskActionCompleted(task, control)) throw error;
     }
     if (!this.taskActionCompleted(task, control)) {
-      await this.taskCard(task, destination);
+      await show();
       return true;
     }
     this.finishTaskControl(id, control, 'completed');
@@ -1647,7 +1661,7 @@ export class TelegramWorkspace {
         'bold',
       ),
     );
-    await this.taskCard(task, destination);
+    await show();
     return true;
   }
   private async help(destination: Destination, privateChat: boolean) {
@@ -1693,7 +1707,12 @@ export class TelegramWorkspace {
       ],
     });
   }
-  private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
+  private async showTasks(
+    groupId: string,
+    destination: Destination,
+    view: 'queue' | 'workers',
+    page = 0,
+  ) {
     const group = this.authorize(destination, groupId);
     const slots = workerSlots(this.store, group);
     const tasks = taskActivity(
@@ -1702,11 +1721,12 @@ export class TelegramWorkspace {
         .reverse()
         .map((task) => this.groupTask(destination, task)),
       this.store.activeJobs(),
-      (task) =>
+      (task, job) =>
         githubActivityStatus(
           task,
           autoMergeSettings(this.store, group, task),
           githubBackoff(this.store, task.ref),
+          job,
         ),
       slots,
     );
@@ -1714,7 +1734,10 @@ export class TelegramWorkspace {
     await this.api.send(
       destination,
       view === 'queue'
-        ? queueCard(locale, groupId, tasks)
+        ? queueCard(locale, groupId, tasks, {
+            page,
+            readFirstStarts: (ids) => this.store.firstTaskStarts(ids),
+          })
         : workersCard(
             locale,
             groupId,
@@ -1724,7 +1747,7 @@ export class TelegramWorkspace {
           ),
     );
   }
-  private async showTask(groupId: string, taskId: string, destination: Destination) {
+  private async showTask(groupId: string, taskId: string, destination: Destination, queuePage = 0) {
     const group = this.authorize(destination, groupId);
     const original = this.daddy.task(groupId, taskId),
       task = this.groupTask(destination, original);
@@ -1732,11 +1755,12 @@ export class TelegramWorkspace {
     const [activity] = taskActivity(
       [task],
       this.store.activeJobs(taskId),
-      (t) =>
+      (t, job) =>
         githubActivityStatus(
           t,
           autoMergeSettings(this.store, group, t),
           githubBackoff(this.store, t.ref),
+          job,
         ),
       slots,
     );
@@ -1746,7 +1770,7 @@ export class TelegramWorkspace {
         ? autoMergeSettings(this.store, group, original)
         : undefined;
     this.store.setSetting(this.selectedTaskKey(destination, groupId), task.id);
-    const card = activityTaskCard(this.locale(), activity!, slot, merge);
+    const card = activityTaskCard(this.locale(), activity!, slot, merge, queuePage);
     if (destination.chatId === this.pair()?.chatId) {
       const withRequirements = new TelegramText()
         .append(card)
@@ -1770,6 +1794,7 @@ export class TelegramWorkspace {
             expectedHead: version.head,
             expectedGeneration: version.generation,
             expectedPendingHead: version.pendingHead,
+            queuePage,
           }),
         },
       ]),
@@ -2681,9 +2706,14 @@ export class TelegramWorkspace {
       return true;
     }
     if (await this.repositoryCallback(data, destination)) return true;
-    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})$/);
+    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})(?::(\d{1,10}))?$/);
     if (queue) {
-      await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
+      await this.showTasks(
+        queue[2]!,
+        destination,
+        queue[1] as 'queue' | 'workers',
+        Number(queue[3] ?? 0),
+      );
       return true;
     }
     const sessionMerge = /^dad:sm:([a-f0-9-]{36}):(on|off)$/.exec(data);
@@ -2697,20 +2727,20 @@ export class TelegramWorkspace {
       );
       return true;
     }
-    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
+    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)(?::(\d{1,10}))?$/.exec(data);
     if (taskMerge) {
       const task = this.store.getTask(taskMerge[1]!);
       if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
       this.authorize(destination, task.groupId);
       this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
-      await this.showTask(task.groupId, task.id, destination);
+      await this.showTask(task.groupId, task.id, destination, Number(taskMerge[3] ?? 0));
       return true;
     }
-    const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
+    const task = data.match(/^dad:task:([a-f0-9-]{36})(?::(\d{1,10}))?$/);
     if (task) {
       const { groupId } = this.store.getTask(task[1]!);
       if (!groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
-      await this.showTask(groupId, task[1]!, destination);
+      await this.showTask(groupId, task[1]!, destination, Number(task[2] ?? 0));
       return true;
     }
     const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);

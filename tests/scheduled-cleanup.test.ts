@@ -1,3 +1,5 @@
+import { hostCleanupActions } from '../src/ops/host-cleanup.js';
+import { cleanupReportLines } from '../src/core/cleanup-outcomes.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -315,6 +317,145 @@ it('cleans under pressure without a session and reports the measured result to T
     ).toThrow('cleanup threshold must be lower');
   } finally {
     await server.app.close();
+    f.close();
+  }
+});
+
+it('reports decreasing host space and a failed operation for pre-upgrade reports', () => {
+  const lines = cleanupReportLines('ru', {
+    id: '1',
+    startedAt: 0,
+    finishedAt: 1,
+    status: 'failed',
+    before: { diskAvailableGiB: 241.18, diskUsedPercent: 84 },
+    after: { diskAvailableGiB: 235.26, diskUsedPercent: 84.4 },
+    actions: [{ id: 'review-caches', error: 'Error: Cache maintenance is already running' }],
+  });
+  expect(lines.join(' ')).toContain('меньше на 5.92 ГиБ');
+  expect(lines.join(' ')).toContain('Другая уборка уже выполнялась');
+});
+const unloaded = {
+  LoadState: 'loaded',
+  RemainAfterExit: 'no',
+  Type: 'oneshot',
+  ActiveState: 'inactive',
+  InvocationID: '',
+  Result: 'success',
+  ConditionResult: 'no',
+  ConditionTimestampMonotonic: '0',
+  ExecMainCode: '0',
+  ExecMainStatus: '0',
+  ExecMainStartTimestampMonotonic: '0',
+  ExecMainExitTimestampMonotonic: '0',
+};
+const completedUnit = {
+  ...unloaded,
+  InvocationID: 'a'.repeat(32),
+  ConditionResult: 'yes',
+  ConditionTimestampMonotonic: '11',
+  ExecMainStartTimestampMonotonic: '12',
+  ExecMainExitTimestampMonotonic: '13',
+  ExecMainCode: '1',
+};
+function unitRun(before: typeof unloaded, after: typeof unloaded) {
+  const show = (state: typeof unloaded) =>
+    Object.entries(state)
+      .map(([k, v]) => k + '=' + v)
+      .join('\n');
+  return vi
+    .fn(async (_exe: string, args: string[]): Promise<string> =>
+      args[0] === 'show' ? show(before) : '',
+    )
+    .mockResolvedValueOnce(show(before))
+    .mockResolvedValueOnce('')
+    .mockResolvedValueOnce(show(after));
+}
+it('only starts an allowed oneshot and rechecks the threshold after inspection', async () => {
+  const unit = 'daddyloop-cleanup-example.service',
+    signal = new AbortController().signal;
+  const run = unitRun(unloaded, completedUnit);
+  expect(hostCleanupActions(undefined, run)).toEqual([]);
+  expect(() => hostCleanupActions('ssh.service', run)).toThrow();
+  expect(await hostCleanupActions(unit, run)[0].run(signal, () => false)).toMatchObject({
+    skipped: true,
+    unitResult: 'threshold',
+  });
+  expect(run).toHaveBeenCalledTimes(1);
+  const wrong = unitRun({ ...unloaded, Type: 'simple' }, unloaded);
+  await expect(hostCleanupActions(unit, wrong)[0].run(signal, () => true)).rejects.toThrow(
+    /oneshot/,
+  );
+  expect(wrong).toHaveBeenCalledTimes(1);
+});
+it.each([
+  ['success', unloaded, completedUnit, 'completed'],
+  ['busy', unloaded, { ...completedUnit, ExecMainStatus: '75' }, 'busy'],
+  [
+    'joined',
+    { ...completedUnit, ActiveState: 'activating', ExecMainExitTimestampMonotonic: '0' },
+    completedUnit,
+    'completed',
+  ],
+  [
+    'unmet condition after a prior success',
+    completedUnit,
+    { ...completedUnit, ConditionResult: 'no', ConditionTimestampMonotonic: '31' },
+    'condition',
+  ],
+  [
+    'ExecCondition skipped',
+    unloaded,
+    { ...unloaded, InvocationID: 'c'.repeat(32), Result: 'exec-condition' },
+    'condition',
+  ],
+  ['no execution metadata', unloaded, unloaded, 'unconfirmed'],
+  ['stale success', completedUnit, completedUnit, 'unconfirmed'],
+  [
+    'incomplete execution',
+    unloaded,
+    { ...completedUnit, ExecMainExitTimestampMonotonic: '0' },
+    'unconfirmed',
+  ],
+] as const)('verifies the systemd receipt for %s', async (_, before, after, outcome) => {
+  const unit = 'daddyloop-cleanup-example.service',
+    signal = new AbortController().signal,
+    run = unitRun(before, after);
+  const result = hostCleanupActions(unit, run)[0].run(signal, () => true);
+  if (outcome === 'unconfirmed') await expect(result).rejects.toThrow(/confirmed execution/);
+  else await expect(result).resolves.toMatchObject({ unitResult: outcome });
+  expect(run).toHaveBeenCalledWith(
+    '/usr/bin/sudo',
+    ['-n', '/usr/bin/systemctl', 'start', unit],
+    signal,
+  );
+});
+it('shows a verified per-service space change and does not mark legacy starts as completed', async () => {
+  const f = fixture();
+  try {
+    f.options.actions.push({
+      id: 'daddyloop-cleanup-one',
+      description: 'Test',
+      async run() {
+        f.setUsage(82);
+        return { unitResult: 'completed' };
+      },
+    });
+    f.setUsage(92);
+    const scheduler = new ScheduledCleanup(
+      f.store,
+      cacheScheduleSchema.parse({ enabled: true, diskPercent: 83 }),
+      f.options,
+    );
+    await scheduler.tick();
+    const r = scheduler.status().lastReport!;
+    expect(r.actions).toEqual([
+      { id: 'daddyloop-cleanup-one', unitResult: 'completed', freeSpaceChangeGiB: 10 },
+    ]);
+    expect(cleanupReportLines('ru', r).join(' ')).toContain('+10.00 ГиБ');
+    expect(
+      cleanupReportLines('ru', { ...r, actions: [{ id: 'daddyloop-cleanup-one' }] }).join(' '),
+    ).toContain('нет подтверждения');
+  } finally {
     f.close();
   }
 });

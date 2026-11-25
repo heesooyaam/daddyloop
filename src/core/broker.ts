@@ -12,6 +12,7 @@ import {
 } from './types.js';
 import type { Store } from './store.js';
 import { Outbox } from './outbox.js';
+import { sameOpenTarget } from './pr-routing.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
 
 const body = z.string().min(1).max(60000);
@@ -66,6 +67,20 @@ export const dynamicTools = Object.entries(schemas).map(([name, schema]) => ({
   inputSchema: z.toJSONSchema(schema, { target: 'draft-7' }),
 }));
 
+const draftFingerprint = (s: ReviewSnapshot) =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        s.authorId,
+        s.revision.head,
+        s.body,
+        s.comments
+          .map((c) => [c.id, c.body, c.location])
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      ]),
+    )
+    .digest('hex');
+
 export class Broker {
   readonly outbox: Outbox;
   constructor(
@@ -76,15 +91,62 @@ export class Broker {
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
-    const marker = `daddyloop:${task.id}:${task.generation}:${task.round}`;
+    const marker =
+      task.draftStart?.marker ?? `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
       revision = task.revision!;
+    const create = (replay: boolean) =>
+      provider.createReview(
+        prRef(task),
+        revision,
+        marker,
+        task.draftStart
+          ? async (owner) => {
+              if (replay) {
+                const pr = await provider.getPR(prRef(task));
+                if (!sameOpenTarget(task.pr, pr) || !sameRevision(revision, pr) || pr.draft)
+                  throw new AppError(
+                    'draft_revision_changed',
+                    'The PR changed during draft recovery.',
+                  );
+              }
+              const latest = this.store.getTask(task.id);
+              const intent = latest.draftStart;
+              const group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
+              if (
+                !intent ||
+                intent.marker !== marker ||
+                latest.generation !== task.generation ||
+                latest.state === 'paused' ||
+                group?.deletion ||
+                group?.deletedAt ||
+                group?.daddyState === 'paused' ||
+                group?.daddyState === 'archived'
+              )
+                throw new AppError('stale_task', 'The task changed during draft recovery.');
+              if (intent.owner && intent.owner !== owner)
+                throw new AppError(
+                  'draft_owner_changed',
+                  'The GitHub account changed during draft recovery.',
+                );
+              if (!intent.owner) {
+                intent.owner = owner;
+                task.draftStart!.owner = owner;
+                this.store.saveTask(latest);
+              }
+            }
+          : undefined,
+      );
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => provider.createReview(prRef(task), revision, marker),
+      () => create(false),
       async () => {
+        // The GitHub draft create checks all of this account's reviews before writing,
+        // reuses the marked draft and refuses to touch a different pending review.
+        if (task.ref.provider === 'github' && task.draftStart)
+          return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
@@ -312,38 +374,141 @@ export class Broker {
     );
     return { summaryUpdated: true };
   }
+  hasUnsettledDraftWrites(task: Task, draft: ReviewSnapshot, publishing = false) {
+    const marker = task.review!.marker,
+      publish = marker + ':publish';
+    const reviewed =
+      task.reviewFinished &&
+      task.snapshot?.status === 'draft' &&
+      task.review?.authorId &&
+      task.review.authorId === draft.authorId &&
+      draftFingerprint(task.snapshot) === draftFingerprint(draft);
+    // An absent add is never replayed. A later confirmed summary can supersede an
+    // earlier uncertain edit. Keep both operation receipts for the audit trail.
+    return this.store.pendingReviewWrites(task.id, marker).some((row) => {
+      const id = String(row.id);
+      if (id === publish && draft.status === 'draft')
+        return !publishing && this.outbox.isActive(id);
+      if (this.outbox.isActive(id)) return true;
+      if (!reviewed) return true;
+      if (id.startsWith(marker + ':comment:'))
+        return draft.comments.some((c) => c.body.includes(tag(id)));
+      const suffix = '\n\n' + tag(marker);
+      if (
+        !String(id)
+          .slice(marker.length + 1)
+          .split(':')
+          .includes('set_summary') ||
+        !draft.body.endsWith(suffix)
+      )
+        return true;
+      const digest = createHash('sha256')
+        .update(JSON.stringify({ body: draft.body.slice(0, -suffix.length) }))
+        .digest('hex');
+      return !this.store.db
+        .prepare(
+          `
+        SELECT 1 FROM operations o JOIN events e ON o.id=json_extract(e.data,'$.operationId') AND e.task_id=o.task_id
+        WHERE o.task_id=? AND o.id GLOB ? AND o.status='done' AND o.request=?
+          AND e.type IN ('operation.completed','operation.recovered')
+          AND e.id>(SELECT MAX(id) FROM events WHERE task_id=? AND type IN ('operation.started','operation.uncertain')
+            AND json_extract(data,'$.operationId')=?) LIMIT 1
+      `,
+        )
+        .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
+    });
+  }
   async publish(
     task: Task,
     verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
   ): Promise<ReviewSnapshot> {
     const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
-    const pr = await provider.getPR(prRef(task));
-    if (
-      pr.state !== 'open' ||
-      pr.head !== task.review.revision.head ||
-      (!verifyFindings && !sameRevision(pr, task.review.revision))
-    )
-      throw new AppError(
-        'stale_revision',
-        'PR revision changed. This review cannot release feedback for the new revision.',
-      );
-    const snapshot = await provider.getReview(prRef(task), task.review);
-    if (verifyFindings) await verifyFindings(pr, snapshot);
-    if (snapshot.status === 'published') return snapshot;
-    assertDraft(snapshot);
+    const ref = prRef(task),
+      handle = task.review;
+    const key = handle.marker + ':publish';
+    const read = async () => {
+      const pr = await provider.getPR(ref);
+      if (
+        !sameOpenTarget(task.pr, pr) ||
+        pr.head !== handle.revision.head ||
+        (!verifyFindings && !sameRevision(pr, handle.revision))
+      )
+        throw new AppError(
+          'stale_revision',
+          'PR revision changed. This review cannot release feedback for the new revision.',
+        );
+      const draft = await provider.getReview(ref, handle);
+      if (verifyFindings) await verifyFindings(pr, draft);
+      return draft;
+    };
+    const draft = await read();
+    if (draft.status === 'published') {
+      if (
+        this.store.db
+          .prepare("SELECT 1 FROM operations WHERE id=? AND task_id=? AND status='pending'")
+          .get(key, task.id)
+      )
+        await this.outbox.perform(
+          task.id,
+          key,
+          { review: handle.id },
+          async () => null,
+          async () => ({ found: true, value: null }),
+        );
+      return draft;
+    }
+    assertDraft(draft);
+    const baselineKey =
+      'review.publish-content:' + key + ':' + handle.revision.head + ':' + handle.revision.base;
+    const send = async () => {
+      await provider.publish(ref, handle);
+      return null;
+    };
     await this.outbox.perform(
       task.id,
-      `${task.review.marker}:publish`,
-      { review: task.review.id },
+      key,
+      { review: handle.id },
       async () => {
-        await provider.publish(prRef(task), task.review!);
-        return null;
+        if (ref.provider === 'github') this.store.setSetting(baselineKey, draftFingerprint(draft));
+        return send();
       },
-      async () =>
-        (await provider.getReview(prRef(task), task.review!)).status === 'published'
-          ? { found: true, value: null }
-          : { found: false },
+      async () => {
+        const current = await read();
+        if (current.status === 'published') return { found: true, value: null };
+        if (ref.provider !== 'github') return { found: false };
+        assertDraft(current);
+        const latest = this.store.getTask(task.id),
+          group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
+        const expected =
+          this.store.setting<string>(baselineKey) ??
+          (task.snapshot?.status === 'draft' &&
+          sameRevision(task.snapshot.revision, handle.revision)
+            ? draftFingerprint(task.snapshot)
+            : undefined);
+        if (
+          latest.generation !== task.generation ||
+          latest.state !== 'awaiting_publication' ||
+          latest.review?.id !== handle.id ||
+          group?.deletedAt ||
+          group?.deletion ||
+          group?.daddyState === 'paused' ||
+          group?.daddyState === 'archived' ||
+          !handle.authorId ||
+          handle.authorId !== current.authorId ||
+          current.revision.head !== handle.revision.head ||
+          !expected ||
+          expected !== draftFingerprint(current) ||
+          this.hasUnsettledDraftWrites(task, current, true)
+        )
+          throw new AppError(
+            'draft_changed',
+            'The review changed before publication could be confirmed. Its contents have been preserved.',
+          );
+        // Submitting one review ID is a single native transition. Confirm its current state before repeating it.
+        this.store.setSetting(baselineKey, expected);
+        return { found: true, value: await send() };
+      },
     );
     return provider.getReview(prRef(task), task.review);
   }

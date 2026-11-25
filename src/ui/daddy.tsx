@@ -62,7 +62,12 @@ import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
 import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
 import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
-import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
+import {
+  activityReason,
+  activityStatus,
+  profileText,
+  taskReference,
+} from '../core/task-activity.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -2146,12 +2151,12 @@ function TaskReport({
           <div className="daddy-task-meta">
             <code>{taskReference(detail.task)}</code>
             <span className="daddy-status-pill">
-              {t(detail.statusLabel ?? taskStatus(detail.task.state))}
+              {t(live.statusLabel ?? detail.statusLabel ?? activityStatus({ task: detail.task }))}
             </span>
             {worker !== undefined && <span>{t('Worker {number}', { number: worker })}</span>}
             {profile && <span>{profileText(profile)}</span>}
           </div>
-          <p>{t(detail.task.reason)}</p>
+          <p>{t(live.reason ?? activityReason(detail.task))}</p>
           <dl className="daddy-task-version">
             <div>
               <dt>{t('Exact revision')}</dt>

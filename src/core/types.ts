@@ -260,6 +260,16 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  publicationRetry?: { retryAt: number; delay: number };
+  draftStart?: {
+    marker: string;
+    owner?: string;
+    revision: Revision;
+    retry: boolean;
+    clarification?: string;
+    retryAt?: number;
+    delay?: number;
+  };
   prLink?: {
     ref?: PRRef;
     head: string;
@@ -369,6 +379,7 @@ export interface Job {
   turnId?: string;
   error?: string;
   startedAt?: string;
+  firstStartedAt?: string;
   finishedAt?: string;
   createdAt: string;
   actionId?: string;

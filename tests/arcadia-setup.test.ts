@@ -10,9 +10,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { registerOperations } from '../src/ops/commands.js';
 import { loadConfig, saveConfig } from '../src/ops/config.js';
+import { runLeaseHelper } from '../src/integrations/arc-lease.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
 
 function program() {
@@ -136,41 +137,236 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
   }
 });
 
-it('uses an uncommitted helper candidate for the setup probe', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
-  const candidate = join(directory, 'candidate-helper');
-  const status = JSON.stringify({
-    status: 'success',
-    data: { mounts: [{ path: '/new-pool', claimable: true, object_store_ok: true }] },
-  });
-  const config = JSON.stringify({
-    status: 'success',
-    data: {
-      object_store: join(directory, 'shared'),
-      lease_root: join(directory, 'leases'),
-      store_root: join(directory, 'stores'),
-      mount_prefix: join(directory, 'arcadia'),
-      mount_start: 1,
-      mount_end: 2,
-      extra_mounts: '',
-      human_reserved_mount_numbers: '1',
-    },
-  });
-  writeFileSync(
-    candidate,
-    `#!/usr/bin/env bash
-if [[ " $* " == *" config "* ]]; then
-  printf '%s\n' '${config}'
-else
-  printf '%s\n' '${status}'
-fi
+it.each(['relative symlink', 'bare name'])(
+  'keeps the mounts inventory after setup saves a %s',
+  async (selection) => {
+    const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-setup-'));
+    const originalCwd = process.cwd();
+    const originalConfig = loadConfig();
+    const doctor = vi.spyOn(ArcBridge.prototype, 'doctor');
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const isSymlink = selection === 'relative symlink';
+      const name = 'fixture-arc-lease';
+      const target = join(directory, 'target');
+      const later = join(directory, 'later');
+      const helper = isSymlink ? './current/../fixture-arc-lease' : name;
+      const saved = join(target, name);
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      mkdirSync(later);
+      if (isSymlink) {
+        symlinkSync('target/bin', join(directory, 'current'));
+        symlinkSync('driver', saved);
+      }
+      const inventory = { status: 'success', data: { mounts: [{ path: '/expected-pool' }] } };
+      const helperConfig = {
+        status: 'success',
+        data: {
+          object_store: join(directory, 'objects'),
+          lease_root: join(directory, 'leases'),
+          store_root: join(directory, 'stores'),
+          mount_prefix: join(directory, 'mount'),
+          mount_start: 1,
+          mount_end: 2,
+          extra_mounts: '',
+          human_reserved_mount_numbers: '',
+        },
+      };
+      writeFileSync(
+        isSymlink ? join(target, 'driver') : saved,
+        `#!/usr/bin/env bash
+[[ "\${0##*/}" == ${name} && "$1" == --json ]] || exit 7
+case "$2" in
+  status) printf '%s\\n' '${JSON.stringify(inventory)}' ;;
+  config) printf '%s\\n' '${JSON.stringify(helperConfig)}' ;;
+  *) exit 7 ;;
+esac
 `,
-    { mode: 0o600 },
-  );
+        { mode: isSymlink ? 0o700 : 0o600 },
+      );
+      writeFileSync(
+        join(later, name),
+        `#!/bin/sh\nprintf '%s\\n' '{"status":"success","data":{"mounts":[{"path":"/other-pool"}]}}'\n`,
+        { mode: 0o700 },
+      );
+      const config = structuredClone(originalConfig);
+      config.modules = [...new Set([...config.modules, 'arcadia'])];
+      config.dataDir = directory;
+      config.arcadia.leaseHelper = undefined;
+      saveConfig(config);
+      vi.stubEnv('DADDYLOOP_ARCADIA_LEASE_HELPER', helper);
+      vi.stubEnv('PATH', [target, later, process.env.PATH].join(delimiter));
+      process.chdir(directory);
+      const before = await new ArcBridge(directory).mounts();
+      expect(before).toEqual(inventory.data.mounts);
+      doctor.mockImplementation(async function (this: ArcBridge) {
+        expect(await this.mounts()).toEqual(before);
+        return { user_login: 'tester', hash: 'a'.repeat(40), branch: 'trunk', source: '/source' };
+      });
+      await program().parseAsync([
+        'node',
+        'daddy',
+        '--data-dir',
+        directory,
+        'arcadia',
+        'setup',
+        ...(isSymlink ? ['--lease-helper', helper] : []),
+      ]);
+      expect(loadConfig().arcadia.leaseHelper).toBe(saved);
+      process.chdir(later);
+      vi.stubEnv('PATH', [later, process.env.PATH].join(delimiter));
+      expect(await new ArcBridge(directory).mounts()).toEqual(before);
+    } finally {
+      process.chdir(originalCwd);
+      vi.unstubAllEnvs();
+      doctor.mockRestore();
+      output.mockRestore();
+      saveConfig(originalConfig);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(['non-executable Bash script', 'executable Node script'])(
+  'validates the inventory and journals with a %s',
+  async (helperType) => {
+    const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+    const candidate = join(directory, 'candidate helper');
+    const status = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/new-pool', claimable: true, object_store_ok: true }] },
+    });
+    const config = JSON.stringify({
+      status: 'success',
+      data: {
+        object_store: join(directory, 'shared'),
+        lease_root: join(directory, 'leases'),
+        store_root: join(directory, 'stores'),
+        mount_prefix: join(directory, 'arcadia'),
+        mount_start: 1,
+        mount_end: 2,
+        extra_mounts: '',
+        human_reserved_mount_numbers: '1',
+      },
+    });
+    try {
+      const executable = helperType === 'executable Node script';
+      const script = executable
+        ? `#!/usr/bin/env node
+if (process.argv[2] !== '--json') process.exit(7);
+if (process.argv[3] === 'config') console.log(${JSON.stringify(config)});
+else if (process.argv[3] === 'status') console.log(${JSON.stringify(status)});
+else process.exit(7);
+`
+        : `#!/usr/bin/env bash
+if [[ "$1" != --json ]]; then
+  exit 7
+elif [[ "$2" == config ]]; then
+  printf '%s\n' '${config}'
+elif [[ "$2" == status ]]; then
+  printf '%s\n' '${status}'
+else
+  exit 7
+fi
+`;
+      writeFileSync(candidate, script, { mode: executable ? 0o700 : 0o600 });
+      const bridge = new ArcBridge(directory, candidate);
+      await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/new-pool' }]);
+      await expect(bridge.withValidatedJournals(async () => undefined)).resolves.toBeUndefined();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it('resolves a symlink before traversing the parent of a lease helper path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
   try {
-    const bridge = new ArcBridge(directory, candidate);
-    await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/new-pool' }]);
-    await expect(bridge.withValidatedJournals(async () => undefined)).resolves.toBeUndefined();
+    const target = join(directory, 'target');
+    mkdirSync(join(target, 'bin'), { recursive: true });
+    symlinkSync(join(target, 'bin'), join(directory, 'current'));
+    writeFileSync(join(directory, 'helper'), '#!/bin/sh\nexit 7\n', { mode: 0o700 });
+    const response = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/target-pool' }] },
+    });
+    writeFileSync(
+      join(target, 'helper'),
+      `#!/usr/bin/env node\nconsole.log(${JSON.stringify(response)});\n`,
+      {
+        mode: 0o700,
+      },
+    );
+    const bridge = new ArcBridge(directory, `${directory}/current/../helper`);
+    await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/target-pool' }]);
+
+    const driver = join(target, 'driver');
+    writeFileSync(
+      driver,
+      `#!/bin/sh
+[ "\${0##*/}" = helper-alias ] || exit 7
+printf '%s\\n' '${response}'
+`,
+      { mode: 0o700 },
+    );
+    symlinkSync(driver, join(target, 'helper-alias'));
+    const alias = new ArcBridge(directory, `${directory}/current/../helper-alias`);
+    await expect(alias.mounts()).resolves.toMatchObject([{ path: '/target-pool' }]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('skips directories in PATH when looking for a named lease helper', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+  try {
+    const name = 'fixture-arcadia-mount-lease';
+    const first = join(directory, 'first');
+    const second = join(directory, 'second');
+    mkdirSync(join(first, name), { recursive: true });
+    mkdirSync(second);
+    const response = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/path-pool' }] },
+    });
+    const script = join(directory, 'helper');
+    writeFileSync(script, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(response)});\n`, {
+      mode: 0o700,
+    });
+    symlinkSync(script, join(second, name));
+    vi.stubEnv('PATH', [first, second, process.env.PATH].join(delimiter));
+    await expect(new ArcBridge(directory, name).mounts()).resolves.toMatchObject([
+      { path: '/path-pool' },
+    ]);
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('runs the file selected from PATH even with a same-named directory in the working directory', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+  try {
+    const name = 'fixture-arcadia-mount-lease';
+    const bin = join(directory, 'bin');
+    mkdirSync(join(directory, name));
+    mkdirSync(bin);
+    const path = join(bin, name);
+    const response = { status: 'success', data: { mounts: [{ path: '/path-pool' }] } };
+    writeFileSync(
+      path,
+      `#!/usr/bin/env bash
+[[ "$1" == --json && "$2" == status ]] || exit 7
+printf '%s\\n' '${JSON.stringify(response)}'
+`,
+      { mode: 0o600 },
+    );
+    const options = { cwd: directory, env: { PATH: [bin, process.env.PATH].join(delimiter) } };
+    const bash = await runLeaseHelper(name, ['--json', 'status'], options);
+    chmodSync(path, 0o700);
+    const executable = await runLeaseHelper(name, ['--json', 'status'], options);
+    expect(JSON.parse(bash.stdout)).toEqual(response);
+    expect(executable).toEqual(bash);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

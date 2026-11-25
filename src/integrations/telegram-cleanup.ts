@@ -1,4 +1,4 @@
-import { cleanupOutcomes } from '../core/cleanup-outcomes.js';
+import { cleanupReportLines } from '../core/cleanup-outcomes.js';
 import { translator, type Locale } from '../i18n/index.js';
 import type { CleanupScheduleStatus } from '../ops/cleanup-controls.js';
 import { TelegramText, type TelegramCard } from './telegram-text.js';
@@ -29,19 +29,14 @@ export function cleanupControlCard(locale: Locale, value: CleanupScheduleStatus)
         }),
     )
     .add('\n' + t('Cleanup skill') + ' · ' + (value.skill ?? t('No cleanup skill')));
+  if (value.hostUnits?.length)
+    text.add('\n' + t('Host cleanup services') + ' · ' + value.hostUnits.join(', '));
   if (value.running) text.add('\n' + t('Cleanup in progress'));
   if (value.lastCheckedAt) text.add('\n' + t('Last disk check') + ' · ' + value.lastCheckedAt);
   if (value.nextCheckAt) text.add('\n' + t('Next disk check') + ' · ' + value.nextCheckAt);
   if (value.lastReport)
     text.add(
-      '\n' +
-        t('Last cleanup') +
-        ' · ' +
-        value.lastReport.before.diskUsedPercent.toFixed(1) +
-        '% → ' +
-        value.lastReport.after.diskUsedPercent.toFixed(1) +
-        '% · ' +
-        t(cleanupOutcomes[value.lastReport.status]),
+      '\n' + t('Last cleanup') + '\n' + cleanupReportLines(locale, value.lastReport).join('\n'),
     );
   text.add(
     '\n\n/cleanup threshold N\n/cleanup interval N\n/cleanup skill PATH\n/cleanup clear-skill',

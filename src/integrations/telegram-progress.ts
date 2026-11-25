@@ -16,7 +16,6 @@ import {
   outstandingActivity,
   taskActivity,
   taskReference,
-  taskStatus,
 } from '../core/task-activity.js';
 
 const activeStates = new Set<State>([
@@ -80,11 +79,12 @@ function snapshot(
   const outstanding = taskActivity(
     [...tasks].reverse(),
     workers,
-    (task) =>
+    (task, job) =>
       githubActivityStatus(
         task,
         autoMergeSettings(store, group, task),
         githubBackoff(store, task.ref),
+        job,
       ),
     workerSlots(store, group),
   ).filter(outstandingActivity);
@@ -98,7 +98,8 @@ function snapshot(
   else if (running.length) label = 'Work in progress';
   else if (turns.length) label = 'Request saved. Waiting to start.';
   else if (workers.length) label = 'Waiting for a worker';
-  else if (activeTask) label = taskStatus(activeTask.state, false);
+  else if (activeTask)
+    label = activityStatus(outstanding.find(({ task }) => task.id === activeTask.id)!);
   else if (
     group.daddyState === 'needs_input' &&
     store.daddyJobs(group.id).at(-1)?.status === 'failed'

@@ -248,12 +248,18 @@ it('emits an attention milestone when a native review cannot start', async () =>
 it('finishes the saved result after a throttled verification read without restarting the agent', async () => {
   const f = await fixture(),
     runtime = new DemoRuntime();
+  const taskIds = [f.task.id];
+  let firstStart: string | undefined;
   const agent = vi.spyOn(runtime, 'run').mockImplementation(async () => {
+    firstStart = f.store.jobs(f.task.id)[0]?.startedAt;
+    expect(firstStart).toBeDefined();
+    expect(f.store.firstTaskStarts(taskIds).get(f.task.id)).toBe(firstStart);
     vi.spyOn(f.provider, 'getPR').mockRejectedValueOnce(new GitHubQuotaError(Date.now() + 60_000));
     return f.result();
   });
   const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
   try {
+    expect(f.store.firstTaskStarts(taskIds).size).toBe(0);
     await worker.tick();
     await vi.waitFor(() =>
       expect(f.store.jobs()[0]).toMatchObject({
@@ -262,10 +268,14 @@ it('finishes the saved result after a throttled verification read without restar
       }),
     );
     const job = f.store.jobs()[0];
+    expect(job.firstStartedAt).toBe(firstStart);
+    expect(f.store.firstTaskStarts(taskIds).get(f.task.id)).toBe(firstStart);
     f.store.saveJob({ ...job, notBefore: undefined });
     await worker.tick();
     await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
     expect(agent).toHaveBeenCalledTimes(1);
+    expect(f.store.jobs()[0].startedAt! > firstStart!).toBe(true);
+    expect(f.store.firstTaskStarts(taskIds).get(f.task.id)).toBe(firstStart);
     expect(f.store.messages(f.task.id)).toHaveLength(1);
   } finally {
     await worker.stop();

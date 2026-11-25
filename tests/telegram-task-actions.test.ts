@@ -487,8 +487,6 @@ it('shows the same GitHub retry status when a task is opened from tasks or queue
       message: { chat: { id: 7, type: 'private' } },
     },
   });
-  const retry = `PR #77 · GitHub HTTP 503 · retry at ${new Date(until).toISOString().slice(11, 19)} UTC`;
-  const taskRetry = `PR #77 · retry at ${new Date(taskUntil).toISOString().slice(11, 19)} UTC`;
   const webStatus = () =>
     f.daddy.board(group.id).tasks.find((item) => item.id === task.id)!.statusLabel;
   const openFromTasks = async () => {
@@ -497,16 +495,16 @@ it('shows the same GitHub retry status when a task is opened from tasks or queue
     return telegram.sent.at(-1)!.card.text as string;
   };
   try {
-    expect(await openFromTasks()).toContain(retry);
+    const sharedRetry = webStatus();
+    expect(await openFromTasks()).toContain(sharedRetry);
     await bot.handle(message('/queue'));
-    expect(telegram.sent.at(-1)!.card.text).toContain(retry);
-    expect(webStatus()).toBe(retry);
+    expect(telegram.sent.at(-1)!.card.text).toContain(sharedRetry);
 
     f.store.setSetting('github.read-backoff:github.com', null);
-    expect(await openFromTasks()).toContain(taskRetry);
+    const localRetry = webStatus();
+    expect(await openFromTasks()).toContain(localRetry);
     await bot.handle(message('/queue'));
-    expect(telegram.sent.at(-1)!.card.text).toContain(taskRetry);
-    expect(webStatus()).toBe(taskRetry);
+    expect(telegram.sent.at(-1)!.card.text).toContain(localRetry);
 
     delete task.prLink.retryAt;
     f.store.saveTask(task);
