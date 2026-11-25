@@ -621,6 +621,8 @@ export class TelegramDelivery {
     return !row || !row.deletedAt;
   }
   private isQuestionDelivery(value: Delivery) {
+    if (value.options.key?.startsWith('message:') || value.options.key?.startsWith('turn:'))
+      return false;
     if (isSeparateQuestion(value)) return true;
     if (!value.options.notificationId || value.options.key !== value.options.notificationId)
       return false;
@@ -692,12 +694,13 @@ export class TelegramDelivery {
       !value.options.notificationId ||
       !source.options.notificationId ||
       notificationIdentity(source.options.notificationId) !==
-        notificationIdentity(value.options.notificationId) ||
-      this.inheritedPartsBelongToSibling(source)
+        notificationIdentity(value.options.notificationId)
     )
       return;
-    const candidate = { ...value, messages: source.messages };
-    if (this.acknowledgedPartsMatch(candidate)) value.messages = structuredClone(source.messages);
+    const inherited = this.inheritedPartsBelongToSibling(source);
+    const fullyCurrent = source.status === 'sent' && this.fullyAcknowledged(source);
+    if (inherited && !fullyCurrent) return;
+    value.messages = structuredClone(this.matchingAcknowledgedParts(value, source.messages));
   }
   private removeStaleMention(value: Delivery) {
     const mention = value.options.mention;
@@ -842,6 +845,31 @@ export class TelegramDelivery {
           digest(this.messageBody(value.destination, value.content, chunks, index)),
     );
   }
+  private matchingAcknowledgedParts(value: Delivery, messages = value.messages) {
+    const chunks = splitTelegramText(value.content);
+    const matching: Delivery['messages'] = [];
+    for (const [index, message] of messages.entries()) {
+      if (
+        !chunks[index] ||
+        message.fingerprint !==
+          digest(this.messageBody(value.destination, value.content, chunks, index))
+      )
+        break;
+      matching.push(message);
+    }
+    return matching;
+  }
+  private ownedAcknowledgedParts(value: Delivery) {
+    const matching = this.matchingAcknowledgedParts(value);
+    if (!matching.length) return matching;
+    const fullyCurrent =
+      value.status === 'sent' &&
+      matching.length === value.messages.length &&
+      matching.length === splitTelegramText(value.content).length;
+    if (value.options.key?.startsWith('turn:') && this.inheritedPartsBelongToSibling(value))
+      return fullyCurrent ? matching : [];
+    return matching;
+  }
   private fullyAcknowledged(value: Delivery) {
     return (
       value.messages.length === splitTelegramText(value.content).length &&
@@ -961,10 +989,10 @@ export class TelegramDelivery {
     if (row.value.status === 'sending') row.value.status = 'queued';
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
     if (row.value.options.key?.startsWith('turn:')) {
-      const partsMatch = this.acknowledgedPartsMatch(row.value);
-      if (!partsMatch || this.inheritedPartsBelongToSibling(row.value)) {
+      const acknowledged = this.ownedAcknowledgedParts(row.value);
+      if (acknowledged.length !== row.value.messages.length) {
         receipt = this.receiptFor(row.value.messages, row.value);
-        row.value.messages = [];
+        row.value.messages = acknowledged;
       }
     }
     row.value.options.key = deliveryKey;
@@ -1025,14 +1053,18 @@ export class TelegramDelivery {
     this.cancelledRouteNotifications.delete(notificationId);
     this.cancelledQuestionNotifications.delete(notificationId);
   }
+  private alternatePending(key: string, destination: TelegramDestination, notificationId: string) {
+    const identity = digest([destination, notificationIdentity(notificationId)]);
+    const row = this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
+    return !row || row.key === key ? undefined : row;
+  }
   private cancelAlternatePending(
     key: string,
     destination: TelegramDestination,
     notificationId: string,
   ) {
-    const identity = digest([destination, notificationIdentity(notificationId)]);
-    const row = this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
-    if (!row || row.key === key) return;
+    const row = this.alternatePending(key, destination, notificationId);
+    if (!row) return;
     this.cancel(row.key, row.value);
     this.releaseUnblocked(row.value.destination);
   }
@@ -1170,12 +1202,14 @@ export class TelegramDelivery {
         this.detachedQuestionSources.delete(key);
       }
     }
-    if (
-      (value?.status === 'cancelled' || (value?.status === 'sent' && options.final)) &&
-      options.replace &&
-      options.notificationId?.startsWith('telegram:dialog:')
-    )
-      this.cancelAlternatePending(key, destination, options.notificationId);
+    if (value && options.replace && options.notificationId?.startsWith('telegram:dialog:')) {
+      const alternate = this.alternatePending(key, destination, options.notificationId);
+      if (alternate?.value.messages.length) {
+        key = alternate.key;
+        value = alternate.value;
+      } else if (value.status === 'cancelled' || (value.status === 'sent' && options.final))
+        this.cancelAlternatePending(key, destination, options.notificationId);
+    }
     if (
       value?.status === 'cancelled' &&
       (value.cancelledForRoute ||

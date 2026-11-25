@@ -512,6 +512,205 @@ it.each([
   },
 );
 
+it('keeps the confirmed prefix of a mixed legacy turn and sends only its missing tail', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: 7 };
+    const first = f.store.daddyMessage('group', 'agent', 'A'.repeat(5000), 'run', undefined, {
+      phase: 'progress',
+    });
+    const firstNotification = `telegram:dialog:7:0:${first.id}:progress`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(firstNotification, 'pending', first.at);
+    await f.queue.send(destination, text(first.text), {
+      groupId: 'group',
+      key: 'turn:run',
+      replace: true,
+      notificationId: firstNotification,
+    });
+    const finalText = 'B'.repeat(3800) + 'C'.repeat(1200);
+    const final = f.store.finishDaddyReply('group', finalText, 'run', true);
+    const finalNotification = `telegram:dialog:7:0:${final.id}:final`;
+    f.call
+      .mockResolvedValueOnce({ message_id: 1 })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Too many requests'), { retryAfter: 60, telegramStatus: 429 }),
+      );
+    await f.queue.send(destination, text(finalText), {
+      groupId: 'group',
+      key: 'turn:run',
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    const beforeRecovery = f.call.mock.calls.length;
+    await f.queue.stop();
+    const turn = f.store.db
+      .prepare(
+        `SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'
+         AND json_extract(value,'$.options.key')='turn:run'`,
+      )
+      .get()!;
+    const question = JSON.parse(String(turn.value));
+    question.id = 'mixed-question';
+    question.createdAt++;
+    question.messages = [];
+    question.content = text('@Owner · ' + finalText);
+    question.options = {
+      groupId: 'group',
+      key: finalNotification,
+      notificationId: finalNotification,
+      mention: { groupId: 'group', messageId: final.id },
+    };
+    f.store.setSetting('telegram.delivery:mixed-question', question);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text(finalText), {
+      groupId: 'group',
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    await restored.finishRecovery();
+    f.advance(60000);
+    await restored.flush(10);
+    const recoveryCalls = f.call.mock.calls.slice(beforeRecovery);
+    expect(recoveryCalls.map(([method]) => method)).toEqual(['sendMessage']);
+    expect(recoveryCalls[0][1].text).toBe('C'.repeat(1200));
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('keeps a fully confirmed short turn that matches an older reply prefix', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: 7 };
+    const prefix = 'A'.repeat(3800);
+    const first = f.store.daddyMessage('group', 'agent', prefix + 'TAIL', 'run', undefined, {
+      phase: 'progress',
+    });
+    const firstNotification = `telegram:dialog:7:0:${first.id}:progress`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(firstNotification, 'pending', first.at);
+    await f.queue.send(destination, text(first.text), {
+      groupId: 'group',
+      key: 'turn:run',
+      replace: true,
+      notificationId: firstNotification,
+    });
+    const final = f.store.finishDaddyReply('group', prefix, 'run', true);
+    const finalNotification = `telegram:dialog:7:0:${final.id}:final`;
+    await f.queue.send(destination, text(prefix), {
+      groupId: 'group',
+      key: 'turn:run',
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    const beforeRecovery = f.call.mock.calls.length;
+    await f.queue.stop();
+    const turn = f.store.db
+      .prepare(
+        `SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'
+         AND json_extract(value,'$.options.key')='turn:run'`,
+      )
+      .get()!;
+    const question = JSON.parse(String(turn.value));
+    question.id = 'short-question';
+    question.createdAt++;
+    question.status = 'queued';
+    question.messages = [];
+    question.content = text('@Owner · ' + prefix);
+    question.options = {
+      groupId: 'group',
+      key: finalNotification,
+      notificationId: finalNotification,
+      mention: { groupId: 'group', messageId: final.id },
+    };
+    f.store.setSetting('telegram.delivery:short-question', question);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text(prefix), {
+      groupId: 'group',
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    await restored.finishRecovery();
+    await restored.flush(10);
+    expect(f.call).toHaveBeenCalledTimes(beforeRecovery);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('finishes a visible owner question without cancelling its acknowledged part', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: 7 };
+    const body = 'A'.repeat(5000);
+    const message = f.store.daddyMessage('group', 'agent', body, 'run', undefined, {
+      phase: 'progress',
+    });
+    const progressNotification = `telegram:dialog:7:0:${message.id}:progress`;
+    await f.queue.send(destination, text(body), {
+      groupId: 'group',
+      key: `message:${message.id}`,
+      replace: true,
+      notificationId: progressNotification,
+    });
+    f.store.finishDaddyReply('group', body, 'run', true);
+    const finalNotification = progressNotification.replace(/:progress$/, ':final');
+    f.call
+      .mockResolvedValueOnce({ message_id: 50 })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Too many requests'), { retryAfter: 60, telegramStatus: 429 }),
+      );
+    await f.queue.send(destination, text('@Owner · ' + body), {
+      groupId: 'group',
+      key: finalNotification,
+      replacePending: true,
+      final: true,
+      notificationId: finalNotification,
+      mention: { groupId: 'group', messageId: message.id },
+    });
+    await f.queue.send(destination, text('Menu'), { key: 'menu' });
+    const beforeRecovery = f.call.mock.calls.length;
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text(body), {
+      groupId: 'group',
+      key: `message:${message.id}`,
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    await restored.finishRecovery();
+    f.advance(60000);
+    await restored.flush(20);
+    const recoveryCalls = f.call.mock.calls.slice(beforeRecovery);
+    expect(recoveryCalls.map(([method]) => method)).toEqual([
+      'editMessageText',
+      'sendMessage',
+      'sendMessage',
+    ]);
+    expect(recoveryCalls[0][1]).toMatchObject({ message_id: 50 });
+    expect(recoveryCalls[0][1].text).not.toContain('@Owner');
+    expect(recoveryCalls.at(-1)![1].text).toBe('Menu');
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['open question', false],
   ['closed question', true],
@@ -537,11 +736,16 @@ it.each([
       });
       const legacy = f.store.db
         .prepare(
-          `SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'
+          `SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'
          AND json_extract(value,'$.options.key')='turn:run'`,
         )
         .get()!;
       const question = JSON.parse(String(legacy.value));
+      if (closed) {
+        const source = JSON.parse(String(legacy.value));
+        source.options.mention = { groupId: 'group', messageId: message.id };
+        f.store.setSetting(String(legacy.key), source);
+      }
       question.id = 'separate-question';
       question.createdAt++;
       question.content = text('@Owner · Saved question');
@@ -549,6 +753,7 @@ it.each([
         groupId: 'group',
         key: notificationId,
         notificationId,
+        ...(closed ? { mention: { groupId: 'group', messageId: message.id } } : {}),
         ...(closed ? {} : { final: true }),
       };
       f.store.setSetting('telegram.delivery:separate-question', question);

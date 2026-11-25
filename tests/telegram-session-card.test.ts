@@ -608,6 +608,8 @@ it('updates the initial private-chat card after /new as well', async () => {
 it.each(['online', 'failed-edit', 'missed-event'])(
   'edits the session and pinned status cards after preparation and replay: %s',
   async (mode) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const failEdit = mode === 'failed-edit';
     const f = daddyFixture(true);
     const sent: { method: string; body: Record<string, any> }[] = [];
@@ -703,6 +705,7 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       await workspace.stop();
       await api.delivery.stop();
       await f.close();
+      vi.useRealTimers();
     }
   },
 );
