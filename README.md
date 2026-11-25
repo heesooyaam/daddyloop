@@ -6,7 +6,7 @@
 
 A ticket landed. A bug surfaced. The deadline got closer. Hand it to daddy: he assigns the work, keeps everyone moving, checks the result and brings it back to you. Talk in the terminal, on the web or in Telegram. Close the laptop — daddy’s still on duty.
 
-![daddyloop in Mint: conversation, worker pool and remaining quotas](docs/media/en/theme-mint.png)
+![Conversation, task board and agent limits icon in the Mint theme](docs/media/en/theme-mint.png)
 
 [Install](#put-daddy-to-work) · [Telegram](#daddy-in-telegram) · [Laptop access](#open-the-website-from-your-laptop) · [Models](#pick-your-crew) · [Backups](#moving-house-take-daddy-with-you)
 
