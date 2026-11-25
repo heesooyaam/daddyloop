@@ -1055,6 +1055,21 @@
 .daddy-shade {
   display: none;
 }
+@media (width > 850px) {
+  .daddy-app:has(.daddy-sessions-toggle[aria-expanded='false']) > .daddy-sidebar {
+    display: none;
+  }
+}
+@media (width > 650px) {
+  .daddy-board.collapsed {
+    display: none;
+  }
+}
+@media (width <= 650px) {
+  .daddy-tasks-toggle {
+    display: none;
+  }
+}
 @media (min-width: 1450px) {
   .daddy-conversation {
     padding-left: 55px;
@@ -1097,6 +1112,9 @@
   }
 }
 @media (max-width: 850px) {
+  .daddy-sessions-toggle {
+    display: none;
+  }
   .daddy-sidebar {
     position: fixed;
     top: 0;
