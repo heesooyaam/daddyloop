@@ -6,6 +6,8 @@ The website runs **on the service host**, at `http://127.0.0.1:4317`. Your brows
 
 In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
 
+In chat and in the task form, use the microphone button to dictate. Review the transcript before sending. See [voice input](../voice/en.md).
+
 ## Which machine does what?
 
 | Location                       | What to do here                                                    |

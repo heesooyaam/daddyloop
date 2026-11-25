@@ -48,6 +48,17 @@ export interface Update {
     from?: User;
     message_thread_id?: number;
     message_id?: number;
+    reply_to_message?: {
+      message_id: number;
+      chat: Chat;
+      message_thread_id?: number;
+      from?: User;
+      text?: string;
+      caption?: string;
+      forum_topic_created?: unknown;
+    };
+    quote?: { text: string; position: number; is_manual?: boolean };
+    external_reply?: unknown;
     voice?: {
       file_id: string;
       file_unique_id: string;

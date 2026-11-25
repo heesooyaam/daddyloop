@@ -28,6 +28,21 @@ function fixture() {
     },
   };
 }
+it('resolves a private reply only against a matching bot, owner, chat and native message', async () => {
+  const f = fixture();
+  try {
+    await f.queue.send({ chatId: 7 }, new TelegramText().add('Question'), {
+      groupId: 'original-session',
+      key: 'question',
+    });
+    expect(f.queue.replySession(7, 1, 7)).toBe('original-session');
+    expect(f.queue.replySession(-10042, 1, 7)).toBeUndefined();
+    expect(f.queue.replySession(7, 1, 12)).toBeUndefined();
+    expect(f.queue.replySession(7, 99, 7)).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
 const text = (value: string) => new TelegramText().add(value);
 
 it('keeps status edits delivering while a durable pin retries', async () => {

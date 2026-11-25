@@ -5,6 +5,7 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
   pinMessageId?: number;
@@ -55,6 +56,8 @@ export class TelegramDelivery {
   private legacyByNotification = new Map<string, { key: string; value: Delivery }>();
   private pendingByNotification = new Map<string, { key: string; value: Delivery }>();
   private redirectedKeys = new Map<string, string>();
+  private deferredKeys = new Set<string>();
+  private legacyDeliveredSibling = new Set<string>();
   private running?: Promise<void>;
   private controller?: AbortController;
   private timer?: NodeJS.Timeout;
@@ -74,11 +77,13 @@ export class TelegramDelivery {
       if (!value || value.bot !== bot) continue;
       const key = String(row.key);
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
-      const legacyMessage =
-        value.options?.key?.startsWith('turn:') && this.storedMessage(value) !== undefined;
+      const restoreThroughHistory =
+        value.options.notificationId?.startsWith('telegram:dialog:') &&
+        this.storedMessage(value) !== undefined;
       if (['queued', 'sending'].includes(value.status)) {
         value.status = 'queued';
-        if (!legacyMessage) this.pending.set(key, value);
+        if (restoreThroughHistory) this.deferredKeys.add(key);
+        else this.pending.set(key, value);
       }
       if (
         value.status !== 'cancelled' &&
@@ -89,6 +94,8 @@ export class TelegramDelivery {
           digest([value.destination, notificationIdentity(value.options.notificationId)]),
           { key, value },
         );
+      if (value.options?.key?.startsWith('turn:') && this.hasDeliveredSibling(value))
+        this.legacyDeliveredSibling.add(key);
       if (
         ['queued', 'sending'].includes(value.status) &&
         value.options.notificationId?.startsWith('telegram:dialog:')
@@ -236,7 +243,7 @@ export class TelegramDelivery {
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';
     if (row.value.options.key?.startsWith('turn:')) {
-      if (this.hasDeliveredSibling(row.value) || !this.acknowledgedPartsMatch(row.value))
+      if (this.legacyDeliveredSibling.has(row.key) || !this.acknowledgedPartsMatch(row.value))
         row.value.messages = [];
       row.value.createdAt = this.createdAt();
     }
@@ -246,11 +253,38 @@ export class TelegramDelivery {
       this.store.db.prepare('DELETE FROM settings WHERE key=?').run(row.key);
     });
     this.pending.delete(row.key);
+    this.deferredKeys.delete(row.key);
+    this.legacyDeliveredSibling.delete(row.key);
     this.pendingByNotification.delete(legacyKey);
     this.legacyByNotification.delete(legacyKey);
     this.redirectedKeys.set(row.key, key);
     this.remember(key, row.value);
     return row.value;
+  }
+  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+    // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
+    const row = this.store.db
+      .prepare(
+        `SELECT json_extract(value,'$.options.groupId') AS groupId,
+      json_extract(value,'$.options.key') AS deliveryKey FROM settings
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+        AND json_extract(value,'$.destination.chatId')=?
+        AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+      )
+      .get(this.bot, ownerId, chatId, messageId);
+    if (typeof row?.groupId === 'string') return row.groupId;
+    // Receipts from older installs identify the task or turn in the delivery key.
+    const key = String(row?.deliveryKey ?? '');
+    const task = key.startsWith('telegram:question:' + ownerId + ':')
+      ? key.split(':')[3]
+      : undefined;
+    if (task) return this.store.tasks().find((t) => t.id === task)?.groupId;
+    if (key.startsWith('turn:')) {
+      const job = this.store.db
+        .prepare('SELECT group_id FROM daddy_jobs WHERE id=?')
+        .get(key.slice(5));
+      if (typeof job?.group_id === 'string') return job.group_id;
+    }
   }
   private createDelivery(
     destination: TelegramDestination,
@@ -313,6 +347,10 @@ export class TelegramDelivery {
     let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
     if (!value && options.notificationId?.startsWith('telegram:dialog:'))
       value = this.migrateByNotification(key, destination, options.notificationId, options.key);
+    if (value && this.deferredKeys.delete(key)) {
+      value.createdAt = this.createdAt();
+      this.remember(key, value);
+    }
     if (value) {
       if (
         (value.options.final && !options.final) ||

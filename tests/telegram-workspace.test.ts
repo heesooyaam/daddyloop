@@ -666,6 +666,55 @@ it('does not append legacy progress after the final reply was already delivered'
   }
 });
 
+it('uses the paired private-chat receipt after another session is selected', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let messageId = 250;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    return Response.json({
+      ok: true,
+      result: method === 'sendMessage' ? { message_id: ++messageId } : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
+  const second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
+  f.store.setSetting('telegram.currentDaddy', second.id);
+  f.store.daddyMessage(first.id, 'agent', 'Earlier progress.', 'legacy-run', undefined, {
+    phase: 'progress',
+  });
+  const final = f.store.daddyMessage(
+    first.id,
+    'agent',
+    'Delivered final.',
+    'legacy-run',
+    undefined,
+    { phase: 'final' },
+  );
+  f.store.db
+    .prepare('INSERT INTO notifications VALUES(?,?,?)')
+    .run(`telegram:dialog:7:0:${final.id}:final`, 'sent', final.at);
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    workspace.replay();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(
+      calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.startsWith('👨‍💻 [daddy]'),
+      ),
+    ).toHaveLength(0);
+  } finally {
+    await workspace.stop();
+    await api.delivery.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['the private chat', 7, 0],
   ['a sibling topic', -10042, 99],
@@ -770,7 +819,9 @@ it('restores pending legacy final after its earlier progress in a new topic', as
   const final = f.store.daddyMessage(group.id, 'agent', 'Pending final.', 'legacy-run', undefined, {
     phase: 'final',
   });
+  const user = f.store.daddyMessage(group.id, 'user', 'Later user message.');
   const finalNotification = `telegram:dialog:-10042:${topic!.threadId}:${final.id}:final`;
+  const userNotification = `telegram:dialog:-10042:${topic!.threadId}:${user.id}`;
   f.store.db
     .prepare('INSERT INTO notifications VALUES(?,?,?)')
     .run(finalNotification, 'pending', final.at);
@@ -788,6 +839,16 @@ it('restores pending legacy final after its earlier progress in a new topic', as
       notificationId: finalNotification,
     },
   );
+  await legacy.send(
+    { chatId: -10042, threadId: topic!.threadId },
+    new TelegramText().add('👤 [user]', 'bold').add('\n\n').add(user.text),
+    {
+      key: userNotification,
+      order: user.at,
+      final: true,
+      notificationId: userNotification,
+    },
+  );
   f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
   api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
@@ -803,11 +864,16 @@ it('restores pending legacy final after its earlier progress in a new topic', as
     await api.delivery.flush(20);
     expect(
       calls
-        .filter((call) => call.method === 'sendMessage' && call.body.text?.startsWith('👨‍💻 [daddy]'))
+        .filter(
+          (call) =>
+            call.method === 'sendMessage' &&
+            (call.body.text?.startsWith('👨‍💻 [daddy]') || call.body.text?.startsWith('👤 [user]')),
+        )
         .map((call) => call.body.text),
     ).toEqual([
       expect.stringContaining('Earlier progress.'),
       expect.stringContaining('Pending final.'),
+      expect.stringContaining('Later user message.'),
     ]);
   } finally {
     await workspace.stop();
@@ -1347,6 +1413,113 @@ it('offers an immediate model switch from the daddy effort picker', async () => 
     );
   } finally {
     await bot.stop();
+    await f.close();
+  }
+});
+
+it('binds the current turn to the quoted Telegram parent even after an unrelated update', async () => {
+  const f = daddyFixture();
+  const api = {
+    send: vi.fn(async () => ({ message_id: 1 })),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const chat = { id: 7, type: 'private' };
+  const message = {
+    message_id: 365,
+    from: { id: 7 },
+    chat,
+    text: 'а на что это влияет?',
+    reply_to_message: {
+      message_id: 359,
+      chat,
+      from: { id: 12, username: 'fixture_bot', is_bot: true },
+      text: 'Воркер · DADDY-ccf7e32c · PR #39. Какой контракт сохранить?',
+    },
+    quote: { text: 'Какой контракт сохранить?', position: 38, is_manual: true },
+  };
+  try {
+    f.store.daddyMessage(group.id, 'agent', 'Newer result about PR #64');
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({
+      update_id: 366,
+      message: { message_id: 366, chat, from: { id: 7 }, text: 'и отдельный вопрос' },
+    });
+    const jobs = f.store.daddyJobs(group.id);
+    expect(jobs.filter((j) => j.trigger === 'user')).toHaveLength(2);
+    expect(jobs[0].replyTo).toMatchObject({
+      messageId: 359,
+      text: message.reply_to_message.text,
+      quote: message.quote.text,
+    });
+    expect(jobs[1].replyTo).toBeUndefined();
+    const saved = f.store.messages(group.id).find((m) => m.text === message.text);
+    expect(saved?.origin).toMatchObject({ messageId: 365, replyTo: jobs[0].replyTo });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledOnce());
+    const context = JSON.parse(f.runtime.runSession.mock.calls[0][0].prompt);
+    expect(context.currentInstruction).toBe(message.text);
+    expect(context.replyTo).toMatchObject({
+      messageId: 359,
+      text: expect.stringContaining('PR #39'),
+      quote: message.quote.text,
+    });
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('routes a private reply to the session that sent either independent parent message', async () => {
+  const f = daddyFixture();
+  let nextMessageId = 0;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async () =>
+    Response.json({ ok: true, result: { message_id: ++nextMessageId } }),
+  );
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
+  const second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
+  await api.send(7, new TelegramText().add('First independent reply'), undefined, {
+    groupId: first.id,
+    key: 'message:first',
+  });
+  await api.send(7, new TelegramText().add('Second independent reply'), undefined, {
+    groupId: first.id,
+    key: 'message:second',
+  });
+  f.store.setSetting('telegram.currentDaddy', second.id);
+  try {
+    await workspace.handle({
+      update_id: 500,
+      message: {
+        message_id: 500,
+        chat: { id: 7, type: 'private' },
+        from: { id: 7 },
+        text: 'Reply to the first message',
+        reply_to_message: {
+          message_id: 1,
+          chat: { id: 7, type: 'private' },
+          from: { id: 12, username: 'fixture_bot', is_bot: true },
+          text: 'First independent reply',
+        },
+      },
+    });
+    expect(f.store.messages(first.id).map((message) => message.text)).toContain(
+      'Reply to the first message',
+    );
+    expect(f.store.messages(second.id).map((message) => message.text)).not.toContain(
+      'Reply to the first message',
+    );
+    expect(nextMessageId).toBe(2);
+  } finally {
+    await workspace.stop();
+    await api.delivery.stop();
     await f.close();
   }
 });

@@ -2537,6 +2537,7 @@ export class Engine {
     );
   }
   async createTicket(input: {
+    replyTo?: Task['replyTo'];
     ref: TicketRef;
     source: TicketSource;
     repoPath: string;
@@ -2643,6 +2644,7 @@ export class Engine {
         source: input.source,
         repoPath: input.repoPath,
         ticketRepository: input.repository,
+        replyTo: input.replyTo,
         requirements: input.requirements ?? (input.source.body || input.source.title),
         parentTaskId: parent?.id,
         groupId: group.id,
