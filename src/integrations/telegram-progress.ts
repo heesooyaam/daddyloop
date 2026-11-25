@@ -12,6 +12,7 @@ import type { TelegramDestination } from './telegram-delivery.js';
 import { TelegramText } from './telegram-text.js';
 import {
   activityStatus,
+  draftSyncPending,
   outstandingActivity,
   taskActivity,
   taskReference,
@@ -67,7 +68,9 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     !['paused', 'archived'].includes(group.daddyState ?? '') &&
     group.workspacePreparation?.state !== 'error' &&
     (preparing || !!activeTask || turns.length > 0 || workers.length > 0);
-  const attention = tasks.find((task) => task.state === 'needs_input');
+  const attention = tasks.find(
+    (task) => task.state === 'needs_input' && task.reason !== draftSyncPending,
+  );
   const outstanding = taskActivity(
     [...tasks].reverse(),
     workers,

@@ -69,14 +69,6 @@ type RepoChoice = {
   expiresAt: string;
   creationExpiresAt?: string;
 };
-function taskRequestKey(task: Task) {
-  if (task.state === 'awaiting_plan_approval')
-    return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
-  if (task.state === 'needs_input' && task.reason === draftInspectionRequired && task.review)
-    return 'inspect-draft:' + task.review.id;
-  if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
-    return task.inputRequest.runId;
-}
 export class TelegramWorkspace {
   private pending = Promise.resolve();
   private stopped = false;
@@ -1920,8 +1912,21 @@ export class TelegramWorkspace {
       url: `tg://user?id=${pair.userId}`,
     });
   }
+  private taskRequestKey(task: Task) {
+    if (task.state === 'awaiting_plan_approval')
+      return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
+    if (
+      task.state === 'needs_input' &&
+      task.reason === draftInspectionRequired &&
+      task.review &&
+      !this.store.pendingReviewWrites(task.id, task.review.marker).length
+    )
+      return 'inspect-draft:' + task.review.id;
+    if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
+      return task.inputRequest.runId;
+  }
   private queueTaskRequest(task: Task, event: Event) {
-    const request = taskRequestKey(task);
+    const request = this.taskRequestKey(task);
     if (!request || !task.groupId) return;
     this.onEvent({
       ...event,
@@ -2094,7 +2099,10 @@ export class TelegramWorkspace {
         };
         const task = taskId ? this.store.getTask(taskId) : undefined;
         const message = messageId ? this.store.messageById(group.id, messageId) : undefined;
-        if (task && (task.groupId !== group.id || !request || taskRequestKey(task) !== request))
+        if (
+          task &&
+          (task.groupId !== group.id || !request || this.taskRequestKey(task) !== request)
+        )
           return;
         if (!task && (!message || !['user', 'agent'].includes(message.sender))) return;
         const prefs = notificationPreferences(this.store);
@@ -2151,7 +2159,7 @@ export class TelegramWorkspace {
           return;
         if (
           task &&
-          (taskRequestKey(this.store.getTask(task.id)) !== request ||
+          (this.taskRequestKey(this.store.getTask(task.id)) !== request ||
             !notificationPreferences(this.store).enabled)
         )
           return;

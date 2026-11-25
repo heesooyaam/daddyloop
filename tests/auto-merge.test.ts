@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
@@ -276,6 +277,29 @@ describe('opt-in GitHub merging', () => {
       await f.engine.retryInterruptedStep(old.id);
       expect(f.store.getTask(old.id).state).toBe('needs_input');
       f.store.setSetting(key, before);
+      const observedEdit = handle.marker + ':' + job.id + ':edit_comment:lost-response';
+      const digest = createHash('sha256')
+        .update(JSON.stringify({ id, body: 'Check layout' }))
+        .digest('hex');
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(observedEdit, old.id, 'pending', digest);
+      // A timeout remains uncertain. A refused legacy REST edit can be retired after a native read.
+      const op = handle.marker + ':' + job.id + ':edit_comment:old:hash';
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(op, old.id, 'pending', 'different-text');
+      await f.engine.retryInterruptedStep(old.id);
+      expect(
+        f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(observedEdit)?.status,
+      ).toBe('done');
+      expect(f.store.getTask(old.id).reason).toContain('Waiting to confirm');
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      f.store.event(old.id, 'operation.uncertain', {
+        operationId: op,
+        error: `AppError: PATCH /repos/${old.ref.repo}/pulls/comments/${id}: HTTP 404 Not Found`,
+      });
+
       await f.engine.retryInterruptedStep(old.id);
       expect(f.store.getTask(old.id)).toMatchObject({
         state: 'reviewing',

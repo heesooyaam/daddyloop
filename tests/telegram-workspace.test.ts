@@ -866,6 +866,13 @@ it.each(['private', 'topic'])(
         reason:
           'Inspect the old review draft: it contains changes that daddy cannot safely replace.',
       });
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run('test:run:edit_comment:call', task.id, 'pending', 'unknown');
+      bot.replay();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mentions()).toHaveLength(2);
+      f.store.db.prepare("DELETE FROM operations WHERE id='test:run:edit_comment:call'").run();
       bot.replay();
       await vi.waitFor(() => expect(mentions()).toHaveLength(3));
       expect(mentions()[2].card.buttons[0]).toContainEqual({ text: 'PR', url: source });

@@ -140,6 +140,13 @@ export class Store {
       ]),
     );
   }
+  pendingReviewWrites(taskId: string, marker: string) {
+    return this.db
+      .prepare(
+        "SELECT id,request FROM operations WHERE task_id=? AND status='pending' AND id GLOB ?",
+      )
+      .all(taskId, marker + ':*');
+  }
   saveTask(task: Task) {
     task.updatedAt = now();
     this.db
