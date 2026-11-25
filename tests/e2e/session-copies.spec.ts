@@ -1,7 +1,9 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import type { DaddyBoard } from '../../src/client/daddy.js';
 import { mockTwoProviders } from './usage-helpers.js';
+import type { ReviewGroup } from '../../src/core/types.js';
+import { translator } from '../../src/i18n/index.js';
 
 async function login(page: import('@playwright/test').Page) {
   await page.goto('/');
@@ -41,6 +43,48 @@ test('offers automatic Arc session copies and sends the selected mode', async ({
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
   await expect.poll(() => creation?.repository?.copyMode).toBe('pool');
 });
+test('keeps copy preparation and retry visible and shows the ready path in session settings', async ({
+  page,
+}) => {
+  const title = 'Session copy status fixture';
+  const copyPath = '/fixture/session-copies/' + 'a'.repeat(100);
+  const error = 'Fixture: copy preparation failed';
+  let preparation: ReviewGroup['workspacePreparation'] = { state: 'preparing' };
+  await page.route('**/api/daddy/sessions/*', async (route) => {
+    const response = await route.fetch();
+    const board = await response.json();
+    if (board.group?.title === title) board.group.workspacePreparation = preparation;
+    await route.fulfill({ response, json: board });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill(title);
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const progress = page.getByRole('status').filter({ hasText: 'Preparing the session copy' });
+  await expect(progress).toBeVisible();
+
+  preparation = { state: 'error', error };
+  const failure = page.getByRole('alert').filter({ hasText: 'Could not prepare the session copy' });
+  await expect(failure.getByText(error, { exact: true })).toBeVisible();
+  const retried = page.waitForResponse(
+    (response) => response.url().endsWith('/resume') && response.request().method() === 'POST',
+  );
+  await failure.getByRole('button', { name: 'Retry', exact: true }).click();
+  expect((await retried).ok()).toBe(true);
+
+  preparation = { state: 'ready', path: copyPath };
+  await expect(failure).toHaveCount(0);
+  await expect(progress).toHaveCount(0);
+  await expect(page.getByText('Session copy ready', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(copyPath, { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  await expect(settings.getByText('Session copy ready', { exact: true })).toBeVisible();
+  await expect(settings.getByText(copyPath, { exact: true })).toBeVisible();
+  expect(await settings.evaluate((dialog) => dialog.scrollWidth <= dialog.clientWidth)).toBe(true);
+});
+
 test('confirms session deletion, sends its generation and clears the deleted selection', async ({
   page,
 }) => {
@@ -99,6 +143,176 @@ test('confirms session deletion, sends its generation and clears the deleted sel
   );
 });
 
+for (const locale of ['en', 'ru'] as const) {
+  test(`keeps ${locale} session notices visible with resource waits and two usage providers`, async ({
+    page,
+  }) => {
+    const t = translator(locale);
+    const title = `Resource status fixture (${locale})`;
+    const path = `/fixtures/${'unavailable-repository-'.repeat(10)}removed`;
+    const error = `git -C ${path} rev-parse --show-toplevel\nfatal: cannot change to '${path}': No such file or directory`;
+    const sendError = `ENOENT: no such file or directory, chdir '/fixtures' -> '${path}'`;
+    const failure = { status: 503, json: { error: { message: sendError } } };
+    const copyFailure = { state: 'error', error } as const;
+    type StatusFields = Pick<ReviewGroup, 'workspacePreparation' | 'deletion' | 'daddyState'>;
+    let status: StatusFields = {};
+    let failLoad = false;
+    await login(page);
+    await page.route('**/api/preferences', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), locale } });
+    });
+    await page.route('**/api/status', async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({
+        response,
+        json: { ...body, preferences: { ...body.preferences, locale } },
+      });
+    });
+    await page.route('**/api/usage', async (route) => {
+      const response = await route.fetch();
+      const {
+        agents: [codex],
+      } = await response.json();
+      await route.fulfill({
+        response,
+        json: { agents: [codex, { ...codex, engine: 'claude', name: 'Claude' }] },
+      });
+    });
+    await page.route('**/api/daddy/sessions/*', async (route) => {
+      const response = await route.fetch();
+      const board = await response.json();
+      if (board.group?.title !== title) return route.fulfill({ response, json: board });
+      if (failLoad) return route.fulfill(failure);
+      await route.fulfill({
+        response,
+        json: {
+          ...board,
+          group: {
+            ...board.group,
+            workspacePreparation: { state: 'ready' },
+            ...status,
+            resourceWait: {
+              state: 'repairing',
+              since: new Date().toISOString(),
+              reasons: ['Disk-space threshold reached'],
+            },
+          },
+        },
+      });
+    });
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    await page.getByRole('button', { name: t('New session'), exact: true }).click();
+    await page.getByLabel(t('Session name (optional)')).fill(title);
+    await page.getByRole('button', { name: t('Start session'), exact: true }).click();
+    await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+
+    const resource = page.getByText(t('Waiting for server resources'), { exact: true });
+    const expectRetry = async (notice: Locator, label: string) => {
+      const button = notice.getByRole('button', { name: t(label), exact: true });
+      await expect(button).toBeInViewport({ ratio: 0.99 });
+    };
+    const expectFullReason = async (notice: Locator, reason: string) => {
+      await notice.getByRole('button', { name: t('View details'), exact: true }).click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog.locator('.daddy-notice-detail-text')).toHaveText(reason);
+      await page.keyboard.press('Escape');
+    };
+    const cases: { status: StatusFields; notice: string; retry?: string }[] = [
+      {
+        status: { workspacePreparation: { state: 'pending' } },
+        notice: 'Preparing the session copy',
+      },
+      {
+        status: { workspacePreparation: { state: 'preparing' } },
+        notice: 'Preparing the session copy',
+      },
+      {
+        status: { workspacePreparation: copyFailure },
+        notice: 'Could not prepare the session copy',
+        retry: 'Retry',
+      },
+      {
+        status: { daddyState: 'paused', workspacePreparation: copyFailure },
+        notice: 'Could not prepare the session copy',
+        retry: 'Retry',
+      },
+      {
+        status: { deletion: { state: 'pending' } },
+        notice: 'Saving results and removing session copies',
+      },
+      {
+        status: { deletion: { state: 'running' } },
+        notice: 'Saving results and removing session copies',
+      },
+      {
+        status: { deletion: { state: 'error', error } },
+        notice: 'Session deletion stopped; working copies were preserved',
+        retry: 'Retry deletion',
+      },
+    ];
+    const viewports = [
+      [667, 375],
+      [390, 540],
+      [844, 390],
+      [320, 540],
+    ];
+    for (const example of cases) {
+      status = example.status;
+      await page.reload();
+      await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(2);
+      const notice = page
+        .getByRole(example.retry ? 'alert' : 'status')
+        .filter({ hasText: t(example.notice) });
+      for (const [width, height] of viewports) {
+        await test.step(`${example.notice} at ${width} × ${height}`, async () => {
+          await page.setViewportSize({ width, height });
+          await expect(notice).toBeInViewport({ ratio: 0.99 });
+          await expect(resource).toBeInViewport({ ratio: 0.99 });
+          if (example.retry) await expectRetry(notice, example.retry);
+          expect(
+            await page.evaluate(
+              () => !window.scrollY && !document.querySelector('main')?.scrollTop,
+            ),
+          ).toBe(true);
+        });
+      }
+      if (example.retry) await expectFullReason(notice, error);
+    }
+
+    status = { workspacePreparation: copyFailure };
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.reload();
+    await expect(resource).toBeVisible();
+    await page.route('**/api/daddy/sessions/*/chat', (route) => route.fulfill(failure));
+    await page.getByLabel(t('Message daddy')).fill('Fixture message');
+    await page.getByRole('button', { name: t('Send message'), exact: true }).click();
+    const alert = page.getByRole('alert').filter({ hasText: t('Request failed') });
+    const copy = page
+      .getByRole('alert')
+      .filter({ hasText: t('Could not prepare the session copy') });
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await expectRetry(alert, 'Retry');
+      await expectRetry(copy, 'Retry');
+      await expect(resource).toBeInViewport({ ratio: 0.99 });
+      expect(
+        await page.evaluate(() => !window.scrollY && !document.querySelector('main')?.scrollTop),
+      ).toBe(true);
+    }
+    await expectFullReason(alert, sendError);
+
+    failLoad = true;
+    await page.reload();
+    await expectRetry(alert, 'Retry');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  });
+}
+
 test('shows copy preparation and deletion progress without scrolling on short screens', async ({
   page,
 }) => {
@@ -156,63 +370,5 @@ test('shows copy preparation and deletion progress without scrolling on short sc
       await expect(firstTask).toBeInViewport({ ratio: 1 });
       expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
     }
-  }
-});
-
-test('shows the resource wait and a task card without scrolling on short screens', async ({
-  page,
-}) => {
-  const reason = 'Disk-space threshold reached';
-  await mockTwoProviders(page);
-  await page.route('**/api/daddy/sessions/**', async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    if (!body.group) return route.fulfill({ json: body });
-    await route.fulfill({
-      json: {
-        ...body,
-        group: {
-          ...body.group,
-          resourceWait: {
-            state: 'repairing',
-            since: new Date().toISOString(),
-            reasons: [reason],
-          },
-        },
-      },
-    });
-  });
-  await login(page);
-  await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await page
-    .getByLabel('What should daddy do?')
-    .fill(`https://github.com/fixture/planning/issues/${Date.now()}`);
-  await page.getByLabel('Session name (optional)').fill('Resource status fixture');
-  await page.getByRole('button', { name: 'Start session', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
-
-  const overview = page.getByRole('region', { name: 'Session overview' });
-  const notice = page.getByRole('status').filter({ hasText: 'Waiting for server resources' });
-  await expect(notice).toContainText('Your messages and working files are saved.');
-  for (const viewport of [
-    { width: 390, height: 540 },
-    { width: 1024, height: 480 },
-  ]) {
-    await page.setViewportSize(viewport);
-    await expect(notice.getByText(reason, { exact: true })).toBeInViewport({ ratio: 1 });
-    await expect(notice.getByText('Waiting for server resources', { exact: true })).toBeInViewport({
-      ratio: 1,
-    });
-    if (viewport.width === 390) {
-      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-    }
-    await expect(notice).toBeInViewport({ ratio: 1 });
-    await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
-      ratio: 1,
-    });
-    expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-      true,
-    );
   }
 });
