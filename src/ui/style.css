@@ -1,15 +1,8 @@
 :root {
-  font-family:
-    'Inter Variable',
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
   color: var(--ink);
   background: var(--surface);
-  font-synthesis: none;
+  font-synthesis: style;
   text-rendering: optimizeLegibility;
-  font-size: 13px;
 }
 * {
   box-sizing: border-box;
@@ -17,12 +10,7 @@
 body {
   margin: 0;
 }
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
+
 button,
 a {
   -webkit-tap-highlight-color: transparent;
@@ -53,13 +41,7 @@ a {
 a:hover {
   text-decoration: underline;
 }
-code,
-pre {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-}
-code {
-  font-size: 0.88em;
-}
+
 button svg {
   flex-shrink: 0;
 }
@@ -68,11 +50,10 @@ button {
   background: none;
 }
 .brand {
+  font: var(--type-brand);
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 24px;
-  font-weight: 750;
   letter-spacing: -1px;
   color: var(--ink);
   padding: 0 10px;
@@ -96,6 +77,7 @@ button {
   flex: 1;
 }
 .button {
+  font: var(--type-label);
   border: 1px solid var(--line);
   background: white;
   border-radius: 6px;
@@ -104,9 +86,7 @@ button {
   justify-content: center;
   gap: 8px;
   padding: 10px 15px;
-  font-size: 11px;
-  font-weight: 550;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   box-shadow: 0 1px 2px var(--shadow);
 }
 .button:hover {
@@ -122,12 +102,10 @@ button {
   background: var(--primary);
 }
 .button.small {
-  font-size: 10px;
   padding: 7px 10px;
 }
 .pill {
-  font-size: 9px;
-  line-height: 1.3;
+  font: var(--type-status);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -147,9 +125,8 @@ button {
   flex: 1;
 }
 .message {
+  font: var(--type-reading);
   margin: 0 0 20px;
-  font-size: 11px;
-  line-height: 1.8;
 }
 .message.user {
   background: var(--surface);
@@ -179,8 +156,6 @@ button {
   outline: none;
   padding: 13px;
   color: var(--ink);
-  font-size: 10px;
-  line-height: 1.7;
 }
 .composer textarea::placeholder {
   color: var(--muted);
@@ -192,13 +167,14 @@ button {
   justify-content: space-between;
 }
 .composer > div > span {
+  font: var(--type-caption);
   display: flex;
   gap: 4px;
   align-items: center;
-  font-size: 8px;
   color: var(--muted);
 }
 .discuss {
+  font: var(--type-caption);
   display: flex;
   gap: 5px;
   align-items: center;
@@ -206,19 +182,17 @@ button {
   width: 100%;
   padding: 11px 0 0;
   margin-top: 12px;
-  font-size: 9px;
   color: var(--muted);
 }
 .discuss > svg:last-child {
   margin-left: auto;
 }
 .planning-note {
+  font: var(--type-body);
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  font-size: 12px;
-  line-height: 1.7;
 }
 .event {
   border-left: 1px solid var(--line);
@@ -233,17 +207,15 @@ button {
   cursor: pointer;
 }
 .event summary strong {
-  font-size: 10px;
+  font: var(--type-label);
   color: var(--muted);
-  font-weight: 500;
 }
 .event summary time {
   margin-left: auto;
   color: var(--muted);
-  font-size: 8px;
 }
 .event > div {
-  font-size: 9px;
+  font: var(--type-help);
   padding: 12px 0;
   color: var(--muted);
 }
@@ -253,8 +225,6 @@ button {
   background: var(--surface);
   padding: 12px;
   border-radius: 5px;
-  font-size: 9px;
-  line-height: 1.7;
   max-height: 350px;
   overflow: auto;
 }
@@ -271,10 +241,10 @@ button {
 }
 .task-form label,
 .login-card label {
+  font: var(--type-label);
   display: flex;
   flex-direction: column;
   gap: 7px;
-  font-size: 11px;
   color: var(--muted);
   margin-bottom: 17px;
 }
@@ -288,8 +258,6 @@ button {
   width: 100%;
   color: var(--ink);
   background: white;
-  font-size: 11px;
-  line-height: 1.6;
 }
 .task-form input::placeholder,
 .task-form textarea::placeholder,
@@ -301,9 +269,8 @@ button {
   min-height: 90px;
 }
 .task-form small {
-  font-size: 9px;
+  font: var(--type-help);
   color: var(--muted);
-  line-height: 1.7;
 }
 .task-form .checkbox-label {
   flex-direction: row;
@@ -319,8 +286,7 @@ button {
   flex-shrink: 0;
 }
 .checkbox-label strong {
-  font-size: 10px;
-  font-weight: 500;
+  font: var(--type-label);
   display: block;
 }
 .checkbox-label small {
@@ -328,8 +294,7 @@ button {
   margin-top: 4px;
 }
 .field-error {
-  font-size: 11px;
-  line-height: 1.7;
+  font: var(--type-help);
   color: var(--danger);
   margin: 10px 0;
 }
@@ -353,6 +318,7 @@ button {
   padding: 37px;
   width: min(425px, 100%);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 .login-lock {
   display: inline-grid;
@@ -363,15 +329,13 @@ button {
   padding: 17px;
 }
 .login-card h1 {
-  font-size: 22px;
-  font-weight: 550;
+  font: var(--type-title);
   letter-spacing: -0.7px;
   margin: 22px 0 13px;
 }
 .login-card > p {
-  font-size: 11px;
+  font: var(--type-body);
   color: var(--muted);
-  line-height: 1.9;
 }
 .login-card form {
   margin-top: 27px;
@@ -382,7 +346,6 @@ button {
   width: 100%;
 }
 .login-page > small {
-  font-size: 9px;
   color: var(--muted);
   margin-top: 23px;
 }
@@ -396,7 +359,7 @@ button {
   color: var(--muted);
 }
 .loading-screen > span {
-  font-size: 11px;
+  font: var(--type-help);
 }
 .spin {
   animation: spin 1.8s linear infinite;
@@ -417,9 +380,6 @@ button {
 @media (max-width: 1300px) {
   .main {
     margin-left: 196px;
-  }
-  .brand {
-    font-size: 22px;
   }
 }
 @media (max-width: 1100px) {
@@ -463,7 +423,6 @@ button {
   width: auto;
   max-width: 110px;
   padding: 6px 8px;
-  font-size: 12px;
 }
 .login-page > .language-select {
   position: absolute;

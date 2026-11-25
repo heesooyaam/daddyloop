@@ -1,21 +1,29 @@
+import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
+import { legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
+import { autoMergeEnabled, autoMergeRequested } from './auto-merge.js';
 import {
   AppError,
   assertTaskVersion,
   type ExpectedTask,
+  requestsHumanInput,
   prRef,
   isTicket,
   type AgentProfiles,
   type AgentProfile,
   type ReviewGroup,
+  type ReviewHandle,
+  type ReviewSnapshot,
   type TicketSource,
   type TicketRef,
   type PRTask,
+  type PullRequest,
   defaultPolicy,
   now,
   sameRevision,
+  sameAgentProfile,
   revisionOf,
   type Task,
   type PRRef,
@@ -24,10 +32,76 @@ import {
   type Job,
   type AgentResult,
   type Workspace,
+  type WorkerRequest,
 } from './types.js';
 import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
+
+const oldReviewStartLimit = 'Review round limit reached';
+const oldPublishedReviewLimit =
+  'Review round limit reached; inspect the remaining published findings';
+
+const noFixChanges =
+  'Author made no code changes; independent verification of the decisions is next';
+
+function confirmationDeadline() {
+  // Allow several scheduler polls for the host's PR API to catch up with Git.
+  return new Date(Date.now() + 120_000).toISOString();
+}
+
+function unconfirmedFix(head: string, remote: string) {
+  return `Submission of saved fix ${head} is unconfirmed; the PR still shows ${remote}. Inspect the outcome and resume to retry this exact commit.`;
+}
+
+function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+  return (
+    current.state === 'open' &&
+    current.branch === expected?.branch &&
+    current.targetBranch === expected.targetBranch &&
+    current.cloneUrl === expected.cloneUrl
+  );
+}
+
+const interruptedByRestart =
+  'Server restarted during this run. Its external effects must be reconciled before retry.';
+function restartInterrupted(task: Task, job: Job) {
+  return (
+    job.status === 'failed' &&
+    job.generation + 1 === task.generation &&
+    job.error === interruptedByRestart &&
+    task.reason === interruptedByRestart
+  );
+}
+const dirtyConflictCopy =
+  'AppError: The worker copy contains earlier changes. Inspect them before resolving the merge conflict.';
+export function staleConflictPreparation(task: Task) {
+  return (
+    task.state === 'needs_input' &&
+    task.fixingMergeConflict === true &&
+    !task.pendingFix &&
+    task.resumeState === 'fixing' &&
+    (task.reason === dirtyConflictCopy ||
+      task.reason ===
+        'AppError: The worker copy has no pending merge of the expected target commit.' ||
+      task.reason ===
+        'AppError: The PR changed before the queued job started. Reconcile and review the new revision.')
+  );
+}
+
+export function confirmedSupersededDraft(task: Task) {
+  return (
+    task.ref.provider === 'github' &&
+    task.state === 'needs_input' &&
+    !!task.review &&
+    !!task.pendingFix &&
+    !!task.pendingAuthorHead &&
+    task.pendingAuthorHead === task.revision?.head &&
+    task.review.revision.head !== task.pendingAuthorHead &&
+    task.reason ===
+      `Saved fix ${task.pendingAuthorHead} is on the PR. Inspect the earlier draft review ${task.review.id} before starting another review.`
+  );
+}
 
 export class Engine {
   readonly broker: Broker;
@@ -125,6 +199,7 @@ export class Engine {
         ...input.agents,
         ...(group ? { daddy: group.daddy } : {}),
       },
+      workerRequest: group?.orchestrated ? { profile: input.agents?.worker } : undefined,
     };
     if (input.planTaskId) {
       const plan = this.store.getTask(input.planTaskId);
@@ -160,7 +235,10 @@ export class Engine {
     });
     return task;
   }
-  private state(task: Task, state: State, reason: string) {
+  private state(task: Task, state: State, reason: string, request?: Job) {
+    task.inputRequest = request
+      ? { runId: request.id, role: request.role, generation: task.generation }
+      : undefined;
     task.state = state;
     task.reason = reason;
     this.store.saveTask(task);
@@ -178,8 +256,57 @@ export class Engine {
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
         throw new AppError('task_paused', 'Resume this task before starting a review');
-      const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (isTicket(task)) {
+        if (
+          !sameRevision(task.workerReport?.revision, task.revision) ||
+          !(task.state === 'queued' || (retry && task.state === 'needs_input'))
+        )
+          throw new AppError(
+            'report_not_ready',
+            'Wait for a worker report on the current task revision before reviewing',
+          );
+        this.store.transaction(() => this.queueReportReview(task));
+        return task;
+      }
+      if (
+        (task.pendingFix && task.pendingAuthorHead !== task.revision?.head) ||
+        task.state === 'awaiting_push'
+      )
+        throw new AppError(
+          'fix_pending',
+          `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
+        );
+      const provider = this.provider(prRef(task));
+      const pr = await provider.getPR(prRef(task));
+      if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
+      if (confirmedSupersededDraft(task)) {
+        if (pr.head !== task.pendingAuthorHead || !sameOpenTarget(task.pr, pr)) {
+          this.holdSavedFix(task, pr);
+          return task;
+        }
+        if (!(await this.retireSupersededDraft(task, provider))) return task;
+        this.invalidate(task, pr);
+        task.pendingFix = undefined;
+      }
+      if (task.pendingFix && (!sameRevision(task.revision, pr) || !sameOpenTarget(task.pr, pr))) {
+        this.holdSavedFix(task, pr);
+        return task;
+      }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
+      if (this.queueConflictIfReady(task, pr)) return task;
+      if (
+        task.review &&
+        sameRevision(task.revision, pr) &&
+        !sameRevision(task.review.revision, pr)
+      ) {
+        const previous = await provider.getReview(prRef(task), task.review);
+        if (previous.status === 'draft' || previous.status === 'partial')
+          throw new AppError(
+            'stale_draft',
+            `Inspect the earlier draft review ${task.review.id} before reviewing ${pr.head}.`,
+          );
+        this.invalidate(task, pr);
+      }
       const changed = !sameRevision(task.revision, pr);
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
@@ -193,18 +320,13 @@ export class Engine {
           'review_exists',
           'This revision already has a review. Discuss it or use retry to continue an interrupted run.',
         );
-      if (!task.review) {
-        if (task.round >= task.policy.maxRounds) {
-          this.state(task, 'needs_input', 'Review round limit reached');
-          return task;
-        }
-        task.round++;
-      }
+      if (!task.review) task.round++;
       task.pr = pr;
       task.revision = revisionOf(pr);
       await this.broker.ensureReview(task);
       task.reviewFinished = false;
       this.store.transaction(() => {
+        task.pendingFix = undefined;
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
@@ -218,30 +340,664 @@ export class Engine {
       return task;
     });
   }
+  private knownDraftSummary(taskId: string, handle: ReviewHandle, body: string) {
+    const suffix = `\n\n<!-- ${handle.marker} -->`;
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ body: body.slice(0, -suffix.length) }))
+      .digest('hex');
+    return (
+      body === 'Review in progress.' + suffix ||
+      (body.endsWith(suffix) &&
+        this.store.db
+          .prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND request=? AND status='done'",
+          )
+          .get(taskId, handle.marker + ':*:set_summary:*', digest))
+    );
+  }
+  private recordedDraft(task: Task, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (
+      !handle.authorId ||
+      draft.authorId !== handle.authorId ||
+      !this.knownDraftSummary(task.id, handle, draft.body)
+    )
+      return false;
+    const receipt = this.store.db.prepare(
+      "SELECT 1 FROM operations WHERE task_id=? AND (id GLOB ? OR id GLOB ?) AND status='done' AND json_extract(result,'$.id')=? AND json_extract(result,'$.body')=?",
+    );
+    return draft.comments.every((comment) =>
+      receipt.get(
+        task.id,
+        handle.marker + ':comment:*',
+        handle.marker + ':*:edit_comment:*',
+        comment.id,
+        comment.body,
+      ),
+    );
+  }
+  private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
+    const handle = task.review!,
+      ref = prRef(task);
+    const snapshot = await provider.getReview(ref, handle);
+    if (snapshot.status === 'published') return true;
+    const archiveKey = 'review.archive:' + task.id + ':' + handle.id;
+    const archived = this.store.setting<typeof snapshot>(archiveKey);
+    const key = handle.marker + ':retire:' + handle.id;
+    const pending = this.store.db.prepare('SELECT status FROM operations WHERE id=?').get(key);
+    if (snapshot.status === 'missing' && !pending) return true;
+    const source = snapshot.status === 'missing' ? archived : snapshot;
+    const body = source?.body ?? '';
+    if (
+      !source ||
+      source.status !== 'draft' ||
+      source.revision.head !== handle.revision.head ||
+      !handle.authorId ||
+      source.comments.length ||
+      !this.knownDraftSummary(task.id, handle, body) ||
+      !provider.discardSupersededDraft ||
+      (archived && archived.body !== body)
+    ) {
+      this.state(task, 'needs_input', draftInspectionRequired);
+      return false;
+    }
+    if (!archived)
+      this.store.transaction(() => {
+        this.store.setSetting(archiveKey, source);
+        this.store.event(task.id, 'review.draft_archived', {
+          reviewId: handle.id,
+          head: source.revision.head,
+          archiveKey,
+        });
+      });
+    await this.broker.outbox.perform(
+      task.id,
+      key,
+      { review: handle.id, head: source.revision.head, body },
+      async () => {
+        await provider.discardSupersededDraft!(ref, handle, source);
+        return null;
+      },
+      async () => ({
+        found: (await provider.getReview(ref, handle)).status === 'missing',
+        value: null,
+      }),
+      (error) => error instanceof AppError && error.code === 'draft_changed',
+    );
+    return true;
+  }
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
     task.generation++;
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
+    task.draftRecheck = undefined;
     task.snapshot = undefined;
     task.approvedAt = undefined;
     task.checksWaivedAt = undefined;
     task.reviewFinished = false;
     task.pr = pr;
     task.revision = pr ? revisionOf(pr) : undefined;
+    task.verifiedMerge = undefined;
+    task.fixingMergeConflict = undefined;
+    task.conflictCheckpoint = undefined;
     this.store.event(task.id, 'revision.changed', {
       revision: task.revision,
       generation: task.generation,
     });
   }
+  private queueReportReview(task: Task) {
+    task.reviewFinished = false;
+    task.resumeState = 'reviewing';
+    this.state(task, 'reviewing', 'The worker report is ready for review');
+    this.store.enqueue(
+      task,
+      'reviewer',
+      'review',
+      'Verify the worker report and its evidence against the original requirements. Report any missing work.',
+    );
+  }
+  private restartNativeReview(task: Task, pr: PullRequest, draft: ReviewSnapshot, reason: string) {
+    const handle = task.review!;
+    const recheck =
+      !sameRevision(handle.revision, pr) && this.draftHasWork(handle, draft)
+        ? { commentIds: draft.comments.map((comment) => comment.id) }
+        : task.draftRecheck;
+    // The old run cannot release feedback or authorize a merge after the generation changes.
+    this.invalidate(task, pr);
+    task.reviewerThreadId = undefined;
+    task.review = { ...handle, revision: revisionOf(pr) };
+    task.snapshot = { ...draft, revision: revisionOf(pr) };
+    task.draftRecheck = recheck;
+    task.resumeState = 'reviewing';
+    this.state(task, 'reviewing', reason);
+    return this.store.enqueue(
+      task,
+      'reviewer',
+      'review',
+      'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
+    );
+  }
+  private draftHasWork(handle: ReviewHandle, draft: ReviewSnapshot) {
+    return (
+      draft.comments.length > 0 || draft.body !== `Review in progress.\n\n<!-- ${handle.marker} -->`
+    );
+  }
+  private async draftCarryProblem(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
+    this.broker.reconcileDraftEdits(task, draft);
+    if (this.store.pendingReviewWrites(task.id, handle.marker).length) return draftSyncPending;
+    if (!this.draftHasWork(handle, draft)) return;
+    if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
+    if (
+      !sameRevision(handle.revision, pr) &&
+      !(await this.provider(prRef(task)).targetAdvanced?.(
+        prRef(task),
+        handle.revision.base,
+        pr.base,
+      ))
+    )
+      return draftSyncPending;
+  }
+  async retryInterruptedStep(id: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (
+        task.state !== 'needs_input' ||
+        !task.groupId ||
+        task.ref.provider !== 'github' ||
+        this.store.busy(id)
+      )
+        return;
+      const group = this.store.getGroup(task.groupId);
+      if (
+        group.deletedAt ||
+        group.deletion ||
+        group.daddyState === 'paused' ||
+        group.daddyState === 'archived'
+      )
+        return;
+      const job = this.store.jobs(id).at(-1);
+      if (!job || job.groupGeneration !== group.generation) return;
+      const previous = task.ticketRepository;
+      const movedBase =
+        job.kind === 'review' &&
+        job.status === 'cancelled' &&
+        job.generation + 1 === task.generation &&
+        (task.reason ===
+          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
+          task.reason === draftInspectionRequired ||
+          task.reason === draftSyncPending) &&
+        !!task.review &&
+        task.review.revision.head === task.revision?.head &&
+        task.review.revision.base !== task.revision.base &&
+        !!previous &&
+        previous.branch === task.pr?.branch &&
+        previous.baseBranch === task.pr.targetBranch &&
+        previous.cloneUrl === task.pr.cloneUrl;
+      const waitingForSync =
+        task.reason === draftSyncPending &&
+        job.kind === 'review' &&
+        job.status === 'failed' &&
+        (job.generation === task.generation ||
+          (job.error === interruptedByRestart && job.generation + 1 === task.generation));
+      const restarted =
+        restartInterrupted(task, job) || (waitingForSync && job.error === interruptedByRestart);
+      if (
+        !movedBase &&
+        !restarted &&
+        (job.status !== 'failed' || job.generation !== task.generation)
+      )
+        return;
+      const quota = job.errorCode === 'github_rate_limit' || legacyQuotaRead(job.error);
+      if (
+        quota &&
+        job.error &&
+        job.kind === 'fix' &&
+        task.resumeState === 'awaiting_push' &&
+        task.pendingFix &&
+        task.pendingAuthorHead &&
+        task.reason === `Saved fix ${task.pendingAuthorHead} is preserved. ${job.error}`
+      ) {
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        if (await this.checkSavedFix(task, pr))
+          this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
+        return;
+      }
+      if (
+        (!movedBase && task.resumeState !== 'reviewing') ||
+        job.kind !== 'review' ||
+        !task.review ||
+        task.pendingFix ||
+        (!movedBase && !waitingForSync && job.error !== task.reason)
+      )
+        return;
+      const context =
+        job.profile?.engine === 'codex' &&
+        !job.freshContextRetry &&
+        (job.errorCode === 'context_window_exceeded' ||
+          (job.error?.startsWith('AppError: Codex turn failed: {') &&
+            job.error.includes('"codexErrorInfo":"contextWindowExceeded"')));
+      const timeout = job.errorCode === 'run_timeout' && !job.timeoutRetry;
+      const staleStart =
+        job.errorCode === 'stale_revision' &&
+        job.error ===
+          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
+      if (
+        !quota &&
+        !restarted &&
+        !movedBase &&
+        !staleStart &&
+        !((context || timeout) && autoMergeEnabled(this.store, task))
+      )
+        return;
+      const ref = prRef(task),
+        provider = this.provider(ref);
+      const [pr, draft] = await Promise.all([
+        provider.getPR(ref),
+        provider.getReview(ref, task.review),
+      ]);
+      if (
+        !sameOpenTarget(task.pr, pr) ||
+        pr.draft !== false ||
+        pr.head !== task.revision?.head ||
+        pr.head !== task.review.revision.head ||
+        draft.status !== 'draft' ||
+        draft.revision.head !== pr.head
+      ) {
+        if (!context)
+          this.state(
+            task,
+            'needs_input',
+            'The PR or native draft changed. Inspect the interrupted review.',
+          );
+        return;
+      }
+      if (restarted || waitingForSync || !sameRevision(task.review.revision, pr)) {
+        const problem = await this.draftCarryProblem(task, pr, draft);
+        if (problem) {
+          if ((!context || problem === draftSyncPending) && task.reason !== problem)
+            this.state(task, 'needs_input', problem);
+          return;
+        }
+      }
+      const currentGroup = this.store.getGroup(task.groupId);
+      if (
+        currentGroup.generation !== job.groupGeneration ||
+        currentGroup.deletedAt ||
+        currentGroup.deletion ||
+        currentGroup.daddyState === 'paused' ||
+        currentGroup.daddyState === 'archived' ||
+        (!quota && !restarted && !movedBase && !staleStart && !autoMergeEnabled(this.store, task))
+      )
+        return;
+      this.store.transaction(() => {
+        if (
+          context &&
+          currentGroup.reviewerThreadId &&
+          currentGroup.reviewerThreadId === job.threadId
+        ) {
+          currentGroup.reviewerThreadId = undefined;
+          this.store.saveGroup(currentGroup);
+        }
+        if (restarted && this.draftHasWork(task.review!, draft))
+          task.draftRecheck = { commentIds: draft.comments.map((comment) => comment.id) };
+        const retry = this.restartNativeReview(
+          task,
+          pr,
+          draft,
+          context
+            ? 'Reviewer context was full. Restarting the independent review.'
+            : 'Continuing the independent review on the verified PR head',
+        );
+        retry.freshContextRetry = job.freshContextRetry || !!context;
+        retry.timeoutRetry = job.timeoutRetry || timeout;
+        this.store.saveJob(retry);
+      });
+    });
+  }
+
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
+  private queueMergeVerification(task: Task, pr: PullRequest) {
+    if (task.state !== 'needs_input' || this.store.busy(task.id))
+      throw new AppError('task_busy', 'Choose an idle task that needs attention');
+    if (pr.state !== 'merged' || pr.head !== task.revision?.head)
+      throw new AppError(
+        'merge_unconfirmed',
+        'The provider must confirm the merge of this task head',
+      );
+    if (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head)
+      throw new AppError(
+        'unsubmitted_changes',
+        'Inspect the saved worker changes before verifying this merge',
+      );
+    this.store.transaction(() => {
+      if (!sameRevision(task.revision, pr)) {
+        task.approvedAt = undefined;
+        task.checksWaivedAt = undefined;
+      }
+      task.generation++;
+      task.revision = revisionOf(pr);
+      task.pr = pr;
+      task.verifiedMerge = undefined;
+      task.pendingFix = undefined;
+      task.reviewerThreadId = undefined;
+      this.state(task, 'reviewing', 'Checking the merged result');
+      this.store.enqueue(
+        task,
+        'reviewer',
+        'verify_merge',
+        'Verify the delivered PR diff and the original task outcome, including requested deployment checks. Use read-only evidence. Check prior published findings and return their verified IDs. Report incomplete if any required result cannot be verified.',
+      );
+    });
+    return task;
+  }
+  private queueConflictIfReady(task: Task, pr: PullRequest) {
+    if (
+      !pr.mergeConflict ||
+      pr.draft !== false ||
+      !sameOpenTarget(task.pr, pr) ||
+      ![
+        'complete',
+        'awaiting_merge',
+        'awaiting_checks',
+        'awaiting_plan_approval',
+        'queued',
+      ].includes(task.state) ||
+      (task.review && task.snapshot?.status !== 'published') ||
+      (task.pendingFix &&
+        (task.pendingAuthorHead !== pr.head || !sameRevision(task.revision, pr))) ||
+      (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head) ||
+      this.store.busy(task.id) ||
+      !autoMergeEnabled(this.store, task)
+    )
+      return false;
+    this.store.transaction(() => {
+      this.invalidate(task, pr);
+      task.pendingFix = undefined;
+      this.enqueueConflictRepair(task);
+    });
+    return true;
+  }
+  private async handOffIncompleteFix(
+    task: Task,
+    result: AgentResult,
+    pr: PullRequest,
+    checkpoint: (task: Task) => Promise<string>,
+  ) {
+    if (
+      result.status !== 'incomplete' ||
+      result.question?.trim() ||
+      result.disputedCommentIds?.length ||
+      !task.revision ||
+      result.checkedHead !== pr.head ||
+      task.revision.head !== pr.head ||
+      !pr.mergeConflict ||
+      pr.draft !== false ||
+      !sameOpenTarget(task.pr, pr) ||
+      !autoMergeEnabled(this.store, task) ||
+      task.fixingMergeConflict ||
+      task.pendingFix ||
+      !task.authorWorktree ||
+      task.snapshot?.status !== 'published' ||
+      !task.reviewFinished
+    )
+      return false;
+    const saved = await checkpoint(task);
+    this.store.transaction(() => {
+      this.invalidate(task, pr, false);
+      task.conflictCheckpoint = saved;
+      this.enqueueConflictRepair(task);
+      this.store.event(task.id, 'author.conflict_checkpoint', {
+        head: saved,
+        revision: task.revision,
+      });
+    });
+    return true;
+  }
+
+  async publishedFixBaseAdvanced(task: Task, pr: PullRequest) {
+    const pinned = task.revision;
+    if (
+      task.ref.provider !== 'github' ||
+      !pinned ||
+      task.pendingFix ||
+      task.fixingMergeConflict ||
+      !task.reviewFinished ||
+      task.snapshot?.status !== 'published' ||
+      !sameRevision(task.snapshot.revision, pinned) ||
+      !sameRevision(task.review?.revision, pinned) ||
+      (task.pendingAuthorHead && task.pendingAuthorHead !== pinned.head) ||
+      pr.draft !== false ||
+      pr.head !== pinned.head ||
+      pr.base === pinned.base ||
+      !sameOpenTarget(task.pr, pr)
+    )
+      return false;
+    return (
+      (await this.provider(prRef(task)).targetAdvanced?.(prRef(task), pinned.base, pr.base)) ===
+      true
+    );
+  }
+
+  private recordedAgentResult(taskId: string, runId: string): AgentResult | undefined {
+    const result = this.store.db
+      .prepare(
+        "SELECT json_extract(data,'$.text') AS text FROM events WHERE task_id=? AND run_id=? AND type='runtime.item' AND json_extract(data,'$.type')='agentMessage' AND json_extract(data,'$.phase')='final_answer' ORDER BY id DESC LIMIT 1",
+      )
+      .get(taskId, runId);
+    if (typeof result?.text !== 'string') return;
+    try {
+      const value = JSON.parse(result.text);
+      if (
+        value &&
+        typeof value.summary === 'string' &&
+        typeof value.checkedHead === 'string' &&
+        (value.question == null || typeof value.question === 'string')
+      )
+        return value;
+    } catch {
+      /* Earlier agents could leave plain text instead of a structured result. */
+    }
+  }
+
+  async recoverInterruptedFix(id: string, checkpoint: (task: Task) => Promise<string>) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (
+        task.state !== 'needs_input' ||
+        task.resumeState !== 'fixing' ||
+        task.pendingFix ||
+        task.fixingMergeConflict ||
+        this.store.busy(id)
+      )
+        return;
+      const job = this.store.jobs(id).at(-1);
+      if (!job || job.kind !== 'fix') return;
+      const restarted = restartInterrupted(task, job);
+      if (!restarted && job.generation !== task.generation) return;
+      const staleStart =
+        job.status === 'failed' &&
+        job.errorCode === 'stale_revision' &&
+        job.error === task.reason &&
+        job.error ===
+          'AppError: The PR changed before the queued job started. Reconcile and review the new revision.';
+      if (staleStart || restarted) {
+        if (
+          task.ref.provider !== 'github' ||
+          !task.reviewFinished ||
+          !task.review ||
+          task.snapshot?.status !== 'published' ||
+          !sameRevision(task.review.revision, task.revision) ||
+          (task.pendingAuthorHead && task.pendingAuthorHead !== task.revision?.head)
+        )
+          return;
+        const ref = prRef(task),
+          provider = this.provider(ref);
+        const pr = await provider.getPR(ref);
+        const same =
+          sameRevision(pr, task.revision) && sameOpenTarget(task.pr, pr) && pr.draft === false;
+        if (!(restarted && same) && !(await this.publishedFixBaseAdvanced(task, pr))) return;
+        if (restarted) {
+          const native = await provider.getReview(ref, task.review);
+          const pending = this.store.db
+            .prepare("SELECT 1 FROM operations WHERE task_id=? AND status='pending'")
+            .get(task.id);
+          if (pending || native.status !== 'published' || native.revision.head !== pr.head) return;
+          task.feedback = native;
+        }
+        const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+        if (
+          group &&
+          (group.generation !== job.groupGeneration ||
+            group.deletedAt ||
+            group.deletion ||
+            group.daddyState === 'paused' ||
+            group.daddyState === 'archived')
+        )
+          return;
+        this.store.transaction(() => {
+          this.state(
+            task,
+            'fixing',
+            restarted
+              ? 'Continuing the interrupted fix against confirmed published feedback.'
+              : 'The target branch advanced. Continuing the published feedback on the same PR commit.',
+          );
+          this.store.enqueue(task, 'author', 'fix', job.input);
+        });
+        return;
+      }
+      if (job.status !== 'completed' || !autoMergeEnabled(this.store, task)) return;
+      const result = this.recordedAgentResult(task.id, job.id);
+      if (
+        result?.status !== 'incomplete' ||
+        result.summary !== task.reason ||
+        result.question ||
+        result.checkedHead !== task.revision?.head
+      )
+        return;
+      await this.handOffIncompleteFix(
+        task,
+        result,
+        await this.provider(prRef(task)).getPR(prRef(task)),
+        checkpoint,
+      );
+    });
+  }
+
+  private enqueueConflictRepair(task: Task) {
+    task.fixingMergeConflict = true;
+    this.state(task, 'fixing', 'Worker assigned to resolve the GitHub merge conflict');
+    this.store.enqueue(
+      task,
+      'author',
+      'fix',
+      'Resolve the merge conflicts in the prepared working copy. Preserve the intended behavior of both branches and verify the result.',
+    );
+  }
+  private async changeReviewRevision(task: Task, pr: PullRequest) {
+    const handle = task.review;
+    if (
+      task.ref.provider === 'github' &&
+      handle &&
+      !task.pendingFix &&
+      ['reviewing', 'awaiting_publication'].includes(task.state) &&
+      sameOpenTarget(task.pr, pr) &&
+      pr.draft === false &&
+      sameRevision(handle.revision, task.revision) &&
+      handle.revision.head === pr.head &&
+      handle.revision.base !== pr.base
+    ) {
+      const groupGeneration = task.groupId && this.store.getGroup(task.groupId).generation;
+      const draft = await this.provider(prRef(task)).getReview(prRef(task), handle);
+      const reusable =
+        draft.status === 'draft' &&
+        draft.revision.head === pr.head &&
+        !(await this.draftCarryProblem(task, pr, draft));
+      const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (
+        this.store.getTask(task.id).generation !== task.generation ||
+        (group &&
+          (group.generation !== groupGeneration ||
+            group.deletedAt ||
+            group.deletion ||
+            group.daddyState === 'paused' ||
+            group.daddyState === 'archived'))
+      )
+        return;
+      if (reusable) {
+        this.store.transaction(() =>
+          this.restartNativeReview(
+            task,
+            pr,
+            draft,
+            'The target branch advanced. Reviewing the updated change.',
+          ),
+        );
+        return;
+      }
+    }
+    const hadUnpublished =
+      task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
+    const previous = task.snapshot;
+    this.invalidate(task, pr);
+    if (hadUnpublished) {
+      if (handle) task.resumeState = 'reviewing';
+      task.review = handle;
+      task.snapshot = previous;
+    }
+    this.state(
+      task,
+      hadUnpublished ? 'needs_input' : 'queued',
+      hadUnpublished
+        ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
+        : 'New revision is ready for review',
+    );
+  }
   private async reconcileLocked(id: string): Promise<Task> {
-    const task = this.store.getTask(id);
+    let task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
+    task = this.store.getTask(id);
+    if (
+      task.pendingFix ||
+      (task.state === 'awaiting_push' &&
+        !!task.pendingAuthorHead &&
+        task.pendingAuthorHead !== task.revision?.head)
+    ) {
+      await this.checkSavedFix(task, pr);
+      return task;
+    }
+    if (pr.state === 'merged') {
+      if (
+        task.state === 'awaiting_merge' &&
+        task.revision?.head === pr.head &&
+        task.pr?.targetBranch === pr.targetBranch
+      ) {
+        task.pr = pr;
+        this.finishReviewedTask(task, 'Merged on GitHub');
+        return task;
+      }
+      if (
+        task.state === 'complete' ||
+        this.store.activeJobs(id).some((job) => job.kind === 'verify_merge')
+      )
+        return task;
+      if (
+        sameRevision(task.verifiedMerge, pr) &&
+        task.verifiedMerge?.mergeCommit === pr.mergeCommit &&
+        ['awaiting_checks', 'awaiting_plan_approval'].includes(task.state)
+      ) {
+        task.pr = pr;
+        await this.finish(task);
+        return task;
+      }
+    }
     if (pr.state !== 'open') {
       this.onCancel(id);
       this.store.cancelJobs(id);
@@ -249,24 +1005,56 @@ export class Engine {
       this.state(task, 'needs_input', `PR is ${pr.state}; automatic work stopped`);
       return task;
     }
+    if (staleConflictPreparation(task)) {
+      if (
+        task.revision?.head === pr.head &&
+        (task.reason === dirtyConflictCopy ? pr.mergeConflict : task.revision.base !== pr.base) &&
+        sameOpenTarget(task.pr, pr) &&
+        pr.draft === false &&
+        pr.mergeable != null &&
+        !this.store.busy(task.id) &&
+        autoMergeEnabled(this.store, task)
+      ) {
+        this.store.transaction(() => {
+          const checkpoint = task.conflictCheckpoint;
+          this.invalidate(task, pr);
+          if (pr.mergeConflict) task.conflictCheckpoint = checkpoint;
+          if (pr.mergeConflict) this.enqueueConflictRepair(task);
+          else this.state(task, 'queued', 'New revision is ready for review');
+        });
+      }
+      return task;
+    }
+    if (this.queueConflictIfReady(task, pr)) return task;
+    if (task.state === 'fixing' && task.fixingMergeConflict) {
+      if (task.revision?.head !== pr.head || !sameOpenTarget(task.pr, pr)) {
+        this.onCancel(id);
+        this.store.cancelJobs(id);
+        task.generation++;
+        task.resumeState = 'fixing';
+        this.state(
+          task,
+          'needs_input',
+          'The PR changed during conflict resolution. Inspect the preserved worker copy.',
+        );
+      }
+      return task;
+    }
+    if (
+      task.state === 'fixing' &&
+      !sameRevision(task.revision, pr) &&
+      this.store
+        .activeJobs(id)
+        .some((job) => job.generation === task.generation && job.kind === 'fix') &&
+      (await this.publishedFixBaseAdvanced(task, pr))
+    )
+      return task;
     if (!sameRevision(task.revision, pr)) {
-      const hadUnpublished =
-        task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
-      this.invalidate(task, pr);
-      this.state(
-        task,
-        hadUnpublished ? 'needs_input' : 'queued',
-        hadUnpublished
-          ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
-          : 'New revision is ready for review',
-      );
+      await this.changeReviewRevision(task, pr);
       return task;
     }
     task.pr = pr;
-    if (this.store.busy(id)) {
-      this.store.saveTask(task);
-      return task;
-    }
+    if (this.store.busy(id)) return task;
     if (!task.review) {
       this.store.saveTask(task);
       return task;
@@ -325,28 +1113,178 @@ export class Engine {
             'needs_input',
             'The same findings keep returning; human decision is required',
           );
-        else if (task.round >= task.policy.maxRounds)
-          this.state(
-            task,
-            'needs_input',
-            'Review round limit reached; inspect the remaining published findings',
-          );
-        else
-          this.store.transaction(() => {
-            this.state(task, 'fixing', 'Author is addressing the published review');
-            this.store.enqueue(
-              task,
-              'author',
-              'fix',
-              'Address exactly the published feedback snapshot. Explain disputes. Do not treat the reviewer’s private draft or old summary as additional requirements.',
-            );
-          });
+        else this.queuePublishedFix(task, 'Author is addressing the published review');
       } else await this.finish(task);
+    } else if (task.state === 'awaiting_merge' && !autoMergeRequested(this.store, task)) {
+      if (snapshot.status === 'published' && task.reviewFinished && !snapshot.comments.length)
+        await this.finish(task);
+      else
+        this.state(
+          task,
+          'needs_input',
+          'The reviewed revision needs verification before completion',
+        );
     } else if (task.state === 'awaiting_checks' || task.state === 'awaiting_plan_approval')
       await this.finish(task);
     else this.store.saveTask(task);
     return this.store.getTask(id);
   }
+  // Keep the original PR identity pinned until the provider confirms the saved head.
+  private async checkSavedFix(task: Task, pr: PullRequest, resume = false): Promise<boolean> {
+    const head = task.pendingAuthorHead;
+    const original = task.pendingFix?.revision ?? task.revision;
+    if (!head || !original)
+      throw new AppError('missing_fix', 'The saved fix or its original revision is missing');
+    if (!task.pendingFix) {
+      task.pendingFix = { revision: original };
+      this.store.saveTask(task);
+    }
+    const sameTarget = sameOpenTarget(task.pr, pr);
+    if (task.revision?.head === head) {
+      if (!sameTarget || !sameRevision(task.revision, pr)) this.holdSavedFix(task, pr);
+      else if (resume) this.state(task, 'queued', 'New revision is ready for review');
+      return false;
+    }
+    const sameBase = pr.base === original.base && pr.start === original.start;
+    const compatibleBase =
+      sameBase ||
+      (task.ref.provider === 'github' &&
+        sameTarget &&
+        (pr.head === head || pr.head === original.head) &&
+        (await this.provider(prRef(task)).targetAdvanced?.(prRef(task), original.base, pr.base)) ===
+          true);
+    if (sameTarget && pr.head === head && compatibleBase) {
+      const old = task.review;
+      const snapshot =
+        old && !task.reviewFinished
+          ? await this.provider(prRef(task)).getReview(prRef(task), old)
+          : undefined;
+      this.store.transaction(() => {
+        this.invalidate(task, pr, false);
+        task.pendingAuthorHead = head;
+        if (old && (snapshot?.status === 'draft' || snapshot?.status === 'partial')) {
+          task.review = old;
+          task.snapshot = snapshot;
+          this.state(
+            task,
+            'needs_input',
+            `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`,
+          );
+        } else {
+          this.state(task, 'queued', 'New revision is ready for review');
+        }
+      });
+      return false;
+    }
+    if (
+      sameTarget &&
+      pr.head === original.head &&
+      compatibleBase &&
+      original.revisionId === pr.revisionId
+    ) {
+      if (!task.pendingFix.attempted) return true;
+      if (task.pendingFix.confirmUntil && task.pendingFix.confirmUntil > now()) {
+        const reason = `Waiting for the PR to confirm saved fix ${head}.`;
+        if (task.state !== 'awaiting_push' || task.reason !== reason)
+          this.state(task, 'awaiting_push', reason);
+        return false;
+      }
+      if (resume) return true;
+      task.resumeState = 'awaiting_push';
+      this.state(task, 'needs_input', unconfirmedFix(head, pr.head));
+      return false;
+    }
+    this.holdSavedFix(task, pr);
+    return false;
+  }
+
+  private holdSavedFix(task: Task, pr: PullRequest) {
+    const original = task.revision!;
+    task.resumeState = 'awaiting_push';
+    this.state(
+      task,
+      'needs_input',
+      `Saved fix ${task.pendingAuthorHead} is preserved. PR is ${pr.state} at ${pr.head} (base ${pr.base}, target ${pr.targetBranch}); expected ${original.head} (base ${original.base}, target ${task.pr?.targetBranch}). Inspect the target and submission outcome.`,
+    );
+  }
+
+  async submitSavedFix(id: string, push: (task: Task, head: string) => Promise<void>) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      const head = task.pendingAuthorHead;
+      if (
+        task.state !== 'awaiting_push' ||
+        !task.revision ||
+        !head ||
+        head === task.revision.head ||
+        this.store.busy(id)
+      )
+        return;
+      const provider = this.provider(prRef(task));
+      if (!(await this.checkSavedFix(task, await provider.getPR(prRef(task))))) return;
+      if (task.fixingMergeConflict && !autoMergeEnabled(this.store, task)) {
+        task.resumeState = 'awaiting_push';
+        this.state(
+          task,
+          'needs_input',
+          'Auto-merge is disabled. The saved conflict resolution is waiting for submission.',
+        );
+        return;
+      }
+      task.pendingFix = {
+        revision: task.pendingFix?.revision ?? task.revision,
+        attempted: true,
+        confirmUntil: confirmationDeadline(),
+      };
+      this.store.saveTask(task);
+      try {
+        await push(task, head);
+        task.pendingFix.confirmUntil = confirmationDeadline();
+        this.store.transaction(() => {
+          this.store.saveTask(task);
+          this.store.event(id, 'author.submitted', { head, pushed: true });
+        });
+      } catch (error) {
+        this.store.event(id, 'author.submission_uncertain', { head, error: redact(String(error)) });
+      }
+      await this.checkSavedFix(task, await provider.getPR(prRef(task)));
+    });
+  }
+
+  private hasUnverifiedFindings(task: Task, verified: Set<string>, feedback = task.feedback) {
+    const decisions = this.store.decisions(task.id);
+    const exempt = new Set(
+      decisions
+        .filter(
+          (d) =>
+            ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
+            (d.outcome === 'verified' && d.head === task.revision?.head),
+        )
+        .map((d) => d.commentId),
+    );
+    const unresolved =
+      feedback?.comments.filter((c) => !verified.has(c.id) && !exempt.has(c.id)) ?? [];
+    return unresolved.length > 0;
+  }
+  finishReviewedTask(
+    task: Task,
+    reason = 'Current revision reviewed; publication, findings and checks are accounted for',
+  ) {
+    if (task.pr?.state === 'open' && autoMergeRequested(this.store, task))
+      this.state(task, 'awaiting_merge', 'Review complete. Waiting for GitHub to merge the PR.');
+    else this.state(task, 'complete', reason);
+  }
+
+  restoreMergeWaits() {
+    for (const task of this.store.tasks())
+      if (
+        task.state === 'complete' &&
+        task.pr?.state === 'open' &&
+        autoMergeRequested(this.store, task)
+      )
+        this.finishReviewedTask(task);
+  }
+
   private async finish(task: Task) {
     if (task.policy.requireChecks && !task.checksWaivedAt && task.pr?.checks !== 'passing') {
       this.state(
@@ -366,11 +1304,168 @@ export class Engine {
       );
     else {
       if (task.kind === 'plan') task.approvedAt = now();
-      this.state(
+      this.finishReviewedTask(
         task,
-        'complete',
-        'Current revision reviewed; publication, findings and checks are accounted for',
+        task.verifiedMerge ? 'daddy verified the merged result' : undefined,
       );
+    }
+  }
+  private queuePublishedFix(task: Task, reason: string) {
+    this.store.transaction(() => {
+      this.state(task, 'fixing', reason);
+      this.store.enqueue(
+        task,
+        'author',
+        'fix',
+        'Address exactly the published feedback snapshot. Explain disputes. Do not treat the reviewer’s private draft or old summary as additional requirements.',
+      );
+    });
+  }
+
+  recoverLostFixes() {
+    for (const task of this.store.tasks()) {
+      if (
+        isTicket(task) ||
+        !['queued', 'needs_input'].includes(task.state) ||
+        this.store.busy(task.id) ||
+        !task.revision
+      )
+        continue;
+      if (task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (
+          group.deletion ||
+          group.deletedAt ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          continue;
+      }
+      if (
+        task.state === 'needs_input' &&
+        task.pendingFix?.attempted &&
+        !task.pendingFix.confirmUntil &&
+        task.pendingAuthorHead &&
+        task.revision &&
+        task.reason === unconfirmedFix(task.pendingAuthorHead, task.revision.head)
+      ) {
+        // A previous release stopped on the first stale read. Recheck without sending.
+        task.pendingFix.confirmUntil = confirmationDeadline();
+        this.state(
+          task,
+          'awaiting_push',
+          `Waiting for the PR to confirm saved fix ${task.pendingAuthorHead}.`,
+        );
+        continue;
+      }
+      if (
+        task.pendingFix ||
+        task.pendingAuthorHead ||
+        task.feedback?.status !== 'published' ||
+        !sameRevision(task.feedback.revision, task.revision)
+      )
+        continue;
+      const job = this.store
+        .jobs(task.id)
+        .filter((item) => item.role === 'author')
+        .at(-1);
+      if (
+        job?.kind !== 'fix' ||
+        job.status !== 'completed' ||
+        job.generation + 1 !== task.generation
+      )
+        continue;
+      const saved = this.store.db
+        .prepare(
+          `SELECT id,json_extract(data,'$.head') AS head FROM events
+         WHERE task_id=? AND run_id=? AND type='author.fixes_saved' ORDER BY id DESC LIMIT 1`,
+        )
+        .get(task.id, job.id);
+      if (typeof saved?.head !== 'string' || !saved.head || saved.head === task.revision.head)
+        continue;
+      const lost = this.store.db
+        .prepare(
+          `SELECT 1 FROM events WHERE task_id=? AND id>? AND type='task.state'
+         AND json_extract(data,'$.state')='queued' AND json_extract(data,'$.reason')=?
+         AND json_extract(data,'$.generation')=? AND json_extract(data,'$.head')=?
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id=? AND e.id>? AND e.type='author.submitted')`,
+        )
+        .get(
+          task.id,
+          saved.id,
+          noFixChanges,
+          task.generation,
+          task.revision.head,
+          task.id,
+          saved.id,
+        );
+      if (!lost) continue;
+      const head = saved.head;
+      this.store.transaction(() => {
+        task.pendingAuthorHead = head;
+        task.pendingFix = { revision: task.revision! };
+        task.resumeState = 'awaiting_push';
+        this.state(
+          task,
+          'awaiting_push',
+          `Recovered saved fix ${head}; checking the PR before submission.`,
+        );
+        this.store.event(task.id, 'author.fix_recovered', { head }, job.id);
+      });
+    }
+  }
+
+  recoverReviewRoundLimits() {
+    for (const task of this.store.tasks()) {
+      if (!['needs_input', 'awaiting_push'].includes(task.state) || this.store.busy(task.id))
+        continue;
+      if (task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (
+          group.deletedAt ||
+          group.deletion ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          continue;
+      }
+      if (task.state === 'needs_input' && task.reason === oldReviewStartLimit && !task.review) {
+        this.state(task, 'queued', 'Review can continue on the saved revision');
+        continue;
+      }
+      if (
+        !task.revision ||
+        !task.reviewFinished ||
+        !task.review ||
+        task.snapshot?.status !== 'published' ||
+        task.feedback?.status !== 'published' ||
+        !task.feedback.comments.length ||
+        task.noProgress >= task.policy.maxNoProgress ||
+        !sameRevision(task.review.revision, task.revision) ||
+        !sameRevision(task.snapshot.revision, task.revision) ||
+        !sameRevision(task.feedback.revision, task.revision) ||
+        (task.pendingAuthorHead && task.pendingAuthorHead !== task.revision.head)
+      )
+        continue;
+      // A legacy resume may have changed the visible reason without queuing an author.
+      const stop = this.store.db
+        .prepare(
+          `SELECT 1 FROM events stopped
+           WHERE stopped.task_id=? AND stopped.type='task.state'
+             AND json_extract(stopped.data,'$.reason')=?
+             AND json_extract(stopped.data,'$.generation')=?
+             AND json_extract(stopped.data,'$.head')=?
+             AND NOT EXISTS (
+               SELECT 1 FROM events later
+               WHERE later.task_id=stopped.task_id AND later.id>stopped.id
+                 AND later.type='job.queued'
+                 AND json_extract(later.data,'$.kind') IN ('review','fix')
+             )
+           LIMIT 1`,
+        )
+        .get(task.id, oldPublishedReviewLimit, task.generation, task.revision.head);
+      if (!stop) continue;
+      this.queuePublishedFix(task, 'Continuing against the saved published findings');
     }
   }
   async publish(id: string, expected?: ExpectedTask) {
@@ -386,9 +1481,39 @@ export class Engine {
       return this.reconcileLocked(id);
     });
   }
-  async chat(id: string, role: 'author' | 'reviewer', text: string, actionId?: string) {
+  async chat(
+    id: string,
+    role: 'author' | 'reviewer',
+    text: string,
+    actionId?: string,
+    deferUntilPublished = false,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (
+        role === 'author' &&
+        (deferUntilPublished || task.pendingFix || task.state === 'awaiting_push')
+      ) {
+        const key = actionId ?? randomUUID();
+        this.store.transaction(() => {
+          const pending = (task.deferredWorkerInstructions ??= []);
+          if (
+            this.store.db
+              .prepare('SELECT id FROM messages WHERE id=? AND task_id=?')
+              .get('deferred:' + id + ':' + key, id)
+          )
+            return;
+          pending.push({ id: key, text });
+          this.store.message(id, role, 'user', text, undefined, 'deferred:' + id + ':' + key);
+          this.store.saveTask(task);
+        });
+        return task;
+      }
+      if (task.pendingFix || task.state === 'awaiting_push')
+        throw new AppError(
+          'fix_pending',
+          `Wait for submission of saved fix ${task.pendingAuthorHead} before starting another turn.`,
+        );
       if (task.state === 'paused' || task.state === 'complete')
         throw new AppError(
           'chat_unavailable',
@@ -401,60 +1526,181 @@ export class Engine {
       return task;
     });
   }
-  async completeJob(job: Job, result: AgentResult) {
+  async deliverWorkerInstruction(id: string) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id),
+        next = task.deferredWorkerInstructions?.[0];
+      if (
+        !next ||
+        this.store.busy(id) ||
+        task.pendingFix ||
+        task.pr?.state !== 'open' ||
+        ![
+          'complete',
+          'awaiting_merge',
+          'awaiting_checks',
+          'awaiting_plan_approval',
+          'fixing',
+        ].includes(task.state) ||
+        task.snapshot?.status !== 'published' ||
+        !sameRevision(task.snapshot.revision, task.revision)
+      )
+        return;
+      this.store.enqueue(task, 'author', 'chat', next.text, next.id);
+    });
+  }
+  async completeJob(job: Job, result: AgentResult, saveFix?: (task: Task) => Promise<string>) {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state === 'paused') {
         this.store.event(task.id, 'job.stale_result', { generation: job.generation }, job.id);
         return;
       }
-      if (isTicket(task)) {
-        this.store.message(task.id, job.role, 'agent', result.summary, job.id);
-        if (result.status !== 'completed' || result.checkedHead !== task.revision?.head) {
-          task.resumeState = task.state;
-          this.state(
-            task,
-            'needs_input',
-            result.question || result.summary || 'The ticket turn was incomplete',
+      if (
+        saveFix &&
+        job.kind === 'fix' &&
+        result.status === 'completed' &&
+        task.revision &&
+        result.checkedHead === task.revision.head &&
+        !result.disputedCommentIds?.length
+      ) {
+        const head = await saveFix(task);
+        this.store.transaction(() => {
+          task.pendingAuthorHead = head;
+          task.pendingFix = head === result.checkedHead ? undefined : { revision: task.revision! };
+          this.store.saveTask(task);
+          this.store.event(
+            task.id,
+            'author.fixes_saved',
+            { head, revision: task.revision },
+            job.id,
           );
-        } else if (job.kind === 'implement') {
-          if (!task.pendingAuthorHead || task.pendingAuthorHead === task.revision?.head)
+        });
+      }
+      if (isTicket(task)) {
+        this.store.transaction(() => {
+          this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
+          const reportReview = job.kind === 'review';
+          if (
+            reportReview &&
+            (!sameRevision(task.workerReport?.revision, task.revision) ||
+              result.checkedHead !== task.revision?.head)
+          ) {
+            task.resumeState = 'reviewing';
             this.state(
               task,
               'needs_input',
-              'The author produced no new committed changes. Discuss the result before implementing again.',
+              'The review used a different worker report or revision',
             );
-          else {
-            task.revision = { ...task.revision!, head: task.pendingAuthorHead };
-            task.resumeState = 'ready_for_review';
+          } else if (result.status !== 'completed' || result.checkedHead !== task.revision?.head) {
+            task.resumeState = task.state;
             this.state(
               task,
-              'ready_for_review',
-              'Implementation saved locally. Submit it to a native PR for the shared reviewer.',
+              'needs_input',
+              result.question || result.summary || 'The ticket turn was incomplete',
+              requestsHumanInput(result) && result.checkedHead === task.revision?.head
+                ? job
+                : undefined,
+            );
+          } else if (reportReview) {
+            task.resumeState = undefined;
+            task.reviewFinished = true;
+            this.state(task, 'complete', 'daddy verified the worker report');
+          } else if (job.kind === 'implement') {
+            const head = task.pendingAuthorHead;
+            const base = task.ticketRepository?.baseHead ?? task.revision?.base;
+            // A resumed run can start on a saved commit that still needs submission.
+            if (head && head !== base) {
+              task.revision = { ...task.revision!, head };
+              task.resumeState = 'ready_for_review';
+              this.store.event(task.id, 'author.implementation_saved', { head }, job.id);
+              this.state(
+                task,
+                'ready_for_review',
+                'Implementation saved locally. Submit it to a native PR for the shared reviewer.',
+              );
+            } else {
+              task.pendingAuthorHead = undefined;
+              task.workerReport = { runId: job.id, revision: task.revision! };
+              task.reviewerThreadId = undefined;
+              task.summary = result.summary;
+              this.queueReportReview(task);
+            }
+          } else {
+            const pendingSubmission = !!this.store.db
+              .prepare('SELECT 1 FROM operations WHERE id=?')
+              .get('ticket-submit:' + task.id);
+            this.state(
+              task,
+              pendingSubmission
+                ? 'needs_input'
+                : task.pendingAuthorHead
+                  ? 'ready_for_review'
+                  : 'discussing',
+              pendingSubmission
+                ? 'Submit again to reconcile the existing PR creation before changing implementation.'
+                : task.pendingAuthorHead
+                  ? 'Saved implementation is ready to submit for review.'
+                  : 'Continue the conversation, or start implementation when the requirements are clear.',
             );
           }
-        } else {
-          const pendingSubmission = !!this.store.db
-            .prepare('SELECT 1 FROM operations WHERE id=?')
-            .get('ticket-submit:' + task.id);
-          this.state(
-            task,
-            pendingSubmission
-              ? 'needs_input'
-              : task.pendingAuthorHead
-                ? 'ready_for_review'
-                : 'discussing',
-            pendingSubmission
-              ? 'Submit again to reconcile the existing PR creation before changing implementation.'
-              : task.pendingAuthorHead
-                ? 'Saved implementation is ready to submit for review.'
-                : 'Continue the conversation, or start implementation when the requirements are clear.',
-          );
-        }
+        });
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (job.kind === 'fix' && task.pendingFix) {
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
+        if (await this.checkSavedFix(task, pr)) {
+          task.resumeState = 'awaiting_push';
+          this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
+        }
+        return;
+      }
+      if (job.kind === 'verify_merge') {
+        this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
+        if (
+          pr.state !== 'merged' ||
+          !sameRevision(task.revision, pr) ||
+          pr.mergeCommit !== task.pr?.mergeCommit ||
+          result.checkedHead !== pr.head
+        ) {
+          this.state(task, 'needs_input', 'The merged revision changed during verification');
+        } else if (result.status !== 'completed') {
+          this.state(
+            task,
+            'needs_input',
+            result.question || result.summary,
+            requestsHumanInput(result) ? job : undefined,
+          );
+        } else if (
+          result.disputedCommentIds?.length ||
+          this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds)) ||
+          (task.snapshot?.status === 'published' &&
+            this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds), task.snapshot))
+        ) {
+          this.state(
+            task,
+            'needs_input',
+            'Reviewer has not verified all previously published findings',
+          );
+        } else {
+          task.summary = result.summary;
+          task.pr = pr;
+          task.verifiedMerge = { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
+          await this.finish(task);
+        }
+        return;
+      }
       if (job.kind !== 'fix' && !sameRevision(task.revision, pr)) {
+        if (
+          job.kind === 'review' &&
+          task.ref.provider === 'github' &&
+          task.review &&
+          pr.state === 'open'
+        ) {
+          await this.changeReviewRevision(task, pr);
+          return;
+        }
         this.invalidate(task, pr);
         this.state(
           task,
@@ -463,7 +1709,7 @@ export class Engine {
         );
         return;
       }
-      this.store.message(task.id, job.role, 'agent', result.summary, job.id);
+      this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
       if (pr.state !== 'open') {
         this.state(
           task,
@@ -472,6 +1718,21 @@ export class Engine {
         );
         return;
       }
+      if (
+        job.kind === 'fix' &&
+        saveFix &&
+        (await this.handOffIncompleteFix(task, result, pr, saveFix))
+      )
+        return;
+      if (
+        job.kind === 'chat' &&
+        job.actionId &&
+        sameRevision(task.revision, pr) &&
+        task.deferredWorkerInstructions
+      )
+        task.deferredWorkerInstructions = task.deferredWorkerInstructions.filter(
+          (entry) => entry.id !== job.actionId,
+        );
       if (result.status !== 'completed') {
         task.resumeState = task.state;
         if (job.role === 'reviewer') task.reviewFinished = false;
@@ -479,6 +1740,7 @@ export class Engine {
           task,
           'needs_input',
           result.question || result.summary || 'Agent did not complete its work',
+          requestsHumanInput(result) ? job : undefined,
         );
         return;
       }
@@ -488,20 +1750,8 @@ export class Engine {
           return;
         }
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review!);
-        const decisions = this.store.decisions(task.id);
         const verified = new Set(result.verifiedCommentIds ?? []);
-        const exempt = new Set(
-          decisions
-            .filter(
-              (d) =>
-                ['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
-                (d.outcome === 'verified' && d.head === task.revision?.head),
-            )
-            .map((d) => d.commentId),
-        );
-        const unresolved =
-          task.feedback?.comments.filter((c) => !verified.has(c.id) && !exempt.has(c.id)) ?? [];
-        if (!snapshot.comments.length && unresolved.length) {
+        if (!snapshot.comments.length && this.hasUnverifiedFindings(task, verified)) {
           this.state(
             task,
             'needs_input',
@@ -518,6 +1768,44 @@ export class Engine {
             'Review was published, removed or changed before the reviewer completed; inspect it before releasing feedback',
           );
           return;
+        }
+        if (task.draftRecheck) {
+          const key = task.review!.marker + ':' + job.id;
+          const done = this.store.db.prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='done' AND json_extract(result,'$.id')=? AND json_extract(result,'$.body')=?",
+          );
+          const summary = this.store.db
+            .prepare("SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='done'")
+            .get(task.id, key + ':set_summary:*');
+          const missed = snapshot.comments.some(
+            (c) =>
+              task.draftRecheck!.commentIds.includes(c.id) &&
+              !done.get(task.id, key + ':edit_comment:*', c.id, c.body),
+          );
+          if (!summary || missed) {
+            if (!task.draftRecheck.retried) {
+              task.draftRecheck.retried = true;
+              this.state(
+                task,
+                'reviewing',
+                'Rechecking the existing draft on the updated target branch',
+              );
+              this.store.enqueue(
+                task,
+                'reviewer',
+                'review',
+                'Finish rechecking the carried draft before publication.',
+              );
+            } else {
+              this.state(
+                task,
+                'needs_input',
+                'Reviewer could not verify the carried draft on the updated target branch',
+              );
+            }
+            return;
+          }
+          task.draftRecheck = undefined;
         }
         task.reviewFinished = true;
         for (const id of verified)
@@ -546,6 +1834,7 @@ export class Engine {
             task,
             'needs_input',
             'Author disputes published findings; discuss them with the reviewer',
+            job,
           );
           return;
         }
@@ -554,7 +1843,7 @@ export class Engine {
           task.pendingAuthorHead &&
           task.pendingAuthorHead !== task.revision?.head
         )
-          this.state(task, 'awaiting_push', 'Author finished; waiting for a new PR revision');
+          this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
         else {
           const changed = !sameRevision(pr, task.revision);
           task.pendingAuthorHead = undefined;
@@ -562,9 +1851,7 @@ export class Engine {
           this.state(
             task,
             'queued',
-            changed
-              ? 'Author pushed changes; independent verification is next'
-              : 'Author made no code changes; independent verification of the decisions is next',
+            changed ? 'Author pushed changes; independent verification is next' : noFixChanges,
           );
         }
       } else {
@@ -578,7 +1865,7 @@ export class Engine {
   }
   async action(
     id: string,
-    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen',
+    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
     reason = '',
     expected?: ExpectedTask,
   ) {
@@ -590,6 +1877,10 @@ export class Engine {
           throw new AppError('session_deleting', 'This session is being deleted');
       }
       assertTaskVersion(task, expected);
+      if (action === 'verify-merge') {
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        return this.queueMergeVerification(task, pr);
+      }
       if (action === 'pause') {
         task.resumeState = task.state;
         task.generation++;
@@ -601,7 +1892,24 @@ export class Engine {
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
+        if (task.pendingFix && task.pendingAuthorHead) {
+          if (
+            await this.checkSavedFix(
+              task,
+              await this.provider(prRef(task)).getPR(prRef(task)),
+              true,
+            )
+          ) {
+            task.pendingFix.attempted = false;
+            this.state(task, 'awaiting_push', 'Resuming submission of the saved fix');
+          }
+          return task;
+        }
         if (isTicket(task)) {
+          if (task.workerReport && ['queued', 'reviewing'].includes(task.resumeState ?? '')) {
+            this.store.transaction(() => this.queueReportReview(task));
+            return task;
+          }
           const implementing = task.resumeState === 'implementing';
           this.state(
             task,
@@ -617,8 +1925,31 @@ export class Engine {
               task,
               'author',
               'implement',
-              'Continue the interrupted implementation. Preserve the existing working copy and test the result.',
+              'Continue the interrupted task. Preserve the existing working copy and verify the requested outcome.',
             );
+          return task;
+        }
+        if (task.resumeState === 'awaiting_merge') {
+          this.state(
+            task,
+            'awaiting_merge',
+            'Review complete. Waiting for GitHub to merge the PR.',
+          );
+          return task;
+        }
+        if (task.resumeState === 'fixing' && task.fixingMergeConflict) {
+          const pr = await this.provider(prRef(task)).getPR(prRef(task));
+          if (!sameOpenTarget(task.pr, pr) || !sameRevision(task.revision, pr))
+            throw new AppError(
+              'stale_revision',
+              'The PR changed during conflict resolution. Inspect the preserved worker copy.',
+            );
+          if (!autoMergeEnabled(this.store, task))
+            throw new AppError(
+              'automerge_disabled',
+              'Enable auto-merge before resuming conflict resolution.',
+            );
+          this.store.transaction(() => this.enqueueConflictRepair(task));
           return task;
         }
         if (
@@ -650,10 +1981,15 @@ export class Engine {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (!sameRevision(current, task.revision))
+        if (
+          !sameRevision(current, task.revision) ||
+          (task.verifiedMerge &&
+            (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
+        )
           throw new AppError('stale_plan', 'The plan changed after review');
         task.approvedAt = now();
-        this.state(task, 'complete', 'Plan approved for implementation at this exact revision');
+        task.pr = current;
+        this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
       } else if (action === 'waive-checks') {
         if (task.state !== 'awaiting_checks' || !reason.trim())
           throw new AppError(
@@ -676,15 +2012,38 @@ export class Engine {
       } else {
         if (task.state !== 'complete')
           throw new AppError('not_complete', 'Only completed tasks can be reopened');
-        this.invalidate(task, task.pr);
-        task.round = 0;
-        this.state(task, 'queued', reason || 'Reopened by the user');
+        if (isTicket(task)) {
+          task.generation++;
+          this.store.cancelJobs(id);
+          this.onCancel(id);
+          task.workerReport = undefined;
+          task.reviewFinished = false;
+          this.state(task, 'discussing', reason || 'Reopened by the user');
+        } else {
+          this.invalidate(task, task.pr);
+          task.round = 0;
+          this.state(task, 'queued', reason || 'Reopened by the user');
+        }
       }
       this.store.event(id, `human.${action}`, { reason });
       return task;
     });
   }
   recoverInterruptedJobs() {
+    for (const task of this.store.tasks()) {
+      if (task.state !== 'needs_input' || task.inputRequest) continue;
+      const job = this.store.jobs(task.id).at(-1);
+      if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;
+      const result = this.recordedAgentResult(task.id, job.id);
+      if (
+        result &&
+        requestsHumanInput(result) &&
+        result.checkedHead === task.revision?.head &&
+        (result.question || result.summary) === task.reason
+      ) {
+        this.state(task, 'needs_input', task.reason, job);
+      }
+    }
     for (const task of this.store.tasks())
       if (task.state === 'submitting')
         this.state(
@@ -700,8 +2059,8 @@ export class Engine {
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
         job.status = 'failed';
-        job.error =
-          'Server restarted during this run. Its external effects must be reconciled before retry.';
+        job.error = interruptedByRestart;
+        job.errorCode = 'server_restarted';
         job.finishedAt = now();
         this.store.saveJob(job);
         const task = this.store.getTask(job.taskId);
@@ -735,7 +2094,17 @@ export class Engine {
     if (task.generation !== job.generation || task.state === 'paused') return;
     task.resumeState = task.state;
     if (job.role === 'reviewer') task.reviewFinished = false;
-    this.state(task, 'needs_input', redact(String(error)));
+    const reason = redact(String(error));
+    if (job.kind === 'fix' && task.pendingFix && task.pendingAuthorHead) {
+      task.resumeState = 'awaiting_push';
+      this.state(
+        task,
+        'needs_input',
+        `Saved fix ${task.pendingAuthorHead} is preserved. ${reason}`,
+      );
+    } else {
+      this.state(task, 'needs_input', reason);
+    }
     this.store.event(task.id, 'job.failed', { error: redact(String(error)) }, job.id);
   }
   defaultAgents(): AgentProfiles {
@@ -752,6 +2121,79 @@ export class Engine {
     this.store.setSetting('agents.defaults', profiles);
     return profiles;
   }
+  applyAuthorProfile(task: Task, profile: AgentProfile) {
+    const agents = this.effectiveAgents(task);
+    if (agents.worker.engine !== profile.engine) {
+      this.store.event(task.id, 'agent.engine_changed', {
+        previous: agents.worker.engine,
+        current: profile.engine,
+        thread: task.authorThreadId,
+      });
+      task.authorThreadId = undefined;
+    }
+    task.agents = { ...agents, worker: profile };
+  }
+
+  /** Called under the task lock and in the same transaction as the slot update. */
+  reconfigureTaskRuns(
+    task: Task,
+    role: Job['role'],
+    profile: AgentProfile,
+    canInterrupt: (id: string) => boolean,
+  ) {
+    const jobs = this.store.activeJobs(task.id).filter((job) => job.generation === task.generation);
+    const previous = jobs.find(
+      (job) =>
+        job.role === role &&
+        job.status === 'running' &&
+        canInterrupt(job.id) &&
+        !sameAgentProfile(job.profile, profile),
+    );
+    if (previous) task.generation++;
+    if (role === 'author') {
+      this.applyAuthorProfile(task, profile);
+      if (task.workerRequest?.profile) task.workerRequest.profile = profile;
+    }
+    this.store.saveTask(task);
+
+    for (const job of jobs) {
+      if (job.status !== 'queued') continue;
+      job.generation = task.generation;
+      if (job.role === role) job.profile = profile;
+      this.store.saveJob(job);
+    }
+    if (!previous) return false;
+
+    this.store.saveJob({ ...previous, status: 'cancelled', finishedAt: now() });
+    const resumed: Job = {
+      ...previous,
+      id: randomUUID(),
+      firstAttemptId: previous.firstAttemptId ?? previous.id,
+      generation: task.generation,
+      profile,
+      status: 'queued',
+      startedAt: undefined,
+      finishedAt: undefined,
+      threadId: undefined,
+      turnId: undefined,
+      notBefore: undefined,
+      error: undefined,
+      createdAt: now(),
+    };
+    this.store.saveJob(resumed);
+    this.store.event(
+      task.id,
+      'job.queued',
+      {
+        role: resumed.role,
+        kind: resumed.kind,
+        replaces: previous.id,
+      },
+      resumed.id,
+    );
+    return true;
+  }
+
   async setTaskAgent(id: string, role: 'author' | 'reviewer', profile: AgentProfile) {
     const existing = this.store.getTask(id);
     return this.lock(
@@ -793,20 +2235,21 @@ export class Engine {
               'task_busy',
               'Wait for this task to become idle before changing its model',
             );
-          const old = this.effectiveAgents(task)[role === 'author' ? 'worker' : 'daddy'];
-          if (old.engine !== profile.engine) {
-            const field = role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
-            this.store.event(id, 'agent.engine_changed', {
-              previous: old.engine,
-              current: profile.engine,
-              thread: task[field],
-            });
-            task[field] = undefined;
+          if (role === 'author') {
+            this.applyAuthorProfile(task, profile);
+            if (task.workerRequest) task.workerRequest.profile = profile;
+          } else {
+            const agents = this.effectiveAgents(task);
+            if (agents.daddy.engine !== profile.engine) {
+              this.store.event(id, 'agent.engine_changed', {
+                previous: agents.daddy.engine,
+                current: profile.engine,
+                thread: task.reviewerThreadId,
+              });
+              task.reviewerThreadId = undefined;
+            }
+            task.agents = { ...agents, daddy: profile };
           }
-          task.agents = {
-            ...this.effectiveAgents(task),
-            [role === 'author' ? 'worker' : 'daddy']: profile,
-          };
           task.contextVersion++;
           task.generation++;
           this.store.saveTask(task);
@@ -828,8 +2271,6 @@ export class Engine {
     requirements?: string;
     parentTaskId?: string;
     agents?: AgentProfiles;
-    publication?: 'auto' | 'human';
-    autoPush?: boolean;
     groupId?: string;
     groupGeneration?: number;
     workspaceId?: string;
@@ -837,6 +2278,8 @@ export class Engine {
     workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
     dependsOn?: string[];
+    workerRequest?: WorkerRequest;
+    startImplementation?: boolean;
     id?: string;
   }) {
     if (
@@ -900,6 +2343,14 @@ export class Engine {
         };
       if (group.deletedAt || group.deletion)
         throw new AppError('session_deleting', 'This session is being deleted');
+      if (input.startImplementation) {
+        if (group.daddyState === 'paused' || group.daddyState === 'archived')
+          throw new AppError('daddy_paused', 'Resume daddy before sending another message');
+        const slot = input.workerRequest?.slot;
+        const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
+        if (slot !== undefined && (!Number.isInteger(slot) || slot < 1 || slot > capacity))
+          throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      }
       if (
         (parent || input.groupId) &&
         input.agents?.daddy &&
@@ -928,15 +2379,17 @@ export class Engine {
         createdByAction: input.createdByAction,
         dependsOn: input.dependsOn,
         agents: {
-          worker: input.agents?.worker ?? group.worker ?? this.defaultAgents().worker,
+          worker:
+            input.workerRequest?.profile ??
+            input.agents?.worker ??
+            group.worker ??
+            this.defaultAgents().worker,
           daddy: group.daddy,
         },
-        policy: {
-          ...defaultPolicy,
-          publication:
-            input.publication ?? group.defaultPolicy?.publication ?? defaultPolicy.publication,
-          autoPush: input.autoPush ?? group.defaultPolicy?.autoPush ?? defaultPolicy.autoPush,
-        },
+        workerRequest: group.orchestrated
+          ? (input.workerRequest ?? { profile: input.agents?.worker })
+          : undefined,
+        policy: { ...defaultPolicy, ...group.defaultPolicy },
         state: 'discussing',
         reason: group.orchestrated
           ? 'Waiting for daddy to assign this task.'
@@ -964,8 +2417,10 @@ export class Engine {
           source: input.source.url,
           groupId: group.id,
           parentTaskId: parent?.id,
+          dispatched: input.startImplementation,
         });
-        if (!group.orchestrated)
+        if (input.startImplementation) this.queueImplementation(task, input.createdByAction);
+        else if (!group.orchestrated)
           this.store.enqueue(
             task,
             'author',
@@ -995,26 +2450,30 @@ export class Engine {
           'task_busy',
           'Resume or wait for the current discussion before implementing',
         );
-      task.resumeState = 'implementing';
-      this.state(
-        task,
-        'implementing',
-        'The author is implementing this ticket in its managed workspace',
-      );
-      this.store.enqueue(
-        task,
-        'author',
-        'implement',
-        instruction ??
-          'Implement the ticket according to the original requirements and our discussion. Test the changes. Do not commit, push or create a PR yourself; the service will save the local result.',
-        actionId,
-      );
+      this.store.transaction(() => this.queueImplementation(task, actionId, instruction));
       return task;
     });
   }
+  private queueImplementation(task: Task, actionId?: string, instruction?: string) {
+    if (task.workerReport) {
+      task.workerReport = undefined;
+      task.reviewFinished = false;
+      task.summary = '';
+    }
+    task.resumeState = 'implementing';
+    this.state(task, 'implementing', 'The worker is carrying out the task');
+    this.store.enqueue(
+      task,
+      'author',
+      'implement',
+      instruction ??
+        'Carry out the task according to the original requirements and discussion. Verify the outcome and report what was accomplished. The service saves any code changes and handles submission. Do not commit, push or create a PR yourself.',
+      actionId,
+    );
+  }
   async retryTicket(id: string) {
     const task = this.store.getTask(id);
-    if (!isTicket(task)) return this.review(id, true);
+    if (!isTicket(task) || task.workerReport) return this.review(id, true);
     if (this.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get('ticket-submit:' + id))
       throw new AppError(
         'submission_pending',

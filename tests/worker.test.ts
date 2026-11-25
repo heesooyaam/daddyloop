@@ -1,9 +1,11 @@
+import { GitHubQuotaError } from '../src/providers/github-quota.js';
 import { it, expect, vi } from 'vitest';
 import { fixture } from './helpers.js';
 import { Worker } from '../src/runtime/worker.js';
 import { Workspaces } from '../src/runtime/workspaces.js';
 import { DemoRuntime } from '../src/runtime/demo.js';
-import { defaultPolicy } from '../src/core/types.js';
+import { TicketWorkflow } from '../src/core/ticket-workflow.js';
+import { daddyFixture } from './daddy-fixture.js';
 const healthy = () => ({
   memoryAvailableGiB: 30,
   memoryTotalGiB: 90,
@@ -12,7 +14,73 @@ const healthy = () => ({
   ok: true,
   reasons: [],
 });
-it('runs the complete author/reviewer cycle and stops at each human publication gate', async () => {
+it('records structured agent events containing quoted command text without interrupting review', async () => {
+  const f = await fixture();
+  const demo = new DemoRuntime();
+  const run = demo.run.bind(demo);
+  vi.spyOn(demo, 'run').mockImplementation(async (input) => {
+    input.onEvent('runtime.item', {
+      type: 'commandExecution',
+      command: 'inspect authorization: "test-fixture" then continue',
+      output: [{ private: { api_key: 'opaque test value' }, exitCode: 0 }, 'quoted "output"'],
+    });
+    return run(input);
+  });
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), demo, demo, healthy, 0);
+  try {
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
+    const item = f.store
+      .events(f.task.id)
+      .find(
+        (e) => e.type === 'runtime.item' && JSON.stringify(e.data).includes('commandExecution'),
+      );
+    expect(item?.data).toEqual({
+      type: 'commandExecution',
+      command: 'inspect authorization: "[REDACTED]" then continue',
+      output: [{ private: { api_key: '[REDACTED]' }, exitCode: 0 }, 'quoted "output"'],
+    });
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+it('recovers an outstanding pre-upgrade human question only when it still explains the task state', async () => {
+  const f = await fixture();
+  try {
+    await f.engine.review(f.task.id);
+    const job = f.store.claim()!;
+    const result = {
+      ...f.result(),
+      status: 'needs_input',
+      question: 'Which variant?',
+      summary: 'A choice is missing.',
+    };
+    f.store.event(
+      f.task.id,
+      'runtime.item',
+      { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify(result) },
+      job.id,
+    );
+    await f.engine.completeJob(job, { ...result, status: 'needs_input' });
+    f.store.saveJob({ ...job, status: 'completed' });
+    const task = f.store.getTask(job.taskId);
+    delete task.inputRequest;
+    f.store.saveTask({ ...task, reason: 'Another reason' });
+    f.engine.recoverInterruptedJobs();
+    expect(f.store.getTask(task.id).inputRequest).toBeUndefined();
+    f.store.saveTask(task);
+    f.engine.recoverInterruptedJobs();
+    expect(f.store.getTask(task.id).inputRequest).toEqual({
+      runId: job.id,
+      role: job.role,
+      generation: job.generation,
+    });
+  } finally {
+    f.store.close();
+  }
+});
+it('persists each completed draft before publishing it and running the next stage', async () => {
   const f = await fixture();
   const worker = new Worker(
     f.engine,
@@ -48,10 +116,10 @@ it('runs the complete author/reviewer cycle and stops at each human publication 
     f.store.close();
   }
 });
-it('runs automatic publication without requiring a manual handoff', async () => {
-  const f = await fixture({
-    policy: { ...defaultPolicy, publication: 'auto' },
-  });
+it('publishes automatically even when an older task stored a manual policy', async () => {
+  const f = await fixture();
+  Object.assign(f.task.policy, { publication: 'human', autoPush: false });
+  f.store.saveTask(f.task);
   const worker = new Worker(
     f.engine,
     new Workspaces('/tmp'),
@@ -68,6 +136,68 @@ it('runs automatic publication without requiring a manual handoff', async () => 
       );
     }
     expect(f.store.getTask(f.task.id).state).toBe('complete');
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+it('keeps explicit session submission and publication policies manual', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({
+      workspaceId: f.workspace.id,
+      autoPush: false,
+      publication: 'human',
+    });
+    const task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: 'Manual workflow',
+      requirements: 'Wait for explicit actions',
+      createdByAction: 'fixture',
+    });
+    expect(task.policy).toMatchObject({ autoPush: false, publication: 'human' });
+    task.state = 'ready_for_review';
+    task.pendingAuthorHead = task.revision!.head;
+    f.store.saveTask(task);
+    const submit = vi.fn(async () => task);
+    f.worker.autoSubmit = submit;
+    await f.worker.tick();
+    expect(submit).not.toHaveBeenCalled();
+
+    task.state = 'awaiting_publication';
+    f.store.saveTask(task);
+    const publish = vi.spyOn(f.engine, 'publish');
+    await f.worker.tick();
+    expect(publish).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
+
+it('sends an older task’s saved corrections and reconciles the new PR head', async () => {
+  const f = await fixture();
+  const workspaces = new Workspaces('/tmp');
+  const runtime = new DemoRuntime();
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  const workflow = new TicketWorkflow(f.engine, workspaces);
+  worker.autoSubmit = (id) => workflow.pushFixes(id);
+  try {
+    const task = f.store.getTask(f.task.id);
+    const pending = 'f'.repeat(40);
+    task.state = 'awaiting_push';
+    task.pendingAuthorHead = pending;
+    Object.assign(task.policy, { autoPush: false });
+    f.store.saveTask(task);
+    let current = task.pr!;
+    vi.spyOn(f.provider, 'getPR').mockImplementation(async () => current);
+    const push = vi.spyOn(workspaces, 'pushSavedFix').mockImplementation(async () => {
+      current = { ...current, head: pending };
+    });
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(task.id).revision?.head).toBe(pending));
+    expect(push).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: task.id }), pending);
   } finally {
     await worker.stop();
     f.store.close();
@@ -145,6 +275,34 @@ it('emits an attention milestone when a native review cannot start', async () =>
         ),
     ).toBe(true);
     expect(runtime.run).not.toHaveBeenCalled();
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
+it('finishes the saved result after a throttled verification read without restarting the agent', async () => {
+  const f = await fixture(),
+    runtime = new DemoRuntime();
+  const agent = vi.spyOn(runtime, 'run').mockImplementation(async () => {
+    vi.spyOn(f.provider, 'getPR').mockRejectedValueOnce(new GitHubQuotaError(Date.now() + 60_000));
+    return f.result();
+  });
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+  try {
+    await worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.jobs()[0]).toMatchObject({
+        status: 'queued',
+        deferredResult: { status: 'completed' },
+      }),
+    );
+    const job = f.store.jobs()[0];
+    f.store.saveJob({ ...job, notBefore: undefined });
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
+    expect(agent).toHaveBeenCalledTimes(1);
+    expect(f.store.messages(f.task.id)).toHaveLength(1);
   } finally {
     await worker.stop();
     f.store.close();

@@ -343,9 +343,19 @@ it('shows individual CI checks and safe links in the Telegram task card', async 
       update_id: 500,
       message: {
         message_id: 501,
-        text: `/task ${task.id.slice(0, 8)}`,
+        text: '/tasks',
         from: { id: 7 },
         chat: { id: 7, type: 'private' },
+      },
+    });
+    const open = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle({
+      update_id: 501,
+      callback_query: {
+        id: 'open-task',
+        data: open,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
       },
     });
     expect(telegram.sent.at(-1)!.card.text).toContain('Unit tests: failed');

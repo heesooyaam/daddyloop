@@ -144,7 +144,7 @@ it('binds a Telegram submit confirmation to its owner, topic, task and exact rev
   }
 });
 
-it('requires an explicit session outside a topic and installs separate private/group command menus', async () => {
+it('requires an explicit session outside a topic and ignores commands for another bot', async () => {
   const f = daddyFixture(),
     telegram = telegramFixture(),
     bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
@@ -171,21 +171,6 @@ it('requires an explicit session outside a topic and installs separate private/g
     },
   });
   try {
-    await bot.syncCommands();
-    expect(telegram.calls.filter((call) => call.method === 'setMyCommands')).toEqual([
-      expect.objectContaining({
-        body: expect.objectContaining({ scope: { type: 'all_private_chats' } }),
-      }),
-      expect.objectContaining({
-        body: expect.objectContaining({ scope: { type: 'chat', chat_id: -10042 } }),
-      }),
-    ]);
-    const privateCommands = telegram.calls[0].body.commands.map((item: any) => item.command);
-    const groupCommands = telegram.calls[1].body.commands.map((item: any) => item.command);
-    expect(privateCommands).toContain('updates');
-    expect(groupCommands).not.toContain('updates');
-    expect(groupCommands).toEqual(expect.arrayContaining(['help', 'tasks', 'submit']));
-
     await bot.handle(message('/tasks'));
     expect(telegram.sent.at(-1)!.card.text).toContain('Choose a session');
     await bot.handle(message('/session Second session'));
@@ -202,8 +187,7 @@ it('requires an explicit session outside a topic and installs separate private/g
     await bot.handle(message('/help@another_bot'));
     expect(telegram.sent).toHaveLength(sent);
     await bot.handle(message('/help@fixture_bot'));
-    expect(telegram.sent.at(-1)!.card.text).toContain('general topic');
-    expect(telegram.sent.at(-1)!.card.text).toContain('/command@fixture_bot');
+    expect(telegram.sent.at(-1)!.card.text).toContain('/session [name|ID]');
     expect(first.id).not.toBe(second.id);
   } finally {
     await bot.stop();
@@ -331,7 +315,9 @@ it.each([
       },
     });
     try {
-      await bot.handle(message(`/task ${task.id.slice(0, 8)}`));
+      await bot.handle(message('/tasks'));
+      const open = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+      await bot.handle(click(open));
       await bot.handle(message(command));
       const confirm = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
       await bot.handle(click(confirm));

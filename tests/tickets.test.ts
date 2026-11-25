@@ -147,12 +147,14 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
   task.state = 'ready_for_review';
   store.saveTask(task);
   let writes = 0,
-    correctOwner = false;
+    correctOwner = false,
+    draft: boolean | undefined;
   const reader = new TicketReader(
     async (url, options) => {
       if (String(url).endsWith('/user')) return response({ id: 7 });
       if (options?.method === 'POST') {
         writes++;
+        draft = JSON.parse(String(options.body)).draft;
         throw new Error('Lost response after creation');
       }
       return response([
@@ -184,6 +186,7 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
     expect(linked.state).toBe('queued');
     expect(linked.revision?.head).toBe(task.pendingAuthorHead);
     expect(writes).toBe(1);
+    expect(draft).toBe(false);
   } finally {
     store.close();
   }

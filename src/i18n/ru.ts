@@ -926,6 +926,42 @@ Object.assign(ru, {
   'The ticket turn was incomplete': 'Работа над тикетом не завершена',
   'The author produced no new committed changes. Discuss the result before implementing again.':
     'Автор не создал новых изменений. Обсуди результат перед повторной реализацией.',
+  'The worker report is ready for review': 'Отчёт воркера готов к проверке',
+  'Inspect the saved worker changes before verifying this merge':
+    'Проверь сохранённые изменения воркера перед проверкой слияния',
+  'Verify merge': 'Проверить слияние',
+  'Checking the merged result': 'daddy проверяет результат слияния',
+  'Recovered saved fix {head}; checking the PR before submission.':
+    'Восстановлен сохранённый коммит {head}. Сверяем PR перед отправкой.',
+  'Resume submission of saved fix {head} before review.':
+    'Перед ревью возобнови отправку сохранённого коммита {head}.',
+  'Waiting for the PR to confirm saved fix {head}.':
+    'Ждём, когда PR покажет сохранённый коммит {head}.',
+  'Resuming submission of the saved fix': 'Возобновляем отправку сохранённого исправления',
+  'Wait for submission of saved fix {head} before starting another turn.':
+    'Дождись отправки сохранённого коммита {head} перед следующим ходом.',
+  'Saved fix {head} is on the PR. Inspect the earlier draft review {id} before starting another review.':
+    'Исправление {head} уже в PR. Перед новым ревью проверь черновик {id} для предыдущей версии.',
+  'Inspect the earlier draft review {id} before reviewing {head}.':
+    'Перед проверкой коммита {head} проверь черновик ревью {id} на предыдущей версии.',
+  'Submission of saved fix {head} is unconfirmed; the PR still shows {remote}. Inspect the outcome and resume to retry this exact commit.':
+    'Отправка коммита {head} не подтверждена. В PR виден {remote}. Проверь результат и возобнови задачу для повторной отправки.',
+  'Saved fix {head} is preserved. PR is {state} at {remote} (base {base}, target {target}); expected {original} (base {expectedBase}, target {expectedTarget}). Inspect the target and submission outcome.':
+    'Сохранён коммит {head}. PR в состоянии {state} на {remote} (база {base}, ветка {target}). Ожидался {original} (база {expectedBase}, ветка {expectedTarget}). Проверь цель и результат отправки.',
+  'daddy verified the merged result': 'daddy проверил результат слияния',
+  'Choose an idle task that needs attention':
+    'Выбери остановившуюся задачу, которая требует внимания',
+  'The provider must confirm the merge of this task head':
+    'Сервис репозитория должен подтвердить слияние этой версии PR',
+  'The merged revision changed during verification':
+    'Версия PR изменилась во время проверки слияния',
+  'daddy verified the worker report': 'daddy проверил отчёт воркера',
+  'The review used a different worker report or revision':
+    'Ревью относится к другому отчёту воркера или другой ревизии',
+  'Wait for a worker report on the current task revision before reviewing':
+    'Дождись отчёта воркера для текущей ревизии задачи',
+  'The saved worker report could not be loaded': 'Не удалось загрузить сохранённый отчёт воркера',
+  'Reviewing the worker report': 'daddy проверяет отчёт воркера',
   'Implementation saved locally. Submit it to a native PR for the shared reviewer.':
     'Реализация сохранена локально. Отправь её в PR для общего ревьюера.',
   'Submit again to reconcile the existing PR creation before changing implementation.':
@@ -973,6 +1009,7 @@ Object.assign(ru, {
     'Тикет импортирован. Автор изучает его перед реализацией.',
   'The author is implementing this ticket in its managed workspace':
     'Автор реализует тикет в своей рабочей копии',
+  'The worker is carrying out the task': 'Воркер выполняет задачу',
   'Retrying the ticket conversation': 'Повторяем обсуждение тикета',
   'PR connected. The shared reviewer will check this revision.':
     'PR подключён. Общий ревьюер проверит эту ревизию.',

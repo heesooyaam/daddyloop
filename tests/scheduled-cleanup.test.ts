@@ -203,6 +203,7 @@ it('cleans under pressure without a session and reports the measured result to T
   utimesSync(old, new Date(0), new Date(0));
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   const sent: string[] = [];
+  let bot!: Telegram;
   const telegram = new TelegramApi(
     '123456:abcdefghijklmnopqrstuvwxyz123456',
     async (url, options) => {
@@ -213,7 +214,7 @@ it('cleans under pressure without a session and reports the measured result to T
           });
         });
       const { text } = JSON.parse(String(options?.body)) as { text: string };
-      if (text) sent.push(text);
+      if (String(url).endsWith('/sendMessage')) sent.push(text);
       return Response.json({ ok: true, result: { message_id: sent.length } });
     },
   );
@@ -222,7 +223,7 @@ it('cleans under pressure without a session and reports the measured result to T
     store: f.store,
     token: 'fixture',
     startUpdateCheck: false,
-    telegramFactory: async (engine) => new Telegram(engine, telegram, 'fixture_bot'),
+    telegramFactory: async (engine) => (bot = new Telegram(engine, telegram, 'fixture_bot')),
     config: configSchema.parse({
       telegram: { enabled: true, tokenFile: '/fixture' },
       cache: {
@@ -257,6 +258,50 @@ it('cleans under pressure without a session and reports the measured result to T
     expect(existsSync(old)).toBe(false);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toContain('Disk usage 85.0% → 81.0%. Free space gained 4.00 GiB.');
+    const sendCommand = (id: number, user: number, text: string) =>
+      bot.handle({
+        update_id: id,
+        message: { message_id: id, chat: { id: 7, type: 'private' }, from: { id: user }, text },
+      });
+    await sendCommand(10, 77, '/cleanup off');
+    expect((await status()).json().enabled).toBe(true);
+    await sendCommand(11, 7, '/cleanup off');
+    expect((await status()).json().enabled).toBe(false);
+    const file = join(f.directory, 'SKILL.md');
+    writeFileSync(file, '---\nname: cleanup-fixture\n---\nChoose review-caches first.');
+    const update = (payload: Record<string, unknown>) =>
+      server.app.inject({
+        method: 'POST',
+        url: '/api/cache/schedule',
+        headers: { authorization: 'Bearer fixture' },
+        payload,
+      });
+    expect(
+      (await update({ intervalMinutes: 45, diskPercent: 89, skillPath: file })).json(),
+    ).toMatchObject({
+      enabled: false,
+      intervalMinutes: 45,
+      diskPercent: 89,
+      skill: 'cleanup-fixture',
+    });
+    expect((await update({ enabled: true, diskPercent: 90 })).statusCode).toBe(422);
+    await bot.handle({
+      update_id: 12,
+      callback_query: {
+        id: 'toggle',
+        from: { id: 7 },
+        data: 'cleanup:on',
+        message: { message_id: 99, chat: { type: 'private', id: 7 } },
+      },
+    });
+    expect((await status()).json()).toMatchObject({
+      enabled: true,
+      intervalMinutes: 45,
+      diskPercent: 89,
+      skill: 'cleanup-fixture',
+    });
+    await sendCommand(13, 7, '/cleanup interval 60');
+    expect((await status()).json().intervalMinutes).toBe(60);
     expect(() => cacheScheduleSchema.parse({ intervalMinutes: 29 })).toThrow();
     expect(() =>
       configSchema.parse({

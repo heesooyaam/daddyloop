@@ -2,8 +2,247 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { daddyFixture } from './daddy-fixture.js';
 import type { SessionInput, AgentInput } from '../src/runtime/agent.js';
-import { profiles } from './planning-fixture.js';
+import { profiles, ticketInput } from './planning-fixture.js';
+import { taskCard } from '../src/integrations/telegram-tasks.js';
 afterEach(() => vi.restoreAllMocks());
+
+it('imports the declared sub-issue and keeps unrelated links as references', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  try {
+    const child = ticketInput(57);
+    vi.spyOn(f.tickets.reader, 'read').mockResolvedValue({ ref: child.ref, source: child.source });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: `Child task\nТикет GitHub — ${child.source.url}\nSee https://github.com/test/repo/issues/51 for background`,
+      requestId: 'subissue-57',
+    });
+    expect(task.source).toMatchObject({ kind: 'github_issue', url: child.source.url });
+    expect(task.state).toBe('implementing');
+    expect(
+      (
+        await f.daddy.createTask(group.id, {
+          requirements: child.source.url,
+          requestId: 'same-issue',
+        })
+      ).id,
+    ).toBe(task.id);
+    const local = await f.daddy.createTask(group.id, {
+      requirements: `Look at ${child.source.url} as an example`,
+      requestId: 'reference',
+    });
+    expect(local.source?.kind).toBe('local');
+  } finally {
+    await f.close();
+  }
+});
+it('keeps other tasks active while a worker question awaits a reply', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const first = await f.daddy.createTask(group.id, {
+      requirements: 'First task',
+      requestId: 'first',
+    });
+    const other = await f.daddy.createTask(group.id, {
+      requirements: 'Other task',
+      requestId: 'other',
+    });
+    f.daddy.start();
+    const question = 'Which layout should the first task use?';
+    f.runtime.runSession.mockResolvedValueOnce({
+      status: 'needs_input',
+      summary: question,
+      question,
+      checkedHead: '',
+    });
+    f.store.saveTask({ ...first, state: 'needs_input', reason: question });
+    f.store.event(first.id, 'job.completed', {});
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).at(-1)?.waitingTaskId).toBe(first.id),
+    );
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id).at(-1)?.status).toBe('completed'));
+    expect(f.store.getGroup(group.id).daddyState).toBe('active');
+    expect(f.store.getTask(first.id).state).toBe('needs_input');
+    expect(f.store.messages(group.id).at(-1)?.text).toBe(question);
+    f.store.saveTask({ ...other, state: 'complete' });
+    f.store.event(other.id, 'task.state', { state: 'complete' });
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).at(-1)).toMatchObject({
+        status: 'queued',
+        input: expect.stringContaining(other.id),
+      }),
+    );
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id).at(-1)?.status).toBe('completed'));
+    f.daddy.chat(group.id, 'Set the goal for the whole session');
+    f.runtime.runSession.mockResolvedValueOnce({
+      status: 'needs_input',
+      summary: 'Which goal?',
+      checkedHead: '',
+    });
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.getGroup(group.id).daddyState).toBe('needs_input'));
+  } finally {
+    await f.close();
+  }
+});
+
+it('reviews a report without code changes before daddy dispatches follow-up work', async () => {
+  const f = daddyFixture();
+  const subIssue = ticketInput(56);
+  const report = `Created and linked [sub-issue](${subIssue.source.url}).`;
+  const verified = 'Verified that the sub-issue is linked and covers the requested work.';
+  const submit = vi.fn(async () => {});
+  f.worker.autoSubmit = submit;
+  vi.spyOn(f.tickets.reader, 'read').mockResolvedValue({
+    ref: subIssue.ref,
+    source: subIssue.source,
+  });
+  vi.mocked(f.checkouts.commitTicket).mockImplementationOnce(async (task) => task.revision!.head);
+  f.agentRuntime.run
+    .mockImplementationOnce(async (input) => ({
+      status: 'completed',
+      summary: report,
+      checkedHead: input.task.revision!.head,
+    }))
+    .mockImplementationOnce(async (input) => {
+      expect(input.job).toMatchObject({
+        kind: 'review',
+        role: 'reviewer',
+        profile: profiles.daddy,
+      });
+      expect(input.task.reviewerThreadId).toBeUndefined();
+      expect(input.tools).toEqual([]);
+      expect(input.prompt).toContain(report);
+      input.onSession('report-review');
+      return { status: 'completed', summary: verified, checkedHead: input.task.revision!.head };
+    });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    group.reviewerThreadId = 'existing-native-review';
+    f.store.saveGroup(group);
+    f.daddy.start();
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Create a sub-issue and report its URL',
+      requestId: 'report-without-code',
+    });
+    await f.worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.jobs(task.id).map((job) => [job.role, job.status])).toEqual([
+        ['author', 'completed'],
+        ['reviewer', 'queued'],
+      ]),
+    );
+    expect(f.store.getTask(task.id)).toMatchObject({ state: 'reviewing', summary: report });
+    expect(f.store.daddyJobs(group.id)).toHaveLength(0);
+    expect(f.daddy.board(group.id).workers.occupied).toBe(1);
+
+    f.runtime.runSession.mockImplementation(async (input) => {
+      const outcome = await input.onTool('read_task', { taskId: task.id }, 'read');
+      expect(outcome).toMatchObject({
+        task: { state: 'complete' },
+        messages: [
+          { role: 'author', text: report },
+          { role: 'reviewer', text: verified },
+        ],
+      });
+      const item = (await input.onTool(
+        'import_ticket',
+        { source: subIssue.source.url },
+        'import',
+      )) as { taskId: string };
+      await input.onTool('dispatch', { taskId: item.taskId }, 'dispatch');
+      return { status: 'completed', summary: 'Queued the verified sub-issue.', checkedHead: '' };
+    });
+    await f.worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('complete'));
+    expect(f.store.getTask(task.id)).toMatchObject({ reviewFinished: true, summary: report });
+    expect(f.store.getTask(task.id).pendingAuthorHead).toBeUndefined();
+    expect(taskCard('en', { task: f.store.getTask(task.id) }).entities).toContainEqual(
+      expect.objectContaining({ type: 'text_link', url: subIssue.source.url }),
+    );
+    expect(f.store.getGroup(group.id).reviewerThreadId).toBe('existing-native-review');
+    await vi.waitFor(() => expect(f.daddy.board(group.id).workers.occupied).toBe(0));
+    expect(submit).not.toHaveBeenCalled();
+
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id)[0]?.status).toBe('completed'));
+    const child = f.store.tasks(group.id).find((item) => item.source?.url === subIssue.source.url);
+    expect(f.store.jobs(child!.id)).toMatchObject([{ kind: 'implement', status: 'queued' }]);
+    const reopened = await f.engine.action(task.id, 'reopen');
+    expect(reopened).toMatchObject({ state: 'discussing', revision: task.revision });
+  } finally {
+    await f.close();
+  }
+});
+
+it.each([
+  { status: 'incomplete', revision: 'a' },
+  { status: 'completed', revision: 'f' },
+] as const)(
+  'keeps an unverified report open when review returns $status for $revision',
+  async ({ status, revision }) => {
+    const f = daddyFixture();
+    vi.mocked(f.checkouts.commitTicket).mockImplementationOnce(async (task) => task.revision!.head);
+    try {
+      const group = f.daddy.create({ workspaceId: f.workspace.id });
+      const task = await f.daddy.createTask(group.id, {
+        requirements: 'Verify an external result',
+        requestId: 'unverified-report',
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.jobs(task.id)[0]?.status).toBe('completed'));
+      f.agentRuntime.run.mockResolvedValueOnce({
+        status,
+        summary: 'Report review',
+        checkedHead: revision.repeat(40),
+      });
+      await f.worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          reviewFinished: false,
+          resumeState: 'reviewing',
+        }),
+      );
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      await f.engine.action(task.id, 'resume');
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', status: 'queued' }]);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+it('keeps previously saved code changes on the PR path when the next run adds no commit', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Check and preserve the saved changes',
+      requestId: 'preserved-commit',
+    });
+    const savedHead = 'b'.repeat(40);
+    f.store.saveTask({
+      ...task,
+      revision: { ...task.revision!, head: savedHead },
+      pendingAuthorHead: savedHead,
+    });
+    await f.worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'ready_for_review',
+        pendingAuthorHead: savedHead,
+        revision: { head: savedHead, base: task.revision!.base },
+      }),
+    );
+    expect(f.store.getTask(task.id).workerReport).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+
 it('creates one daddy conversation idempotently and lets him split and dispatch work without contacting workers', async () => {
   const f = daddyFixture();
   let created: string[] = [];
@@ -128,6 +367,7 @@ it('drains whole tasks through review and fixes before retiring worker slots', a
       target: 1,
       pending: false,
       occupied: 1,
+      slots: [{ number: 1 }, { number: 2, taskId: b }],
     });
     expect(pending).toHaveLength(0);
     const completedB = f.store.getTask(b);
@@ -272,7 +512,7 @@ it('allows worker defaults to change while daddy works, but preserves his active
     expect(f.store.getGroup(group.id).generation).toBe(group.generation);
     await expect(
       f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.worker } }),
-    ).rejects.toThrow('idle');
+    ).rejects.toMatchObject({ code: 'daddy_busy' });
     expect(f.store.getGroup(group.id).daddy).toEqual(profiles.daddy);
   } finally {
     done?.();

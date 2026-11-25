@@ -99,6 +99,134 @@ test('keeps separate conversation drafts when changing daddy sessions', async ({
   await page.locator('.daddy-session').filter({ hasText: 'Second draft session' }).click();
   await expect(page.getByLabel('Message daddy')).toHaveValue('Another unsent idea');
 });
+test('collapses each side panel independently and keeps the current conversation accessible on a phone', async ({
+  page,
+}) => {
+  const desktop = { width: 1280, height: 900 };
+  await page.setViewportSize(desktop);
+  await login(page);
+  const issue = Date.now();
+  await create(page, 'Panel layout session', issue);
+  await create(page, 'Another panel layout session', issue + 1);
+
+  const sessions = page.getByRole('navigation', { name: 'Sessions' });
+  const session = sessions.getByRole('button', { name: /^Panel layout session/ });
+  const workers = page.getByRole('heading', { name: 'Worker pool' });
+  const chat = page.getByRole('region', { name: 'Conversation with daddy' });
+  const composer = chat.getByLabel('Message daddy');
+  await session.click();
+  await expect(
+    page.getByRole('heading', { name: 'Panel layout session', exact: true }),
+  ).toBeVisible();
+  const selectedUrl = page.url();
+  const draft = 'Keep this message while switching panels';
+  await composer.fill(draft);
+
+  const checkConversation = async () => {
+    await expect(page).toHaveURL(selectedUrl);
+    await expect(composer).toBeVisible();
+    await expect(composer).toHaveValue(draft);
+  };
+  const chatWidth = () => chat.evaluate((element) => element.getBoundingClientRect().width);
+  const initialWidth = await chatWidth();
+  const hideSessions = page.getByRole('button', { name: 'Hide sessions panel' });
+  const showSessions = page.getByRole('button', { name: 'Show sessions panel' });
+  const hideTasks = page.getByRole('button', { name: 'Hide workers and tasks panel' });
+  const showTasks = page.getByRole('button', { name: 'Show workers and tasks panel' });
+  const openSessions = page.getByRole('button', { name: 'Sessions', exact: true });
+  const sidebarId = await page.locator('.daddy-sidebar').getAttribute('id');
+  expect(sidebarId).toBeTruthy();
+  expect(await hideSessions.getAttribute('aria-controls')).toBe(sidebarId);
+  const openSessionsWithKeyboard = async () => {
+    expect(await openSessions.getAttribute('aria-controls')).toBe(sidebarId);
+    const first = page.getByRole('button', { name: 'New session', exact: true });
+    const last = page.getByRole('combobox', { name: 'Language', exact: true });
+    await openSessions.press('Enter');
+    await expect(first).toBeFocused();
+    await expect(page.locator('.daddy-main')).toHaveAttribute('inert', '');
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(openSessions).toBeFocused();
+    await page.keyboard.press('Enter');
+  };
+  const openTaskReport = async (number: number) => {
+    const title = `Ticket fixture ${number}`;
+    await page.getByRole('button', { name: new RegExp(title) }).click({ timeout: 5000 });
+    const report = page.getByRole('dialog', { name: 'Work item' });
+    await expect(report.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    await report.getByRole('button', { name: 'Close', exact: true }).click();
+  };
+
+  await hideSessions.press('Enter');
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeVisible();
+  await expect(showSessions).toBeFocused();
+  await expect(showSessions).toHaveAttribute('aria-expanded', 'false');
+  await checkConversation();
+  const leftCollapsedWidth = await chatWidth();
+  expect(leftCollapsedWidth).toBeGreaterThan(initialWidth);
+
+  await hideTasks.click();
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeHidden();
+  await expect(showSessions).toBeVisible();
+  await expect(showTasks).toBeVisible();
+  await expect(showTasks).toHaveAttribute('aria-expanded', 'false');
+  await checkConversation();
+  const bothCollapsedWidth = await chatWidth();
+  expect(bothCollapsedWidth).toBeGreaterThan(leftCollapsedWidth);
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(sessions).toBeHidden();
+  await showTasks.click();
+  await expect(workers).toBeVisible();
+  await openSessionsWithKeyboard();
+  await sessions
+    .getByRole('button', { name: /^Another panel layout session/ })
+    .click({ timeout: 5000 });
+  await expect(
+    page.getByRole('heading', { name: 'Another panel layout session', exact: true }),
+  ).toBeVisible();
+  await openTaskReport(issue + 1);
+  await hideTasks.click();
+  await expect(workers).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 540 });
+  await expect(sessions).toBeHidden();
+  await openSessionsWithKeyboard();
+  await expect(sessions).toBeVisible();
+  await session.click();
+  await expect(sessions).toBeHidden();
+  const tabs = page.locator('.daddy-mobile-tabs');
+  await tabs.getByRole('button', { name: /Tasks/ }).click();
+  await expect(workers).toBeVisible();
+  await openTaskReport(issue);
+  await expect(chat).toBeHidden();
+  await tabs.getByRole('button', { name: 'daddy' }).click();
+  await checkConversation();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await page.setViewportSize(desktop);
+  await expect(sessions).toBeHidden();
+  await expect(workers).toBeHidden();
+  await showSessions.click();
+  await expect(sessions).toBeVisible();
+  await expect(workers).toBeHidden();
+  await expect(hideSessions).toHaveAttribute('aria-expanded', 'true');
+  await checkConversation();
+  const rightCollapsedWidth = await chatWidth();
+  expect(rightCollapsedWidth).toBeGreaterThan(initialWidth);
+  expect(rightCollapsedWidth).toBeLessThan(bothCollapsedWidth);
+
+  await showTasks.click();
+  await expect(workers).toBeVisible();
+  await expect(hideTasks).toHaveAttribute('aria-expanded', 'true');
+  await checkConversation();
+  expect(await chatWidth()).toBe(initialWidth);
+});
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
 }) => {
@@ -118,6 +246,49 @@ test('supports the phone task board, pool controls and workspace directory choos
   await expect(page.getByLabel('Server directory')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test('queues a task for a numbered worker and updates that worker’s model from the phone', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Shared task controls', Date.now());
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await page.getByLabel('Maximum workers').selectOption('2');
+  await page.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const queue = page.getByRole('dialog', { name: 'Queue task' });
+  await queue.getByLabel('Task description').fill('Repair the filter cache');
+  await queue.getByLabel('Assign to worker').selectOption('2');
+  await queue.getByText('Choose a model', { exact: true }).click();
+  await queue.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra');
+  await queue.getByLabel('Reasoning effort', { exact: true }).selectOption('medium');
+  const submitted = page.waitForResponse(
+    (response) => response.url().endsWith('/tasks') && response.request().method() === 'POST',
+  );
+  await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const task = await (await submitted).json();
+  const report = page.getByRole('dialog', { name: 'Work item' });
+  await expect(report.getByRole('heading', { name: 'Repair the filter cache' })).toBeVisible();
+  await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
+  await report.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  const workers = page.getByRole('dialog', { name: 'Workers' });
+  const worker = workers.getByRole('button', { name: 'Configure worker 2' });
+  await expect(worker).toContainText('Repair the filter cache');
+  await expect(worker).toContainText('gpt-6-astra · medium');
+  await worker.click();
+  await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('max');
+  await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
+  const saved = page.waitForRequest(
+    (request) => request.url().endsWith('/workers/2') && request.method() === 'POST',
+  );
+  await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+  expect((await saved).postDataJSON()).toMatchObject({ forceTaskId: task.id });
+  await expect(worker).toContainText('gpt-5.6-sol · max');
+  await expect(worker).toContainText('Repair the filter cache');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({
   page,
 }) => {
@@ -130,7 +301,7 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
-  await expect(page.getByLabel('Новые воркеры Модель')).toHaveValue('gpt-5.6-sol');
+  await expect(page.getByLabel('Все воркеры Модель')).toHaveValue('gpt-5.6-sol');
   const refreshed = page.waitForRequest((request) =>
     request.url().includes('/api/agents?refresh=1'),
   );
@@ -175,4 +346,45 @@ test('shows the same enabled module summary available from Telegram', async ({ p
   await expect(dialog.getByText('GitHub', { exact: true })).toBeVisible();
   await expect(dialog.getByText('Agent', { exact: true }).first()).toBeVisible();
   await expect(dialog.getByText('Repository', { exact: true }).first()).toBeVisible();
+});
+
+test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
+  await login(page);
+  await create(page, 'GitHub auto-merge settings', Date.now());
+  await page.getByRole('button', { name: 'Session settings' }).click();
+  const dialog = page.getByRole('dialog');
+  const sessionSwitch = dialog.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ });
+  await expect(sessionSwitch).not.toBeChecked();
+  await sessionSwitch.check();
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.locator('.daddy-work-item').first().click();
+  const mode = dialog.getByRole('combobox', { name: 'Auto-merge GitHub PRs' });
+  await expect(mode.locator('option:checked')).toHaveText('Use session setting (on)');
+  await mode.selectOption('off');
+  await expect(mode).toHaveValue('off');
+  await page.reload();
+  await page.locator('.daddy-work-item').first().click();
+  await expect(mode).toHaveValue('off');
+  await mode.selectOption('inherit');
+  await expect(mode).toHaveValue('inherit');
+});
+
+test('changes the host cleanup schedule from the web sidebar', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  const panel = page.getByRole('dialog');
+  await panel.getByLabel('Enable scheduled cleanup').check();
+  await panel.getByLabel('Cleanup threshold (%)').fill('89');
+  await panel.getByLabel('Check interval (minutes)').fill('45');
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
+  await page.reload();
+  await page.getByRole('button', { name: 'Disk cleanup', exact: true }).click();
+  await expect(panel.getByLabel('Enable scheduled cleanup')).toBeChecked();
+  await expect(panel.getByLabel('Cleanup threshold (%)')).toHaveValue('89');
+  await expect(panel.getByLabel('Check interval (minutes)')).toHaveValue('45');
+  await panel.getByLabel('Enable scheduled cleanup').uncheck();
+  await panel.getByRole('button', { name: 'Save settings' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
 });

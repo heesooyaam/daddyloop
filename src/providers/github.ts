@@ -1,3 +1,5 @@
+import { GitHubQuota, GitHubQuotaError } from './github-quota.js';
+import type { Store } from '../core/store.js';
 import type {
   PRRef,
   PullRequest,
@@ -23,6 +25,7 @@ type GHReview = {
 };
 type GHComment = {
   id: number;
+  node_id?: string;
   body: string;
   html_url: string;
   path?: string;
@@ -34,6 +37,7 @@ type GHComment = {
 const path = (ref: PRRef) => `/repos/${ref.repo}/pulls/${ref.number}`;
 const comment = (c: GHComment): ReviewComment => ({
   id: String(c.id),
+  nodeId: c.node_id,
   body: c.body,
   url: c.html_url,
   author: c.user?.login,
@@ -49,7 +53,7 @@ const comment = (c: GHComment): ReviewComment => ({
 });
 export class GitHubProvider implements ReviewProvider {
   readonly http: ProviderHttp;
-  constructor(host: string, token: string, fetcher?: Fetch) {
+  constructor(host: string, token: string, fetcher?: Fetch, store?: Store) {
     this.http = new ProviderHttp(
       host === 'github.com' ? 'https://api.github.com' : `https://${host}/api/v3`,
       {
@@ -59,6 +63,7 @@ export class GitHubProvider implements ReviewProvider {
         'User-Agent': 'daddyloop/0.1',
       },
       fetcher,
+      store ? new GitHubQuota(store, host) : undefined,
     );
   }
   async getPR(ref: PRRef): Promise<PullRequest> {
@@ -66,15 +71,20 @@ export class GitHubProvider implements ReviewProvider {
       title: string;
       body: string;
       head: { sha: string; ref: string; repo: { clone_url: string } | null };
-      base: { sha: string; ref: string };
+      base: { sha: string; ref: string; repo?: { clone_url: string } };
       state: string;
       merged: boolean;
+      draft: boolean;
+      mergeable: boolean | null;
+      mergeable_state?: string;
+      merge_commit_sha?: string;
     }>('GET', path(ref));
-    const [status, checks] = await Promise.all([
+    const [status, checks, base] = await Promise.all([
       this.http.request<{
         statuses: { context: string; state: string; target_url?: string }[];
       }>('GET', `/repos/${ref.repo}/commits/${pr.head.sha}/status?per_page=100`),
       this.getChecks(ref, pr.head.sha),
+      pr.state === 'open' && !pr.merged ? this.targetHead(ref, pr.base.ref) : pr.base.sha,
     ]);
     // The combined status endpoint only exposes one page of contexts. Read all statuses
     // and keep the latest status per context, including reruns of previously failed jobs.
@@ -94,20 +104,27 @@ export class GitHubProvider implements ReviewProvider {
           status: item.state,
           url: item.target_url,
         });
-    for (const item of checks)
-      if (!latest.has(`check:${item.name}`))
-        latest.set(`check:${item.name}`, {
+    for (const item of checks) {
+      const key = `check:${item.check_suite?.id ?? ''}:${item.name}`;
+      if (!latest.has(key))
+        latest.set(key, {
           name: item.name,
           status: item.status === 'completed' ? (item.conclusion ?? 'failure') : 'pending',
           url: item.html_url,
         });
+    }
     const details = [...latest.values()];
     const passing = new Set(['success', 'neutral', 'skipped']);
     const pending = new Set(['pending', 'queued', 'in_progress', 'waiting', 'requested']);
     return {
       head: pr.head.sha,
-      base: pr.base.sha,
-      start: pr.base.sha,
+      draft: pr.draft,
+      mergeable: pr.mergeable == null ? null : pr.mergeable && pr.mergeable_state === 'clean',
+      mergeConflict: pr.mergeable === false && pr.mergeable_state === 'dirty',
+      targetCloneUrl: pr.base.repo?.clone_url,
+      mergeCommit: pr.merged ? pr.merge_commit_sha : undefined,
+      base,
+      start: base,
       title: pr.title,
       body: pr.body ?? '',
       branch: pr.head.ref,
@@ -124,8 +141,72 @@ export class GitHubProvider implements ReviewProvider {
             : 'passing',
     };
   }
+  private async targetHead(ref: PRRef, branch: string) {
+    // pulls/{number}.base.sha can remain at the PR creation commit after the branch advances.
+    const name = branch.split('/').map(encodeURIComponent).join('/');
+    const value = await this.http.request<{ ref: string; object: { type: string; sha: string } }>(
+      'GET',
+      `/repos/${ref.repo}/git/ref/heads/${name}`,
+    );
+    if (
+      value.ref !== 'refs/heads/' + branch ||
+      value.object?.type !== 'commit' ||
+      !/^[a-f0-9]{40,64}$/.test(value.object.sha)
+    )
+      throw new AppError('invalid_target_ref', 'GitHub did not confirm the target branch commit');
+    return value.object.sha;
+  }
+  async targetAdvanced(ref: PRRef, before: string, after: string) {
+    if (![before, after].every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) return false;
+    const comparison = await this.http.request<{
+      status: string;
+      merge_base_commit: { sha: string };
+    }>('GET', `/repos/${ref.repo}/compare/${before}...${after}?per_page=1`);
+    return comparison.status === 'ahead' && comparison.merge_base_commit?.sha === before;
+  }
+  async prepareMerge(ref: PRRef) {
+    const repo = await this.http.request<{
+      allow_squash_merge: boolean;
+      allow_merge_commit: boolean;
+      allow_rebase_merge: boolean;
+    }>('GET', `/repos/${ref.repo}`);
+    const method = repo.allow_squash_merge
+      ? 'squash'
+      : repo.allow_merge_commit
+        ? 'merge'
+        : repo.allow_rebase_merge
+          ? 'rebase'
+          : undefined;
+    if (!method)
+      throw new AppError(
+        'merge_method_missing',
+        'No merge method is available for this repository',
+      );
+    return async (expectedHead: string) => {
+      let result: { merged: boolean; sha: string };
+      try {
+        result = await this.http.request<typeof result>('PUT', `${path(ref)}/merge`, {
+          sha: expectedHead,
+          merge_method: method,
+        });
+      } catch (error) {
+        if (error instanceof GitHubQuotaError) throw error;
+        if (error instanceof AppError)
+          throw new AppError(
+            error.code,
+            'GitHub did not confirm the merge request',
+            error.statusCode,
+          );
+        throw error;
+      }
+      if (!result.merged || !result.sha)
+        throw new AppError('merge_unconfirmed', 'GitHub has not confirmed the merge');
+      return result.sha;
+    };
+  }
   private async getChecks(ref: PRRef, head: string) {
     const result: {
+      check_suite?: { id: number };
       name: string;
       status: string;
       conclusion: string | null;
@@ -162,7 +243,11 @@ export class GitHubProvider implements ReviewProvider {
     };
   }
   async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const existing = await this.findReview(ref, marker);
+    const existing = await this.findReview(ref, marker).catch((error) => {
+      // This lookup happens before the create request.
+      if (error instanceof GitHubQuotaError) throw new GitHubQuotaError(error.until, true);
+      throw error;
+    });
     if (existing) return { ...existing, revision };
     // GitHub itself enforces one pending review per authenticated account. Never adopt
     // or delete the user's unrelated review when that constraint rejects this call.
@@ -186,6 +271,7 @@ export class GitHubProvider implements ReviewProvider {
               ? 'missing'
               : 'published',
         body: value.body ?? '',
+        authorId: String(value.user.id),
         comments: comments.map(comment),
         url: value.html_url ?? ref.url,
         revision: { ...review.revision, head: value.commit_id },
@@ -202,6 +288,61 @@ export class GitHubProvider implements ReviewProvider {
       throw error;
     }
   }
+  async discardSupersededDraft(ref: PRRef, review: ReviewHandle, snapshot: ReviewSnapshot) {
+    const url = `${path(ref)}/reviews/${review.id}`;
+    const [value, user, comments] = await Promise.all([
+      this.http.request<GHReview>('GET', url),
+      this.http.request<{ id: number }>('GET', '/user'),
+      this.http.pages<GHComment>(url + '/comments'),
+    ]);
+    if (
+      value.state !== 'PENDING' ||
+      String(user.id) !== review.authorId ||
+      value.user.id !== user.id ||
+      value.commit_id !== review.revision.head ||
+      value.body !== snapshot.body ||
+      !value.body.endsWith(tag(review.marker)) ||
+      comments.length
+    )
+      throw new AppError(
+        'draft_changed',
+        'The old draft changed. Inspect it before replacing the review.',
+      );
+    await this.http.request('DELETE', url);
+  }
+  private async mutation<T>(query: string, input: object): Promise<T> {
+    const base = this.http.baseUrl.replace(/\/api\/v3$/, '/api');
+    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher, this.http.quota);
+    const value = await http.request<{ data?: T; errors?: { message: string }[] }>(
+      'POST',
+      '/graphql',
+      { query, variables: { input } },
+    );
+    if (value.errors?.length || !value.data)
+      throw new AppError(
+        'github_graphql',
+        value.errors?.map((e) => e.message).join('; ') || 'GitHub returned no mutation result',
+        502,
+      );
+    return value.data;
+  }
+  private async draftComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    current?: ReviewComment,
+  ) {
+    if (current?.id === id && current.nodeId) return current;
+    const draft = await this.getReview(ref, review);
+    const item = draft.status === 'draft' && draft.comments.find((c) => c.id === id);
+    if (!item || !item.nodeId)
+      throw new AppError(
+        'draft_changed',
+        'The comment is no longer available in the pending GitHub review',
+        409,
+      );
+    return item;
+  }
   async createComment(
     ref: PRRef,
     review: ReviewHandle,
@@ -215,68 +356,70 @@ export class GitHubProvider implements ReviewProvider {
         'GitHub inline comments require a diff location. Put general observations in the review summary.',
         400,
       );
-    const query = `mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){thread{comments(first:1){nodes{databaseId body url path line originalLine}}}}}`;
-    const base = this.http.baseUrl.endsWith('/api/v3')
-      ? this.http.baseUrl.slice(0, -7) + '/api'
-      : this.http.baseUrl;
-    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher);
-    const value = await http.request<{
-      errors?: { message: string }[];
-      data: {
-        addPullRequestReviewThread: {
-          thread: {
-            comments: {
-              nodes: {
-                databaseId: number;
-                body: string;
-                url: string;
-                path: string;
-                line: number;
-              }[];
-            };
-          };
+    const query = `mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){thread{comments(first:1){nodes{id databaseId body url}}}}}`;
+    const data = await this.mutation<{
+      addPullRequestReviewThread: {
+        thread: {
+          comments: { nodes: { id: string; databaseId: number; body: string; url: string }[] };
         };
       };
-    }>('POST', '/graphql', {
-      query,
-      variables: {
-        input: {
-          pullRequestReviewId: review.nodeId,
-          path: location.path,
-          line: location.line,
-          side: location.side,
-          body: `${body}\n\n${tag(marker)}`,
-          ...(location.startLine
-            ? { startLine: location.startLine, startSide: location.side }
-            : {}),
-        },
-      },
+    }>(query, {
+      pullRequestReviewId: review.nodeId,
+      path: location.path,
+      line: location.line,
+      side: location.side,
+      body: `${body}\n\n${tag(marker)}`,
+      ...(location.startLine ? { startLine: location.startLine, startSide: location.side } : {}),
     });
-    if (value.errors?.length)
-      throw new AppError('github_graphql', value.errors.map((e) => e.message).join('; '), 502);
-    const item = value.data.addPullRequestReviewThread.thread.comments.nodes[0];
+    const item = data.addPullRequestReviewThread.thread.comments.nodes[0];
     return {
       id: String(item.databaseId),
+      nodeId: item.id,
       body: item.body,
       url: item.url || ref.url,
       location,
       marker,
     };
   }
-  async updateComment(ref: PRRef, _review: ReviewHandle, id: string, body: string) {
-    return comment(
-      await this.http.request<GHComment>(
-        'PATCH',
-        `/repos/${ref.repo}/pulls/comments/${encodeURIComponent(id)}`,
-        { body },
-      ),
+  async updateComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    body: string,
+    current?: ReviewComment,
+  ) {
+    const item = await this.draftComment(ref, review, id, current);
+    const result = await this.mutation<{
+      updatePullRequestReviewComment: {
+        pullRequestReviewComment: { id: string; body: string; url: string };
+      };
+    }>(
+      'mutation($input:UpdatePullRequestReviewCommentInput!){updatePullRequestReviewComment(input:$input){pullRequestReviewComment{id body url}}}',
+      { pullRequestReviewCommentId: item.nodeId, body },
     );
+    const updated = result.updatePullRequestReviewComment?.pullRequestReviewComment;
+    if (updated?.id !== item.nodeId || updated?.body !== body)
+      throw new AppError(
+        'unconfirmed_comment_edit',
+        'GitHub did not confirm the requested draft comment text',
+        502,
+      );
+    return { ...item, body: updated.body, url: updated.url };
   }
-  async deleteComment(ref: PRRef, _review: ReviewHandle, id: string) {
-    await this.http.request(
-      'DELETE',
-      `/repos/${ref.repo}/pulls/comments/${encodeURIComponent(id)}`,
+  async deleteComment(ref: PRRef, review: ReviewHandle, id: string, current?: ReviewComment) {
+    const item = await this.draftComment(ref, review, id, current);
+    const result = await this.mutation<{
+      deletePullRequestReviewComment: { clientMutationId: string };
+    }>(
+      'mutation($input:DeletePullRequestReviewCommentInput!){deletePullRequestReviewComment(input:$input){clientMutationId}}',
+      { id: item.nodeId, clientMutationId: item.nodeId },
     );
+    if (result.deletePullRequestReviewComment?.clientMutationId !== item.nodeId)
+      throw new AppError(
+        'unconfirmed_comment_removal',
+        'GitHub did not confirm the draft comment removal',
+        502,
+      );
   }
   async updateSummary(ref: PRRef, review: ReviewHandle, body: string) {
     await this.http.request('PUT', `${path(ref)}/reviews/${review.id}`, {

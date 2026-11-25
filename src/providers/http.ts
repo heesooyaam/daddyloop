@@ -1,4 +1,5 @@
 import { AppError } from '../core/types.js';
+import type { GitHubQuota } from './github-quota.js';
 import { redact } from '../core/security.js';
 export type Fetch = typeof fetch;
 export class ProviderHttp {
@@ -6,10 +7,12 @@ export class ProviderHttp {
     readonly baseUrl: string,
     readonly headers: Record<string, string>,
     readonly fetcher: Fetch = fetch,
+    readonly quota?: GitHubQuota,
   ) {}
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     if (!path.startsWith('/') || path.startsWith('//'))
       throw new AppError('invalid_path', 'Invalid provider API path', 400);
+    this.quota?.check(method);
     let response: Response;
     try {
       response = await this.fetcher(this.baseUrl + path, {
@@ -28,6 +31,7 @@ export class ProviderHttp {
     }
     if (!response.ok) {
       const text = redact((await response.text()).slice(0, 1200));
+      this.quota?.observe(response, method, text);
       throw new AppError(
         `provider_${response.status}`,
         `${method} ${path.split('?')[0]}: HTTP ${response.status} ${text}`,

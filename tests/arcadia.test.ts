@@ -22,6 +22,40 @@ class FakeArc extends ArcBridge {
     return { success: true } as T;
   }
 }
+class DoctorArc extends ArcBridge {
+  events: string[] = [];
+  override async sourceMounts() {
+    this.events.push('sources');
+    return [
+      {
+        status: 'mounted',
+        mount: '/source-arcadia',
+        store: '/source-store',
+        'object-store': '/source-objects',
+      },
+    ];
+  }
+  override async api<T>(args: string[]): Promise<T> {
+    this.events.push('arcanum:' + args.join(' '));
+    return [] as T;
+  }
+  override async mounts() {
+    this.events.push('helper');
+    return [];
+  }
+  override async withMount<T>(_fn: (mount: string) => Promise<T>): Promise<T> {
+    throw new Error('doctor must not allocate a probe copy');
+  }
+  override async native(args: string[], mount: string) {
+    this.events.push('arc:' + args.join(' '));
+    expect(mount).toBe('/source-arcadia');
+    return JSON.stringify({
+      user_login: 'tester',
+      hash: 'a'.repeat(40),
+      branch: 'trunk',
+    });
+  }
+}
 const ref = parsePR('https://a.yandex-team.ru/review/11111111');
 const review: ReviewHandle = {
   id: '-7',
@@ -68,4 +102,14 @@ it('uses the pinned diff ID and retains the sign when deleting an inline draft',
   const bridge = new FakeArc();
   await new ArcadiaProvider(bridge).deleteComment(ref, review, 'diff:-9');
   expect(bridge.calls[0]).toEqual(['diff', 'delete-comment', '-9', '--diff-id', '99']);
+});
+it('checks Arcanum, the helper and journals without allocating a probe copy', async () => {
+  const bridge = new DoctorArc();
+  await expect(bridge.doctor()).resolves.toMatchObject({ user_login: 'tester' });
+  expect(bridge.events).toEqual([
+    'sources',
+    'arcanum:repo list --fields repos(id)',
+    'helper',
+    'arc:info --json',
+  ]);
 });

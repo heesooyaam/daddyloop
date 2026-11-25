@@ -31,6 +31,7 @@ export function lastScheduledCleanup(store: Store) {
 }
 type Options = {
   allowed: boolean;
+  pausePercent?: number;
   measure(): Disk;
   canPlan(): boolean;
   directory: string;
@@ -54,7 +55,11 @@ export class ScheduledCleanup {
   }
 
   private enabled() {
-    return this.policy.enabled && this.options.allowed;
+    return (
+      this.policy.enabled &&
+      this.options.allowed &&
+      this.policy.diskPercent < (this.options.pausePercent ?? 100)
+    );
   }
 
   private state() {
@@ -70,6 +75,7 @@ export class ScheduledCleanup {
     const state = this.state();
     return {
       configured: this.policy.enabled,
+      automaticCleanup: this.options.allowed,
       enabled: this.enabled(),
       intervalMinutes: this.policy.intervalMinutes,
       diskPercent: this.policy.diskPercent,
@@ -86,22 +92,28 @@ export class ScheduledCleanup {
     };
   }
 
+  configure(patch: Pick<CacheSchedule, 'enabled' | 'diskPercent' | 'intervalMinutes' | 'skill'>) {
+    const changedSkill = this.policy.skill?.checksum !== patch.skill?.checksum;
+    this.policy = { ...this.policy, ...patch };
+    if (!this.enabled() || changedSkill) this.running?.controller.abort();
+    if (this.timer && this.enabled()) this.checkInBackground();
+  }
+
+  private checkInBackground = () => {
+    void this.tick().catch((error) => {
+      try {
+        this.store.event('_system', 'cache.schedule_failed', { error: redact(String(error)) });
+      } catch {
+        // A failed SQLite write leaves the attempt due for the next tick.
+      }
+    });
+  };
+
   start() {
     if (this.timer) return;
-    const tick = () => {
-      void this.tick().catch((error) => {
-        try {
-          this.store.event('_system', 'cache.schedule_failed', { error: redact(String(error)) });
-        } catch {
-          // A failed SQLite write leaves the attempt due for the next tick.
-        }
-      });
-    };
-    if (this.enabled()) {
-      this.timer = setInterval(tick, minute);
-      this.timer.unref();
-    }
-    tick();
+    this.timer = setInterval(this.checkInBackground, minute);
+    this.timer.unref();
+    this.checkInBackground();
   }
 
   async stop() {

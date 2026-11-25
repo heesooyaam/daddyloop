@@ -1,32 +1,23 @@
+import { githubWait } from '../providers/github-quota.js';
 import { randomUUID } from 'node:crypto';
+import { workerSlots } from '../core/worker-pool.js';
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import type { Store } from '../core/store.js';
 import type { DaddyJob, Job, ReviewGroup, State } from '../core/types.js';
 import { redact } from '../core/security.js';
+import { clipTitle } from '../core/session-title.js';
 import { translator, type Locale } from '../i18n/index.js';
 import type { TelegramApi } from './telegram.js';
 import type { TelegramDestination } from './telegram-delivery.js';
 import { TelegramText } from './telegram-text.js';
-
-const statusLabels: Record<State, string> = {
-  discussing: 'Waiting for assignment',
-  implementing: 'Implementing the task',
-  ready_for_review: 'Ready for review',
-  submitting: 'Submitting the changes',
-  queued: 'Waiting for a worker',
-  reviewing: 'Reviewing the changes',
-  awaiting_publication: 'Review ready to publish',
-  fixing: 'Addressing review feedback',
-  awaiting_push: 'Waiting for changes to be pushed',
-  awaiting_checks: 'Waiting for CI',
-  awaiting_plan_approval: 'Waiting for plan approval',
-  needs_input: 'Action needed',
-  paused: 'Paused',
-  complete: 'Complete',
-};
-
-export function taskStatus(state: State, queued: boolean) {
-  return queued && state !== 'paused' ? 'Waiting for a worker' : statusLabels[state];
-}
+import {
+  activityStatus,
+  draftSyncPending,
+  outstandingActivity,
+  taskActivity,
+  taskReference,
+  taskStatus,
+} from '../core/task-activity.js';
 
 const activeStates = new Set<State>([
   'implementing',
@@ -35,6 +26,10 @@ const activeStates = new Set<State>([
   'reviewing',
   'fixing',
   'awaiting_checks',
+  'awaiting_merge',
+  'ready_for_review',
+  'awaiting_publication',
+  'awaiting_push',
 ]);
 
 function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: DaddyJob[]) {
@@ -62,24 +57,31 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
         subject: job.taskId,
         startedAt: job.startedAt,
         engine: job.profile?.engine,
-        label: taskStatus(taskById.get(job.taskId)!.state, false),
+        label: activityStatus({ task: taskById.get(job.taskId)!, job }),
         title: taskById.get(job.taskId)!.title,
       })),
   ];
   const preparing = ['pending', 'preparing'].includes(group.workspacePreparation?.state ?? '');
-  const activeTask = tasks.find(
-    (task) =>
-      activeStates.has(task.state) ||
-      (task.state === 'ready_for_review' && task.policy.autoPush) ||
-      (task.state === 'awaiting_publication' && task.policy.publication === 'auto'),
-  );
+  const activeTask = tasks.find((task) => activeStates.has(task.state));
   const active =
     !group.deletion &&
     !['paused', 'archived'].includes(group.daddyState ?? '') &&
     group.workspacePreparation?.state !== 'error' &&
     (preparing || !!activeTask || turns.length > 0 || workers.length > 0);
-  const attention = tasks.find((task) => task.state === 'needs_input');
-  const unfinished = tasks.find((task) => task.state !== 'complete');
+  const attention = tasks.find(
+    (task) => task.state === 'needs_input' && task.reason !== draftSyncPending,
+  );
+  const outstanding = taskActivity(
+    [...tasks].reverse(),
+    workers,
+    (task) =>
+      githubActivityStatus(
+        task,
+        autoMergeSettings(store, group, task),
+        githubWait(store, task.ref),
+      ),
+    workerSlots(store, group),
+  ).filter(outstandingActivity);
   let label = 'No work in progress';
   if (group.deletion) label = 'Saving results and removing session copies';
   else if (group.daddyState === 'paused') label = 'Paused';
@@ -90,7 +92,7 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
   else if (running.length) label = 'Work in progress';
   else if (turns.length) label = 'Request saved. Waiting to start.';
   else if (workers.length) label = 'Waiting for a worker';
-  else if (activeTask) label = statusLabels[activeTask.state];
+  else if (activeTask) label = taskStatus(activeTask.state, false);
   else if (
     group.daddyState === 'needs_input' &&
     store.daddyJobs(group.id).at(-1)?.status === 'failed'
@@ -99,13 +101,18 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
   else if (attention && store.jobs(attention.id).at(-1)?.status === 'failed')
     label = 'Agent run failed';
   else if (group.daddyState === 'needs_input' || attention) label = 'Action needed';
-  else if (unfinished) label = statusLabels[unfinished.state];
+  else if (outstanding[0]) label = activityStatus(outstanding[0]);
   else if (tasks.length) label = 'All tasks complete';
   else if (store.daddyJobs(group.id).at(-1)?.status === 'completed') label = 'Request finished';
   return {
     active,
     label,
     running,
+    tasks: outstanding.map((item) => ({
+      id: taskReference(item.task),
+      title: clipTitle(item.task.title, 80),
+      label: activityStatus(item),
+    })),
     attention: attention?.title,
     resources: label === 'Waiting for server resources' ? group.resourceWait?.reasons : undefined,
   };
@@ -150,7 +157,7 @@ function render(
       ? Math.max(0, Math.floor((now - Date.parse(run.startedAt)) / 60000))
       : 0;
     text.add('\n\n');
-    if (run.title) text.add(run.title, 'bold').add('\n');
+    if (run.title) text.add(clipTitle(run.title, 100), 'bold').add('\n');
     text.add(
       [engine, t(run.label), elapsed && t('{minutes} min elapsed', { minutes: elapsed })]
         .filter(Boolean)
@@ -165,6 +172,23 @@ function render(
         ),
     );
   }
+  if (status.tasks.length) {
+    text.add('\n\n').add(t('Unfinished tasks · {count}', { count: status.tasks.length }), 'bold');
+    for (const task of status.tasks.slice(0, 5))
+      text
+        .add('\n')
+        .add(task.id, 'code')
+        .add(' ' + task.title + ' · ' + t(task.label));
+    const rest = status.tasks.slice(5, 100);
+    if (rest.length) text.add('\n' + rest.map((task) => task.id).join(' '));
+  }
+  text
+    .add('\n\n')
+    .add('/task', 'bot_command')
+    .add(' · ')
+    .add('/queue', 'bot_command')
+    .add(' · ')
+    .add('/workers', 'bot_command');
   return text.add('\n\n' + t('Server status at {time}', { time: time.format(now) }), 'italic');
 }
 
@@ -227,21 +251,15 @@ export class TelegramProgress {
           JSON.parse(String(row.value)) as LiveCard,
         ]),
     );
-    const groups = new Set([
-      ...cards.keys(),
-      ...[...jobs, ...coordination].map((job) => job.groupId),
-    ]);
-    for (const groupId of groups) {
+    const groups = this.store.groups().filter((group) => group.orchestrated && !group.deletedAt);
+    const groupIds = new Set(groups.map((group) => group.id));
+    for (const [groupId, card] of cards)
+      if (!groupIds.has(groupId)) this.clearCard(this.prefix + groupId, card.id);
+    for (const group of groups) {
       if (!this.timer) return;
-      if (!groupId) continue;
-      const key = this.prefix + groupId;
-      let card = cards.get(groupId);
-      const group = this.store.getGroup(groupId);
-      if (!group.orchestrated || group.deletedAt) {
-        if (card) this.clearCard(key, card.id);
-        continue;
-      }
-      const route = this.destination(groupId, card?.route);
+      const key = this.prefix + group.id;
+      let card = cards.get(group.id);
+      const route = this.destination(group.id, card?.route);
       if (!route) continue;
       if (
         card &&
@@ -253,12 +271,14 @@ export class TelegramProgress {
         card = undefined;
       }
       const status = snapshot(this.store, group, jobs, coordination);
-      if (!card && !status.active) continue;
+      const topic = route.threadId !== undefined;
+      if (!card && !topic && !status.active) continue;
       const locale = this.locale();
       const signature = JSON.stringify([locale, group.title, status]);
       const last = card && this.sent.get(card.id);
       const now = Date.now();
-      if (last && last.signature === signature && now - last.at < 60000) continue;
+      if (last && last.signature === signature && (!status.active || now - last.at < 60000))
+        continue;
       if (!card) {
         card = { id: randomUUID(), route };
         this.store.setSetting(key, card);
@@ -266,9 +286,10 @@ export class TelegramProgress {
       await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
         key: `progress:${card.id}`,
         replace: true,
-        final: !status.active,
+        final: topic || !status.active,
+        pin: topic,
       });
-      if (status.active) this.sent.set(card.id, { at: now, signature });
+      if (topic || status.active) this.sent.set(card.id, { at: now, signature });
       else this.clearCard(key, card.id);
     }
   }

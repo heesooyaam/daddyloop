@@ -5,7 +5,10 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
-  operation?: 'renameTopic';
+  operation?: 'renameTopic' | 'reaction' | 'pin';
+  reactionMessageId?: number;
+  pinMessageId?: number;
+  pin?: boolean;
   key?: string;
   replace?: boolean;
   order?: string;
@@ -34,6 +37,8 @@ type Transport = {
 };
 const prefix = 'telegram.delivery:';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const isIndependent = ({ options }: Delivery) =>
+  options.operation === 'reaction' || options.operation === 'pin';
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
 }
@@ -86,6 +91,53 @@ export class TelegramDelivery {
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
   }
+  private createDelivery(
+    destination: TelegramDestination,
+    content: Delivery['content'],
+    options: DeliveryOptions,
+  ): Delivery {
+    return {
+      id: randomUUID(),
+      bot: this.bot,
+      ownerId: this.store.setting<{ userId: number }>('telegram.pairing')?.userId,
+      destination,
+      content: structuredClone(content),
+      options,
+      revision: 1,
+      createdAt: this.clock(),
+      status: 'queued',
+      attempts: 0,
+      nextAttemptAt: this.clock(),
+      messages: [],
+    };
+  }
+  enqueueReaction(destination: TelegramDestination, messageId: number) {
+    const key = prefix + digest([this.bot, 'reaction', destination.chatId, messageId]);
+    if (this.pending.has(key) || this.store.setting<Delivery>(key)) return;
+    this.save(
+      key,
+      this.createDelivery(
+        destination,
+        { text: '', entities: [] },
+        {
+          operation: 'reaction',
+          reactionMessageId: messageId,
+        },
+      ),
+    );
+  }
+  private enqueuePin(destination: TelegramDestination, messageId: number) {
+    const key = prefix + digest([this.bot, 'pin', destination.chatId, messageId]);
+    if (this.pending.has(key) || this.store.setting<Delivery>(key)) return;
+    this.save(
+      key,
+      this.createDelivery(
+        destination,
+        { text: '', entities: [] },
+        { operation: 'pin', pinMessageId: messageId },
+      ),
+    );
+  }
   async send(
     destination: TelegramDestination,
     content: TelegramCard | FormattedText,
@@ -105,7 +157,10 @@ export class TelegramDelivery {
         return { status: 'superseded', deliveryId: value.id };
       if (!options.replace)
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
-      if (digest([value.content, value.options.final]) === digest([content, options.final]))
+      if (
+        digest([value.content, value.options.final, value.options.pin]) ===
+        digest([content, options.final, options.pin])
+      )
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
         value.options.notificationId &&
@@ -123,25 +178,15 @@ export class TelegramDelivery {
       value.revision++;
       value.status = 'queued';
       value.nextAttemptAt = this.clock();
-    } else
-      value = {
-        id: randomUUID(),
-        bot: this.bot,
-        ownerId: this.store.setting<{ userId: number }>('telegram.pairing')?.userId,
-        destination,
-        content: structuredClone(content),
-        options,
-        revision: 1,
-        createdAt: this.clock(),
-        status: 'queued',
-        attempts: 0,
-        nextAttemptAt: this.clock(),
-        messages: [],
-      };
+    } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
     // New text also wakes the oldest buffered message for this conversation. Never bypass retry_after.
     for (const [otherKey, other] of this.pending)
-      if (digest(other.destination) === digest(destination) && other.status === 'queued') {
+      if (
+        !isIndependent(other) &&
+        digest(other.destination) === digest(destination) &&
+        other.status === 'queued'
+      ) {
         other.nextAttemptAt = this.clock();
         this.save(otherKey, other);
       }
@@ -176,9 +221,13 @@ export class TelegramDelivery {
         if (this.clock() < this.rateLimitUntil) break;
         const seen = new Set<string>();
         const ready = [...this.pending.entries()]
-          .sort((a, b) => a[1].createdAt - b[1].createdAt)
-          .filter(([, value]) => {
-            const route = digest(value.destination);
+          .sort(
+            (a, b) =>
+              Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin') ||
+              a[1].createdAt - b[1].createdAt,
+          )
+          .filter(([key, value]) => {
+            const route = isIndependent(value) ? key : digest(value.destination);
             if (seen.has(route)) return false;
             seen.add(route);
             return value.nextAttemptAt <= this.clock();
@@ -204,11 +253,33 @@ export class TelegramDelivery {
     const revision = value.revision,
       content = structuredClone(value.content),
       options = { ...value.options };
-    const chunks = splitTelegramText(content);
     value.status = 'sending';
     this.save(key, value);
     this.controller = new AbortController();
     try {
+      if (options.operation === 'reaction' || options.operation === 'pin') {
+        const reaction = options.operation === 'reaction';
+        await this.api.call(
+          reaction ? 'setMessageReaction' : 'pinChatMessage',
+          reaction
+            ? {
+                chat_id: value.destination.chatId,
+                message_id: options.reactionMessageId,
+                reaction: [{ type: 'emoji', emoji: '👀' }],
+              }
+            : {
+                chat_id: value.destination.chatId,
+                message_id: options.pinMessageId,
+                disable_notification: true,
+              },
+          AbortSignal.any([this.controller.signal, AbortSignal.timeout(4000)]),
+        );
+        value.status = 'sent';
+        value.error = undefined;
+        value.attempts = 0;
+        this.save(key, value);
+        return;
+      }
       if (options.operation === 'renameTopic') {
         try {
           await this.api.call(
@@ -229,6 +300,7 @@ export class TelegramDelivery {
         this.save(key, value);
         return;
       }
+      const chunks = splitTelegramText(content);
       for (let i = 0; i < chunks.length; i++) {
         if (value.revision !== revision || !this.valid(value)) break;
         const chunk = chunks[i];
@@ -291,6 +363,8 @@ export class TelegramDelivery {
         this.save(key, value);
       }
       if (value.revision === revision && this.valid(value)) {
+        if (options.pin && value.messages[0])
+          this.enqueuePin(value.destination, value.messages[0].id);
         value.status = 'sent';
         value.error = undefined;
         value.attempts = 0;
@@ -316,6 +390,34 @@ export class TelegramDelivery {
       } else value.status = 'queued';
       this.save(key, value);
     } catch (error) {
+      const status = Number((error as { telegramStatus?: number })?.telegramStatus);
+      if (options.operation === 'pin') {
+        const description = String(error);
+        if (/message.*already.*pinned|chat[_ ]not[_ ]modified/i.test(description)) {
+          value.status = 'sent';
+          value.error = undefined;
+          this.save(key, value);
+          return;
+        }
+        if (/message to pin not found|message[_ ]id[_ ]invalid|chat not found/i.test(description)) {
+          value.status = 'cancelled';
+          value.error = redact(description);
+          this.save(key, value);
+          return;
+        }
+      }
+      if (
+        options.operation === 'reaction' &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 408 &&
+        status !== 429
+      ) {
+        value.status = 'cancelled';
+        value.error = redact(String(error));
+        this.save(key, value);
+        return;
+      }
       value.status = 'queued';
       value.attempts++;
       value.error = redact(String(error));

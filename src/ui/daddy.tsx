@@ -1,5 +1,7 @@
+import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -8,11 +10,16 @@ import {
   CircleCheck,
   Folder,
   FolderGit2,
+  HardDrive,
   GitPullRequest,
   LoaderCircle,
   Menu,
   MessageSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Plus,
@@ -26,10 +33,10 @@ import {
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
 import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
-import type { ModelOption } from '../core/agents.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
+import { CleanupPanel } from './cleanup.js';
 import { NotificationsForm } from './notifications.js';
 import './daddy.css';
 import type { RepositorySelection } from '../core/workspace-registry.js';
@@ -42,25 +49,13 @@ import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageStrip, UsagePanel } from './usage.js';
 import { usageSummary } from '../client/usage.js';
+import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
+import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
+import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const stateCopy: Record<string, string> = {
-  discussing: 'Waiting for daddy',
-  implementing: 'Worker on it',
-  ready_for_review: 'Ready for review',
-  submitting: 'Creating PR',
-  queued: 'Queued for review',
-  reviewing: 'daddy is reviewing',
-  awaiting_publication: 'Review ready',
-  fixing: 'Addressing feedback',
-  awaiting_push: 'Waiting for submission',
-  awaiting_checks: 'Waiting for CI',
-  awaiting_plan_approval: 'Plan approval',
-  needs_input: 'daddy is checking',
-  paused: 'Paused',
-  complete: 'Complete',
-};
+const sidebarMedia = '(max-width: 850px)';
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -77,6 +72,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [returnToNew, setReturnToNew] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [tasksCollapsed, setTasksCollapsed] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
   );
@@ -88,17 +85,38 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       | 'settings'
       | 'updates'
       | 'notifications'
+      | 'cleanup'
       | 'limits'
       | 'presets'
       | 'modules'
       | 'delete'
+      | 'queue-task'
+      | 'workers'
       | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
-    end = useRef<HTMLDivElement>(null),
-    composer = useRef<HTMLTextAreaElement>(null);
+    chatScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const media = matchMedia(sidebarMedia);
+    const resize = () => {
+      setNarrowLayout(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    resize();
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+  useLayoutEffect(() => {
+    if (menu) firstMenuItem.current?.focus();
+    else if (wasMenuOpen.current) menuButton.current?.focus();
+    wasMenuOpen.current = menu;
+  }, [menu]);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -114,8 +132,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     );
   }, [state.selected]);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const chat = chatScroll.current;
+    if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!menu || !event.currentTarget.contains(event.target as Node)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenu(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length,
+    );
+    const from = event.shiftKey ? items[0] : items.at(-1);
+    const to = event.shiftKey ? items.at(-1) : items[0];
+    if (event.target === from) {
+      event.preventDefault();
+      to?.focus();
+    }
+  };
   const choose = (id: string) => {
     void model.select(id);
     setMenu(false);
@@ -130,9 +171,24 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
+  const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
+  const tasksToggleLabel = t(
+    tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
+  );
+  const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
+  const workItems = board?.tasks.toSorted(
+    (a, b) =>
+      (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  );
   return (
     <div className="daddy-app">
-      <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
+      <aside
+        id="daddy-sidebar"
+        className={'daddy-sidebar' + (menu ? ' open' : '')}
+        inert={narrowLayout && !menu}
+        onKeyDown={onMenuKeyDown}
+      >
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
           <span>
@@ -140,7 +196,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </span>
         </div>
         <p className="daddy-kicker">{t('daddy will handle it.')}</p>
-        <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
+        <button
+          ref={firstMenuItem}
+          className="daddy-button primary new-session"
+          onClick={() => setModal('new')}
+        >
           <Plus size={17} />
           {t('New session')}
         </button>
@@ -195,6 +255,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Workspaces')}
             <span>{state.workspaces.length}</span>
           </button>
+          <button onClick={() => setModal('cleanup')}>
+            <HardDrive size={17} />
+            {t('Disk cleanup')}
+          </button>
           <button onClick={() => setModal('notifications')}>
             <Bell size={17} />
             {t('Notifications')}
@@ -216,6 +280,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Limits')}
             {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
           </button>
+          <ThemeButton showLabel />
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -237,23 +302,38 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <button
           className="daddy-shade"
           aria-label={t('Close menu')}
+          tabIndex={-1}
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main">
+      <main className="daddy-main" inert={menu}>
         <header className="daddy-topbar">
           <button
+            ref={menuButton}
             className="daddy-icon mobile-menu"
             aria-label={t('Sessions')}
+            aria-controls="daddy-sidebar"
+            aria-expanded={menu}
             onClick={() => setMenu(!menu)}
           >
             <Menu size={20} />
           </button>
+          <button
+            className="daddy-icon daddy-sessions-toggle"
+            aria-label={sessionsToggleLabel}
+            title={sessionsToggleLabel}
+            aria-controls="daddy-sidebar"
+            aria-expanded={!sessionsCollapsed}
+            onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
+          >
+            {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
           <div className="daddy-title">
-            <span className="daddy-eyebrow">{board?.workspace?.name ?? 'daddyloop'}</span>
-            <h1>{board?.group.title ?? t('Your dashboard')}</h1>
+            <span className="daddy-eyebrow" title={board?.workspace?.name}>
+              {board?.workspace?.name ?? 'daddyloop'}
+            </span>
+            <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
-          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button
@@ -285,6 +365,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 </button>
               )}
             </div>
+          )}
+          {board && (
+            <button
+              className="daddy-icon daddy-tasks-toggle"
+              aria-label={tasksToggleLabel}
+              title={tasksToggleLabel}
+              aria-controls="daddy-tasks-panel"
+              aria-expanded={!tasksCollapsed}
+              onClick={() => setTasksCollapsed((collapsed) => !collapsed)}
+            >
+              {tasksCollapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
+            </button>
           )}
         </header>
         <UsageStrip
@@ -360,11 +452,21 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
-              <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>
+              <button
+                className={pane === 'chat' ? 'active' : ''}
+                aria-controls="daddy-chat-panel"
+                aria-pressed={pane === 'chat'}
+                onClick={() => setPane('chat')}
+              >
                 <MessageSquare size={15} />
                 daddy
               </button>
-              <button className={pane === 'tasks' ? 'active' : ''} onClick={() => setPane('tasks')}>
+              <button
+                className={pane === 'tasks' ? 'active' : ''}
+                aria-controls="daddy-tasks-panel"
+                aria-pressed={pane === 'tasks'}
+                onClick={() => setPane('tasks')}
+              >
                 <Users size={15} />
                 {t('Tasks')}
                 <span>{board.tasks.length}</span>
@@ -372,10 +474,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
             <div className="daddy-workspace">
               <section
+                id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
-                <div className="daddy-chat-scroll">
+                <div className="daddy-chat-scroll" ref={chatScroll}>
                   <div className="daddy-chat-intro">
                     <span className="daddy-avatar">d.</span>
                     <div>
@@ -418,7 +521,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       {t('daddy is working')}
                     </div>
                   )}
-                  <div ref={end} />
                 </div>
                 <form
                   className="daddy-composer"
@@ -435,10 +537,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     onEditingChange={setRepositoryEditing}
                     value={state.overrides[state.selected]}
                     onChange={(value) => model.repository(value)}
-                    compact
+                    target="message"
                   />
                   <textarea
-                    ref={composer}
                     aria-label={t('Message daddy')}
                     placeholder={t(
                       paused
@@ -489,7 +590,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   )}
                 </div>
               </section>
-              <aside className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}>
+              <aside
+                id="daddy-tasks-panel"
+                className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
+              >
                 <div className="daddy-board-header">
                   <div>
                     <span className="daddy-eyebrow">{t('Your team')}</span>
@@ -525,20 +629,29 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     board.workers,
                   )}
                 </p>
-                <p className="daddy-pool-hint">
-                  {t(
-                    'Pool changes apply in the background. Busy workers finish their tasks, including review fixes.',
-                  )}
-                </p>
+                <div className="daddy-board-controls">
+                  <button className="daddy-button outline" onClick={() => setModal('workers')}>
+                    <Users size={15} />
+                    {t('Workers')}
+                  </button>
+                  <button
+                    className="daddy-button primary"
+                    onClick={() => setModal('queue-task')}
+                    disabled={paused || !!board.group.deletion}
+                  >
+                    <Plus size={15} />
+                    {t('Queue task')}
+                  </button>
+                </div>
                 <div className="daddy-section-label">
-                  {t('Tasks')}
+                  {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
                   <span>
                     {board.tasks.filter((task) => task.state === 'complete').length}/
                     {board.tasks.length}
                   </span>
                 </div>
                 <div className="daddy-work-items">
-                  {board.tasks.map((task) => (
+                  {workItems?.map((task) => (
                     <button
                       key={task.id}
                       className={'daddy-work-item ' + task.state}
@@ -553,11 +666,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           ) : (
                             <span className="daddy-work-dot" />
                           )}
-                          {t(stateCopy[task.state] ?? task.state)}
+                          {t(task.statusLabel)}
                         </span>
                         <MoreHorizontal size={17} />
                       </div>
                       <strong>{task.title}</strong>
+                      <code className="daddy-work-id">{taskReference(task)}</code>
                       <footer>
                         <span>
                           {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
@@ -578,17 +692,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     {t('The crew is ready. Give daddy something to handle.')}
                   </p>
                 )}
-                <button
-                  className="daddy-button outline"
-                  onClick={() => {
-                    setPane('chat');
-                    composer.current?.focus();
-                    model.draft(state.drafts[state.selected] || '');
-                  }}
-                >
-                  <Plus size={16} />
-                  {t('Add tasks through daddy')}
-                </button>
                 <div className="daddy-board-bottom">
                   <span className="daddy-avatar small">d.</span>
                   <span>
@@ -693,10 +796,40 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles, instructions) => {
-              await model.action('settings', { profiles, instructions });
+            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
+              await model.action('settings', {
+                profiles,
+                instructions,
+                autoMerge,
+                forceDaddy,
+                applyWorkers,
+              });
               if (!model.snapshot().error) setModal(null);
             }}
+          />
+        </Dialog>
+      )}
+      {modal === 'queue-task' && board && (
+        <Dialog title={t('Queue task')} onClose={() => setModal(null)}>
+          <QueueTaskForm
+            key={board.group.id}
+            api={api}
+            board={board}
+            onQueued={(taskId) => {
+              setModal(null);
+              setInspect(taskId);
+              void model.refresh();
+            }}
+          />
+        </Dialog>
+      )}
+      {modal === 'workers' && board && (
+        <Dialog title={t('Workers')} onClose={() => setModal(null)}>
+          <WorkerControls
+            key={board.group.id}
+            api={api}
+            board={board}
+            onChange={() => model.refresh()}
           />
         </Dialog>
       )}
@@ -746,6 +879,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
+      {modal === 'cleanup' && (
+        <Dialog title={t('Disk cleanup')} onClose={() => setModal(null)}>
+          <CleanupPanel api={api} />
+        </Dialog>
+      )}
       {modal === 'notifications' && (
         <Dialog title={t('Notifications and Telegram')} onClose={() => setModal(null)}>
           <div className="daddy-telegram-setup">
@@ -774,7 +912,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => void model.refresh()} />
+          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
         </Dialog>
       )}
     </div>
@@ -1239,39 +1377,34 @@ function SessionSettings({
 }: {
   api: DaddyApi;
   board: DaddyBoard;
-  onSave: (profiles?: AgentProfiles, instructions?: SessionInstructions) => Promise<void>;
+  onSave: (
+    profiles?: Partial<AgentProfiles>,
+    instructions?: SessionInstructions,
+    autoMerge?: boolean,
+    forceDaddy?: boolean,
+    applyWorkers?: boolean,
+  ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
-      worker: board.group.worker ?? board.group.daddy,
+      worker: board.workerDefault,
     }),
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
     ),
     [importingInstructions, setImportingInstructions] = useState(false),
-    [models, setModels] = useState<ModelOption[]>([]),
-    [engines, setEngines] = useState<{ id: string; name: string }[]>([]),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
+  const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
-  const load = async (refresh = false) => {
-    try {
-      const result = await api<{
-        models: ModelOption[];
-        engines: { id: string; name: string }[];
-        error?: string;
-      }>('/agents' + (refresh ? '?refresh=1' : ''));
-      setModels(result.models);
-      setEngines(result.engines);
-      setError(result.error ?? '');
-    } catch (error) {
-      setError((error as Error).message);
-    }
-  };
-  useEffect(() => {
-    void load();
-  }, []);
+  const [forceDaddy, setForceDaddy] = useState(false),
+    [applyWorkers, setApplyWorkers] = useState(false);
+  const overrides = board.workers.slots.filter(
+    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  );
+  const { catalogue, load } = useAgentCatalogue(api);
   return (
     <form
       className="daddy-form"
@@ -1279,89 +1412,90 @@ function SessionSettings({
         event.preventDefault();
         if (importingInstructions) return;
         setBusy(true);
+        const changed: Partial<AgentProfiles> = {};
+        if (
+          forceDaddy ||
+          JSON.stringify(profiles.daddy) !== JSON.stringify(originalProfiles.current.daddy)
+        )
+          changed.daddy = profiles.daddy;
+        if (
+          applyWorkers ||
+          JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
+        )
+          changed.worker = profiles.worker;
         void onSave(
-          JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
-            ? undefined
-            : profiles,
+          Object.keys(changed).length ? changed : undefined,
           instructions,
+          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          forceDaddy || undefined,
+          applyWorkers || undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
       }}
     >
+      {board.workspace.provider === 'github' && (
+        <label className="daddy-toggle">
+          <input
+            type="checkbox"
+            checked={autoMerge}
+            onChange={(event) => setAutoMerge(event.target.checked)}
+          />
+          <span>
+            {t('Auto-merge GitHub PRs')}
+            <small className="daddy-muted">
+              {t(
+                'Includes already reviewed open PRs in this session. Task overrides take precedence.',
+              )}
+            </small>
+          </span>
+        </label>
+      )}
       {(['daddy', 'worker'] as const).map((role) => {
-        const profile = profiles[role],
-          choices = models.filter((model) => model.engine === profile.engine),
-          model = choices.find((model) => model.id === profile.model);
+        const label = role === 'daddy' ? 'daddy' : t('All workers');
         return (
           <fieldset key={role}>
-            <legend>{role === 'daddy' ? 'daddy' : t('New workers')}</legend>
-            <label>
-              {t('Agent module')}
-              <select
-                aria-label={
-                  (role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Agent module')
-                }
-                value={profile.engine}
-                onChange={(event) =>
-                  setProfiles({ ...profiles, [role]: { engine: event.target.value } })
-                }
-              >
-                {!engines.some((engine) => engine.id === profile.engine) && (
-                  <option value={profile.engine}>{profile.engine}</option>
-                )}
-                {engines.map((engine) => (
-                  <option key={engine.id} value={engine.id}>
-                    {engine.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t('Model')}
-              <select
-                aria-label={(role === 'daddy' ? 'daddy' : t('New workers')) + ' ' + t('Model')}
-                value={profile.model ?? ''}
-                onChange={(event) => {
-                  const model = choices.find((model) => model.id === event.target.value);
-                  setProfiles({
-                    ...profiles,
-                    [role]: {
-                      engine: profile.engine,
-                      ...(model ? { model: model.id, effort: model.defaultEffort } : {}),
-                    },
-                  });
-                }}
-              >
-                <option value="">{t('Engine configuration')}</option>
-                {profile.model && !model && <option value={profile.model}>{profile.model}</option>}
-                {choices.map((model) => (
-                  <option value={model.id} key={model.id}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              {t('Reasoning effort')}
-              <select
-                value={profile.effort ?? ''}
-                disabled={!profile.model}
-                onChange={(event) =>
-                  setProfiles({
-                    ...profiles,
-                    [role]: { ...profile, effort: event.target.value || undefined },
-                  })
-                }
-              >
-                <option value="">{t('Default')}</option>
-                {model?.efforts.map((effort) => (
-                  <option value={effort} key={effort}>
-                    {effort}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <legend>{label}</legend>
+            <AgentProfileFields
+              label={label}
+              profile={profiles[role]}
+              catalogue={catalogue}
+              onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
+              selectDefaultEffort
+            />
+            {role === 'worker' &&
+              overrides.map((slot) => (
+                <small key={slot.number} className="daddy-muted">
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                </small>
+              ))}
+            {role === 'daddy' ? (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={forceDaddy}
+                  onChange={(e) => setForceDaddy(e.target.checked)}
+                />
+                {t('Apply now and restart the active daddy turn or review')}
+              </label>
+            ) : (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={
+                    applyWorkers ||
+                    JSON.stringify(profiles.worker) !==
+                      JSON.stringify(originalProfiles.current.worker)
+                  }
+                  onChange={(e) => setApplyWorkers(e.target.checked)}
+                  disabled={
+                    JSON.stringify(profiles.worker) !==
+                    JSON.stringify(originalProfiles.current.worker)
+                  }
+                />
+                {t('Apply this profile to all worker slots')}
+              </label>
+            )}
           </fieldset>
         );
       })}
@@ -1380,9 +1514,9 @@ function SessionSettings({
           'Worker defaults apply to new tasks. Changing daddy’s model requires his session to be idle.',
         )}
       </p>
-      {error && (
+      {(error || catalogue.error) && (
         <p className="daddy-field-error" role="alert">
-          {t(error)}
+          {t(error || catalogue.error!)}
         </p>
       )}
       <button className="daddy-button primary" disabled={busy || importingInstructions}>
@@ -1400,13 +1534,20 @@ function TaskReport({
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
-  onChange: () => void;
+  onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
     [waiverReason, setWaiverReason] = useState('');
+  const live = board?.tasks.find((task) => task.id === id);
+  const slot = board?.workers.slots.find((worker) => worker.taskId === id);
+  const request = live?.workerRequest ?? value?.task.workerRequest;
+  const worker = slot?.number ?? request?.slot;
+  const profile = slot ? live?.worker : request?.profile;
+  const ref = live?.ref ?? value?.task.ref;
+  const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
     let active = true;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
@@ -1431,7 +1572,7 @@ function TaskReport({
         expectedGeneration: value.task.generation,
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
       });
-      onChange();
+      await onChange();
       const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
       setValue(next);
     } catch (error) {
@@ -1450,10 +1591,15 @@ function TaskReport({
       {value ? (
         <>
           <h3>{value.task.title}</h3>
-          <span className="daddy-status-pill">
-            {t(stateCopy[value.task.state] ?? value.task.state)}
-          </span>
-          <p>{value.task.reason}</p>
+          <div className="daddy-task-meta">
+            <code>{taskReference(value.task)}</code>
+            <span className="daddy-status-pill">
+              {t(live?.statusLabel ?? taskStatus(value.task.state))}
+            </span>
+            {worker !== undefined && <span>{t('Worker {number}', { number: worker })}</span>}
+            {profile && <span>{profileText(profile)}</span>}
+          </div>
+          <p>{t(live?.reason ?? value.task.reason)}</p>
           <dl className="daddy-task-version">
             <div>
               <dt>{t('Exact revision')}</dt>
@@ -1488,17 +1634,57 @@ function TaskReport({
               ))}
             </ul>
           )}
-          {value.task.ref.kind !== 'ticket' && safeUrl(value.task.ref.url) && (
-            <a
-              className="daddy-button outline"
-              href={value.task.ref.url}
-              target="_blank"
-              rel="noreferrer"
-            >
+          {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
+            <label className="daddy-pool-control">
+              {t('Auto-merge GitHub PRs')}
+              <select
+                value={live.autoMerge.mode}
+                disabled={busy || !!board.group.deletion}
+                onChange={async (event) => {
+                  const mode = event.target.value;
+                  setBusy(true);
+                  setError('');
+                  try {
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await onChange();
+                  } catch (error) {
+                    setError((error as Error).message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <option value="inherit">
+                  {t(
+                    board.group.autoMerge
+                      ? 'Use session setting (on)'
+                      : 'Use session setting (off)',
+                  )}
+                </option>
+                <option value="on">{t('On for this task')}</option>
+                <option value="off">{t('Off for this task')}</option>
+              </select>
+            </label>
+          )}
+          {live?.autoMerge.result &&
+            (live.autoMerge.enabled || live.autoMerge.result.state !== 'waiting') && (
+              <p>{t(live.autoMerge.result.message)}</p>
+            )}
+          {prUrl && (
+            <a className="daddy-button outline" href={prUrl} target="_blank" rel="noreferrer">
               <GitPullRequest size={16} />
               {t('Open native review')}
               <ArrowUpRight size={15} />
             </a>
+          )}
+          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+            <button
+              className="daddy-button outline"
+              disabled={busy}
+              onClick={() => void action('verify-merge')}
+            >
+              {t('Verify merge')}
+            </button>
           )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button
@@ -1519,7 +1705,7 @@ function TaskReport({
                 {t('Publish review')}
               </button>
             )}
-          {value.task.state === 'ready_for_review' && !value.task.policy.autoPush && (
+          {value.task.state === 'ready_for_review' && value.task.policy.autoPush === false && (
             <button
               disabled={busy}
               className="daddy-button primary"

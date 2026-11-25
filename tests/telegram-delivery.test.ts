@@ -30,6 +30,74 @@ function fixture() {
 }
 const text = (value: string) => new TelegramText().add(value);
 
+it('keeps status edits delivering while a durable pin retries', async () => {
+  const f = fixture();
+  const target = { chatId: -10042, threadId: 4 };
+  const options = { key: 'status', replace: true, pin: true };
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.send(target, text('Waiting'), options);
+    f.call.mockRejectedValueOnce(new Error('Bad Request: not enough rights'));
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
+    await f.queue.send(target, text('Working'), options);
+    expect(f.call.mock.calls.at(-1)).toMatchObject([
+      'editMessageText',
+      { message_id: 1, text: 'Working' },
+      expect.anything(),
+    ]);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+      'pinChatMessage',
+    ]);
+    expect(restored.status().pending).toBe(0);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('retries a rate-limited receipt reaction after restart and deduplicates repeated updates', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  const target = { chatId: -10042, threadId: 4 };
+  try {
+    f.call.mockRejectedValueOnce(
+      Object.assign(new Error('Too many requests'), { retryAfter: 10, telegramStatus: 429 }),
+    );
+    f.queue.enqueueReaction(target, 116);
+    expect(f.call).not.toHaveBeenCalled();
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(9999);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledOnce();
+    f.advance(1);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body])).toEqual(
+      [1, 2].map(() => [
+        'setMessageReaction',
+        { chat_id: -10042, message_id: 116, reaction: [{ type: 'emoji', emoji: '👀' }] },
+      ]),
+    );
+    expect(restored.status().pending).toBe(0);
+    restored.enqueueReaction(target, 116);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('replaces a confirmed deleted card, but keeps editing after a transient failure', async () => {
   const f = fixture();
   try {

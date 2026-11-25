@@ -24,7 +24,7 @@ class GitLabSubmission implements SubmissionBackend {
         {
           source_branch: task.ticketRepository!.branch,
           target_branch: task.ticketRepository!.baseBranch,
-          title: `Draft: ${title}`,
+          title,
           description: body,
           remove_source_branch: false,
         },
