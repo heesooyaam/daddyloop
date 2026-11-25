@@ -898,6 +898,8 @@ Object.assign(ru, {
 });
 Object.assign(ru, {
   'Ready for independent review': 'Готово к независимому ревью',
+  'Preparing the GitHub draft review': 'Подготавливаем черновик ревью на GitHub',
+  'Waiting to confirm the GitHub draft review': 'Ждём подтверждения черновика ревью на GitHub',
   'Review round limit reached': 'Достигнут лимит раундов ревью',
   'Independent review, round {v0}': 'Независимое ревью, раунд {v0}',
   'PR is {v0}; automatic work stopped': 'PR имеет статус {v0}; автоматическая работа остановлена',

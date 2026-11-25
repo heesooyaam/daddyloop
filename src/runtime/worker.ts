@@ -336,7 +336,13 @@ export class Worker {
           }
         }
       for (const task of store.tasks())
-        if (task.state === 'queued' && !store.busy(task.id) && !githubWait(store, task.ref)) {
+        if (
+          task.state === 'queued' &&
+          (!task.reviewPreparation ||
+            (resources.ok && (task.reviewPreparation.notBefore ?? 0) <= Date.now())) &&
+          !store.busy(task.id) &&
+          !githubWait(store, task.ref)
+        ) {
           try {
             await this.engine.review(task.id);
             if (this.stopped) return;

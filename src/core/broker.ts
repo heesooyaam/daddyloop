@@ -8,6 +8,7 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type ReviewHandle,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
@@ -90,6 +91,52 @@ export class Broker {
       },
     );
     task.review = review;
+    return review;
+  }
+  async prepareGitHubReview(
+    task: Task,
+    provider: ReviewProvider,
+    checkRevision: () => Promise<void>,
+    checkTask: () => void,
+  ) {
+    const intent = task.reviewPreparation!;
+    const ref = prRef(task);
+    if (!provider.prepareDraftReview)
+      throw new AppError(
+        'provider_missing',
+        'The configured provider cannot reconcile this draft.',
+      );
+    const prepared = await provider.prepareDraftReview(
+      ref,
+      intent.revision,
+      intent.marker,
+      intent.authorId,
+    );
+    await checkRevision();
+    checkTask();
+    if (!intent.authorId) {
+      intent.authorId = prepared.authorId;
+      this.store.saveTask(task);
+    }
+    let created = false;
+    // Only an unused or definitively refused intent can reach create(). An empty
+    // snapshot leaves a pending receipt unresolved even after repeated scans.
+    const review = await this.outbox.perform<ReviewHandle>(
+      task.id,
+      intent.marker,
+      intent.revision,
+      async () => {
+        if (prepared.existing) return prepared.existing;
+        const result = await prepared.create();
+        created = true;
+        return result;
+      },
+      async () =>
+        prepared.existing ? { found: true, value: prepared.existing } : { found: false },
+    );
+    if (created) await checkRevision();
+    else if (!prepared.existing || prepared.existing.id !== review.id)
+      throw new AppError('draft_unconfirmed', 'GitHub has not confirmed the saved draft.');
     return review;
   }
   reconcileDraftEdits(task: Task, draft: ReviewSnapshot) {

@@ -16,6 +16,16 @@ export interface ReviewProvider {
   prepareMerge?(ref: PRRef): Promise<(expectedHead: string) => Promise<string>>;
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
   createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
+  prepareDraftReview?(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    authorId?: string,
+  ): Promise<{
+    authorId: string;
+    existing?: ReviewHandle;
+    create: () => Promise<ReviewHandle>;
+  }>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
   discardSupersededDraft?(
     ref: PRRef,

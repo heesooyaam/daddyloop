@@ -8,7 +8,7 @@ import {
   type PrEvidence,
 } from './pr-routing.js';
 import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
-import { legacyQuotaRead } from '../providers/github-quota.js';
+import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
@@ -271,6 +271,11 @@ export class Engine {
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
         );
       const provider = this.provider(prRef(task));
+      if (task.reviewPreparation) {
+        if (retry && task.state === 'needs_input')
+          this.state(task, 'queued', 'Preparing the GitHub draft review');
+        return this.prepareGitHubReview(task, provider);
+      }
       const pr = await provider.getPR(prRef(task));
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
       if (confirmedSupersededDraft(task)) {
@@ -344,24 +349,109 @@ export class Engine {
       if (!task.review) task.round++;
       task.pr = pr;
       task.revision = revisionOf(pr);
+      if (!task.review && task.ref.provider === 'github' && provider.prepareDraftReview) {
+        task.reviewPreparation = {
+          marker: `daddyloop:${task.id}:${task.generation}:${task.round}`,
+          revision: task.revision,
+          retry,
+          clarification,
+        };
+        this.state(task, 'queued', 'Preparing the GitHub draft review');
+        return this.prepareGitHubReview(task, provider);
+      }
       await this.broker.ensureReview(task);
-      task.reviewFinished = false;
-      this.store.transaction(() => {
-        task.pendingFix = undefined;
-        if (clarification?.trim()) this.rememberClarification(task, clarification);
-        this.state(task, 'reviewing', `Independent review, round ${task.round}`);
-        this.store.enqueue(
-          task,
-          'reviewer',
-          'review',
-          retry
-            ? clarification?.trim()
-              ? clarifiedReviewPrefix + clarification.trim()
-              : reviewRetryInstruction
-            : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
-        );
-      });
+      this.enqueueReview(task, retry, clarification);
       return task;
+    });
+  }
+  private async prepareGitHubReview(task: Task, provider: ReviewProvider) {
+    const intent = task.reviewPreparation!;
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    if (
+      task.state !== 'queued' ||
+      (intent.notBefore ?? 0) > Date.now() ||
+      group?.deletedAt ||
+      group?.deletion ||
+      group?.daddyState === 'paused' ||
+      group?.daddyState === 'archived'
+    )
+      return task;
+    const stillCurrent = () => {
+      const current = this.store.getTask(task.id);
+      const session = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      return (
+        current.state === 'queued' &&
+        current.generation === task.generation &&
+        current.contextVersion === task.contextVersion &&
+        current.reviewPreparation?.marker === intent.marker &&
+        sameRevision(current.revision, task.revision) &&
+        current.ref.url === task.ref.url &&
+        session?.generation === group?.generation &&
+        !session?.deletedAt &&
+        !session?.deletion &&
+        session?.daddyState !== 'paused' &&
+        session?.daddyState !== 'archived' &&
+        !this.store.busy(task.id)
+      );
+    };
+    const checkTask = () => {
+      if (!stillCurrent())
+        throw new AppError('stale_run', 'The task changed while preparing its draft review.');
+    };
+    const checkRevision = async () => {
+      const pr = await provider.getPR(prRef(task));
+      if (
+        !sameRevision(task.revision, intent.revision) ||
+        !sameRevision(pr, intent.revision) ||
+        !sameOpenTarget(task.pr, pr)
+      )
+        throw new AppError('stale_revision', 'The PR changed while preparing its draft review.');
+      task.pr = pr;
+    };
+    if (!stillCurrent()) return this.store.getTask(task.id);
+    let review: ReviewHandle;
+    try {
+      review = await this.broker.prepareGitHubReview(task, provider, checkRevision, checkTask);
+    } catch (error) {
+      if (!stillCurrent()) return this.store.getTask(task.id);
+      const temporary =
+        error instanceof GitHubRetryError ||
+        error instanceof SyntaxError ||
+        (error instanceof AppError &&
+          /^(ambiguous_write|operation_busy|draft_unconfirmed|provider_(unreachable|shape|408|5\d\d))$/.test(
+            error.code,
+          ));
+      if (!temporary) {
+        this.state(task, 'needs_input', redact(String(error)));
+        return task;
+      }
+      intent.notBefore = error instanceof GitHubRetryError ? error.until : Date.now() + 15000;
+      this.state(task, 'queued', 'Waiting to confirm the GitHub draft review');
+      this.store.event(task.id, 'review.creation_deferred', { error: redact(String(error)) });
+      return task;
+    }
+    if (!stillCurrent()) return this.store.getTask(task.id);
+    task.review = review;
+    delete task.reviewPreparation;
+    this.enqueueReview(task, intent.retry, intent.clarification);
+    return task;
+  }
+  private enqueueReview(task: Task, retry = false, clarification?: string) {
+    task.reviewFinished = false;
+    this.store.transaction(() => {
+      task.pendingFix = undefined;
+      if (clarification?.trim()) this.rememberClarification(task, clarification);
+      this.state(task, 'reviewing', `Independent review, round ${task.round}`);
+      this.store.enqueue(
+        task,
+        'reviewer',
+        'review',
+        retry
+          ? clarification?.trim()
+            ? clarifiedReviewPrefix + clarification.trim()
+            : reviewRetryInstruction
+          : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
+      );
     });
   }
   private knownDraftSummary(taskId: string, handle: ReviewHandle, body: string) {

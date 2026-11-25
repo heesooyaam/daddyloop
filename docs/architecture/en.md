@@ -253,6 +253,8 @@ GitHub draft comments are edited and removed by their node IDs in the pending re
 
 After a service restart, daddy checks an interrupted GitHub review against the native draft and its confirmed writes before scheduling another review. For an interrupted author fix it checks the published review, PR head, target and outstanding operations before returning the existing working copy to its worker.
 
+If GitHub returns HTTP 502 while creating a draft, daddy keeps the round, draft marker, account and pinned revision in SQLite. After a delay it reads all review pages and checks the open PR and its revision again. A matching pending review resumes in the same task, including after a restart or pause. An empty list leaves the write unconfirmed because GitHub may show the draft later. A new create request is allowed after a failed check before the POST or an explicit refusal such as rate limiting. See the [offline recovery tests](../../tests/github-draft-recovery.test.ts).
+
 When a conflict repair starts in a dirty, unscoped GitHub worker checkout, the service preserves the entire checkout alongside a clean copy at the expected commit. The same worker can read its staged and untracked files while resolving the merge. The preserved files remain available after a retry.
 
 Code-version checks solve a related problem: reviewing H1 does not verify a fix in H2. The service compares the full code and comparison-base identity (`head`, `base`, `start`, `revisionId`). Changed code invalidates the old review, plan approval and human CI waiver. A leftover stale draft requires inspection.
