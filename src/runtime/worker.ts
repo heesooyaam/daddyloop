@@ -37,7 +37,7 @@ export class Worker {
   private runningJobs = new Map<string, Job>();
   private finalizing = new Set<string>();
   private pendingRuns = new Set<Promise<void>>();
-  private pendingJobOutcomes = new Map<string, Job>();
+  private pendingJobOutcomes = new Map<string, { job: Job; failure?: unknown }>();
   private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
@@ -143,7 +143,8 @@ export class Worker {
     });
     try {
       const store = this.engine.store;
-      for (const job of this.pendingJobOutcomes.values()) this.writeJobOutcome(job);
+      for (const { job, failure } of [...this.pendingJobOutcomes.values()])
+        this.writeJobOutcome(job, failure);
       const resources = this.resourceCheck();
       if (Date.now() - this.lastArcRelease > 15000) {
         this.lastArcRelease = Date.now();
@@ -544,17 +545,18 @@ export class Worker {
       finishTick();
     }
   }
-  private writeJobOutcome(job: Job) {
+  private writeJobOutcome(job: Job, failure?: unknown) {
     const store = this.engine.store;
     try {
       store.transaction(() => {
+        if (failure !== undefined) this.engine.failJob(job, failure);
         store.saveJob(job);
         store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
       });
       this.pendingJobOutcomes.delete(job.id);
     } catch (error) {
       if (!isSqliteBusy(error)) throw error;
-      this.pendingJobOutcomes.set(job.id, job);
+      this.pendingJobOutcomes.set(job.id, { job, failure });
     }
   }
 
@@ -565,6 +567,7 @@ export class Worker {
     const store = this.engine.store;
     let savedFix: { head: string; revision: Revision } | undefined;
     let awaitingReceiptRecovery = false;
+    let taskFailure: unknown;
     try {
       let task = store.getTask(job.taskId);
       const isolatedReview =
@@ -605,7 +608,7 @@ export class Worker {
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
       if (job.kind === 'verify_merge' && startingPR) {
-        if (!(await this.engine.canStartMergeVerification(job, startingPR))) {
+        if (!(await this.engine.canStartMergeVerification(job, startingPR, false))) {
           job.status = 'cancelled';
           return;
         }
@@ -781,6 +784,25 @@ export class Worker {
         agentCwd = realpathSync(join(cwd, workspaceScope(task.scope)));
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
+      }
+      if (job.kind === 'verify_merge' && startingPR) {
+        const currentPR = await this.engine.provider(prRef(task)).getPR(prRef(task));
+        if (
+          currentPR.state !== 'merged' ||
+          currentPR.mergeCommit !== startingPR.mergeCommit ||
+          !sameRevision(currentPR, startingPR)
+        )
+          throw new AppError(
+            'merge_unconfirmed',
+            'The merged revision changed during workspace preparation.',
+          );
+        if (!(await this.engine.canStartMergeVerification(job, currentPR))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
+        if (abort.signal.aborted || task.generation !== job.generation)
+          throw new AppError('run_cancelled', 'Task changed while merge feedback was being read.');
       }
       if (job.kind === 'review' && startingPR) {
         if (!(await this.engine.refreshQueuedReviewFeedback(job))) {
@@ -960,7 +982,7 @@ export class Worker {
       if (error instanceof AppError) job.errorCode = error.code;
       if (quota) job.notBefore = new Date(error.until).toISOString();
       else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
-      else if (!abort.signal.aborted) this.engine.failJob(job, error);
+      else if (!abort.signal.aborted) taskFailure = error;
       if (savedFix) delete job.fixSaveRevision;
     } finally {
       try {
@@ -987,7 +1009,7 @@ export class Worker {
         try {
           if (!awaitingReceiptRecovery) {
             job.finishedAt = now();
-            this.writeJobOutcome(job);
+            this.writeJobOutcome(job, taskFailure);
           }
         } finally {
           this.active.delete(job.taskId);

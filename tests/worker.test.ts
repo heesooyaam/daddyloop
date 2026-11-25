@@ -1,3 +1,4 @@
+import { AppError } from '../src/core/types.js';
 import { DatabaseSync } from 'node:sqlite';
 import { GitHubQuotaError } from '../src/providers/github-quota.js';
 import { it, expect, vi } from 'vitest';
@@ -3344,7 +3345,12 @@ it.skipIf(process.getuid?.() === 0).each([true, false])(
       const task = f.store.getTask(f.task.id);
       f.store.enqueue(task, 'author', 'fix', 'Save the fix');
       const job = f.store.claim()!;
-      mkdirSync(receipts, { mode: 0o700 });
+      if (!journaled) {
+        job.fixSaveRevision = task.revision;
+        f.store.saveJob(job);
+        f.store.stageSavedFixReceipt(job, { head: saved, revision: task.revision! });
+      }
+      mkdirSync(receipts, { mode: 0o700, recursive: true });
       chmodSync(receipts, 0);
       if (journaled) await f.engine.recordSavedFix(job, { head: saved, revision: task.revision! });
       f.engine.recoverInterruptedJobs();
@@ -3353,7 +3359,14 @@ it.skipIf(process.getuid?.() === 0).each([true, false])(
         message: expect.stringContaining(journaled ? saved : 'worker copy must be checked'),
       });
       await worker.tick();
-      expect(inspect).toHaveBeenCalledTimes(journaled ? 0 : 1);
+      expect(inspect).not.toHaveBeenCalled();
+      if (!journaled) {
+        expect(f.store.pendingFixSaves(task.id)).toHaveLength(1);
+        await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+        chmodSync(receipts, 0o700);
+        await worker.tick();
+        expect(inspect).not.toHaveBeenCalled();
+      }
       expect(f.store.getTask(task.id)).toMatchObject({
         state: 'needs_input',
         reason: expect.stringContaining(saved),
@@ -3505,6 +3518,99 @@ it.each([true, false])(
       expect(job.status).toBe(same ? 'completed' : 'queued');
       if (same) expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication');
       else expect(job.notBefore).toBeDefined();
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
+
+it('retries the failed task transition together with the outcome when SQLite is busy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daddy-locked-outcome-')),
+    path = join(dir, 'state.sqlite');
+  const f = await fixture({}, path),
+    lock = new DatabaseSync(path),
+    ws = new Workspaces(dir);
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const worker = new Worker(f.engine, ws, runtime, runtime, healthy, 0);
+  let locked = false;
+  try {
+    await queueFix(f);
+    const t = f.store.getTask(f.task.id);
+    f.store.saveTask({ ...t, ref: { ...prRef(t), provider: 'github' } });
+    f.store.db.exec('PRAGMA busy_timeout=0');
+    vi.spyOn(ws, 'prepare').mockResolvedValue(dir);
+    vi.spyOn(ws, 'commitFix').mockImplementationOnce(async () => {
+      lock.exec('BEGIN IMMEDIATE');
+      locked = true;
+      throw new AppError('fix_precommit_rejected', 'Index is locked');
+    });
+    const job = f.store.claim()!;
+    await worker['run'](job);
+    lock.exec('ROLLBACK');
+    locked = false;
+    await worker.tick();
+    expect(f.store.getTask(t.id)).toMatchObject({ state: 'needs_input', resumeState: 'fixing' });
+    expect(f.store.jobs(t.id).find((j) => j.id === job.id)).toMatchObject({
+      status: 'failed',
+      errorCode: 'fix_precommit_rejected',
+    });
+    expect((await f.engine.action(t.id, 'resume')).state).toBe('fixing');
+    expect(f.store.activeJobs(t.id)).toHaveLength(1);
+  } finally {
+    if (locked) lock.exec('ROLLBACK');
+    await worker.stop();
+    lock.close();
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it.each(['deleted', 'edited', 'unchanged'] as const)(
+  'presents the current published feedback after preparing a merged checkout (%s)',
+  async (change) => {
+    const f = await fixture(),
+      task = f.store.getTask(f.task.id);
+    const ref = { ...prRef(task), provider: 'github' as const },
+      head = 'f'.repeat(40);
+    const pr = { ...task.pr!, state: 'merged' as const, head, mergeCommit: 'merge' };
+    const queued = {
+      ...task,
+      ref,
+      state: 'reviewing' as const,
+      revision: revisionOf(pr),
+      pr,
+      pendingAuthorHead: head,
+      pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+    };
+    const ws = new Workspaces('/tmp'),
+      runtime = { run: vi.fn(async (_input: AgentInput) => f.result()) };
+    const worker = new Worker(f.engine, ws, runtime, runtime, healthy, 0);
+    try {
+      const handle = await f.engine.broker.ensureReview({ ...queued, round: queued.round + 1 });
+      if (!handle) throw new Error('Fixture failed to create the native review');
+      const finding = await f.provider.createComment(
+        ref,
+        handle,
+        'Original finding',
+        handle.marker + ':comment:R',
+      );
+      await f.provider.publish(ref, handle);
+      f.store.saveTask(queued);
+      f.store.setSetting('demo-pr:1', pr);
+      vi.spyOn(ws, 'prepare').mockImplementation(async () => {
+        if (change === 'deleted') await f.provider.deleteComment(ref, handle, finding.id);
+        if (change === 'edited')
+          await f.provider.updateComment(ref, handle, finding.id, 'Updated finding');
+        return '/tmp';
+      });
+      f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged task');
+      await worker.tick();
+      await vi.waitFor(() => expect(runtime.run).toHaveBeenCalled());
+      const shown = runtime.run.mock.calls[0][0].task.feedback?.comments ?? [];
+      expect(shown.map((c) => c.body.split('\n')[0])).toEqual(
+        change === 'deleted' ? [] : [change === 'edited' ? 'Updated finding' : 'Original finding'],
+      );
     } finally {
       await worker.stop();
       f.store.close();

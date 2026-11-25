@@ -179,15 +179,15 @@ export class Store {
     return createHash('sha256').update(taskId).digest('hex') + '-';
   }
 
+  private savedFixFile(taskId: string, runId: string) {
+    return (
+      this.savedFixFilePrefix(taskId) + createHash('sha256').update(runId).digest('hex') + '.json'
+    );
+  }
   stageSavedFixReceipt(job: Job, fix: { head: string; revision: Revision }): string | undefined {
     if (!this.savedFixDirectory) return;
     mkdirSync(this.savedFixDirectory, { recursive: true, mode: 0o700 });
-    const path = join(
-      this.savedFixDirectory,
-      this.savedFixFilePrefix(job.taskId) +
-        createHash('sha256').update(job.id).digest('hex') +
-        '.json',
-    );
+    const path = join(this.savedFixDirectory, this.savedFixFile(job.taskId, job.id));
     const temporary = path + '.' + randomUUID() + '.tmp';
     writeFileSync(temporary, JSON.stringify({ taskId: job.taskId, runId: job.id, fix }), {
       flag: 'wx',
@@ -221,11 +221,11 @@ export class Store {
     }
   }
 
-  restoreSavedFixReceipts(taskId: string) {
+  restoreSavedFixReceipts(taskId: string, runId?: string) {
     if (!this.savedFixDirectory) return true;
     let files: string[];
     try {
-      files = readdirSync(this.savedFixDirectory);
+      files = runId ? [this.savedFixFile(taskId, runId)] : readdirSync(this.savedFixDirectory);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') return true;
@@ -241,7 +241,7 @@ export class Store {
         content = readFileSync(path, 'utf8');
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') continue;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
         if (code === 'EACCES' || code === 'EPERM') return false;
         throw error;
       }
@@ -250,7 +250,8 @@ export class Store {
         runId: string;
         fix: { head: string; revision: Revision };
       };
-      if (receipt.taskId === taskId) this.journalSavedFix(taskId, receipt.runId, receipt.fix, path);
+      if (receipt.taskId === taskId && (!runId || runId === receipt.runId))
+        this.journalSavedFix(taskId, receipt.runId, receipt.fix, path);
     }
     return true;
   }

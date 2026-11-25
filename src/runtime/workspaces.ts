@@ -372,6 +372,7 @@ export class Workspaces {
       if (!(await run(['status', '--porcelain']))) return run(['rev-parse', 'HEAD']);
       try {
         await run(['diff', '--check']);
+        await run(['add', '--all', '--', '.']);
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new AppError(
@@ -380,7 +381,6 @@ export class Workspaces {
             '\nThe worker copy was preserved.',
         );
       }
-      await run(['add', '--all', '--', '.']);
     }
     await run([
       '-c',

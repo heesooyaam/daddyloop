@@ -53,6 +53,9 @@ import { inheritedProfiles } from './agents.js';
 
 const interruptedSubmission =
   'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
+function rejectedBeforeCommit(job: Job) {
+  return job.errorCode === 'fix_precommit_rejected' || job.errorCode === 'unresolved_merge';
+}
 const reviewRetryInstruction =
   'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.';
 const clarifiedReviewPrefix =
@@ -366,7 +369,27 @@ export class Engine {
     }
   }
   private hasUnconfirmedFixSave(task: Task) {
-    return this.store.pendingFixSaves(task.id).length > 0;
+    if (this.store.pendingFixSaves(task.id).length) return true;
+    // Old interrupted author runs did not persist fixSaveRevision. An unreadable
+    // receipt cannot be treated as evidence that the local commit did not happen.
+    const row = this.store.db
+      .prepare(
+        "SELECT data FROM jobs WHERE task_id=? AND json_extract(data,'$.kind')!='chat' ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(task.id);
+    const last = row && (JSON.parse(String(row.data)) as Job);
+    if (
+      !last ||
+      last.kind !== 'fix' ||
+      !['failed', 'cancelled'].includes(last.status) ||
+      last.generation > task.generation ||
+      rejectedBeforeCommit(last) ||
+      this.store.restoreSavedFixReceipts(task.id, last.id)
+    )
+      return false;
+    return !this.store.db
+      .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved'")
+      .get(task.id, last.id);
   }
 
   async recoverPendingSavedFix(
@@ -376,12 +399,22 @@ export class Engine {
     return this.lock(job.taskId, async () => {
       const current = this.store.jobs(job.taskId).find(({ id }) => id === job.id);
       const revision = current?.fixSaveRevision;
-      if (!current || !revision || current.errorCode === 'fix_precommit_rejected') return;
+      if (!current || !revision || rejectedBeforeCommit(current)) return;
       const task = this.store.getTask(job.taskId);
-      const recorded = this.savedFixEvent(task);
+      const readable = this.store.restoreSavedFixReceipts(task.id, job.id);
+      const recorded = this.store.db
+        .prepare(
+          "SELECT run_id,json_extract(data,'$.head') AS head FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved' ORDER BY id DESC LIMIT 1",
+        )
+        .get(task.id, current.id);
       let head: string | undefined;
       let reason: string;
       try {
+        if (!readable && typeof recorded?.head !== 'string')
+          throw new AppError(
+            'receipt_unavailable',
+            'Waiting to read the saved fix receipt before inspecting the working copy.',
+          );
         if (recorded?.run_id !== job.id && !sameRevision(task.revision, revision))
           throw new AppError(
             'stale_revision',
@@ -1999,6 +2032,7 @@ export class Engine {
       snapshot?: ReviewSnapshot;
       checkpoint?: (task: Task) => Promise<string>;
       finishingRun?: boolean;
+      rejectedSaves?: Job[];
       confirmedFix?: boolean;
     } = {},
   ) {
@@ -2021,6 +2055,11 @@ export class Engine {
     const feedback = options.snapshot ?? task.snapshot;
     const carried = task.feedback;
     this.store.transaction(() => {
+      for (const job of options.rejectedSaves ?? []) {
+        delete job.fixSaveRevision;
+        this.store.saveJob(job);
+      }
+
       if (action.preparation !== 'resume') {
         this.invalidate(task, pr, !options.finishingRun);
         task.pendingFix = undefined;
@@ -2754,7 +2793,7 @@ export class Engine {
     return true;
   }
 
-  async canStartMergeVerification(job: Job, pr: PullRequest): Promise<boolean> {
+  async canStartMergeVerification(job: Job, pr: PullRequest, presenting = true): Promise<boolean> {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (
@@ -2763,7 +2802,13 @@ export class Engine {
         !(await this.prepareMergeVerificationFeedback(task, pr))
       )
         return false;
-      this.store.event(task.id, 'merge.findings_presented', this.mergeFindingDigests(task), job.id);
+      if (presenting)
+        this.store.event(
+          task.id,
+          'merge.findings_presented',
+          this.mergeFindingDigests(task),
+          job.id,
+        );
       return true;
     });
   }
@@ -4337,13 +4382,11 @@ export class Engine {
           !saved &&
           outstanding.length > 0 &&
           outstanding.every(
-            (job) =>
-              job.errorCode === 'fix_precommit_rejected' &&
-              sameRevision(job.fixSaveRevision, task.revision),
+            (job) => rejectedBeforeCommit(job) && sameRevision(job.fixSaveRevision, task.revision),
           ) &&
-          !task.fixingMergeConflict &&
-          hasReleasedReview(task) &&
-          task.snapshot?.status === 'published';
+          (task.fixingMergeConflict
+            ? task.resumeState === 'fixing'
+            : hasReleasedReview(task) && task.snapshot?.status === 'published');
         if (!saved && outstanding.length && !resumePrecommit) {
           this.state(
             task,
@@ -4384,7 +4427,9 @@ export class Engine {
                 ? action.reason
                 : 'The PR changed during conflict resolution. Inspect the preserved worker copy.',
             );
-          await this.applyRepair(task, pr, action);
+          await this.applyRepair(task, pr, action, {
+            rejectedSaves: resumePrecommit ? outstanding : undefined,
+          });
           return task;
         }
         if (
@@ -4749,7 +4794,8 @@ export class Engine {
       !autoMergeEnabled(this.store, task)
     )
       return false;
-    this.store.transaction(() => this.enqueueConflictContinuation(task, job));
+    if (this.store.db.isTransaction) this.enqueueConflictContinuation(task, job);
+    else this.store.transaction(() => this.enqueueConflictContinuation(task, job));
     return true;
   }
   private enqueueConflictContinuation(task: Task, job: Job) {
