@@ -1,3 +1,4 @@
+import { VoiceInput, appendDictation } from './voice-input.js';
 import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -68,6 +69,7 @@ function safeUrl(value: string) {
 }
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const [usageEngine, setUsageEngine] = useState<string>();
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [previewingRepository, setPreviewingRepository] = useState(false);
@@ -506,7 +508,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (!paused && modal !== 'settings') void model.send();
+                    if (!paused && !voiceBusy && modal !== 'settings') void model.send();
                   }}
                 >
                   <textarea
@@ -550,11 +552,24 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           : t('You set the goal. daddy handles the headaches.')}
                       </span>
                     )}
+                    <VoiceInput
+                      key={board.group.id}
+                      onBusy={setVoiceBusy}
+                      disabled={paused}
+                      onText={(text) => {
+                        const current = model.snapshot();
+                        if (current.selected === board.group.id)
+                          model.draft(
+                            appendDictation(current.drafts[current.selected] ?? '', text),
+                          );
+                      }}
+                    />
                     <button
                       type="submit"
                       className="daddy-send"
                       aria-label={t('Send message')}
                       disabled={
+                        voiceBusy ||
                         state.busy ||
                         paused ||
                         modal === 'settings' ||

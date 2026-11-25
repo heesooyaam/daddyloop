@@ -31,7 +31,7 @@
     "format": "prettier --write src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "format:check": "prettier --check src tests scripts docs *.json *.ts *.md .github .gitlab-ci.yml",
     "release:build": "npm run build && node scripts/build-release.mjs",
-    "speech:prepare": "node scripts/prepare-speech.mjs",
+    "speech:prepare": "node --import tsx scripts/prepare-speech.mjs",
     "docs:check": "node scripts/check-docs.mjs"
   },
   "dependencies": {
