@@ -350,37 +350,95 @@ it('retains a worker message through push confirmation and delivers it once on t
   }
 });
 
-it.each([false, true])(
-  'verifies the merged saved fix (observed before merge: %s)',
-  async (confirmed) => {
-    const f = await fixture();
-    try {
-      const task = f.store.getTask(f.task.id);
-      const original = task.revision!;
-      const pr = { ...task.pr!, head: savedHead, state: 'merged' as const, mergeCommit: 'merge' };
-      f.store.saveTask({
-        ...task,
-        state: 'needs_input',
-        pendingAuthorHead: savedHead,
-        pr: confirmed ? { ...pr, state: 'open' } : task.pr,
-        revision: confirmed ? { ...original, head: savedHead } : original,
-        pendingAuthorFix: { revision: original, generation: task.generation, sent: true },
-      });
-      f.store.setSetting('demo-pr:1', pr);
-      const queued = await f.engine.action(task.id, 'verify-merge');
-      expect(queued.state).toBe('reviewing');
-      const job = f.store.claim()!;
-      expect(job.kind).toBe('verify_merge');
-      await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
-      expect(f.store.getTask(task.id)).toMatchObject({
-        state: 'complete',
-        verifiedMerge: { head: savedHead },
-      });
-    } finally {
-      f.store.close();
+it.each(
+  [false, true].flatMap((confirmed) =>
+    (['complete', 'checks pass', 'waive checks', 'approve plan'] as const).map(
+      (continuation) => [confirmed, continuation] as const,
+    ),
+  ),
+)('keeps a verified merged fix after restart (%s, %s)', async (confirmed, continuation) => {
+  const f = await fixture({ kind: continuation === 'approve plan' ? 'plan' : 'code' });
+  try {
+    const task = f.store.getTask(f.task.id);
+    const original = task.revision!;
+    const author = f.store.enqueue(task, 'author', 'fix', 'Save the fix');
+    f.store.saveJob({ ...author, status: 'completed' });
+    f.store.event(
+      task.id,
+      'author.fixes_saved',
+      { head: savedHead, revision: original },
+      author.id,
+    );
+    if (confirmed) f.store.event(task.id, 'author.submitted', { head: savedHead, pushed: true });
+    const pr = {
+      ...task.pr!,
+      head: savedHead,
+      state: 'merged' as const,
+      mergeCommit: 'merge',
+      checks:
+        continuation === 'checks pass' || continuation === 'waive checks'
+          ? ('pending' as const)
+          : ('passing' as const),
+    };
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      pendingAuthorHead: savedHead,
+      pr: confirmed ? { ...pr, state: 'open' } : task.pr,
+      revision: confirmed ? { ...original, head: savedHead } : original,
+      pendingAuthorFix: { revision: original, generation: task.generation, sent: true },
+    });
+    f.store.setSetting('demo-pr:1', pr);
+    expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'reviewing' });
+    const job = f.store.claim()!;
+    expect(job.kind).toBe('verify_merge');
+    await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
+    f.store.saveJob({ ...job, status: 'completed' });
+
+    const restarted = new Engine(f.store, () => f.provider);
+    const expected =
+      continuation === 'approve plan'
+        ? 'awaiting_plan_approval'
+        : continuation === 'complete'
+          ? 'complete'
+          : 'awaiting_checks';
+    expect(await restarted.reconcile(task.id)).toMatchObject({
+      state: expected,
+      verifiedMerge: { head: savedHead },
+    });
+    if (continuation === 'checks pass') {
+      f.store.setSetting('demo-pr:1', { ...pr, checks: 'passing' });
+      await restarted.reconcile(task.id);
+    } else if (continuation === 'waive checks') {
+      await restarted.action(task.id, 'waive-checks', 'Verified checks separately');
+    } else if (continuation === 'approve plan') {
+      await restarted.action(task.id, 'approve-plan');
     }
-  },
-);
+    expect(await restarted.reconcile(task.id)).toMatchObject({ state: 'complete' });
+  } finally {
+    f.store.close();
+  }
+});
+
+it('keeps both SHAs when merge verification observes an older commit', async () => {
+  const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+  try {
+    const task = f.store.getTask(f.task.id);
+    const pr = { ...task.pr!, state: 'merged' as const, mergeCommit: 'merge' };
+    f.store.saveTask({
+      ...task,
+      pendingAuthorFix: { revision: task.revision!, generation: task.generation, sent: true },
+    });
+    f.store.setSetting('demo-pr:1', pr);
+    const held = await f.engine.action(task.id, 'verify-merge');
+    expect(held).toMatchObject({ state: 'needs_input', pendingAuthorHead: savedHead });
+    expect(held.reason).toContain(savedHead);
+    expect(held.reason).toContain(pr.head);
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});
 
 it.each(['awaiting_push', 'paused'] as const)(
   'rejects merge verification without changing %s',

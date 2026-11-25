@@ -1637,7 +1637,7 @@ export class Engine {
         ['awaiting_checks', 'awaiting_plan_approval'].includes(task.state)
       ) {
         task.pr = pr;
-        await this.finish(task);
+        this.finish(task);
         return task;
       }
     }
@@ -1758,10 +1758,10 @@ export class Engine {
         this.assignPublishedConflict(task, pr, snapshot);
       else if (snapshot.comments.length) {
         this.assignPublishedFindings(task, snapshot);
-      } else await this.finish(task);
+      } else this.finish(task);
     } else if (task.state === 'awaiting_merge' && !autoMergeRequested(this.store, task)) {
       if (snapshot.status === 'published' && task.reviewFinished && !snapshot.comments.length)
-        await this.finish(task);
+        this.finish(task);
       else
         this.state(
           task,
@@ -1769,7 +1769,7 @@ export class Engine {
           'The reviewed revision needs verification before completion',
         );
     } else if (task.state === 'awaiting_checks' || task.state === 'awaiting_plan_approval')
-      await this.finish(task);
+      this.finish(task);
     else this.store.saveTask(task);
     return this.store.getTask(id);
   }
@@ -1810,7 +1810,7 @@ export class Engine {
         this.finishReviewedTask(task);
   }
 
-  private async finish(task: Task) {
+  private finish(task: Task) {
     if (task.policy.requireChecks && !task.checksWaivedAt && task.pr?.checks !== 'passing') {
       this.state(
         task,
@@ -2302,6 +2302,15 @@ export class Engine {
       .get(task.id, after, head);
   }
 
+  private savedFixVerifiedInMerge(task: Task, head: string, after: number) {
+    return !!this.store.db
+      .prepare(
+        `SELECT 1 FROM events WHERE task_id=? AND id>? AND type='author.fix_verified_in_merge'
+         AND json_extract(data, '$.revision.head')=? LIMIT 1`,
+      )
+      .get(task.id, after, head);
+  }
+
   private legacyFixPublication(task: Task, head: string, after: number, original?: Revision) {
     return this.store.db
       .prepare(
@@ -2436,7 +2445,8 @@ export class Engine {
     const job = saved && this.store.jobs(task.id).find((job) => job.id === saved.run_id);
     if (saved && job?.role === 'author' && job.kind === 'fix') {
       const original = parseRecordedRevision(saved.revision);
-      if (head === original?.head) return;
+      if (head === original?.head || this.savedFixVerifiedInMerge(task, head, Number(saved.id)))
+        return;
       const targetBranch =
         typeof saved.target_branch === 'string' ? saved.target_branch : undefined;
       // Older push receipts preceded the provider read. The old revision transition is the observation.
@@ -2477,6 +2487,7 @@ export class Engine {
     // Read the revision pinned to the author run. Older services could replace the task's base.
     const saved = this.savedFixEvent(task);
     if (typeof saved?.head !== 'string') return;
+    if (this.savedFixVerifiedInMerge(task, saved.head, Number(saved.id))) return;
     const legacy = typeof saved.saved_revision !== 'string';
     if (!legacy && this.savedFixSubmissionRecorded(task, saved.head, Number(saved.id))) return;
     const job = this.store.jobs(task.id).find((job) => job.id === saved.run_id);
@@ -2840,11 +2851,27 @@ export class Engine {
             'Reviewer has not verified all previously published findings',
           );
         } else {
-          task.summary = result.summary;
-          task.pr = pr;
-          task.verifiedMerge = { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
-          task.pendingAuthorFix = undefined;
-          await this.finish(task);
+          this.store.transaction(() => {
+            task.summary = result.summary;
+            task.pr = pr;
+            const revision = revisionOf(pr);
+            task.verifiedMerge = { ...revision, mergeCommit: pr.mergeCommit };
+            if (task.pendingAuthorHead === pr.head) {
+              this.store.event(
+                task.id,
+                'author.fix_verified_in_merge',
+                {
+                  revision,
+                  mergeCommit: pr.mergeCommit,
+                  targetBranch: pr.targetBranch,
+                },
+                job.id,
+              );
+              task.pendingAuthorHead = undefined;
+            }
+            task.pendingAuthorFix = undefined;
+            this.finish(task);
+          });
         }
         return;
       }
@@ -3257,7 +3284,7 @@ export class Engine {
           reason,
           head: task.revision?.head,
         });
-        await this.finish(task);
+        this.finish(task);
       } else {
         if (task.state !== 'complete')
           throw new AppError('not_complete', 'Only completed tasks can be reopened');
