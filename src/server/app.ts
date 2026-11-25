@@ -86,6 +86,7 @@ export interface ServerOptions {
   store?: Store;
   provider?: (ref: PRRef) => ReviewProvider;
   resourceCheck?: () => ResourceStatus;
+  hostCleanupUnits?: string;
   minDiskGiB?: number;
   maxDiskPercent?: number;
   minMemoryGiB?: number;
@@ -281,7 +282,7 @@ export async function buildApp(options: ServerOptions) {
     runtime: options.daddyRuntime ?? agents,
     profile: () => engine.defaultAgents().daddy,
     actions: [
-      ...hostCleanupActions(process.env.DADDYLOOP_CLEANUP_UNITS),
+      ...hostCleanupActions(options.hostCleanupUnits),
       {
         id: 'run-caches',
         description: 'Disposable caches and abandoned processes owned by finished agent runs',
