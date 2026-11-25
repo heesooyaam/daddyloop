@@ -12,12 +12,14 @@ export function InstructionFields({
   api,
   value,
   onChange,
+  onFullImport,
   onBusyChange,
   scope = 'session',
 }: {
   api: DaddyApi;
   value?: SessionInstructions;
   onChange: (value: SessionInstructions) => void;
+  onFullImport?: (value: SessionInstructions) => void;
   onBusyChange?: (busy: boolean) => void;
   scope?: 'session' | 'preset';
 }) {
@@ -402,7 +404,10 @@ export function InstructionFields({
                     JSON.parse(text),
                     controller.signal,
                   );
-                  if (!controller.signal.aborted) change.current(next);
+                  if (!controller.signal.aborted) {
+                    if (scope === 'session' && onFullImport) onFullImport(next);
+                    else change.current(next);
+                  }
                 })
                 .catch((error) => {
                   if (!controller.signal.aborted) setError(error.message);

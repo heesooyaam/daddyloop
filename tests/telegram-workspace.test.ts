@@ -452,6 +452,12 @@ it('applies a one-task branch and subfolder without changing workspace defaults'
       scope: input?.scope ?? workspace.scope,
       base: input?.base ?? workspace.base,
     }));
+  vi.spyOn(f.workspaces, 'browse').mockResolvedValue({
+    path: '/server',
+    parent: '/parent',
+    directories: [{ name: 'Child', path: '/server/child' }],
+    truncated: false,
+  });
   vi.mocked(f.checkouts.describeTicket).mockImplementation(async (path, ref, base) => ({
     repoPath: path,
     ref,
@@ -481,26 +487,53 @@ it('applies a one-task branch and subfolder without changing workspace defaults'
       message: { chat: { id: 7, type: 'private' } },
     },
   });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
   try {
     await bot.handle(
-      message('/repo --base release-candidate --scope apps/mobile -- https://example.test/one.git'),
+      message(
+        '/repo --base release-candidate --scope apps/mobile app -- https://example.test/one.git',
+      ),
     );
     expect(sent.at(-1).text).toContain('--base BRANCH');
+    expect(sent.at(-1).text).toContain('Base branch: release-candidate');
+    expect(sent.at(-1).text).toContain('Scope: apps/mobile app');
+    await bot.handle(click(button('Browse server folders').callback_data));
+    await bot.handle(click(button('Child').callback_data));
+    expect(sent.at(-1).text).toContain('Base branch: release-candidate');
+    expect(sent.at(-1).text).toContain('Scope: apps/mobile app');
     await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
     expect(selection).toHaveBeenCalledWith(
       f.workspace,
       expect.objectContaining({
-        path: 'https://example.test/one.git',
+        path: '/server/child',
         base: 'release-candidate',
-        scope: 'apps/mobile',
+        scope: 'apps/mobile app',
       }),
     );
     await bot.handle(message('/task One-off repository selection'));
     const first = f.store.tasks(group.id).at(-1)!;
     expect(first).toMatchObject({
-      repoPath: 'https://example.test/one.git',
-      scope: 'apps/mobile',
+      repoPath: '/server/child',
+      scope: 'apps/mobile app',
       ticketRepository: { baseBranch: 'release-candidate' },
+    });
+
+    await bot.handle(
+      message('/repo --base default --scope default -- https://example.test/two.git'),
+    );
+    expect(sent.at(-1).text).toContain('Base branch: default');
+    expect(sent.at(-1).text).toContain('Scope: default');
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
+    await bot.handle(message('/task Literal default options'));
+    const literal = f.store.tasks(group.id).find((task) => task.title.includes('Literal default'))!;
+    expect(literal).toMatchObject({
+      repoPath: 'https://example.test/two.git',
+      scope: 'default',
+      ticketRepository: { baseBranch: 'default' },
     });
 
     await bot.handle(message('/task Workspace defaults again'));
@@ -630,6 +663,65 @@ it('expires, cancels and isolates private repository input for its original rout
     await bot.handle(message('/cancel'));
     await bot.handle(click(cancelledStart));
     expect(f.daddy.sessions()).toHaveLength(sessionCount);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+it('rejects a private repository card after switching sessions and labels a fresh target', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session A' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session B' });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => ({
+    ...workspace,
+    repoPath: input?.path ?? workspace.repoPath,
+  }));
+  let id = 610;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/repo /server/a'));
+    const oldUse = sent.at(-1).buttons[0][0].callback_data;
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(click(oldUse));
+    expect(f.store.setting(`telegram.nextRepo:7:7:0:${first.id}`)).toBeFalsy();
+    expect(f.store.setting(`telegram.nextRepo:7:7:0:${second.id}`)).toBeFalsy();
+
+    await bot.handle(message('/repo /server/b'));
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
+    expect(sent.at(-1).text).toContain('Session B');
+    await bot.handle(message('/task Uses B once'));
+    const task = f.store.tasks(second.id).find((item) => item.title.includes('Uses B'))!;
+    expect(task.repoPath).toBe('/server/b');
+    expect(f.store.setting(`telegram.nextRepo:7:7:0:${second.id}`)).toBeNull();
   } finally {
     await bot.stop();
     await f.close();

@@ -1608,6 +1608,8 @@ for (const action of ['settings', 'tasks', 'session'] as const) {
       action === 'settings' ? 'Save settings' : action === 'tasks' ? 'Queue task' : 'Start session';
     try {
       await page.getByRole('button', { name: open, exact: true }).click();
+      if (action === 'settings')
+        await dialog.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ }).check();
       if (action === 'tasks') await dialog.getByLabel('Task description').fill('Earlier task');
       if (action === 'session') await goal.fill('Earlier goal');
       await dialog.getByRole('button', { name: submit, exact: true }).click();
@@ -1806,6 +1808,7 @@ test('keeps an open task report on one revision while board state changes', asyn
   let hold = false,
     fail = false,
     missing = false,
+    published = false,
     responseDelay = 3200,
     detailRequests = 0,
     detailOverride: Partial<typeof snapshot> | undefined,
@@ -1867,6 +1870,17 @@ test('keeps an open task report on one revision while board state changes', asyn
         ],
       },
     });
+    if (published) {
+      const revision = detail.task.revision;
+      detail.task.snapshot = {
+        status: 'published',
+        body: 'Published review',
+        comments: [],
+        url: detail.task.ref.url,
+        revision,
+      };
+      detail.task.review = { id: 'published-review', marker: 'fixture', revision };
+    }
     await route.fulfill({ response, json: detail });
   });
 
@@ -1875,6 +1889,34 @@ test('keeps an open task report on one revision while board state changes', asyn
   await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
   await expect(report.getByText(snapshot.statusLabel, { exact: true })).toBeVisible();
   const approve = report.getByRole('button', { name: 'Approve plan' });
+  await expect(approve).toBeEnabled();
+
+  published = true;
+  Object.assign(snapshot, {
+    state: 'awaiting_publication',
+    reason: 'The review is published. Waiting for GitHub to determine mergeability.',
+    statusLabel: 'GitHub is calculating mergeability',
+  });
+  detailOverride = { reason: 'Publishing recorded findings from a completed review' };
+  let publishedStarted = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  await publishedStarted;
+  await expect(
+    report.getByText('The review is published. Waiting for GitHub to determine mergeability.'),
+  ).toBeVisible();
+  await expect(report.getByText('Original requirements', { exact: true })).toBeVisible();
+  published = false;
+  detailOverride = undefined;
+  Object.assign(snapshot, {
+    state: 'awaiting_plan_approval',
+    reason: 'Plan ready on the first revision',
+    statusLabel: 'Ready for review',
+  });
+  publishedStarted = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  await publishedStarted;
   await expect(approve).toBeEnabled();
 
   let started = new Promise<void>((resolve) => {

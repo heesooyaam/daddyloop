@@ -55,7 +55,12 @@ import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
-import { activityStatus, profileText, taskActivity } from '../core/task-activity.js';
+import {
+  activityReason,
+  activityStatus,
+  profileText,
+  taskActivity,
+} from '../core/task-activity.js';
 import {
   parseTaskInput,
   parseWorkerInput,
@@ -1401,21 +1406,23 @@ export class TelegramWorkspace {
     const [activity] = taskActivity(
       [task],
       this.store.activeJobs(task.id),
-      (item) =>
+      (item, job) =>
         githubActivityStatus(
           item,
           autoMergeSettings(this.store, group, item),
           githubBackoff(this.store, item.ref),
+          job,
         ),
       workerSlots(this.store, group),
     );
-    const statusLabel = activityStatus(activity!);
+    const statusLabel = activityStatus(activity!),
+      reason = this.groupText(destination, activityReason(task));
     task = this.groupTask(destination, task);
     const version = this.taskVersion(task);
     const text = new TelegramText()
       .add(task.title, 'bold')
       .add('\n\n' + this.t(statusLabel))
-      .add('\n' + this.t(task.reason))
+      .add('\n' + this.t(reason))
       .add(
         '\n\n' +
           (this.locale() === 'ru' ? 'Версия' : 'Version') +
@@ -2101,14 +2108,13 @@ export class TelegramWorkspace {
     } else if (input.startsWith('--base ') || input.startsWith('--scope ')) options = input;
     else path = input;
     const next = { ...current, ...(path ? { path } : {}) };
-    const parts = options ? options.split(/\s+/) : [];
-    for (let index = 0; index < parts.length; index += 2) {
-      const option = parts[index],
-        selected = parts[index + 1];
-      if (!selected || !['--base', '--scope'].includes(option))
+    let remaining = options;
+    while (remaining) {
+      const match = /^--(base|scope)\s+([\s\S]*?)(?=\s+--(?:base|scope)\s+|$)/.exec(remaining);
+      if (!match || !match[2].trim())
         throw new Error(this.t('Use --base BRANCH and --scope SUBFOLDER before -- REPOSITORY.'));
-      const key = option === '--base' ? 'base' : 'scope';
-      next[key] = selected === 'default' ? undefined : selected;
+      next[match[1] as 'base' | 'scope'] = match[2].trim();
+      remaining = remaining.slice(match[0].length).trim();
     }
     return next;
   }
@@ -2201,6 +2207,13 @@ export class TelegramWorkspace {
               (choice.workspace.scope ? '/' + choice.workspace.scope : '')),
         'code',
       )
+      .add('\n' + this.t('Base branch') + ': ')
+      .add(choice.input?.base ?? choice.workspace.base ?? this.t('Default'), 'code')
+      .add('\n' + this.t('Scope') + ': ')
+      .add(
+        choice.input?.scope ?? (choice.input?.path ? '/' : choice.workspace.scope || '/'),
+        'code',
+      )
       .add(
         '\n\n' +
           this.t(
@@ -2289,7 +2302,7 @@ export class TelegramWorkspace {
         buttons.push([
           button(
             '↑ ' + this.t('Parent folder'),
-            { ...choice, input: { path: listing.parent }, browsePage: 0 },
+            { ...choice, input: { ...choice.input, path: listing.parent }, browsePage: 0 },
             'browse',
           ),
         ]);
@@ -2297,7 +2310,7 @@ export class TelegramWorkspace {
         buttons.push([
           button(
             entry.name + ' →',
-            { ...choice, input: { path: entry.path }, browsePage: 0 },
+            { ...choice, input: { ...choice.input, path: entry.path }, browsePage: 0 },
             'browse',
           ),
         ]);
@@ -2328,6 +2341,15 @@ export class TelegramWorkspace {
       (choice.controlDestination ?? choice.destination).threadId !== destination.threadId
     )
       throw new Error(this.t('This selection expired. Choose the repository again.'));
+    if (
+      choice.groupId &&
+      choice.destination.chatId === this.pair()?.chatId &&
+      this.store.setting<string>('telegram.currentDaddy') !== choice.groupId
+    ) {
+      this.store.setSetting(key, null);
+      this.store.setSetting(this.repoKey(choice.destination, choice.groupId), null);
+      throw new Error(this.t('The selected session changed. Choose the repository again.'));
+    }
     if (choice.inputId) {
       const pending = this.store.setting<{ id: string }>(
         this.repoInputKey(choice.controlDestination!),
@@ -2389,11 +2411,16 @@ export class TelegramWorkspace {
                   { title: this.room()?.title ?? group.title },
                 ),
             );
-        } else
+        } else {
+          const group = this.daddy.group(choice.groupId);
           response.add(
             '\n\n' +
-              this.t('Send the task now. The following message will use the defaults again.'),
+              this.t(
+                'Send the task now for {title}. The following message will use the defaults again.',
+                { title: group.title },
+              ),
           );
+        }
         await this.api.send(destination, { ...response, ...(buttons.length ? { buttons } : {}) });
       } else await this.newSession(choice.workspace.id, choice.destination, selected);
       if (choice.controlDestination && choice.inputId) {

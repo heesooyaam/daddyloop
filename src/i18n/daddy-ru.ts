@@ -469,6 +469,10 @@ export const daddyRu: Record<string, string> = {
     'Укажи --base ВЕТКА и --scope ПОДПАПКА перед -- РЕПОЗИТОРИЙ.',
   'For one branch or subfolder, send /repo --base BRANCH --scope SUBFOLDER -- REPOSITORY. Omit either option when it is not needed.':
     'Для разовой ветки или подпапки отправь /repo --base ВЕТКА --scope ПОДПАПКА -- РЕПОЗИТОРИЙ. Ненужный параметр можно пропустить.',
+  'The selected session changed. Choose the repository again.':
+    'Выбранная сессия изменилась. Выбери репозиторий заново.',
+  'Send the task now for {title}. The following message will use the defaults again.':
+    'Теперь отправь задачу для {title}. Следующее сообщение снова использует настройки по умолчанию.',
   'Read-only worker reports': 'Отчёты воркеров — только чтение',
   'Discuss changes with daddy in the main conversation. He will send the instructions to the right worker.':
     'Обсуждай изменения с daddy в основном разговоре. Он передаст инструкции нужному воркеру.',

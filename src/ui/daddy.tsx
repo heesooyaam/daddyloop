@@ -1117,19 +1117,39 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
-            onSave={async (profiles, changes, autoMerge, forceDaddy, applyWorkers, title) => {
+            onSave={async (
+              profiles,
+              changes,
+              fullInstructions,
+              autoMerge,
+              forceDaddy,
+              applyWorkers,
+              title,
+            ) => {
               const ensureSaved = () => {
                 const error = model.snapshot().error;
                 if (error) throw new Error(error);
               };
-              if (changes?.length) {
+              if (changes?.length && !fullInstructions) {
                 await model.action('instructions-patch', { changes }, board.group.id);
                 ensureSaved();
               }
-              if (profiles || autoMerge !== undefined || forceDaddy || applyWorkers) {
+              if (
+                profiles ||
+                fullInstructions ||
+                autoMerge !== undefined ||
+                forceDaddy ||
+                applyWorkers
+              ) {
                 await model.action(
                   'settings',
-                  { profiles, autoMerge, forceDaddy, applyWorkers },
+                  {
+                    profiles,
+                    instructions: fullInstructions,
+                    autoMerge,
+                    forceDaddy,
+                    applyWorkers,
+                  },
                   board.group.id,
                 );
                 ensureSaved();
@@ -1800,6 +1820,7 @@ function SessionSettings({
   onSave: (
     profiles?: Partial<AgentProfiles>,
     instructionChanges?: SessionInstructionChange[],
+    fullInstructions?: SessionInstructions,
     autoMerge?: boolean,
     forceDaddy?: boolean,
     applyWorkers?: boolean,
@@ -1814,6 +1835,7 @@ function SessionSettings({
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
     ),
+    [fullInstructionImport, setFullInstructionImport] = useState(false),
     [title, setTitle] = useState(board.group.title),
     [editingFolder, setEditingFolder] = useState(false),
     [importingInstructions, setImportingInstructions] = useState(false),
@@ -1882,7 +1904,8 @@ function SessionSettings({
         }
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          instructionChanges.length ? instructionChanges : undefined,
+          !fullInstructionImport && instructionChanges.length ? instructionChanges : undefined,
+          fullInstructionImport ? after : undefined,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
           forceDaddy || undefined,
           applyWorkers || undefined,
@@ -1979,6 +2002,10 @@ function SessionSettings({
         api={api}
         value={instructions}
         onChange={setInstructions}
+        onFullImport={(value) => {
+          setInstructions(value);
+          setFullInstructionImport(true);
+        }}
         onBusyChange={setImportingInstructions}
       />
       <button type="button" className="daddy-text-button" onClick={() => void load(true)}>
@@ -2039,7 +2066,7 @@ function TaskReport({
       task.revision?.head ?? '',
       task.pendingAuthorHead ?? '',
       task.ref.kind,
-      task.reason,
+      activityReason(task),
     ].join(':');
   const liveVersion = live ? boardVersion(live) : '';
   const detail = value?.task.id === id ? value : undefined;
