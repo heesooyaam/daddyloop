@@ -915,6 +915,11 @@ export const daddyRu: Record<string, string> = {
     'Выбор устарел. Открой добавление репозитория заново.',
   'Repository saved. Continue the new session in the original chat.':
     'Репозиторий сохранён. Продолжи создание сессии в исходном чате.',
+  'Repository registration expired. Start it again.':
+    'Регистрация репозитория устарела. Начни её заново.',
+  'The original new-session draft expired. Start /new again.':
+    'Исходный черновик новой сессии устарел. Отправь /new заново.',
+  'Continue new session': 'Продолжить создание сессии',
   'Send /repo followed by the exact server path to continue.':
     'Чтобы продолжить, отправь /repo с точным путём на сервере.',
   'These instructions changed in another client. Review the latest value and try again.':

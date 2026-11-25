@@ -1142,6 +1142,179 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
   }
 });
 
+it('expires private repository registration without routing its input into a session', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const current = f.daddy.create({ workspaceId: f.workspace.id, title: 'Current session' });
+  f.store.setSetting('telegram.currentDaddy', current.id);
+  let id = 950;
+  const message = (text: string, thread?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+      message_thread_id: thread,
+    },
+  });
+  const click = (data: string, thread?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+        message_thread_id: thread,
+      },
+    },
+  });
+  const openPrivateRegistration = async () => {
+    await bot.handle(click('dad:add-workspace', 12));
+    await bot.handle(click('dad:workspace-module:github', 12));
+    const privateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
+    await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
+  };
+  try {
+    await openPrivateRegistration();
+    const registrationKey = 'telegram.addWorkspace:7:7:0',
+      registration = f.store.setting<Record<string, unknown>>(registrationKey)!;
+    f.store.setSetting(registrationKey, {
+      ...registration,
+      expiresAt: '2000-01-01T00:00:00.000Z',
+    });
+    await bot.handle(message('https://example.test/expired/repository'));
+    expect(sent.at(-1)!.card).toContain('Repository registration expired');
+    expect(f.store.messages(current.id)).toHaveLength(0);
+
+    await openPrivateRegistration();
+    await bot.handle(message('https://example.test/expired/name'));
+    const waitingForName = f.store.setting<Record<string, unknown>>(registrationKey)!;
+    f.store.setSetting(registrationKey, {
+      ...waitingForName,
+      expiresAt: '2000-01-01T00:00:00.000Z',
+    });
+    await bot.handle(message('Expired name'));
+    expect(sent.at(-1)!.card).toContain('Repository registration expired');
+    expect(f.store.messages(current.id)).toHaveLength(0);
+    expect(f.workspaces.list().some((workspace) => workspace.name === 'Expired name')).toBe(false);
+
+    await bot.handle(click('dad:add-workspace', 12));
+    await bot.handle(click('dad:workspace-module:github', 12));
+    const expiredLink = sent.at(-1)!.card.buttons[0][0].url as string,
+      expiredKey = `telegram.workspacePrivate:${new URL(expiredLink).searchParams
+        .get('start')!
+        .slice('workspace_'.length)}`,
+      expired = f.store.setting<Record<string, unknown>>(expiredKey)!;
+    f.store.setSetting(expiredKey, { ...expired, expiresAt: '2000-01-01T00:00:00.000Z' });
+    await bot.handle(click('dad:add-workspace', 12));
+    await bot.handle(click('dad:workspace-module:github', 12));
+    const freshLink = sent.at(-1)!.card.buttons[0][0].url as string,
+      freshId = new URL(freshLink).searchParams.get('start')!.slice('workspace_'.length);
+    expect(
+      f.store.db
+        .prepare("SELECT key FROM settings WHERE key LIKE 'telegram.workspacePrivate:%'")
+        .all()
+        .map((row) => row.key),
+    ).toEqual([`telegram.workspacePrivate:${freshId}`]);
+    await bot.handle(message(`/start workspace_${freshId}`));
+    expect(
+      f.store.db
+        .prepare("SELECT key FROM settings WHERE key LIKE 'telegram.workspacePrivate:%'")
+        .all(),
+    ).toEqual([]);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('continues repository registration only for its exact new-session draft', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any }[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({ message_thread_id: 44 })),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  let id = 980;
+  const message = (text: string, thread?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+      message_thread_id: thread,
+    },
+  });
+  const click = (data: string, thread?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: thread ? -10042 : 7, type: thread ? 'supergroup' : 'private' },
+        message_thread_id: thread,
+      },
+    },
+  });
+  try {
+    await bot.handle(message('/new Preserve this instruction', 12));
+    await bot.handle(click('dad:add-workspace', 12));
+    await bot.handle(click('dad:workspace-module:github', 12));
+    const privateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
+    await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
+    await bot.handle(message('https://example.test/new/session'));
+    await bot.handle(message('New session repository'));
+    const continuation = sent.filter((item) => item.destination.chatId === -10042).at(-1)!.card
+      .buttons[0][0].callback_data as string;
+    const creationKey = 'telegram.newSession:7:-10042:12',
+      draft = f.store.setting<Record<string, unknown>>(creationKey)!;
+    f.store.setSetting(creationKey, { ...draft, expiresAt: '2000-01-01T00:00:00.000Z' });
+    await bot.handle(click(continuation, 12));
+    expect(f.daddy.sessions()).toHaveLength(0);
+    expect(sent.at(-1)!.card.text ?? sent.at(-1)!.card).toContain(
+      'original new-session draft expired',
+    );
+
+    await bot.handle(message('/new Keep the valid instruction', 12));
+    await bot.handle(click('dad:add-workspace', 12));
+    await bot.handle(click('dad:workspace-module:github', 12));
+    const validPrivateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
+    await bot.handle(message(`/start ${new URL(validPrivateUrl).searchParams.get('start')}`));
+    await bot.handle(message('https://example.test/new/valid-session'));
+    await bot.handle(message('Valid session repository'));
+    const validContinuation = sent.filter((item) => item.destination.chatId === -10042).at(-1)!.card
+      .buttons[0][0].callback_data as string;
+    await bot.handle(click(validContinuation, 12));
+    expect(f.daddy.sessions()).toHaveLength(1);
+    expect(f.store.messages(f.daddy.sessions()[0]!.id)[0].text).toBe('Keep the valid instruction');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('mirrors a CLI-created session and live assistant messages to one topic without tool logs or Telegram echoes', async () => {
   const f = daddyFixture();
   const sent: { destination: any; card: any; options?: any }[] = [];

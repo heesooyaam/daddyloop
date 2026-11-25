@@ -1035,7 +1035,7 @@ export class Engine {
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
-  private queueMergeVerification(task: Task, pr: PullRequest) {
+  private queueMergeVerification(task: Task, pr: PullRequest, actionId?: string) {
     if (task.state !== 'needs_input' || this.store.busy(task.id))
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
     if (pr.state !== 'merged' || pr.head !== task.revision?.head)
@@ -1065,6 +1065,7 @@ export class Engine {
         'reviewer',
         'verify_merge',
         'Verify the delivered PR diff and the original task outcome, including requested deployment checks. Use read-only evidence. Check prior published findings and return their verified IDs. Report incomplete if any required result cannot be verified.',
+        actionId,
       );
     });
     return task;
@@ -2442,7 +2443,7 @@ export class Engine {
       assertTaskVersion(task, expected);
       if (action === 'verify-merge') {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
-        const result = this.queueMergeVerification(task, pr);
+        const result = this.queueMergeVerification(task, pr, actionId);
         if (actionId)
           this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
         return result;
@@ -2572,10 +2573,15 @@ export class Engine {
             'The PR changed; a waiver cannot apply to a new revision',
           );
         task.checksWaivedAt = now();
-        this.store.event(id, 'checks.waived', {
-          reason,
-          head: task.revision?.head,
-        });
+        this.store.event(
+          id,
+          'checks.waived',
+          {
+            reason,
+            head: task.revision?.head,
+          },
+          actionId,
+        );
         await this.finish(task);
       } else {
         if (task.state !== 'complete')
@@ -2593,7 +2599,7 @@ export class Engine {
           this.state(task, 'queued', reason || 'Reopened by the user');
         }
       }
-      this.store.event(id, `human.${action}`, { reason });
+      this.store.event(id, `human.${action}`, { reason }, actionId);
       if (actionId)
         this.store.event(id, 'human.task_action', { action, reason, expected }, actionId);
       return task;

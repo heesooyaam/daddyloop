@@ -75,6 +75,12 @@ type Pair = { chatId: number; userId: number; ownerLabel?: string };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
 type Destination = { chatId: number; threadId?: number };
+type NewSessionDraft = {
+  id: string;
+  text?: string;
+  workspaceId?: string;
+  expiresAt: string;
+};
 type RepoChoice = {
   destination: Destination;
   controlDestination?: Destination;
@@ -1321,6 +1327,41 @@ export class TelegramWorkspace {
       .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='human.task_action'")
       .get(taskId, actionId);
   }
+  private recoverTaskAction(task: Task, control: TaskControl, actionId: string) {
+    let recovered = false;
+    if (control.action === 'waive-checks')
+      recovered = !!this.store.db
+        .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='checks.waived'")
+        .get(task.id, actionId);
+    else if (control.action === 'approve-plan')
+      recovered =
+        !!task.approvedAt &&
+        task.revision?.head === control.expectedHead &&
+        !!this.store.db
+          .prepare(
+            "SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='human.approve-plan'",
+          )
+          .get(task.id, actionId);
+    else if (control.action === 'verify-merge')
+      recovered =
+        task.revision?.head === control.expectedHead &&
+        this.store
+          .jobs(task.id)
+          .some(
+            (job) =>
+              job.kind === 'verify_merge' &&
+              job.generation === (control.expectedGeneration ?? 0) + 1 &&
+              job.actionId === actionId,
+          );
+    if (recovered && !this.taskActionCompleted(task.id, actionId))
+      this.store.event(
+        task.id,
+        'human.task_action',
+        { action: control.action, reason: control.reason, recovered: true },
+        actionId,
+      );
+    return recovered;
+  }
   private finishTaskControl(id: string, control: TaskControl, outcome: 'completed' | 'stale') {
     this.store.db
       .prepare('UPDATE bot_actions SET data=?,consumed=1 WHERE id=?')
@@ -1628,7 +1669,7 @@ export class TelegramWorkspace {
     }
     if (!['approve-plan', 'waive-checks', 'verify-merge'].includes(control.action ?? ''))
       throw new Error(this.t('This action is not available for the current task state.'));
-    if (this.taskActionCompleted(control.taskId, id)) {
+    if (this.taskActionCompleted(control.taskId, id) || this.recoverTaskAction(task, control, id)) {
       this.finishTaskControl(id, control, 'completed');
       await this.api.send(
         destination,
@@ -1678,7 +1719,11 @@ export class TelegramWorkspace {
       );
     } catch (error) {
       task = this.daddy.task(control.groupId, control.taskId);
-      if (!this.taskActionCompleted(control.taskId, id)) throw error;
+      if (
+        !this.taskActionCompleted(control.taskId, id) &&
+        !this.recoverTaskAction(task, control, id)
+      )
+        throw error;
     }
     if (!this.taskActionCompleted(control.taskId, id)) {
       await show();
@@ -2100,9 +2145,7 @@ export class TelegramWorkspace {
     await this.api.send(destination, { ...text, buttons });
   }
   private async newSession(workspaceId: string, destination: Destination, workspace?: Workspace) {
-    const pending = this.store.setting<{ text?: string; expiresAt: string }>(
-      this.creationKey(destination),
-    );
+    const pending = this.store.setting<NewSessionDraft>(this.creationKey(destination));
     if (!pending || pending.expiresAt <= now())
       throw new Error(this.t('This selection expired. Start a new session again.'));
     const text = pending && pending.expiresAt > now() ? pending.text : undefined;
@@ -3015,6 +3058,36 @@ export class TelegramWorkspace {
       await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
       return true;
     }
+    if (data.startsWith('dad-workspace-new:')) {
+      const row = this.store.db
+        .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
+        .get(data);
+      if (!row || row.consumed)
+        throw new Error(this.t('This selection expired. Start a new session again.'));
+      const action = JSON.parse(String(row.data)) as {
+        workspaceId: string;
+        destination: Destination;
+        creationId: string;
+        creationExpiresAt: string;
+        ownerId: number;
+        expiresAt: string;
+      };
+      const draft = this.store.setting<NewSessionDraft>(this.creationKey(destination));
+      if (
+        action.ownerId !== this.pair()?.userId ||
+        action.destination.chatId !== destination.chatId ||
+        action.destination.threadId !== destination.threadId ||
+        action.expiresAt <= now() ||
+        !draft ||
+        draft.id !== action.creationId ||
+        draft.expiresAt !== action.creationExpiresAt ||
+        draft.expiresAt <= now()
+      )
+        throw new Error(this.t('The original new-session draft expired. Start /new again.'));
+      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(data);
+      await this.newSession(action.workspaceId, destination);
+      return true;
+    }
     if (!data.startsWith('dad:')) return false;
     if (data === 'dad:modules') {
       await this.modules(destination);
@@ -3049,9 +3122,17 @@ export class TelegramWorkspace {
       if (!module) throw new Error(this.t('Choose an enabled repository service.'));
       if (destination.chatId !== this.pair()?.chatId) {
         const id = randomBytes(12).toString('base64url');
+        this.store.db
+          .prepare(
+            "DELETE FROM settings WHERE key LIKE 'telegram.workspacePrivate:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
+          )
+          .run(now());
+        const creation = this.store.setting<NewSessionDraft>(this.creationKey(destination));
         this.store.setSetting(`telegram.workspacePrivate:${id}`, {
           provider: module.id,
           origin: destination,
+          creationId: creation?.id,
+          creationExpiresAt: creation?.expiresAt,
           ownerId: this.pair()!.userId,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         });
@@ -3142,6 +3223,7 @@ export class TelegramWorkspace {
     }
     if (data === 'dad:new') {
       this.store.setSetting(this.creationKey(destination), {
+        id: randomBytes(12).toString('base64url'),
         expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
       });
       await this.api.send(
@@ -3232,11 +3314,14 @@ export class TelegramWorkspace {
     if (!match) throw new Error('Unknown daddy action');
     const [, action, id, limit] = match;
     if (action === 'new') {
-      const prior = this.store.setting<{ expiresAt: string }>(this.creationKey(destination));
+      const prior = this.store.setting<NewSessionDraft>(this.creationKey(destination));
       const pending =
         prior && prior.expiresAt > now()
           ? prior
-          : { expiresAt: new Date(Date.now() + 10 * 60000).toISOString() };
+          : {
+              id: randomBytes(12).toString('base64url'),
+              expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+            };
       this.store.setSetting(this.creationKey(destination), { ...pending, workspaceId: id });
       await this.repository({
         destination,
@@ -3311,6 +3396,7 @@ export class TelegramWorkspace {
         if (
           !callback.data?.startsWith('dad:') &&
           !callback.data?.startsWith('dad-workspace:') &&
+          !callback.data?.startsWith('dad-workspace-new:') &&
           !callback.data?.startsWith('dad-model:') &&
           !callback.data?.startsWith('dad-default:') &&
           !callback.data?.startsWith('notifications:') &&
@@ -3403,15 +3489,21 @@ export class TelegramWorkspace {
           pending = this.store.setting<{
             provider: string;
             origin: Destination;
+            creationId?: string;
+            creationExpiresAt?: string;
             ownerId: number;
             expiresAt: string;
           }>(key);
-        if (!pending || pending.ownerId !== pair.userId || pending.expiresAt <= now())
+        if (!pending || pending.ownerId !== pair.userId || pending.expiresAt <= now()) {
+          this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
           throw new Error(this.t('This selection expired. Open repository registration again.'));
-        this.store.setSetting(key, null);
+        }
+        this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
         this.store.setSetting(this.registrationKey(destination), {
           provider: pending.provider,
           origin: pending.origin,
+          creationId: pending.creationId,
+          creationExpiresAt: pending.creationExpiresAt,
           expiresAt: pending.expiresAt,
         });
         await this.api.send(
@@ -3446,10 +3538,20 @@ export class TelegramWorkspace {
         provider: string;
         path?: string;
         origin?: Destination;
+        creationId?: string;
+        creationExpiresAt?: string;
         expiresAt: string;
       }>(registrationKey);
       if (registration) {
-        if (registration.expiresAt <= now() || /^\/[a-z]+(?:\s|$)/i.test(text)) {
+        if (registration.expiresAt <= now()) {
+          this.store.setSetting(registrationKey, null);
+          await this.api.send(
+            destination,
+            this.t('Repository registration expired. Start it again.'),
+          );
+          return true;
+        }
+        if (/^\/[a-z]+(?:\s|$)/i.test(text)) {
           this.store.setSetting(registrationKey, null);
           if (text === '/cancel') {
             await this.api.send(
@@ -3478,7 +3580,37 @@ export class TelegramWorkspace {
           });
           this.store.setSetting(registrationKey, null);
           const target = registration.origin ?? destination;
-          await this.api.send(target, this.workspacePickerCard(target, [workspace]));
+          if (registration.origin && registration.creationId && registration.creationExpiresAt) {
+            const draft = this.store.setting<NewSessionDraft>(this.creationKey(target));
+            if (
+              !draft ||
+              draft.id !== registration.creationId ||
+              draft.expiresAt !== registration.creationExpiresAt ||
+              draft.expiresAt <= now()
+            ) {
+              await this.api.send(
+                destination,
+                this.t('The original new-session draft expired. Start /new again.'),
+              );
+              return true;
+            }
+            const actionId = 'dad-workspace-new:' + randomBytes(12).toString('base64url');
+            this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
+              actionId,
+              JSON.stringify({
+                workspaceId: workspace.id,
+                destination: target,
+                creationId: registration.creationId,
+                creationExpiresAt: registration.creationExpiresAt,
+                ownerId: pair.userId,
+                expiresAt: registration.creationExpiresAt,
+              }),
+            );
+            await this.api.send(target, {
+              ...new TelegramText().add(workspace.name, 'bold'),
+              buttons: [[{ text: this.t('Continue new session'), callback_data: actionId }]],
+            });
+          } else await this.api.send(target, this.workspacePickerCard(target, [workspace]));
           if (registration.origin)
             await this.api.send(
               destination,
@@ -3553,6 +3685,7 @@ export class TelegramWorkspace {
       if (/^\/new(?:\s|$)/.test(text) || text === '/workspaces') {
         if (text.startsWith('/new')) {
           this.store.setSetting(this.creationKey(destination), {
+            id: randomBytes(12).toString('base64url'),
             text: text.slice(4).trim() || undefined,
             expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
           });
@@ -3739,9 +3872,7 @@ export class TelegramWorkspace {
             return true;
           }
         }
-        const pending = this.store.setting<{ workspaceId?: string; expiresAt: string }>(
-          this.creationKey(destination),
-        );
+        const pending = this.store.setting<NewSessionDraft>(this.creationKey(destination));
         const creating = pending && pending.expiresAt > now() && pending.workspaceId;
         if (repo[1] === 'default' && groupId && !creating) {
           this.authorize(destination, groupId);
@@ -4000,9 +4131,10 @@ export class TelegramWorkspace {
         return true;
       }
       if (text.startsWith('/')) return !privateChat;
-      const pending = this.store.setting<{ expiresAt: string }>(this.creationKey(destination));
+      const pending = this.store.setting<NewSessionDraft>(this.creationKey(destination));
       if ((!conversationGroupId && privateChat) || (pending && pending.expiresAt > now())) {
         this.store.setSetting(this.creationKey(destination), {
+          id: randomBytes(12).toString('base64url'),
           text,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         });

@@ -260,6 +260,7 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     presetA = makePreset('Preset A'),
     presetB = makePreset('Preset B'),
     presetC = makePreset('Preset C'),
+    presetD = makePreset('Preset D'),
     selected = (preset: typeof presetA, enabled = true) => ({ preset, enabled, omit: [] }),
     state = (preset: typeof presetA, enabled = true) => ({
       revision: preset.revision,
@@ -333,6 +334,169 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       },
     });
     expect(repeated.statusCode).toBe(200);
+
+    const membership = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: {
+        daddy: {},
+        worker: { prompt: 'Keep this prompt' },
+        presets: [selected(presetA), selected(presetB), selected(presetC)],
+      },
+    });
+    const moved = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${membership.id}/instructions-patch`,
+      payload: {
+        changes: [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetA.id, presetC.id, presetB.id],
+          },
+        ],
+      },
+    });
+    expect(moved.statusCode).toBe(200);
+    const independentAdd = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${membership.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetA.id, presetB.id, presetC.id, presetD.id],
+          },
+        ],
+      },
+    });
+    expect(independentAdd.statusCode).toBe(200);
+    expect(
+      f.daddy.group(membership.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetA.id, presetC.id, presetB.id, presetD.id]);
+
+    const addedBeforeReorder = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: {
+        daddy: {},
+        worker: {},
+        presets: [selected(presetA), selected(presetB), selected(presetC)],
+      },
+    });
+    for (const changes of [
+      [
+        { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+        {
+          target: 'preset-order',
+          before: [presetA.id, presetB.id, presetC.id],
+          after: [presetD.id, presetA.id, presetB.id, presetC.id],
+        },
+      ],
+      [
+        {
+          target: 'preset-order',
+          before: [presetA.id, presetB.id, presetC.id],
+          after: [presetA.id, presetC.id, presetB.id],
+        },
+      ],
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/daddy/sessions/${addedBeforeReorder.id}/instructions-patch`,
+        payload: { changes },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+    }
+    expect(
+      f.daddy.group(addedBeforeReorder.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetD.id, presetA.id, presetC.id, presetB.id]);
+
+    const sameAddition = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: {
+        daddy: {},
+        worker: { prompt: 'Keep this prompt' },
+        presets: [selected(presetA), selected(presetB)],
+      },
+    });
+    const addAtStart = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${sameAddition.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetC.id, presetA.id, presetB.id],
+          },
+        ],
+      },
+    });
+    expect(addAtStart.statusCode).toBe(200);
+    const addAtEnd = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${sameAddition.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'worker.prompt', before: 'Keep this prompt', after: 'Do not save this' },
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetA.id, presetB.id, presetC.id],
+          },
+        ],
+      },
+    });
+    expect(addAtEnd.statusCode).toBe(409);
+    expect(f.daddy.group(sameAddition.id).instructions?.worker.prompt).toBe('Keep this prompt');
+    expect(
+      f.daddy.group(sameAddition.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetC.id, presetA.id, presetB.id]);
+
+    const concurrentDelete = f.daddy.create({
+      workspaceId: f.workspace.id,
+      instructions: {
+        daddy: {},
+        worker: {},
+        presets: [selected(presetA), selected(presetB)],
+      },
+    });
+    const removed = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${concurrentDelete.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'preset', id: presetB.id, before: state(presetB), after: null },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetA.id],
+          },
+        ],
+      },
+    });
+    expect(removed.statusCode).toBe(200);
+    const addAfterDelete = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${concurrentDelete.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'preset', id: presetC.id, before: null, after: state(presetC) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id],
+            after: [presetA.id, presetB.id, presetC.id],
+          },
+        ],
+      },
+    });
+    expect(addAfterDelete.statusCode).toBe(200);
+    expect(
+      f.daddy.group(concurrentDelete.id).instructions?.presets?.map((entry) => entry.preset.id),
+    ).toEqual([presetA.id, presetC.id]);
 
     const first = await app.inject({
       method: 'POST',

@@ -196,16 +196,38 @@ export function applyInstructionChanges(
   }
   const order = changes.find((change) => change.target === 'preset-order');
   if (order) {
-    const shared = order.before.filter((id) => order.after.includes(id)),
+    const actualOrder = value(order) as string[],
+      presetChanges = new Map(
+        changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
+      ),
+      shared = order.before.filter((id) => order.after.includes(id) && actualOrder.includes(id)),
       beforeShared = order.before.filter((id) => shared.includes(id)),
       afterShared = order.after.filter((id) => shared.includes(id)),
-      actualShared = (value(order) as string[]).filter((id) => shared.includes(id));
+      actualShared = actualOrder.filter((id) => shared.includes(id));
     if (
       !sameValue(beforeShared, afterShared) &&
       !sameValue(actualShared, beforeShared) &&
       !sameValue(actualShared, afterShared)
     )
       throw new Error('instruction_conflict');
+    for (const id of order.after.filter((id) => !order.before.includes(id))) {
+      if (!actualOrder.includes(id)) {
+        if (!presetChanges.get(id)?.after) throw new Error('instruction_conflict');
+        continue;
+      }
+      const known = order.after.filter((entry) => actualOrder.includes(entry)),
+        actualKnown = actualOrder.filter((entry) => order.after.includes(entry)),
+        expectedIndex = known.indexOf(id),
+        actualIndex = actualKnown.indexOf(id);
+      for (const other of known) {
+        if (other === id) continue;
+        if (known.indexOf(other) < expectedIndex !== actualKnown.indexOf(other) < actualIndex)
+          throw new Error('instruction_conflict');
+      }
+    }
+    for (const id of order.before.filter((id) => !order.after.includes(id)))
+      if (actualOrder.includes(id) && presetChanges.get(id)?.after !== null)
+        throw new Error('instruction_conflict');
   }
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     if (sameValue(value(change), change.after)) continue;
@@ -245,10 +267,38 @@ export function applyInstructionChanges(
   }
   if (order) {
     const presets = next.presets ?? [],
-      byId = new Map(presets.map((entry) => [entry.preset.id, entry]));
-    if (order.after.some((id) => !byId.has(id))) throw new Error('instruction_conflict');
-    const unknown = presets.filter((entry) => !order.after.includes(entry.preset.id));
-    next.presets = [...order.after.map((id) => byId.get(id)!), ...unknown];
+      byId = new Map(presets.map((entry) => [entry.preset.id, entry])),
+      shared = order.before.filter((id) => order.after.includes(id)),
+      beforeShared = order.before.filter((id) => shared.includes(id)),
+      afterShared = order.after.filter((id) => shared.includes(id));
+    if (!sameValue(beforeShared, afterShared)) {
+      const ordered = order.after.flatMap((id) => {
+          const entry = byId.get(id);
+          return entry ? [entry] : [];
+        }),
+        known = new Set(order.after),
+        merged = presets.slice();
+      let index = 0;
+      for (let slot = 0; slot < merged.length; slot++)
+        if (known.has(merged[slot]!.preset.id)) merged[slot] = ordered[index++]!;
+      next.presets = merged;
+    } else {
+      const added = order.after.filter((id) => !order.before.includes(id));
+      for (const id of added) {
+        const entry = byId.get(id);
+        if (!entry) continue;
+        const current = next.presets ?? [],
+          index = current.findIndex((preset) => preset.preset.id === id);
+        if (index >= 0) current.splice(index, 1);
+        const following = order.after
+          .slice(order.after.indexOf(id) + 1)
+          .find((candidate) => current.some((preset) => preset.preset.id === candidate));
+        const followingIndex = following
+          ? current.findIndex((preset) => preset.preset.id === following)
+          : -1;
+        current.splice(followingIndex < 0 ? current.length : followingIndex, 0, entry);
+      }
+    }
   }
   return sessionInstructionsSchema.parse(next);
 }

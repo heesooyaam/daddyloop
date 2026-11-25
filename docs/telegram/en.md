@@ -81,7 +81,7 @@ Session preparation updates one card: “Preparing the session copy” changes t
 
 For Arcadia, choose Work and keep automatic session copies enabled, then use **Start session**. The session settings offer **Delete session** with confirmation. The service archives its results and removes its copies. [Arcadia](../arcadia/en.md)
 
-To register a repository from your phone, open **Settings → Repositories → Add repository**. Choose GitHub or GitLab and send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. `/cancel` cancels registration. Each step belongs to your chat or topic and expires after ten minutes. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md)
+To register a repository from your phone, open **Settings → Repositories → Add repository**. Choose GitHub or GitLab and send its HTTPS/SSH URL, then a name. For Arcadia choose its module and send an existing mount path. Registration started in a group or topic moves the source and name input to the paired private chat, then returns to the exact `/new` draft in the original chat. The link, private input and draft expire after ten minutes; an expired reply is stopped instead of becoming a session message. `/cancel` cancels registration. `/repo URL` chooses a different repository for one request. [Workspace sources and copies](../workspaces/en.md)
 
 In the private chat, `/workspace <name or ID>` shows saved defaults. Change one field with `/workspace <ID> name|path|scope|base|provider|copies <value>`. Clear only the scope or base branch with `/workspace <ID> clear scope` or `/workspace <ID> clear base`; `clear`, `root` and `default` remain valid literal values in the normal value position.
 

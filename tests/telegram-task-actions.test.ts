@@ -282,6 +282,76 @@ it.each([
   },
 );
 
+it('recovers a plan approval when its confirmation receipt write is interrupted', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id }),
+    task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 63,
+        url: 'https://demo.local/pull/63',
+      },
+      repoPath: f.dir,
+      requirements: 'Approve one exact plan',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+  task.kind = 'plan';
+  task.state = 'awaiting_plan_approval';
+  f.store.saveTask(task);
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 930;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    await bot.handle(message('/approve'));
+    const confirmation = telegram.sent.at(-1)!.card.buttons[0][0].callback_data,
+      actionId = confirmation.slice('dad:task:'.length),
+      event = f.store.event.bind(f.store);
+    let failReceipt = true;
+    vi.spyOn(f.store, 'event').mockImplementation((taskId, type, data, runId) => {
+      if (type === 'human.task_action' && failReceipt) {
+        failReceipt = false;
+        throw new Error('fixture receipt write failed');
+      }
+      return event(taskId, type, data, runId);
+    });
+    await bot.handle(click(confirmation));
+    expect(f.store.getTask(task.id).state).toBe('complete');
+    expect(
+      f.store.db
+        .prepare("SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='human.task_action'")
+        .get(task.id, actionId),
+    ).toBeTruthy();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('rejects legacy submit and publish commands and confirmation records', async () => {
   const f = daddyFixture(),
     telegram = telegramFixture(),
@@ -394,6 +464,15 @@ it('does not reuse a completed waiver receipt for another reason', async () => {
     const first = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle(message('/waive Different reason'));
     const second = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    const event = f.store.event.bind(f.store);
+    let failReceipt = true;
+    vi.spyOn(f.store, 'event').mockImplementation((taskId, type, data, runId) => {
+      if (type === 'human.task_action' && failReceipt) {
+        failReceipt = false;
+        throw new Error('fixture receipt write failed');
+      }
+      return event(taskId, type, data, runId);
+    });
     await bot.handle(click(first));
     await bot.handle(click(second));
     const waivers = f.store.events(task.id).filter((event) => event.type === 'checks.waived');
@@ -490,6 +569,15 @@ it('binds merge verification to the selected session and exact task version', as
       .find((button: any) => button.text === 'Verify merge');
     await bot.handle(click(freshPrepare.callback_data));
     const confirmation = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    const event = f.store.event.bind(f.store);
+    let failReceipt = true;
+    vi.spyOn(f.store, 'event').mockImplementation((taskId, type, data, runId) => {
+      if (type === 'human.task_action' && failReceipt) {
+        failReceipt = false;
+        throw new Error('fixture receipt write failed');
+      }
+      return event(taskId, type, data, runId);
+    });
     await bot.handle(click(confirmation));
     expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'verify_merge', role: 'reviewer' }]);
     const receiptId = confirmation.slice('dad:task:'.length),
@@ -499,6 +587,9 @@ it('binds merge verification to the selected session and exact task version', as
     f.store.db
       .prepare('UPDATE bot_actions SET data=?,consumed=0 WHERE id=?')
       .run(JSON.stringify(control), receiptId);
+    f.store.db
+      .prepare("DELETE FROM events WHERE task_id=? AND run_id=? AND type='human.task_action'")
+      .run(task.id, receiptId);
     await bot.handle(click(confirmation));
     expect(f.store.activeJobs(task.id)).toHaveLength(1);
     expect(
