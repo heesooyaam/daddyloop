@@ -82,7 +82,10 @@ export class ArcBridge {
     return this.managedMounts().park(lease);
   }
   async withValidatedJournals<T>(fn: () => Promise<T>) {
-    return this.managedMounts().withJournalLock(async () => {
+    const managed = this.managedMounts();
+    managed.validateSessionRoot();
+    return managed.withJournalLock(async () => {
+      await managed.validateHelperConfig();
       await this.mounts();
       return fn();
     });

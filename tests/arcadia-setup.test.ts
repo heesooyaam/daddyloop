@@ -1,6 +1,14 @@
 import { Command } from 'commander';
 import { expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { registerOperations } from '../src/ops/commands.js';
@@ -160,9 +168,9 @@ fi
     { mode: 0o600 },
   );
   try {
-    await expect(new ArcBridge(directory, candidate).mounts()).resolves.toMatchObject([
-      { path: '/new-pool' },
-    ]);
+    const bridge = new ArcBridge(directory, candidate);
+    await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/new-pool' }]);
+    await expect(bridge.withValidatedJournals(async () => undefined)).resolves.toBeUndefined();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -184,7 +192,12 @@ fi
 `,
       { mode: 0o600 },
     );
-    await expect(new ArcBridge(directory, candidate).mounts()).rejects.toMatchObject({
+    const missingConfig = new ArcBridge(directory, candidate);
+    chmodSync(directory, 0o500);
+    await expect(missingConfig.mounts()).resolves.toEqual([]);
+    expect(existsSync(join(directory, 'arcadia-session-leases.env'))).toBe(false);
+    chmodSync(directory, 0o700);
+    await expect(missingConfig.withValidatedJournals(async () => undefined)).rejects.toMatchObject({
       code: 'command_failed',
     });
 
@@ -212,7 +225,32 @@ fi
 `,
       { mode: 0o600 },
     );
-    await expect(new ArcBridge(directory, candidate).mounts()).rejects.toThrow('must live outside');
+    await expect(
+      new ArcBridge(directory, candidate).withValidatedJournals(async () => undefined),
+    ).rejects.toThrow('must live outside');
+  } finally {
+    chmodSync(directory, 0o700);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('rejects data directories with whitespace or symlink aliases before setup validation', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-root-'));
+  const spaced = join(directory, 'data with spaces');
+  const target = join(directory, 'target');
+  const alias = join(directory, 'alias');
+  mkdirSync(spaced);
+  mkdirSync(target);
+  symlinkSync(target, alias);
+  try {
+    await expect(
+      new ArcBridge(spaced, '/unused-helper').withValidatedJournals(async () => undefined),
+    ).rejects.toThrow('without whitespace');
+    await expect(
+      new ArcBridge(alias, '/unused-helper').withValidatedJournals(async () => undefined),
+    ).rejects.toThrow('without symlink aliases');
+    expect(existsSync(join(spaced, 'arcadia-session-journals.lock'))).toBe(false);
+    expect(existsSync(join(target, 'arcadia-session-journals.lock'))).toBe(false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

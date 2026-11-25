@@ -12,6 +12,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { ManagedArcMounts, type NativeArcMount } from '../src/integrations/arc-managed.js';
 import type { command } from '../src/ops/process.js';
 
@@ -244,3 +246,39 @@ it('serializes setup validation with session journal creation', async () => {
     f.close();
   }
 });
+it.skipIf(!existsSync('/usr/bin/flock'))(
+  'shares the session journal lock across processes',
+  async () => {
+    const f = managedFixture();
+    const lock = join(f.dir, 'arcadia-session-journals.lock');
+    const child = spawn(
+      '/usr/bin/flock',
+      ['--exclusive', lock, 'sh', '-c', 'printf locked; read value'],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once('data', () => resolve());
+        child.once('error', reject);
+        child.once('exit', () => reject(new Error(stderr || 'flock exited before ready')));
+      });
+      let entered = false;
+      const pending = f.manager.withJournalLock(async () => {
+        entered = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(entered).toBe(false);
+      child.stdin.write('\n');
+      await once(child, 'exit');
+      await pending;
+      expect(entered).toBe(true);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      f.close();
+    }
+  },
+);

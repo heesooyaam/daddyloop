@@ -16,6 +16,7 @@ import { command } from '../ops/process.js';
 import { defaultDataDir, loadConfig, privateWrite } from '../ops/config.js';
 import { resources } from '../core/resources.js';
 import { AppError, type Role } from '../core/types.js';
+import { acquireFileLock } from '../ops/data-lock.js';
 import { leaseHelper } from './arc-lease.js';
 import type { ArcLease } from './arcadia.js';
 
@@ -86,11 +87,18 @@ export class ManagedArcMounts {
     });
     ManagedArcMounts.locks.set(this.root, next);
     await before;
+    let releaseFile: (() => Promise<void>) | undefined;
     try {
+      releaseFile = await acquireFileLock(join(this.dataDir, 'arcadia-session-journals.lock'));
       return await fn();
     } finally {
-      release();
-      if (ManagedArcMounts.locks.get(this.root) === next) ManagedArcMounts.locks.delete(this.root);
+      try {
+        await releaseFile?.();
+      } finally {
+        release();
+        if (ManagedArcMounts.locks.get(this.root) === next)
+          ManagedArcMounts.locks.delete(this.root);
+      }
     }
   }
   async withJournalLock<T>(fn: () => Promise<T>) {
@@ -104,10 +112,15 @@ export class ManagedArcMounts {
     identity.parse(taskId);
     return join(this.root, sessionId, `${taskId}-${role}`);
   }
-  private safeDirectory(path: string, create = false) {
+  validateSessionRoot() {
+    if (/\s/.test(this.root))
+      throw new Error('Automatic Arc copies require a data directory without whitespace');
     const data = realpathSync(this.dataDir);
     if (resolve(this.dataDir) !== data)
       throw new Error('Managed Arc copies require a data directory without symlink aliases');
+  }
+  private safeDirectory(path: string, create = false) {
+    this.validateSessionRoot();
     const relative = path.slice(this.root.length);
     if (!path.startsWith(this.root + '/') && path !== this.root)
       throw new Error('Arc copy escaped its managed directory');
@@ -235,10 +248,13 @@ export class ManagedArcMounts {
       join(this.directory(record.sessionId, record.taskId, record.role), 'lease.env'),
     );
   }
+  async validateHelperConfig() {
+    await this.config(this.records(), join(this.dataDir, 'arcadia-session-leases.env'));
+  }
   async status() {
     const records = this.records();
-    const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
     if (!records.length) return [];
+    const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
     const visible = records.filter((record) => record.state !== 'creating');
     if (!visible.length) return [];
     const value = JSON.parse(
@@ -253,8 +269,7 @@ export class ManagedArcMounts {
   async ensure(sessionId: string, taskId: string, role: Role, signal?: AbortSignal) {
     return this.lock(async () => {
       signal?.throwIfAborted();
-      if (/\s/.test(this.root))
-        throw new Error('Automatic Arc copies require a data directory without whitespace');
+      this.validateSessionRoot();
       const directory = this.directory(sessionId, taskId, role);
       this.safeDirectory(join(this.root, sessionId), true);
       let record = this.records(sessionId).find(
