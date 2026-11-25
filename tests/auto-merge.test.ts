@@ -70,6 +70,44 @@ async function setup(f = daddyFixture(), initial: Partial<PullRequest> = {}, rep
 }
 
 describe('opt-in GitHub merging', () => {
+  it('restores a legacy timed-out conflict once, only with the original task generation and an active merge policy', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      f.setRemote({ mergeConflict: true, mergeable: false });
+      await f.poll();
+      const job = f.store.claim()!;
+      const task = f.store.getTask(job.taskId);
+      const failure = 'AppError: Agent exceeded the configured run time limit';
+      Object.assign(task, {
+        state: 'needs_input',
+        resumeState: 'fixing',
+        reason: failure,
+        authorWorktree: f.dir,
+      });
+      f.store.saveTask(task);
+      f.store.saveJob({
+        ...job,
+        status: 'failed',
+        errorCode: 'run_timeout',
+        error: failure,
+        generation: task.generation - 1,
+      });
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      f.store.saveJob({ ...job, status: 'failed', errorCode: 'run_timeout', error: failure });
+      f.daddy.taskAutoMerge(f.group.id, task.id, 'off');
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      f.daddy.taskAutoMerge(f.group.id, task.id, 'on');
+      f.engine.recoverInterruptedJobs();
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix', timeoutRetry: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('honors session inheritance, both overrides, and a disabled default', async () => {
     const f = await setup();
     try {
@@ -964,6 +1002,33 @@ describe('opt-in GitHub merging', () => {
         expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(head);
         await f.checkouts.prepareConflict(input.task);
 
+        writeFileSync(join(input.cwd, 'feature'), 'first half of the resolution');
+        throw new AppError('run_timeout', 'Agent exceeded the configured run time limit');
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.activeJobs(task.id)[0]?.timeoutRetry).toBe(true));
+      const retry = f.store.activeJobs(task.id)[0];
+      expect(Date.parse(retry.notBefore!)).toBeGreaterThan(Date.now());
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'fixing',
+        revision: { head, base },
+        authorWorktree: previousCopy,
+      });
+      f.store.saveJob({ ...retry, notBefore: undefined });
+      const newerBase = await commit('later upstream');
+      const targetAdvanced = vi.fn(
+        async (_ref: unknown, before: string, after: string) =>
+          before === base && after === newerBase,
+      );
+      Object.assign(f.provider, { targetAdvanced });
+      f.setRemote({ base: newerBase, start: newerBase });
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.cwd).toBe(previousCopy);
+        expect(await git(['rev-parse', 'MERGE_HEAD'], input.cwd)).toBe(base);
+        expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toBe(
+          'first half of the resolution',
+        );
+
         // Exercise the real push path against a local bare remote. Disallow network transports.
         await git(['config', 'protocol.allow', 'never'], input.cwd);
         await git(['config', 'protocol.file.allow', 'always'], input.cwd);
@@ -976,14 +1041,6 @@ describe('opt-in GitHub merging', () => {
         timeout: 5000,
       });
       const saved = f.store.getTask(task.id).pendingAuthorHead!;
-      // Another PR landed while the worker was resolving the pinned conflict.
-      const newerBase = await commit('later upstream');
-      const targetAdvanced = vi.fn(
-        async (_ref: unknown, before: string, after: string) =>
-          before === base && after === newerBase,
-      );
-      Object.assign(f.provider, { targetAdvanced });
-      f.setRemote({ base: newerBase, start: newerBase });
       await f.engine.submitSavedFix(task.id, async (current, sha) => {
         await f.checkouts.pushSavedFix(current, sha);
         expect(await git(['rev-parse', 'refs/heads/feature'], remoteRepo)).toBe(saved);

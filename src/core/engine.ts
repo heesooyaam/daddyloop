@@ -991,22 +991,27 @@ export class Engine {
     );
   }
 
-  async publishedFixBaseAdvanced(task: Task, pr: PullRequest) {
+  async fixCanContinueOnAdvancedBase(task: Task, pr: PullRequest, resumeConflict = false) {
     const pinned = task.revision;
     if (
       task.ref.provider !== 'github' ||
       !pinned ||
       task.pendingFix ||
-      task.fixingMergeConflict ||
-      !hasReleasedReview(task) ||
-      task.snapshot?.status !== 'published' ||
-      !sameRevision(task.snapshot.revision, pinned) ||
-      !sameRevision(task.review?.revision, pinned) ||
       (task.pendingAuthorHead && task.pendingAuthorHead !== pinned.head) ||
       pr.draft !== false ||
       pr.head !== pinned.head ||
       pr.base === pinned.base ||
       !sameOpenTarget(task.pr, pr)
+    )
+      return false;
+    if (task.fixingMergeConflict) {
+      if (!resumeConflict || !autoMergeEnabled(this.store, task) || !task.authorWorktree)
+        return false;
+    } else if (
+      !hasReleasedReview(task) ||
+      task.snapshot?.status !== 'published' ||
+      !sameRevision(task.snapshot.revision, pinned) ||
+      !sameRevision(task.review?.revision, pinned)
     )
       return false;
     return (
@@ -1090,7 +1095,7 @@ export class Engine {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
         if (
           !sameOpenTarget(task.pr, pr) ||
-          (!sameRevision(pr, task.revision) && !(await this.publishedFixBaseAdvanced(task, pr)))
+          (!sameRevision(pr, task.revision) && !(await this.fixCanContinueOnAdvancedBase(task, pr)))
         )
           return;
         this.store.transaction(() => this.queueAnsweredFix(task, job.input, job.actionId));
@@ -1120,7 +1125,7 @@ export class Engine {
         const pr = await provider.getPR(ref);
         const same =
           sameRevision(pr, task.revision) && sameOpenTarget(task.pr, pr) && pr.draft === false;
-        if (!(restarted && same) && !(await this.publishedFixBaseAdvanced(task, pr))) return;
+        if (!(restarted && same) && !(await this.fixCanContinueOnAdvancedBase(task, pr))) return;
         if (restarted) {
           const native = await provider.getReview(ref, task.review);
           const pending = this.store.db
@@ -1328,7 +1333,7 @@ export class Engine {
         });
       return task;
     }
-    if (action.kind === 'check-fix-base' && (await this.publishedFixBaseAdvanced(task, pr)))
+    if (action.kind === 'check-fix-base' && (await this.fixCanContinueOnAdvancedBase(task, pr)))
       return task;
     if (action.kind === 'refresh' || action.kind === 'check-fix-base') {
       await this.changeReviewRevision(task, pr);
@@ -2419,6 +2424,14 @@ export class Engine {
       }
       if (task.state !== 'needs_input' || task.inputRequest) continue;
       const job = this.store.jobs(task.id).at(-1);
+      if (
+        job?.status === 'failed' &&
+        job.error === task.reason &&
+        task.resumeState === 'fixing' &&
+        !this.store.busy(task.id) &&
+        this.queueConflictContinuation(task, job)
+      )
+        continue;
       if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;
       const result = this.recordedAgentResult(task.id, job.id);
       if (
@@ -2476,12 +2489,50 @@ export class Engine {
       this.store.event(id, source, { reason });
     });
   }
+  private queueConflictContinuation(task: Task, job: Job) {
+    if (
+      job.kind !== 'fix' ||
+      job.role !== 'author' ||
+      job.errorCode !== 'run_timeout' ||
+      task.generation !== job.generation ||
+      !task.fixingMergeConflict ||
+      task.pendingFix ||
+      !task.authorWorktree ||
+      !autoMergeEnabled(this.store, task)
+    )
+      return false;
+    this.store.transaction(() => {
+      this.store.saveJob(job);
+      this.state(
+        task,
+        'fixing',
+        'Continuing conflict resolution in the saved worker copy after a timeout',
+      );
+      const retry = this.store.enqueue(
+        task,
+        'author',
+        'fix',
+        'Continue the interrupted conflict repair in the same working copy. Inspect the partial resolution, finish the remaining files and run the checks.',
+      );
+      retry.timeoutRetry = true;
+      retry.notBefore = new Date(Date.now() + (job.timeoutRetry ? 300000 : 30000)).toISOString();
+      this.store.saveJob(retry);
+      this.store.event(
+        task.id,
+        'conflict.timeout_retry',
+        { previousRun: job.id, notBefore: retry.notBefore },
+        retry.id,
+      );
+    });
+    return true;
+  }
   failJob(job: Job, error: unknown) {
     const task = this.store.getTask(job.taskId);
     if (task.generation !== job.generation || task.state === 'paused') return;
     task.resumeState = task.state;
     if (job.role === 'reviewer') task.reviewFinished = false;
     const reason = redact(String(error));
+    if (task.state === 'fixing' && this.queueConflictContinuation(task, job)) return;
     if (job.kind === 'fix' && task.pendingFix && task.pendingAuthorHead) {
       task.resumeState = 'awaiting_push';
       this.state(
