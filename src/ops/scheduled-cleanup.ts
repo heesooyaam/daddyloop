@@ -18,26 +18,23 @@ export interface CleanupCounts {
   removed: number;
   tooRecent?: number;
 }
+interface CleanupResult {
+  counts?: CleanupCounts;
+  removedBytes?: number;
+  skipped?: boolean;
+  unitResult?: 'threshold' | 'condition' | 'busy' | 'completed';
+}
 export interface CleanupAction {
   id: string;
   description: string;
-  run(
-    signal: AbortSignal,
-    shouldContinue: () => boolean,
-  ): Promise<void | { counts?: CleanupCounts; removedBytes?: number; skipped?: boolean }>;
+  run(signal: AbortSignal, shouldContinue: () => boolean): Promise<void | CleanupResult>;
 }
 type CleanupRun = { id: string; startedAt: number; before: Disk };
 export interface CleanupReport extends CleanupRun {
   finishedAt: number;
   after: Disk;
   status: 'cleared' | 'still_high' | 'failed' | 'interrupted';
-  actions: {
-    id: string;
-    error?: string;
-    counts?: CleanupCounts;
-    removedBytes?: number;
-    skipped?: boolean;
-  }[];
+  actions: (CleanupResult & { id: string; error?: string; freeSpaceChangeGiB?: number })[];
   error?: string;
 }
 type ScheduleState = { lastCheckedAt?: number; run?: CleanupRun; report?: CleanupReport };
@@ -180,10 +177,19 @@ export class ScheduledCleanup {
       const plan = shouldContinue() ? await this.plan(run, signal) : [];
       for (const action of plan) {
         signal.throwIfAborted();
-        if (!shouldContinue()) break;
+        const actionBefore = this.options.measure();
+        if (actionBefore.diskUsedPercent <= this.policy.diskPercent) break;
         try {
           const result = await action.run(signal, shouldContinue);
-          actions.push({ id: action.id, ...result });
+          const freeSpaceChangeGiB =
+            result?.unitResult === 'completed'
+              ? this.options.measure().diskAvailableGiB - actionBefore.diskAvailableGiB
+              : undefined;
+          actions.push({
+            id: action.id,
+            ...result,
+            ...(freeSpaceChangeGiB === undefined ? {} : { freeSpaceChangeGiB }),
+          });
         } catch (failure) {
           signal.throwIfAborted();
           actions.push({ id: action.id, error: redact(String(failure)).slice(0, 500) });
