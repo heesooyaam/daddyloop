@@ -649,8 +649,10 @@ export class Daddy {
     expected: { generation: number; instructionsHash: string },
     update: (current: SessionInstructions | undefined) => SessionInstructions,
     validate?: () => void,
+    commit?: () => void,
   ) {
     await this.withSessionTasks(id, (group) => {
+      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       validate?.();
       const instructionsHash = createHash('sha256')
         .update(JSON.stringify(group.instructions ?? null))
@@ -664,8 +666,9 @@ export class Daddy {
           'Session instructions changed. Start the import again.',
           409,
         );
-      group.instructions = sessionInstructionsSchema.parse(update(group.instructions));
+      const instructions = sessionInstructionsSchema.parse(update(group.instructions));
       this.store.transaction(() => {
+        group.instructions = instructions;
         this.store.saveGroup(group);
         this.store.event(id, 'daddy.settings', {
           workerLimit: group.workerLimit,
@@ -674,6 +677,7 @@ export class Daddy {
           restartReviews: [],
           restartCoordinator: false,
         });
+        commit?.();
       });
     });
     return this.board(id);

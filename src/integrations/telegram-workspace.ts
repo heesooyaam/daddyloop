@@ -36,7 +36,7 @@ import type { ResourceStatus } from '../core/types.js';
 import { setLocale } from '../core/preferences.js';
 import { notificationsCard } from './telegram-cards.js';
 import { languageCard } from './telegram-meta.js';
-import { instructionCommand, instructionLines } from '../client/instructions.js';
+import { instructionLines, updateInstructionsFromCommand } from '../client/instructions.js';
 import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
 import { sessionInstructionsSchema, type SkillSnapshot } from '../core/instructions.js';
@@ -813,7 +813,11 @@ export class TelegramWorkspace {
     if (!presets.length) text.add('\n\n' + this.t('No presets yet.'));
     else if (pages > 1)
       text.add('\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }));
-    for (const preset of visible) text.add('\n\n• ' + preset.name);
+    const showDescriptions = destination.chatId === this.pair()?.chatId;
+    for (const preset of visible) {
+      text.add('\n\n• ' + preset.name);
+      if (showDescriptions && preset.description) text.add('\n' + preset.description);
+    }
     const navigation: TelegramButton[] = [],
       route = group?.id ?? 'library';
     if (page > 0) navigation.push({ text: '←', callback_data: `dad:presets:${route}:${page - 1}` });
@@ -869,9 +873,11 @@ export class TelegramWorkspace {
       const preset = library.get(control.presetId);
       if (preset.revision !== control.revision)
         throw new Error(this.t('This preset selection changed. Open it again.'));
-      await this.daddy.settings(
+      await this.daddy.updateInstructions(
         group.id,
-        { instructions: selectPreset(group.instructions, preset) },
+        { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+        (current) => selectPreset(current, preset),
+        () => this.presetSession(destination, group.id),
         () => {
           this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
         },
@@ -881,17 +887,25 @@ export class TelegramWorkspace {
     }
     if (typeof control.enabled !== 'boolean')
       throw new Error(this.t('This preset action expired. Open the preset again.'));
-    const instructions = structuredClone(group.instructions ?? { daddy: {}, worker: {} });
-    const applied = instructions.presets?.find((item) => item.preset.id === control.presetId);
-    if (!applied || applied.preset.revision !== control.revision)
-      throw new Error(this.t('This preset selection changed. Open it again.'));
-    const omitted = new Set(applied.omit);
-    if (control.enabled) omitted.delete(control.part!);
-    else omitted.add(control.part!);
-    applied.omit = [...omitted];
-    await this.daddy.settings(group.id, { instructions }, () => {
-      this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
-    });
+    await this.daddy.updateInstructions(
+      group.id,
+      { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+      (current) => {
+        const instructions = structuredClone(current ?? { daddy: {}, worker: {} });
+        const applied = instructions.presets?.find((item) => item.preset.id === control.presetId);
+        if (!applied || applied.preset.revision !== control.revision)
+          throw new Error(this.t('This preset selection changed. Open it again.'));
+        const omitted = new Set(applied.omit);
+        if (control.enabled) omitted.delete(control.part!);
+        else omitted.add(control.part!);
+        applied.omit = [...omitted];
+        return instructions;
+      },
+      () => this.presetSession(destination, group.id),
+      () => {
+        this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+      },
+    );
     await this.presetPartsCard(this.daddy.group(group.id), control.presetId, destination);
     return true;
   }
@@ -2979,13 +2993,17 @@ export class TelegramWorkspace {
           return true;
         }
         if (!groupId) throw new Error(this.t('Start a daddy session first.'));
-        this.authorize(destination, groupId);
-        const instructions = await instructionCommand(
-          text,
-          this.daddy.group(groupId).instructions,
-          (url) => new InstructionSources().import({ kind: 'github', url }),
-        );
-        if (instructions) await this.daddy.settings(groupId, { instructions });
+        const group = this.authorize(destination, groupId);
+        const skillUrl = text.match(/^\/skill\s+(?:daddy|worker)\s+([\s\S]+)$/)?.[1];
+        const skill = skillUrl
+          ? await new InstructionSources().import({ kind: 'github', url: skillUrl.trim() })
+          : undefined;
+        if (text.trim() !== '/instructions')
+          await this.daddy.updateInstructions(
+            group.id,
+            { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+            (current) => updateInstructionsFromCommand(text, current, skill)!,
+          );
         await this.api.send(
           destination,
           privateChat
@@ -3058,9 +3076,11 @@ export class TelegramWorkspace {
             } else {
               const library = new InstructionPresets(this.store),
                 preset = library.get(findPreset(library.list(), name).id);
-              await this.daddy.settings(group.id, {
-                instructions: selectPreset(group.instructions, preset, action === 'enable'),
-              });
+              await this.daddy.updateInstructions(
+                group.id,
+                { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+                (current) => selectPreset(current, preset, action === 'enable'),
+              );
               await this.api.send(
                 destination,
                 this.t(
@@ -3075,20 +3095,23 @@ export class TelegramWorkspace {
       const presetName = text.match(/^\/preset\s+(.+)$/)?.[1];
       if (presetName) {
         if (!groupId) throw new Error(this.t('Start a daddy session first.'));
-        this.authorize(destination, groupId);
+        const group = this.authorize(destination, groupId);
         const library = new InstructionPresets(this.store),
           preset = library.get(findPreset(library.list(), presetName).id);
-        await this.daddy.settings(groupId, {
-          instructions: selectPreset(this.daddy.group(groupId).instructions, preset),
-        });
+        await this.daddy.updateInstructions(
+          groupId,
+          { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+          (current) => selectPreset(current, preset),
+        );
+        const detail = privateChat
+          ? '\n\n' +
+            instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n')
+          : '';
         await this.api.send(
           destination,
           new TelegramText()
             .add(this.t('Preset enabled for this session'), 'bold')
-            .add(
-              '\n\n' +
-                instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
-            ),
+            .add(`\n\n${preset.name}${detail}`),
         );
         return true;
       }

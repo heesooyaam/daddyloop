@@ -232,7 +232,17 @@ export class TicketWorkflow {
   async submit(id: string, expected?: ExpectedTask): Promise<Task> {
     const result = await this.engine.lock(id, async () => {
       const task = this.engine.store.getTask(id);
-      assertTaskVersion(task, expected);
+      if (expected?.pendingHead) assertTaskVersion(task, expected);
+      else if (
+        expected &&
+        (task.pendingAuthorHead !== expected.head ||
+          task.generation !== expected.generation ||
+          (expected.groupId !== undefined && task.groupId !== expected.groupId))
+      )
+        throw new AppError(
+          'stale_task',
+          'The task changed. Refresh it before confirming this action.',
+        );
       if (
         !isTicket(task) ||
         !task.ticketRepository ||

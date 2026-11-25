@@ -204,6 +204,50 @@ it('requires the exact pending head before a web action submits saved PR fixes',
     await f.close();
   }
 });
+it('rejects a recovered first PR submission unless the request confirms its saved commit', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, autoPush: false });
+    const task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: 'Recovered first submission',
+      requirements: 'Submit only the commit shown to the user',
+      createdByAction: 'recovered-submit',
+    });
+    for (const job of f.store.jobs(task.id)) {
+      job.status = 'completed';
+      f.store.saveJob(job);
+    }
+    task.state = 'needs_input';
+    task.pendingAuthorHead = 'b'.repeat(40);
+    f.store.saveTask(task);
+    const push = vi.spyOn(f.checkouts, 'pushTicket').mockResolvedValue(undefined);
+    const action = (expectedPendingHead?: string) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/daddy/sessions/${group.id}/task-action`,
+        payload: {
+          taskId: task.id,
+          action: 'submit',
+          expectedHead: task.revision!.head,
+          expectedGeneration: task.generation,
+          ...(expectedPendingHead !== undefined ? { expectedPendingHead } : {}),
+        },
+      });
+    expect((await action()).statusCode).toBe(409);
+    expect((await action('')).statusCode).toBe(409);
+    expect((await action('c'.repeat(40))).statusCode).toBe(409);
+    expect(push).not.toHaveBeenCalled();
+    expect(f.store.getTask(task.id).state).toBe('needs_input');
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
 it('authenticates workspace/session controls, deduplicates messages and closes public worker chat', async () => {
   const f = daddyFixture(),
     server = await buildApp({

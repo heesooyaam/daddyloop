@@ -170,14 +170,26 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
     () => '',
     () => 'test-token',
   );
-  vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined);
+  const push = vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined);
   vi.spyOn(provider, 'getPR').mockResolvedValue({
     ...(await provider.getPR({ ...task.ref, kind: undefined })),
     head: task.pendingAuthorHead,
   });
   const workflow = new TicketWorkflow(engine, ws, reader);
   try {
-    await expect(workflow.submit(task.id)).rejects.toThrow('Lost response');
+    const viewed = { head: task.revision!.head, generation: task.generation };
+    await expect(workflow.submit(task.id, viewed)).rejects.toMatchObject({ code: 'stale_task' });
+    await expect(workflow.submit(task.id, { ...viewed, pendingHead: '' })).rejects.toMatchObject({
+      code: 'stale_task',
+    });
+    await expect(
+      workflow.submit(task.id, { ...viewed, pendingHead: 'c'.repeat(40) }),
+    ).rejects.toMatchObject({ code: 'stale_task' });
+    expect(push).not.toHaveBeenCalled();
+    expect(writes).toBe(0);
+    await expect(
+      workflow.submit(task.id, { head: task.pendingAuthorHead, generation: task.generation }),
+    ).rejects.toThrow('Lost response');
     await expect(engine.implement(task.id)).rejects.toThrow('Reconcile');
     await expect(workflow.submit(task.id)).rejects.toThrow('uncertain');
     correctOwner = true;

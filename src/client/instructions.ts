@@ -48,22 +48,45 @@ export async function instructionCommand(
   current: SessionInstructions | undefined,
   importSkill: (url: string) => Promise<SkillSnapshot>,
 ): Promise<SessionInstructions | undefined> {
+  const match = instructionCommandMatch(text);
+  if (!match) return undefined;
+  const skill = match.kind === 'skill' ? await importSkill(match.value.trim()) : undefined;
+  return updateInstructionsFromCommand(text, current, skill);
+}
+export function updateInstructionsFromCommand(
+  text: string,
+  current: SessionInstructions | undefined,
+  skill?: SkillSnapshot,
+): SessionInstructions | undefined {
   if (text.trim() === '/instructions') return undefined;
+  const match = instructionCommandMatch(text);
+  if (!match)
+    throw new Error(
+      'Use /instructions daddy <text>, /instructions worker <text>, or /skill <role> <GitHub URL>',
+    );
+  const role = match.role,
+    value = structuredClone(current ?? { daddy: {}, worker: {} });
+  if (match.kind === 'instructions') {
+    if (match.value.trim() === '--clear') return clearInstructionRole(value, role);
+    else value[role].prompt = match.value;
+  } else {
+    if (!skill) throw new Error('Import the requested skill before updating instructions');
+    const skills = value[role].skills ?? [];
+    if (!skills.some((item) => item.checksum === skill.checksum))
+      value[role].skills = [...skills, skill];
+  }
+  return value;
+}
+function instructionCommandMatch(text: string) {
+  if (text.trim() === '/instructions') return;
   const match = text.match(/^\/(instructions|skill)\s+(daddy|worker)\s+([\s\S]+)$/);
   if (!match)
     throw new Error(
       'Use /instructions daddy <text>, /instructions worker <text>, or /skill <role> <GitHub URL>',
     );
-  const role = match[2] as 'daddy' | 'worker',
-    value = structuredClone(current ?? { daddy: {}, worker: {} });
-  if (match[1] === 'instructions') {
-    if (match[3].trim() === '--clear') return clearInstructionRole(value, role);
-    else value[role].prompt = match[3];
-  } else {
-    const skill = await importSkill(match[3].trim()),
-      skills = value[role].skills ?? [];
-    if (!skills.some((item) => item.checksum === skill.checksum))
-      value[role].skills = [...skills, skill];
-  }
-  return value;
+  return {
+    kind: match[1] as 'instructions' | 'skill',
+    role: match[2] as 'daddy' | 'worker',
+    value: match[3],
+  };
 }

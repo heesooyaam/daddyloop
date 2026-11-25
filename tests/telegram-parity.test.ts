@@ -377,30 +377,29 @@ it('keeps saved instruction text private through preset and settings callback bu
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Work' });
   const group = f.daddy.create({ workspaceId: f.workspace.id });
-  const preset = new InstructionPresets(f.store).save({
+  new InstructionPresets(f.store).save({
     name: 'Private preset',
     instructions: {
       daddy: { prompt: 'PRIVATE_PRESET_PROMPT' },
-      worker: {},
+      worker: { prompt: 'PRIVATE_WORKER_PROMPT' },
     },
   });
   await f.daddy.settings(group.id, {
     instructions: {
       daddy: {},
       worker: {},
-      presets: [{ preset, enabled: true, omit: [] }],
     },
   });
   const topic = await bot.ensureTopic(group);
   let id = 180;
-  const message = (text: string): Update => ({
+  const message = (text: string, threadId: number | null = topic!.threadId): Update => ({
     update_id: id++,
     message: {
       message_id: id,
       text,
       from: { id: 7 },
       chat: { id: -10042, type: 'supergroup' },
-      message_thread_id: topic!.threadId,
+      message_thread_id: threadId ?? undefined,
     },
   });
   const click = (data: string): Update => ({
@@ -416,6 +415,18 @@ it('keeps saved instruction text private through preset and settings callback bu
     },
   });
   try {
+    await bot.handle(message('/preset Private preset'));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Private preset');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_PRESET_PROMPT');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_WORKER_PROMPT');
+
+    await bot.handle(message(`/session ${group.id.slice(0, 8)}`, null));
+    await bot.handle(message('/preset Private preset', null));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Private preset');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_PRESET_PROMPT');
+    expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_WORKER_PROMPT');
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].enabled).toBe(true);
+
     await bot.handle(message('/preset parts Private preset'));
     const back = telegram.sent.at(-1)!.card.buttons.at(-1)[0].callback_data;
     await bot.handle(click(back));
@@ -430,6 +441,242 @@ it('keeps saved instruction text private through preset and settings callback bu
     await bot.handle(click(instructions));
     expect(telegram.sent.at(-1)!.card.text).toContain('paired private chat');
     expect(telegram.sent.at(-1)!.card.text).not.toContain('PRIVATE_PRESET_PROMPT');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('keeps concurrent instruction changes when Telegram applies presets or edits another role', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    instructions: {
+      daddy: { prompt: 'Original daddy' },
+      worker: { prompt: 'Original worker' },
+    },
+  });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const preset = new InstructionPresets(f.store).save({
+    name: 'Concurrent preset',
+    instructions: {
+      daddy: { prompt: 'Preset daddy' },
+      worker: { prompt: 'Preset worker' },
+    },
+  });
+  let id = 240;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const block = async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const locked = f.engine.lock(`create-task:${group.id}`, async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await ready;
+    return { release, locked };
+  };
+  const race = async (instructions: any, action: () => Promise<unknown>) => {
+    const lock = await block();
+    const web = f.daddy.settings(group.id, { instructions });
+    const telegramAction = action();
+    lock.release();
+    await Promise.all([lock.locked, web, telegramAction]);
+  };
+  try {
+    await bot.handle(message('/presets'));
+    const select = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === preset.name).callback_data;
+    await race({ daddy: { prompt: 'Web daddy 1' }, worker: { prompt: 'Original worker' } }, () =>
+      bot.handle(click(select)),
+    );
+    expect(f.daddy.group(group.id).instructions).toEqual({
+      daddy: { prompt: 'Web daddy 1' },
+      worker: { prompt: 'Original worker' },
+    });
+    const selectId = String(select).slice('dad:preset:'.length);
+    expect(
+      f.store.db.prepare('SELECT consumed FROM bot_actions WHERE id=?').get(selectId)?.consumed,
+    ).toBe(0);
+
+    await race({ daddy: { prompt: 'Web daddy 1b' }, worker: { prompt: 'Original worker' } }, () =>
+      bot.handle(message('/preset Concurrent preset')),
+    );
+    expect(f.daddy.group(group.id).instructions).toEqual({
+      daddy: { prompt: 'Web daddy 1b' },
+      worker: { prompt: 'Original worker' },
+    });
+
+    await f.daddy.settings(group.id, {
+      instructions: {
+        daddy: { prompt: 'Web daddy 1b' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: true, omit: [] }],
+      },
+    });
+    await bot.handle(message('/preset parts Concurrent preset'));
+    const part = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await race(
+      {
+        daddy: { prompt: 'Web daddy 2' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: true, omit: [] }],
+      },
+      () => bot.handle(click(part)),
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web daddy 2');
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].omit).toEqual([]);
+    const partId = String(part).slice('dad:preset:'.length);
+    expect(
+      f.store.db.prepare('SELECT consumed FROM bot_actions WHERE id=?').get(partId)?.consumed,
+    ).toBe(0);
+
+    await f.daddy.settings(group.id, {
+      instructions: {
+        daddy: { prompt: 'Web daddy 2' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: false, omit: [] }],
+      },
+    });
+    await race(
+      {
+        daddy: { prompt: 'Web daddy 2b' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: false, omit: [] }],
+      },
+      () => bot.handle(message('/preset enable Concurrent preset')),
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web daddy 2b');
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].enabled).toBe(false);
+
+    await race(
+      {
+        daddy: { prompt: 'Web daddy 3' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: true, omit: [] }],
+      },
+      () => bot.handle(message('/preset disable Concurrent preset')),
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web daddy 3');
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].enabled).toBe(true);
+
+    await race(
+      {
+        daddy: { prompt: 'Web daddy 4' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: true, omit: [] }],
+      },
+      () => bot.handle(message('/instructions worker Replacement worker')),
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web daddy 4');
+    expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('Original worker');
+
+    await race(
+      {
+        daddy: { prompt: 'Web daddy 5' },
+        worker: { prompt: 'Original worker' },
+        presets: [{ preset, enabled: true, omit: [] }],
+      },
+      () => bot.handle(message('/instructions worker --clear')),
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web daddy 5');
+    expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('Original worker');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('rejects Telegram instruction imports while a session is being deleted', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    instructions: { daddy: { prompt: 'Original' }, worker: {} },
+  });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 320;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const file = (name = 'instructions.json'): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+      document: {
+        file_id: `file-${id}`,
+        file_unique_id: `unique-${id}`,
+        file_name: name,
+        file_size: 100,
+      },
+    },
+  });
+  telegram.document(JSON.stringify({ daddy: { prompt: 'Imported' }, worker: {} }));
+  try {
+    for (const state of ['pending', 'running', 'error'] as const) {
+      const current = f.daddy.group(group.id);
+      current.deletion = { state };
+      f.store.saveGroup(current);
+      await bot.handle(message('/instructions import'));
+      await bot.handle(file());
+      expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Original');
+      expect(telegram.sent.at(-1)!.card.text).toContain('being deleted');
+    }
+
+    const deleting = f.daddy.group(group.id);
+    deleting.deletion = { state: 'pending' };
+    f.store.saveGroup(deleting);
+    telegram.document('# Skill\n\nDo not save during deletion.');
+    await bot.handle(message('/skill worker file'));
+    await bot.handle(file('skill.md'));
+    expect(f.daddy.group(group.id).instructions?.worker.skills).toBeUndefined();
+    expect(telegram.sent.at(-1)!.card.text).toContain('being deleted');
+
+    const current = f.daddy.group(group.id);
+    delete current.deletion;
+    current.daddyState = 'paused';
+    f.store.saveGroup(current);
+    telegram.document(JSON.stringify({ daddy: { prompt: 'Imported' }, worker: {} }));
+    await bot.handle(message('/instructions import'));
+    await bot.handle(file());
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Imported');
   } finally {
     await bot.stop();
     await f.close();
@@ -615,6 +862,7 @@ it('keeps preset pages bound to their session while allowing global browsing', a
   for (let index = 1; index <= 21; index++)
     library.save({
       name: `Global preset ${index}`,
+      description: `Description ${index}`,
       instructions: { daddy: { prompt: `Global ${index}` }, worker: {} },
     });
   let id = 700;
@@ -641,12 +889,15 @@ it('keeps preset pages bound to their session while allowing global browsing', a
     f.store.setSetting('telegram.currentDaddy', null);
     await bot.handle(message('/presets'));
     expect(telegram.sent.at(-1)!.card.text).toContain('Global preset 1');
+    expect(telegram.sent.at(-1)!.card.text).toContain('Description 1');
     await bot.handle(click(buttons().find((button: any) => button.text === '→').callback_data));
     await bot.handle(click(buttons().find((button: any) => button.text === '→').callback_data));
     expect(telegram.sent.at(-1)!.card.text).toContain('Global preset 21');
+    expect(telegram.sent.at(-1)!.card.text).toContain('Description 21');
 
     await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
     await bot.handle(message('/presets'));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Description 1');
     const oldSelect = buttons().find(
       (button: any) => button.text === 'Global preset 1',
     ).callback_data;
