@@ -76,6 +76,8 @@ daddy restart
 
 `daddy cache target remove ~/.cache/my-build` removes the directory from the schedule after restart.
 
+For native garbage collection of a large host cache, an administrator can install a system service such as daddyloop-cleanup-example.service with Type=oneshot and RemainAfterExit=no. Set DADDYLOOP_CLEANUP_UNITS to the comma-separated allowed names in the daddy service environment. After restart, cleanup settings list these services and the skill can select their IDs without the .service suffix. The service user needs permission to run sudo -n /usr/bin/systemctl start for each exact name. The unit defines the commands, cache owner and busy checks. Exit status 75 with SuccessExitStatus=75 indicates a skip. daddy checks the threshold again before the next operation.
+
 ### Recovery instead of a silent queue
 
 ```mermaid

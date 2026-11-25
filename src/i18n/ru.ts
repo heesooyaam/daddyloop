@@ -1016,6 +1016,18 @@ Object.assign(ru, {
   'Not enough available RAM': 'Недостаточно свободной RAM',
   'Disk-space threshold reached': 'Достигнут порог заполнения диска',
   'Scheduled cache cleanup': 'Плановая уборка кэшей',
+  'Disk usage {before}% → {after}%. Free space decreased by {gain} GiB.':
+    'Диск {before}% → {after}%. Свободного места стало меньше на {gain} ГиБ.',
+  'Disk usage {before}% → {after}%. Free space was unchanged.':
+    'Диск {before}% → {after}%. Объём свободного места не изменился.',
+  'Review copies and downloads checked: {checked}, eligible: {eligible}, removed: {removed}.':
+    'Копии ревью и временные загрузки: проверено {checked}, подходят для удаления {eligible}, удалено {removed}.',
+  'Younger than the retention period: {count}.': 'Ещё не достигли срока хранения: {count}.',
+  'Host cleanup services': 'Службы уборки хоста',
+  'Host cleanup {unit} was skipped.': 'Обслуживание хоста {unit} пропущено.',
+  'Host cleanup {unit} completed.': 'Обслуживание хоста {unit} завершено.',
+  'Scheduled cleanup ended with an error.': 'Уборка завершилась с ошибкой.',
+  'Error: Cache maintenance is already running': 'Другая уборка уже выполнялась.',
   'Disk usage {before}% → {after}%. Free space gained {gain} GiB.':
     'Диск {before}% → {after}%. Свободного места прибавилось на {gain} ГиБ.',
   'Disk usage is now within the cleanup threshold.': 'Заполнение диска в пределах порога уборки.',

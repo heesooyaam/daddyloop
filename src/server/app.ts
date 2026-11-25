@@ -39,6 +39,7 @@ import { homedir } from 'node:os';
 import { CacheManager } from '../ops/cache.js';
 import { pruneCacheTarget } from '../ops/cache-targets.js';
 import { CleanupControls } from '../ops/cleanup-controls.js';
+import { hostCleanupActions } from '../ops/host-cleanup.js';
 import { ScheduledCleanup } from '../ops/scheduled-cleanup.js';
 import { TicketWorkflow } from '../core/ticket-workflow.js';
 import { TicketReader } from '../modules/repositories/tickets.js';
@@ -280,6 +281,7 @@ export async function buildApp(options: ServerOptions) {
     runtime: options.daddyRuntime ?? agents,
     profile: () => engine.defaultAgents().daddy,
     actions: [
+      ...hostCleanupActions(process.env.DADDYLOOP_CLEANUP_UNITS),
       {
         id: 'run-caches',
         description: 'Disposable caches and abandoned processes owned by finished agent runs',
@@ -288,7 +290,20 @@ export async function buildApp(options: ServerOptions) {
       {
         id: 'review-caches',
         description: 'Expired temporary downloads and old verified clean review copies',
-        run: (signal, shouldContinue) => cache.prune(true, { signal, shouldContinue }),
+        run: async (signal, shouldContinue) => {
+          const report = await cache.prune(true, { signal, shouldContinue });
+          return {
+            counts: {
+              checked: report.candidates.length,
+              eligible: report.candidates.filter((c) => c.eligible).length,
+              removed: report.removed.length,
+              tooRecent: report.candidates.filter(
+                (c) => c.reason === 'Younger than retention policy',
+              ).length,
+            },
+            removedBytes: report.removedBytes,
+          };
+        },
       },
       ...schedule.targets.map((target, index) => ({
         id: `registered-${index + 1}`,

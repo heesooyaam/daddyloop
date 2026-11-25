@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -110,6 +110,50 @@ it('removes a registered clean old reviewer worktree while preserving dirty, cur
     expect((await manager.prune(true)).removed).toEqual([paths[0]]);
     expect(existsSync(paths[0])).toBe(false);
     for (const path of paths.slice(1)) expect(existsSync(path)).toBe(true);
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('serializes preview and apply, and rechecks cancellation and the threshold after waiting', async () => {
+  const f = await fixture(),
+    dir = mkdtempSync(join(tmpdir(), 'daddy-gc-queue-'));
+  try {
+    const cache = join(dir, 'cache');
+    mkdirSync(cache);
+    writeFileSync(join(cache, '.daddyloop-cache'), 'daddyloop-cache-v1');
+    const item = join(cache, 'download-old');
+    writeFileSync(item, 'old');
+    utimesSync(item, new Date(0), new Date(0));
+    const manager = new CacheManager(f.engine, dir, {
+      auto: false,
+      maxAgeDays: 1,
+      keepReviewerCopies: 1,
+    });
+    let release!: () => void;
+    const idle = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inspect = manager.inspect.bind(manager);
+    vi.spyOn(manager, 'inspect').mockImplementationOnce(async () => {
+      await idle;
+      return inspect();
+    });
+    const preview = manager.prune(false),
+      cancelled = new AbortController();
+    const waiting = manager.prune(true, { signal: cancelled.signal, shouldContinue: () => true });
+    const over = manager.prune(true, {
+      signal: new AbortController().signal,
+      shouldContinue: () => false,
+    });
+    cancelled.abort();
+    const apply = manager.prune(true);
+    release();
+    expect((await preview).removableBytes).toBe(3);
+    await expect(waiting).rejects.toThrow();
+    expect((await over).removed).toEqual([]);
+    expect((await apply).removed).toEqual([item]);
   } finally {
     f.store.close();
     rmSync(dir, { recursive: true, force: true });
