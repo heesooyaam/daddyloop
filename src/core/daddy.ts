@@ -42,7 +42,7 @@ import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
 import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
-import { queueDetail, activityStatus, taskActivity } from './task-activity.js';
+import { queueDetail, activityStatus, outstandingActivity, taskActivity } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
 import {
   sessionInstructionsSchema,
@@ -226,7 +226,7 @@ export class Daddy {
       workspace: group.workspace!,
       workerDefault: group.worker ?? this.engine.defaultAgents().worker,
       taskQueue: activity
-        .filter(({ task, job }) => job?.status === 'queued' && task.state !== 'complete')
+        .filter((item) => item.job?.status === 'queued' && outstandingActivity(item))
         .map(({ task }) => task.id),
       tasks: tasks.map((task) => {
         const item = activeByTask.get(task.id)!;

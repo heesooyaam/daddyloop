@@ -680,6 +680,12 @@ export const daddyRu: Record<string, string> = {
     'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',
   'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'GitHub mergeability check · retry at {time} UTC':
+    'Проверка возможности слияния GitHub · повтор в {time} UTC',
+  'GitHub mergeability check · retry at {time} UTC · PR #{number}':
+    'Проверка возможности слияния GitHub · повтор в {time} UTC · PR #{number}',
+  'retry at {time} UTC': 'повтор в {time} UTC',
+  'Waiting for task discussion': 'Ждёт обсуждения задачи',
   'Draft PR: mark it ready for review on GitHub':
     'PR в черновике. Отметь его готовым к ревью в GitHub',
   'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',

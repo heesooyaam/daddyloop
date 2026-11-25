@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
 import { describe, expect, it, vi } from 'vitest';
 import { reconcileWorkerPools, workerSlots, saveWorkerSlots } from '../src/core/worker-pool.js';
-import { pollAutoMerge } from '../src/core/auto-merge.js';
+import { autoMergeSettings, githubActivityStatus, pollAutoMerge } from '../src/core/auto-merge.js';
+import { taskActivity } from '../src/core/task-activity.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
+import { queueCard, taskCard } from '../src/integrations/telegram-tasks.js';
+import { translate } from '../src/i18n/index.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import { daddyFixture } from './daddy-fixture.js';
 
@@ -70,6 +73,131 @@ async function setup(f = daddyFixture(), initial: Partial<PullRequest> = {}, rep
 }
 
 describe('opt-in GitHub merging', () => {
+  function expectStatus(f: Awaited<ReturnType<typeof setup>>, label: string) {
+    const task = f.store.getTask(f.task.id);
+    const group = f.store.getGroup(f.group.id);
+    const [item] = taskActivity(
+      [task],
+      f.store.activeJobs(task.id),
+      (task, job) =>
+        githubActivityStatus(task, autoMergeSettings(f.store, group, task), undefined, job),
+      workerSlots(f.store, group),
+    );
+    expect(f.daddy.board(group.id).tasks).toContainEqual(
+      expect.objectContaining({ id: task.id, statusLabel: label }),
+    );
+    for (const locale of ['en', 'ru'] as const) {
+      const expected = translate(locale, label);
+      expect(queueCard(locale, group.id, [item!]).text).toContain(expected);
+      expect(taskCard(locale, item!).text).toContain(expected);
+    }
+  }
+
+  it.each([
+    ['completed', false],
+    ['completed', true],
+    ['incomplete', true],
+    ['needs_input', true],
+  ] as const)(
+    'shows GitHub mergeability after publishing a %s review (findings: %s)',
+    async (status, findings) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const task = f.store.getTask(f.task.id);
+        const handle = { ...task.review!, authorId: 'owner' };
+        f.store.saveTask({ ...task, review: handle });
+        f.store.setSetting('demo-review:' + handle.id, {
+          ...(await f.provider.getReview(prRef(task), handle)),
+          authorId: 'owner',
+        });
+        const job = f.store.claim()!;
+        if (findings)
+          await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Published finding' });
+        await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
+        await f.engine.completeJob(job, {
+          status,
+          summary: 'Report',
+          question: status === 'needs_input' ? 'Which behavior is intended?' : undefined,
+          checkedHead: task.revision!.head,
+        });
+        f.store.saveJob({ ...job, status: 'completed' });
+        expectStatus(f, 'Publishing review');
+
+        f.setRemote({ mergeable: null });
+        await f.engine.publish(task.id);
+        const waiting = f.store.getTask(task.id);
+        expect(waiting).toMatchObject({
+          state: 'awaiting_publication',
+          snapshot: { status: 'published' },
+        });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        if (waiting.partialReview) {
+          const until = waiting.partialReview.retryAt!;
+          const time = new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
+          expectStatus(f, `GitHub mergeability check · retry at ${time} UTC · PR #12`);
+        } else {
+          expectStatus(f, 'GitHub is calculating mergeability');
+        }
+
+        f.setRemote({ mergeable: true });
+        await f.engine.publish(task.id);
+        expect(f.store.getTask(task.id).state).toBe(findings ? 'fixing' : 'awaiting_merge');
+        expectStatus(f, findings ? 'Waiting for a worker' : 'Checking GitHub auto-merge');
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'shows deferred author discussion after clean publication (auto-merge: %s)',
+    async (autoMerge) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge });
+        await f.engine.review(f.task.id, true);
+        const review = f.store.claim()!;
+        await f.engine.chat(f.task.id, 'author', 'Explain the decision', 'deferred-chat', true);
+        await f.engine.completeJob(review, {
+          status: 'completed',
+          summary: 'Verified',
+          checkedHead: f.task.revision!.head,
+        });
+        f.store.saveJob({ ...review, status: 'completed' });
+        await f.engine.publish(f.task.id);
+        expect(f.store.getTask(f.task.id).state).toBe(autoMerge ? 'awaiting_merge' : 'complete');
+        await f.engine.deliverWorkerInstruction(f.task.id);
+        expect(f.daddy.board(f.group.id).taskQueue).toEqual([f.task.id]);
+        expectStatus(f, 'Waiting for task discussion');
+
+        saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: f.task.id }]);
+        const chat = f.store.claim()!;
+        expect(chat.kind).toBe('chat');
+        expectStatus(f, 'Task discussion in progress');
+        const task = f.store.getTask(f.task.id);
+        expect(
+          queueCard('en', f.group.id, [{ task, job: chat, assignedWorker: 1 }]).text,
+        ).toContain('Worker 1 · <1 min elapsed');
+        await f.engine.completeJob(chat, {
+          status: 'completed',
+          summary: 'Explained',
+          checkedHead: f.task.revision!.head,
+        });
+        f.store.saveJob({ ...chat, status: 'completed' });
+        expect(f.daddy.board(f.group.id).taskQueue).toEqual([]);
+        if (autoMerge) expectStatus(f, 'Checking GitHub auto-merge');
+        else
+          expect(
+            queueCard('en', f.group.id, [{ task: f.store.getTask(f.task.id) }]).text,
+          ).toContain('No unfinished tasks.');
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   it('restores a legacy timed-out conflict once, only with the original task generation and an active merge policy', async () => {
     const f = await setup();
     try {

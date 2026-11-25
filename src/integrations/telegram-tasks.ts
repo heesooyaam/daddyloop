@@ -94,6 +94,7 @@ function queueStatus(item: TaskActivity) {
   if (label === 'Task discussion in progress') return { label };
   const detail = queueDetail(task);
   if (mergeStatus) {
+    if (label.startsWith('GitHub is calculating mergeability · ')) return { label, detail };
     if (label.startsWith('Waiting for GitHub API quota until '))
       return { label: 'Waiting for GitHub quota', detail: label };
     if (label.includes(' · retry at ')) return { label, detail };

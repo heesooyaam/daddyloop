@@ -74,6 +74,7 @@ export function githubActivityStatus(
     return `Waiting for GitHub API quota until ${time} UTC${number ? ` · PR #${number}` : ''}`;
   }
   if (!reviewed(task) || task.ref.provider !== 'github') return;
+  if (job?.kind === 'chat' && (job.status === 'queued' || job.status === 'running')) return;
   if (settings.result?.state === 'merged') return settings.result.message;
   if (settings.enabled && task.pr?.state === 'open')
     return settings.result?.message ?? 'Checking GitHub auto-merge';
