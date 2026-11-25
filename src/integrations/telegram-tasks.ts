@@ -116,8 +116,7 @@ function queueStatus(item: TaskActivity) {
       detail: label,
     };
   }
-  if (assignedWorker !== undefined && job?.role === 'author' && job.status === 'queued')
-    return { label: 'Waiting to start' };
+  if (label === 'Assigned worker is waiting to start') return { label: 'Waiting to start' };
   return { label, detail };
 }
 
@@ -267,9 +266,18 @@ export function taskCard(
     .add('\n' + status);
   if (run) text.add('\n' + run);
   if (profile) text.add('\n' + profileText(profile));
-  const reason = detail ?? (job?.status !== 'running' && !item.mergeStatus ? task.reason : '');
-  const explanation = t(redact(reason)).trim();
-  if (explanation && explanation !== status) text.add('\n\n' + clipTitle(explanation, 1000));
+  const showReason =
+    (job?.status !== 'running' && !item.mergeStatus) ||
+    (task.state === 'needs_input' &&
+      (queueDetail(task) !== undefined || activityStatus({ task }) !== 'Action needed')) ||
+    (task.state === 'fixing' && task.fixingMergeConflict);
+  const explanations = new Set(
+    [detail, showReason ? task.reason : undefined].map((value) =>
+      value ? t(redact(value)).trim() : '',
+    ),
+  );
+  for (const explanation of explanations)
+    if (explanation && explanation !== status) text.add('\n\n' + clipTitle(explanation, 1000));
   if (task.state === 'complete' && task.ref.kind === 'ticket' && task.summary)
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);

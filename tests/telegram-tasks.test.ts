@@ -319,6 +319,119 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       expect(lastText()).toContain('95 min since work began');
       expect(lastText()).not.toContain('5 min elapsed');
     }
+
+    const openTask = () => click(`dad:task:${task!.id}`);
+    const authorJob = { ...chat!, generation: reviewing.generation };
+    const currentGroup = f.store.getGroup(group.id);
+    f.store.saveGroup({ ...currentGroup, workerSlots: [{ number: 2, taskId: task!.id }] });
+    const prRef = { ...withPr.ref, kind: 'pull_request', number: 72 } as const;
+    const prTask: Task = {
+      ...reviewing,
+      ref: prRef,
+      revision: withPr.revision,
+      pr: { state: 'open' } as Task['pr'],
+      state: 'awaiting_merge',
+    };
+    f.store.saveTask(prTask);
+    const boardStatus = async () =>
+      (await app.inject(session)).json().tasks.find((item: Task) => item.id === task!.id)
+        .statusLabel;
+    const mergeKey = `autoMerge.result:${task!.id}`;
+    for (const message of [
+      'Checking GitHub auto-merge',
+      'Waiting for GitHub to confirm the previous merge request',
+    ]) {
+      f.store.setSetting(mergeKey, {
+        generation: prTask.generation,
+        head: prTask.revision!.head,
+        state: 'uncertain',
+        message,
+      });
+      for (const role of ['author', 'reviewer'] as const) {
+        f.store.saveJob({ ...authorJob, role, status: 'running', startedAt: started(5) });
+        expect(await boardStatus()).toBe('Task discussion in progress');
+        f.store.saveJob({ ...authorJob, role, status: 'completed', startedAt: started(5) });
+        expect(await boardStatus()).toBe(message);
+      }
+    }
+    f.store.setSetting(mergeKey, null);
+
+    const retryAt = Date.parse('2026-11-25T12:34:56Z');
+    for (const locale of ['en', 'ru'] as const) {
+      setLocale(f.store, locale);
+      for (const ref of [undefined, prRef]) {
+        f.store.saveTask({
+          ...reviewing,
+          state: 'submitting',
+          prLink: { ref, retryAt, head: prTask.revision!.head, generation: reviewing.generation },
+        });
+        f.store.saveJob({ ...authorJob, status: 'queued' });
+        const retry = translate(
+          locale,
+          ref ? 'PR #72 · retry at 12:34:56 UTC' : 'GitHub · retry at 12:34:56 UTC',
+        );
+        const worker = translate(locale, 'Worker {number}', { number: 2 });
+        const detail = translate(
+          locale,
+          ref
+            ? 'The PR already exists. daddy will connect it automatically.'
+            : 'Checking GitHub for the result of the previous PR creation',
+        );
+        await bot.handle(message('/queue'));
+        expect(lastText()).toContain(retry);
+        expect(lastText()).toContain(`\n${worker}\n${detail}`);
+        await bot.handle(openTask());
+        expect(lastText()).toContain(`\n${retry}\n${worker}`);
+        expect(lastText()).toContain(detail);
+      }
+      const publicQuestion = 'Should the old filters remain available?';
+      const scenarios: Task[] = [
+        {
+          ...reviewing,
+          state: 'needs_input',
+          resumeState: 'reviewing',
+          reason: `Saved fix ${prTask.revision!.head} is on the PR. Inspect the earlier draft review 42 before starting another review.`,
+        },
+        {
+          ...reviewing,
+          state: 'needs_input',
+          resumeState: 'reviewing',
+          reason:
+            'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.',
+        },
+        {
+          ...reviewing,
+          state: 'fixing',
+          fixingMergeConflict: true,
+          reason:
+            'Conflict repair found additional local changes. The working copies were preserved.',
+        },
+      ];
+      f.store.saveJob({ ...authorJob, status: 'completed' });
+      for (const scenario of scenarios) {
+        f.store.saveTask(scenario);
+        await bot.handle(openTask());
+        expect(lastText()).toContain('\n\n' + translate(locale, scenario.reason));
+      }
+      f.store.saveTask({
+        ...reviewing,
+        state: 'needs_input',
+        resumeState: 'reviewing',
+        reason: publicQuestion,
+        inputRequest: { runId: authorJob.id, generation: reviewing.generation, role: 'author' },
+      });
+      f.store.saveJob({ ...authorJob, status: 'running', startedAt: started(5) });
+      await bot.handle(openTask());
+      expect(lastText()).toContain(translate(locale, 'Task discussion in progress'));
+      expect(lastText()).toContain('\n\n' + publicQuestion);
+      f.store.saveJob({ ...authorJob, status: 'queued' });
+      f.store.setSetting('github.quota:' + task!.ref.host, { until, delay: 60_000 });
+      await bot.handle(openTask());
+      expect(lastText()).toContain(translate(locale, 'Waiting for GitHub quota'));
+      expect(lastText()).toContain('UTC');
+      expect(lastText()).toContain('\n\n' + publicQuestion);
+      f.store.setSetting('github.quota:' + task!.ref.host, null);
+    }
   } finally {
     await app.close();
     await bot.stop();
