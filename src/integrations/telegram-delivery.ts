@@ -152,7 +152,7 @@ export class TelegramDelivery {
     void this.flush();
   }
   async finishRecovery() {
-    if (!this.recovering) return;
+    if (!this.recovering && !this.deferredKeys.size) return;
     this.recovering = false;
     for (const key of [...this.historyDeferredKeys]) {
       if (this.retainedDeferredKeys.has(key)) continue;
@@ -171,7 +171,10 @@ export class TelegramDelivery {
     await this.flush();
   }
   needsRecovery() {
-    return this.recovering;
+    return this.recovering || this.deferredKeys.size > 0;
+  }
+  beginRecoveryAttempt() {
+    this.retainedDeferredKeys.clear();
   }
   retainDeferred(destination: TelegramDestination, notificationId: string) {
     const identity = digest([destination, notificationIdentity(notificationId)]);
@@ -419,10 +422,7 @@ export class TelegramDelivery {
   }
   private inheritedPartsBelongToSibling(value: Delivery) {
     if (!value.options.key?.startsWith('turn:') || !this.hasDeliveredSibling(value)) return false;
-    const allPartsAcknowledged = value.messages.length === splitTelegramText(value.content).length;
-    return (
-      this.acknowledgedPartsMatchSibling(value) && (value.attempts > 0 || allPartsAcknowledged)
-    );
+    return this.acknowledgedPartsMatchSibling(value);
   }
   private receiptFor(messages: Delivery['messages'], value: Delivery) {
     if (!messages.length) return;
@@ -447,24 +447,20 @@ export class TelegramDelivery {
     };
   }
   private sentDelivery(destination: TelegramDestination, notificationId: string) {
-    const identity = notificationIdentity(notificationId);
-    return this.store.db
-      .prepare(
-        `SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*'
-         AND json_extract(value,'$.bot')=? AND json_extract(value,'$.status')='sent'
-         AND json_extract(value,'$.destination.chatId')=?
-         AND COALESCE(json_extract(value,'$.destination.threadId'),0)=?`,
-      )
-      .all(this.bot, destination.chatId, destination.threadId ?? 0)
-      .map((row) => ({
-        key: String(row.key),
-        value: JSON.parse(String(row.value)) as Delivery,
-      }))
-      .find(
-        ({ value }) =>
-          !!value.options.notificationId &&
-          notificationIdentity(value.options.notificationId) === identity,
-      );
+    const messageId = notificationIdentity(notificationId).split(':').at(-1);
+    if (!messageId) return;
+    const message = this.store.db
+      .prepare("SELECT json_extract(data,'$.runId') AS runId FROM messages WHERE id=?")
+      .get(messageId);
+    if (typeof message?.runId !== 'string') return;
+    const key = prefix + digest([this.bot, destination, `turn:${message.runId}`]);
+    const value = this.store.setting<Delivery>(key);
+    if (
+      value?.status === 'sent' &&
+      value.options.notificationId &&
+      notificationIdentity(value.options.notificationId) === notificationIdentity(notificationId)
+    )
+      return { key, value };
   }
   private migrateByNotification(
     key: string,
@@ -472,12 +468,13 @@ export class TelegramDelivery {
     notificationId: string,
     deliveryKey?: string,
     groupId?: string,
+    includeSent = true,
   ) {
     const legacyKey = digest([destination, notificationIdentity(notificationId)]);
     const row =
       this.pendingByNotification.get(legacyKey) ??
       this.legacyByNotification.get(legacyKey) ??
-      this.sentDelivery(destination, notificationId);
+      (includeSent ? this.sentDelivery(destination, notificationId) : undefined);
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
@@ -604,6 +601,7 @@ export class TelegramDelivery {
         options.notificationId,
         options.key,
         options.groupId,
+        !!options.replace,
       );
     if (value && this.deferredKeys.has(key)) {
       this.activateDeferred(key, value);

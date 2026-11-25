@@ -316,6 +316,59 @@ it('reuses a sent legacy progress receipt when the same message becomes final', 
   }
 });
 
+it('sends one fresh owner mention after a progress message becomes a question', async () => {
+  const f = fixture();
+  try {
+    const destination = { chatId: 7 };
+    const notificationId = 'telegram:dialog:7:0:message-id:final';
+    await f.queue.send(destination, text('Choose a branch?'), {
+      groupId: 'group',
+      key: 'message:message-id',
+      replace: true,
+      final: false,
+      notificationId: 'telegram:dialog:7:0:message-id:progress',
+    });
+    const question = {
+      groupId: 'group',
+      key: notificationId,
+      replace: false,
+      replacePending: true,
+      final: true,
+      notificationId,
+    };
+    await f.queue.send(destination, text('@Owner · Choose a branch?'), question);
+    await f.queue.send(destination, text('@Owner · Choose a branch?'), question);
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', 'Choose a branch?'],
+      ['sendMessage', '@Owner · Choose a branch?'],
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
+it('looks up a sent phase receipt without scanning unrelated delivery texts', async () => {
+  const f = fixture();
+  try {
+    for (let i = 0; i < 100; i++)
+      await f.queue.send({ chatId: 7 }, text('x'.repeat(16000)), { key: `sent:${i}` });
+    const message = f.store.daddyMessage('group', 'agent', 'New reply', 'new-run', undefined, {
+      phase: 'final',
+    });
+    await f.queue.stop();
+    const prepare = vi.spyOn(f.store.db, 'prepare');
+    await f.queue.send({ chatId: 7 }, text(message.text), {
+      key: `message:${message.id}`,
+      replace: true,
+      final: true,
+      notificationId: `telegram:dialog:7:0:${message.id}:final`,
+    });
+    expect(prepare.mock.calls.length).toBeLessThan(10);
+  } finally {
+    await f.close();
+  }
+});
+
 it.each([
   ['answered elsewhere', true, false],
   ['notifications enabled', false, true],

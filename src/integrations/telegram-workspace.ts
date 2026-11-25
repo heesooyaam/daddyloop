@@ -162,7 +162,13 @@ export class TelegramWorkspace {
         if (!retry || retry.nextAt > Date.now() || this.stopped) continue;
         this.store.setSetting(String(row.key), { ...retry, nextAt: Date.now() + 60000 });
         const group = this.daddy.sessions().find((group) => group.id === retry.groupId);
-        if (group) this.replayGroup(group, true);
+        if (group) {
+          this.api.delivery?.beginRecoveryAttempt();
+          this.replayGroup(group, true);
+          this.pending = this.pending.then(async () => {
+            await this.api.delivery?.finishRecovery();
+          });
+        }
       }
     }, 1000);
     this.retryTimer.unref();
@@ -2249,7 +2255,16 @@ export class TelegramWorkspace {
           .run(deliveryStatus(result), id);
         this.clearDeferred(group.id);
       })
-      .catch((error) => this.deferEvent(event, error));
+      .catch((error) => {
+        const recovery = (
+          event.data as {
+            recovery?: { destination: Destination; notificationId: string };
+          }
+        ).recovery;
+        if (recovery)
+          this.api.delivery?.retainDeferred(recovery.destination, recovery.notificationId);
+        this.deferEvent(event, error);
+      });
     return true;
   }
   private replayGroup(group: ReviewGroup, retry = false) {
@@ -2300,22 +2315,26 @@ export class TelegramWorkspace {
         ['user', 'agent'].includes(message.sender) &&
         !(message.phase === 'progress' && deliveredFinalRuns.has(message.runId)),
     )) {
+      const recovery = destination
+        ? {
+            destination,
+            notificationId: `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`,
+          }
+        : undefined;
       const event = {
         id: retry ? -1 : 0,
         taskId: group.id,
         type: 'daddy.message',
-        data: { messageId: message.id, retryAttempt },
+        data: { messageId: message.id, retryAttempt, recovery },
         at: now(),
       } satisfies Event;
-      if (destination && this.eventDeferred(event))
-        this.api.delivery?.retainDeferred(
-          destination,
-          `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`,
-        );
+      if (recovery && this.eventDeferred(event))
+        this.api.delivery?.retainDeferred(recovery.destination, recovery.notificationId);
       this.onEvent(event);
     }
   }
   replay() {
+    this.api.delivery?.beginRecoveryAttempt();
     for (const group of this.daddy.sessions()) this.replayGroup(group);
     if (this.api.delivery?.needsRecovery())
       this.pending = this.pending.then(async () => {
