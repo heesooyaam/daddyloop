@@ -228,16 +228,16 @@ export class GitHubProvider implements ReviewProvider {
     }
     throw new AppError('pagination_limit', 'Too many check runs', 502);
   }
-  private async readOwnReviews(ref: PRRef): Promise<GHReview[]> {
+  private async ownReviews(ref: PRRef) {
     const [list, user] = await Promise.all([
       this.http.pages<GHReview>(`${path(ref)}/reviews`),
       this.http.request<{ id: number }>('GET', '/user'),
     ]);
-    return list.filter((review) => review.user.id === user.id);
+    return { owner: user.id, reviews: list.filter((r) => r.user.id === user.id) };
   }
   async findReview(ref: PRRef, marker: string) {
-    const reviews = await this.readOwnReviews(ref);
-    const review = reviews.find((item) => (item.body ?? '').includes(tag(marker)));
+    const { reviews } = await this.ownReviews(ref);
+    const review = reviews.find((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
     return review ? this.handle(review, marker) : undefined;
   }
   private handle(review: GHReview, marker: string, revision?: Revision): ReviewHandle {
@@ -249,31 +249,73 @@ export class GitHubProvider implements ReviewProvider {
       authorId: String(review.user.id),
     };
   }
-  async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const reviews = await this.readOwnReviews(ref).catch((error: unknown) => {
+  async createReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    confirmOwner?: (owner: string) => Promise<void>,
+  ) {
+    const { owner, reviews } = await this.ownReviews(ref).catch((error) => {
       if (error instanceof GitHubRetryError) throw error.beforeWrite();
       throw reviewPreparationError(error, 'GitHub');
     });
-    const existing = reviews.find((item) => (item.body ?? '').includes(tag(marker)));
-    if (existing) return this.handle(existing, marker, revision);
-    if (reviews.some((item) => item.state === 'PENDING'))
-      throw new ProviderWriteNotAttempted('existing_drafts', pendingReviewMessage);
-    const review = await this.http
-      .request<GHReview>('POST', `${path(ref)}/reviews`, {
+    await confirmOwner?.(String(owner));
+    const matches = reviews.filter((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
+    const existing = matches[0];
+    if (existing) {
+      if (
+        matches.length !== 1 ||
+        existing.commit_id !== revision.head ||
+        (confirmOwner && existing.state !== 'PENDING')
+      )
+        throw new AppError(
+          'draft_changed',
+          'The marked review was submitted or its revision changed. Inspect it before continuing.',
+        );
+      if (!confirmOwner) return this.handle(existing, marker, revision);
+      const comments = await this.http.pages<GHComment>(
+        `${path(ref)}/reviews/${existing.id}/comments`,
+      );
+      if (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
+        throw new AppError(
+          'draft_changed',
+          'The recovered draft has been edited. Its contents have been preserved.',
+        );
+      return this.handle(existing, marker, revision);
+    }
+    if (reviews.some((r) => r.state === 'PENDING'))
+      throw new ProviderWriteNotAttempted(
+        confirmOwner ? 'draft_occupied' : 'existing_drafts',
+        pendingReviewMessage,
+      );
+    // This POST creates only a draft. GitHub enforces one pending review per account and PR.
+    let review: GHReview;
+    try {
+      review = await this.http.request<GHReview>('POST', `${path(ref)}/reviews`, {
         commit_id: revision.head,
         body: `Review in progress.\n\n${tag(marker)}`,
-      })
-      .catch((error: unknown) => {
-        if (
-          error instanceof AppError &&
-          error.code === 'provider_422' &&
-          /\b(?:user can only have one pending review per pull request|you already have a pending review|a pending review already exists)\b/i.test(
-            error.message,
-          )
-        )
-          throw new ProviderWriteNotAttempted('existing_drafts', pendingReviewMessage);
-        throw error;
       });
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        error.code === 'provider_422' &&
+        /\b(?:user can only have one pending review per pull request|you already have a pending review|a pending review already exists)\b/i.test(
+          error.message,
+        )
+      )
+        throw new ProviderWriteNotAttempted(
+          confirmOwner ? 'draft_creation_race' : 'existing_drafts',
+          'GitHub has a pending review that is not visible in the review list yet.',
+        );
+      throw error;
+    }
+    if (
+      review.user?.id !== owner ||
+      review.state !== 'PENDING' ||
+      review.commit_id !== revision.head ||
+      !(review.body ?? '').trimEnd().endsWith(tag(marker))
+    )
+      throw new AppError('draft_create_unconfirmed', 'GitHub did not confirm the requested draft.');
     return this.handle(review, marker, revision);
   }
   async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {

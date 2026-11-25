@@ -12,17 +12,29 @@ const minute = 60000;
 const stateKey = 'cache.schedule.state';
 type Disk = Pick<ResourceStatus, 'diskUsedPercent' | 'diskAvailableGiB'>;
 
+export interface CleanupCounts {
+  checked: number;
+  eligible: number;
+  removed: number;
+  tooRecent?: number;
+}
+interface CleanupResult {
+  counts?: CleanupCounts;
+  removedBytes?: number;
+  skipped?: boolean;
+  unitResult?: 'threshold' | 'condition' | 'busy' | 'completed';
+}
 export interface CleanupAction {
   id: string;
   description: string;
-  run(signal: AbortSignal, shouldContinue: () => boolean): Promise<unknown>;
+  run(signal: AbortSignal, shouldContinue: () => boolean): Promise<void | CleanupResult>;
 }
 type CleanupRun = { id: string; startedAt: number; before: Disk };
 export interface CleanupReport extends CleanupRun {
   finishedAt: number;
   after: Disk;
   status: 'cleared' | 'still_high' | 'failed' | 'interrupted';
-  actions: { id: string; error?: string }[];
+  actions: (CleanupResult & { id: string; error?: string; freeSpaceChangeGiB?: number })[];
   error?: string;
 }
 type ScheduleState = { lastCheckedAt?: number; run?: CleanupRun; report?: CleanupReport };
@@ -81,6 +93,9 @@ export class ScheduledCleanup {
       diskPercent: this.policy.diskPercent,
       skill: this.policy.skill?.name,
       targets: this.policy.targets,
+      hostUnits: this.options.actions
+        .filter((a) => a.id.startsWith('daddyloop-cleanup-'))
+        .map((a) => a.id + '.service'),
       lastCheckedAt:
         state.lastCheckedAt === undefined ? undefined : new Date(state.lastCheckedAt).toISOString(),
       nextCheckAt:
@@ -162,10 +177,19 @@ export class ScheduledCleanup {
       const plan = shouldContinue() ? await this.plan(run, signal) : [];
       for (const action of plan) {
         signal.throwIfAborted();
-        if (!shouldContinue()) break;
+        const actionBefore = this.options.measure();
+        if (actionBefore.diskUsedPercent <= this.policy.diskPercent) break;
         try {
-          await action.run(signal, shouldContinue);
-          actions.push({ id: action.id });
+          const result = await action.run(signal, shouldContinue);
+          const freeSpaceChangeGiB =
+            result?.unitResult === 'completed'
+              ? this.options.measure().diskAvailableGiB - actionBefore.diskAvailableGiB
+              : undefined;
+          actions.push({
+            id: action.id,
+            ...result,
+            ...(freeSpaceChangeGiB === undefined ? {} : { freeSpaceChangeGiB }),
+          });
         } catch (failure) {
           signal.throwIfAborted();
           actions.push({ id: action.id, error: redact(String(failure)).slice(0, 500) });

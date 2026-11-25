@@ -262,6 +262,7 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  savedFixReview?: { handle: ReviewHandle; commentIds: string[] };
   retiredReviewHandles?: ReviewHandle[];
   retiredReviewCommentIds?: Record<string, string[]>;
   pendingAuthorFix?: {
@@ -272,6 +273,16 @@ export interface Task {
     sent?: boolean;
     confirmUntil?: number;
     staleDraft?: ReviewHandle;
+  };
+  publicationRetry?: { retryAt: number; delay: number };
+  draftStart?: {
+    marker: string;
+    owner?: string;
+    revision: Revision;
+    retry: boolean;
+    clarification?: string;
+    retryAt?: number;
+    delay?: number;
   };
   prLink?: {
     ref?: PRRef;
@@ -386,6 +397,7 @@ export interface Job {
   turnId?: string;
   error?: string;
   startedAt?: string;
+  firstStartedAt?: string;
   finishedAt?: string;
   createdAt: string;
   actionId?: string;

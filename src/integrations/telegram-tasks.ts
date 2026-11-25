@@ -10,9 +10,12 @@ import {
 } from '../core/types.js';
 import {
   activityStatus,
-  queueDetail,
+  activityReason,
+  mergeabilityStatus,
+  waitingForMergeability,
   outstandingActivity,
   profileText,
+  queueDetail,
   taskReference,
   type TaskActivity,
 } from '../core/task-activity.js';
@@ -73,39 +76,138 @@ export function parseWorkerInput(args: string) {
   }
 }
 
-function taskButton(task: Task) {
-  return { text: taskReference(task), callback_data: `dad:task:${task.id}` };
+function taskButton(task: Task, page = 0) {
+  return {
+    text: taskReference(task),
+    callback_data: `dad:task:${task.id}${page ? `:${page}` : ''}`,
+  };
 }
 
-export function queueButtons(groupId: string, locale: Locale) {
+export function queueButtons(groupId: string, locale: Locale, page = 0) {
   const t = translator(locale);
   return [
-    { text: t('Task queue'), callback_data: `dad:queue:${groupId}` },
+    { text: t('Task queue'), callback_data: `dad:queue:${groupId}${page ? `:${page}` : ''}` },
     { text: t('Workers'), callback_data: `dad:workers:${groupId}` },
   ];
 }
 
-export function queueCard(locale: Locale, groupId: string, activity: TaskActivity[]): TelegramCard {
+function queueStatus(item: TaskActivity) {
+  const { task, job, assignedWorker, mergeStatus } = item;
+  const label = activityStatus(item);
+  if (label === 'Task discussion in progress') return { label };
+  const detail = queueDetail(task);
+  if (mergeStatus) {
+    if (label.startsWith(mergeabilityStatus + ' · ')) return { label, detail };
+    if (label.startsWith('Waiting for GitHub API quota until '))
+      return { label: 'Waiting for GitHub quota', detail: label };
+    if (label.includes(' · retry at ')) return { label, detail };
+    if (label === 'Draft PR: mark it ready for review on GitHub')
+      return { label: 'Action needed', detail: label };
+    if (label !== 'Checking GitHub auto-merge' && label !== 'Merged on GitHub')
+      return { label: 'GitHub auto-merge', detail: label };
+    return { label };
+  }
+  if (task.state === 'needs_input') {
+    if (label === 'Checking the GitHub draft') return { label };
+    if (label === 'Waiting for your answer') return { label, detail };
+    return { label: 'Action needed', detail: label === 'Action needed' ? detail : label };
+  }
+  if (task.state === 'paused') return { label: 'Paused' };
+  if (task.state === 'fixing' && task.fixingMergeConflict) {
+    if (job?.status === 'running') return { label: 'Merge conflict', detail: label };
+    return {
+      label: assignedWorker === undefined ? 'Waiting for a worker' : 'Waiting to start',
+      detail: label,
+    };
+  }
+  if (label === 'Assigned worker is waiting to start') return { label: 'Waiting to start' };
+  return { label, detail };
+}
+
+function elapsedMinutes(startedAt: string | undefined, now: number) {
+  const minutes = Math.floor((now - Date.parse(startedAt ?? '')) / 60_000);
+  return Number.isFinite(minutes) ? Math.max(0, minutes) : undefined;
+}
+
+function taskRunLine(t: ReturnType<typeof translator>, item: TaskActivity, now: number) {
+  const { task, job, assignedWorker } = item;
+  const running = job?.status === 'running';
+  const reviewing = running && job.role === 'reviewer';
+  const requestedWorker = task.workerRequest?.slot;
+  const parts = [];
+  if (reviewing) parts.push(t('Shared reviewer'));
+  else if (assignedWorker !== undefined)
+    parts.push(t('Worker {number}', { number: assignedWorker }));
+  else if (running) parts.push(t('Worker'));
+  else if (requestedWorker !== undefined)
+    parts.push(t('Requested worker {number}', { number: requestedWorker }));
+  const minutes = running ? elapsedMinutes(job.startedAt, now) : undefined;
+  if (minutes !== undefined)
+    parts.push(minutes ? t('{minutes} min elapsed', { minutes }) : t('<1 min elapsed'));
+  if (reviewing && assignedWorker !== undefined)
+    parts.push(t('Author worker {number}', { number: assignedWorker }));
+  else if (running && requestedWorker !== undefined && assignedWorker === undefined)
+    parts.push(t('Requested author worker {number}', { number: requestedWorker }));
+  return parts.join(' · ');
+}
+
+export function queueCard(
+  locale: Locale,
+  groupId: string,
+  activity: TaskActivity[],
+  {
+    page: requestedPage = 0,
+    now = Date.now(),
+    readFirstStarts,
+  }: {
+    page?: number;
+    now?: number;
+    readFirstStarts?: (taskIds: string[]) => ReadonlyMap<string, string>;
+  } = {},
+): TelegramCard {
   const t = translator(locale);
-  const text = new TelegramText().add(t('Task queue'), 'bold');
   const tasks = activity.filter(outstandingActivity);
+  const pageSize = 9;
+  const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
+  const page = Math.min(requestedPage, pageCount - 1);
+  const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
+  const firstStarts = readFirstStarts?.(visible.map(({ task }) => task.id));
+  const text = new TelegramText().add(t('Task queue'), 'bold');
+  if (pageCount > 1) text.add(` · ${page + 1}/${pageCount}`);
   const buttons: NonNullable<TelegramCard['buttons']> = [];
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
-  for (const item of tasks) {
+  for (const item of visible) {
     const { task } = item;
+    const { label, detail } = queueStatus(item);
+    const status = t(label);
+    const run = taskRunLine(t, item, now);
+    const taskMinutes = elapsedMinutes(firstStarts?.get(task.id), now);
     text
       .add('\n\n')
+      .add(clipTitle(task.title.replace(/\s+/g, ' ').trim(), 90), 'bold')
+      .add('\n')
       .add(taskReference(task), 'code')
-      .add('  ' + clipTitle(task.title, 90))
-      .add('\n' + t(activityStatus(item)));
-    const number = item.assignedWorker ?? task.workerRequest?.slot;
-    if (number) text.add(' · ' + t('Worker {number}', { number }));
-    if (task.workerRequest?.profile) text.add(' · ' + profileText(task.workerRequest.profile));
-    const detail = queueDetail(task);
-    if (detail) text.add('\n' + clipTitle(t(redact(detail)), 240));
+      .add(' · ' + status);
+    if (taskMinutes !== undefined)
+      text.add(
+        ' · ' +
+          (taskMinutes
+            ? t('{minutes} min since work began', { minutes: taskMinutes })
+            : t('<1 min since work began')),
+      );
+    if (run) text.add('\n' + run);
+    const line = detail ? t(redact(detail)).replace(/\s+/g, ' ').trim() : '';
+    if (line && line !== status)
+      text.add('\n').add(line.length > 140 ? clipTitle(line, 139) + '…' : line, 'italic');
   }
-  for (let start = 0; start < Math.min(tasks.length, 9); start += 3)
-    buttons.push(tasks.slice(start, start + 3).map(({ task }) => taskButton(task)));
+  for (let start = 0; start < visible.length; start += 3)
+    buttons.push(visible.slice(start, start + 3).map(({ task }) => taskButton(task, page)));
+  const pages = [];
+  if (page > 0)
+    pages.push({ text: t('Previous page'), callback_data: `dad:queue:${groupId}:${page - 1}` });
+  if (page + 1 < pageCount)
+    pages.push({ text: t('Next page'), callback_data: `dad:queue:${groupId}:${page + 1}` });
+  if (pages.length) buttons.push(pages);
   buttons.push([{ text: t('Back'), callback_data: `dad:open:${groupId}` }]);
   return { ...text, buttons };
 }
@@ -149,23 +251,43 @@ export function taskCard(
   item: TaskActivity,
   slot?: WorkerSlot,
   merge?: ReturnType<typeof import('../core/auto-merge.js').autoMergeSettings>,
+  queuePage = 0,
 ): TelegramCard {
   const t = translator(locale);
-  const { task } = item;
-  const worker = slot?.number ?? task.workerRequest?.slot;
-  const profile = slot ? task.agents?.worker : task.workerRequest?.profile;
+  const { task, job } = item;
+  const { label, detail } = queueStatus(item);
+  const status = t(label);
+  const run = taskRunLine(t, item, Date.now());
+  const profile =
+    job?.status === 'running'
+      ? (job.profile ?? (job.role === 'author' ? task.agents?.worker : undefined))
+      : slot
+        ? task.agents?.worker
+        : task.workerRequest?.profile;
   const text = new TelegramText()
     .add(taskReference(task), 'code')
     .add('  ' + task.title, 'bold')
-    .add('\n' + t(activityStatus(item)));
-  if (worker !== undefined) text.add('\n' + t('Worker {number}', { number: worker }));
+    .add('\n' + status);
+  if (run) text.add('\n' + run);
   if (profile) text.add('\n' + profileText(profile));
-  if (task.reason) text.add('\n\n' + clipTitle(t(redact(task.reason)), 1000));
+  const showReason =
+    waitingForMergeability(task) ||
+    (job?.status !== 'running' && !item.mergeStatus) ||
+    (task.state === 'needs_input' &&
+      (queueDetail(task) !== undefined || activityStatus({ task }) !== 'Action needed')) ||
+    (task.state === 'fixing' && task.fixingMergeConflict);
+  const explanations = new Set(
+    [detail, showReason ? activityReason(task) : undefined].map((value) =>
+      value ? t(redact(value)).trim() : '',
+    ),
+  );
+  for (const explanation of explanations)
+    if (explanation && explanation !== status) text.add('\n\n' + clipTitle(explanation, 1000));
   if (task.state === 'complete' && task.ref.kind === 'ticket' && task.summary)
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
-  const buttons = [queueButtons(task.groupId!, locale)];
+  const buttons = [queueButtons(task.groupId!, locale, queuePage)];
   if (merge) {
     text.add('\n\n' + t('Auto-merge GitHub PRs') + ' · ' + t(merge.enabled ? 'On' : 'Off'));
     if (merge.result && (merge.enabled || merge.result.state !== 'waiting'))
@@ -175,13 +297,18 @@ export function taskCard(
         text:
           (merge.mode === mode ? '✓ ' : '') +
           t(mode === 'inherit' ? 'Session default' : mode === 'on' ? 'On' : 'Off'),
-        callback_data: `dad:tm:${task.id}:${mode}`,
+        callback_data: `dad:tm:${task.id}:${mode}${queuePage ? `:${queuePage}` : ''}`,
       })),
     );
   }
   if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
     buttons.unshift([
-      { text: t('Verify merge'), callback_data: `dad:merge:${task.id}:${task.generation}` },
+      {
+        text: t('Verify merge'),
+        callback_data: queuePage
+          ? `dad:vm:${task.id}:${task.generation.toString(36)}:${queuePage.toString(36)}`
+          : `dad:merge:${task.id}:${task.generation}`,
+      },
     ]);
   return { ...text, buttons };
 }

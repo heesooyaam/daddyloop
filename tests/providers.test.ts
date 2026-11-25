@@ -208,10 +208,17 @@ describe('GitHub draft review contract', () => {
         repoPath: '/tmp',
         requirements: 'Check the target branch',
       });
+      const startLegacyReview = () =>
+        engine.broker.ensureReview({ ...task, round: task.round + 1 });
+      const expireDraftRetry = () => {
+        const saved = store.getTask(task.id);
+        if (saved.draftStart) delete saved.draftStart.retryAt;
+        store.saveTask(saved);
+      };
       if (scenario === 'POST refused by quota') {
-        await expect(engine.review(task.id)).rejects.toMatchObject({
-          code: 'github_rate_limit',
-          refusedWrite: true,
+        expect(await engine.review(task.id)).toMatchObject({
+          state: 'queued',
+          draftStart: { retryAt: expect.any(Number) },
         });
         expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
           [],
@@ -228,7 +235,7 @@ describe('GitHub draft review contract', () => {
         return;
       }
       if (scenario === 'pending review then dismissed') {
-        await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+        await expect(startLegacyReview()).rejects.toThrow('Lost create response');
         draft!.state = 'DISMISSED';
         const next = await new Engine(store, () => provider).review(task.id, true);
         expect(next).toMatchObject({ state: 'reviewing', round: 2 });
@@ -294,10 +301,12 @@ describe('GitHub draft review contract', () => {
         if (scenario !== 'base changed after the second response was lost') base = 'e'.repeat(40);
         const restarted = new Engine(store, () => provider);
         if (lostSecondResponse) {
-          await expect(restarted.review(task.id, true)).rejects.toThrow(
-            'Lost second create response',
-          );
-          expect(store.getTask(task.id).round).toBe(1);
+          expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'queued',
+            draftStart: { retryAt: expect.any(Number) },
+          });
+          expect(store.getTask(task.id).round).toBe(2);
+          expireDraftRetry();
           draft!.state = 'COMMENTED';
           base = 'f'.repeat(40);
           const recovered = new Engine(store, () => provider);
@@ -351,9 +360,15 @@ describe('GitHub draft review contract', () => {
         scenario === 'pending review appeared before POST' ||
         scenario === 'unclear POST rejection'
       ) {
-        await expect(engine.review(task.id)).rejects.toMatchObject({
-          code: scenario === 'unclear POST rejection' ? 'provider_422' : 'existing_drafts',
-        });
+        if (scenario === 'unclear POST rejection')
+          await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_422' });
+        else {
+          expect(await engine.review(task.id)).toMatchObject({
+            state: 'queued',
+            draftStart: { retryAt: expect.any(Number) },
+          });
+          expireDraftRetry();
+        }
         const restarted = new Engine(store, () => provider);
         if (scenario === 'unclear POST rejection') {
           expect(
@@ -370,6 +385,10 @@ describe('GitHub draft review contract', () => {
           otherReview.state = 'COMMENTED';
           base = 'e'.repeat(40);
           expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'queued',
+            revision: { base },
+          });
+          expect(await restarted.review(task.id, true)).toMatchObject({
             state: 'reviewing',
             review: { id: '2', revision: { base } },
           });
@@ -379,7 +398,7 @@ describe('GitHub draft review contract', () => {
       }
       if (hasOtherReview) {
         if (scenario === 'another pending review') {
-          await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'existing_drafts' });
+          await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'draft_occupied' });
           expect(attempts).toBe(0);
           expect(
             store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),
@@ -393,9 +412,9 @@ describe('GitHub draft review contract', () => {
         return;
       }
       if (scenario === 'unavailable before creation') {
-        await expect(engine.review(task.id)).rejects.toMatchObject({
-          code: 'github_read_unavailable',
-          refusedWrite: true,
+        expect(await engine.review(task.id)).toMatchObject({
+          state: 'queued',
+          draftStart: { retryAt: expect.any(Number) },
         });
         expect(attempts).toBe(0);
         expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
@@ -408,6 +427,10 @@ describe('GitHub draft review contract', () => {
           reviewsAvailable = true;
           base = 'e'.repeat(40);
           const restarted = new Engine(store, () => provider);
+          expect(await restarted.review(task.id, true)).toMatchObject({
+            state: 'queued',
+            revision: { base },
+          });
           const next = await restarted.review(task.id, true);
           expect(next).toMatchObject({
             state: 'reviewing',
@@ -426,7 +449,7 @@ describe('GitHub draft review contract', () => {
             revision: task.revision,
             generation: task.generation,
           });
-        await expect(engine.review(task.id)).rejects.toThrow('Lost create response');
+        await expect(startLegacyReview()).rejects.toThrow('Lost create response');
         if (scenario === 'lost response on current revision') {
           expect(
             store.db.prepare("SELECT id FROM operations WHERE status='pending'").all(),

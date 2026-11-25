@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -947,6 +948,10 @@ it.each([
   ['arcadia', 'edited'],
   ['arcadia', 'edited after restart'],
   ['arcadia', 'unchanged after restart'],
+  ['github', 'edited on previous commit'],
+  ['gitlab', 'edited on previous commit'],
+  ['arcadia', 'edited on previous commit after restart'],
+  ['arcadia', 'unchanged on previous commit after restart'],
 ] as const)(
   'verifies the wording presented to the merge reviewer on %s (%s)',
   async (provider, scenario) => {
@@ -968,7 +973,11 @@ it.each([
         mergeCommit: provider === 'arcadia' ? undefined : 'merge',
       };
       const next = { ...task, ref, revision: confirmed, pr: confirmed };
-      const review = await f.engine.broker.ensureReview({ ...next, round: next.round + 1 });
+      const onPreviousCommit = scenario.includes('previous commit');
+      const review = await f.engine.broker.ensureReview({
+        ...(onPreviousCommit ? { ...task, ref } : next),
+        round: next.round + 1,
+      });
       if (!review) throw new Error('Expected the native review in the operation log');
       const finding = await f.provider.createComment(
         ref,
@@ -981,6 +990,29 @@ it.each([
         ...next,
         pendingAuthorFix: { revision: task.revision!, generation: task.generation },
       });
+      if (onPreviousCommit) {
+        const snapshot = await f.provider.getReview(ref, review);
+        store.saveTask({
+          ...task,
+          ref,
+          state: 'awaiting_push',
+          round: next.round + 1,
+          review,
+          snapshot,
+          feedback: snapshot,
+          reviewFinished: true,
+          pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+        });
+        store.setSetting('demo-pr:1', confirmed);
+        await f.engine.reconcile(task.id);
+        const saved = store.getTask(task.id);
+        expect(saved).toMatchObject({
+          state: 'queued',
+          savedFixReview: { handle: { id: review.id } },
+        });
+        expect(saved.review).toBeUndefined();
+        store.saveTask({ ...saved, state: 'needs_input' });
+      }
       store.setSetting('demo-pr:1', merged);
       expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'reviewing' });
       const job = store.claim()!;
@@ -1009,6 +1041,59 @@ it.each([
         expect(completed.state).toBe('complete');
       }
     } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([false, true])(
+  'fences the old revision after SQLite blocks the task write (restart: %s)',
+  async (restart) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-fix-receipt-'));
+    const path = join(dir, 'state.sqlite');
+    const f = await fixture({ state: 'fixing' }, path);
+    let store = f.store;
+    const other = new DatabaseSync(path);
+    try {
+      store.db.exec('PRAGMA busy_timeout=0');
+      const task = store.getTask(f.task.id);
+      const author = store.enqueue(task, 'author', 'fix', 'Save changes');
+      const job = store.claim()!;
+      expect(job.id).toBe(author.id);
+      const record = store.event.bind(store);
+      const event = vi.spyOn(store, 'event').mockImplementation((...args) => {
+        const saved = record(...args);
+        if (args[1] === 'author.fixes_saved') other.exec('BEGIN IMMEDIATE');
+        return saved;
+      });
+      try {
+        await expect(
+          f.engine.completeJob(job, f.result(), { head: savedHead, revision: task.revision! }),
+        ).rejects.toThrow(/database is locked/i);
+      } finally {
+        event.mockRestore();
+        other.exec('ROLLBACK');
+      }
+      let engine = f.engine;
+      engine.failJob({ ...job, status: 'failed' }, new Error('database is locked'));
+      store.saveJob({ ...job, status: 'failed' });
+      expect(store.getTask(task.id).reason).toContain(savedHead);
+      expect(store.getTask(task.id).pendingAuthorHead).toBeUndefined();
+      if (restart) {
+        store.close();
+        store = new Store(path);
+        engine = new Engine(store, () => new DemoProvider(store));
+      }
+      await expect(engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+      expect(store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        revision: task.revision,
+      });
+      expect(store.activeJobs(task.id)).toHaveLength(0);
+      expect(store.db.prepare('SELECT 1 FROM operations LIMIT 1').get()).toBeUndefined();
+    } finally {
+      other.close();
       store.close();
       rmSync(dir, { recursive: true, force: true });
     }

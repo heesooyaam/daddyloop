@@ -554,6 +554,7 @@ export const daddyRu: Record<string, string> = {
   'Request finished': 'Запрос обработан',
   'No work in progress': 'Сейчас задач в работе нет',
   '{minutes} min elapsed': '{minutes} мин с запуска',
+  '<1 min elapsed': 'меньше минуты с запуска',
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
@@ -590,6 +591,7 @@ export const daddyRu: Record<string, string> = {
     'Для исправления конфликта нужен свободный воркер',
   'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
   'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'Merge conflict': 'Конфликт слияния',
   'The PR changed during conflict resolution. Inspect the preserved worker copy.':
     'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
   'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
@@ -627,6 +629,8 @@ export const daddyRu: Record<string, string> = {
     'PR или черновик изменился. Проверь остановленное ревью.',
   'Waiting for GitHub API quota until {time} UTC':
     'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Waiting for GitHub API quota until {time} UTC · PR #{number}':
+    'Ожидает восстановления лимита GitHub API до {time} UTC · PR #{number}',
   'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
   'Review reached the run time limit': 'Ревью остановилось по таймауту',
   'Continuing the independent review on the verified PR head':
@@ -635,12 +639,28 @@ export const daddyRu: Record<string, string> = {
     'Публикует готовые замечания незавершённого ревью',
   'Continuing conflict resolution after a timeout at {time} UTC':
     'Продолжит исправлять конфликт после таймаута в {time} UTC',
+  'Continuing conflict resolution after a timeout at {time} UTC · PR #{number}':
+    'Продолжит исправлять конфликт после таймаута в {time} UTC · PR #{number}',
   'Continuing conflict resolution in the saved worker copy after a timeout':
     'Воркер продолжает исправлять конфликт в сохранённой копии после таймаута',
   'The PR head or target history changed. The partial merge is preserved in the worker copy.':
     'Изменился коммит PR или история целевой ветки. Незавершённое слияние сохранено в копии воркера.',
   'Continuing the fix with the answer from the session':
     'Воркер продолжает исправление с ответом из сессии',
+  'Waiting to retry GitHub review publication':
+    'Ждёт автоматического повтора публикации ревью GitHub',
+  'GitHub review publication · retry at {time} UTC':
+    'Публикация ревью GitHub · повтор в {time} UTC',
+  'GitHub review publication · retry at {time} UTC · PR #{number}':
+    'Публикация ревью GitHub · повтор в {time} UTC · PR #{number}',
+  'Preparing the GitHub review draft': 'Готовит черновик ревью GitHub',
+  'Waiting to retry the GitHub review draft':
+    'Ждёт автоматического повтора создания черновика GitHub',
+  'GitHub review draft · retry at {time} UTC': 'Черновик ревью GitHub · повтор в {time} UTC',
+  'GitHub review draft · retry at {time} UTC · PR #{number}':
+    'Черновик ревью GitHub · повтор в {time} UTC · PR #{number}',
+  'A different pending GitHub review belongs to this account. Its contents have been preserved.':
+    'У этой учётной записи есть другой черновик ревью. Его содержимое сохранено.',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',
@@ -660,6 +680,14 @@ export const daddyRu: Record<string, string> = {
     'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',
   'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'The review is published. Waiting for GitHub to determine mergeability.':
+    'Ревью опубликовано. Ждём, пока GitHub проверит возможность слияния.',
+  'GitHub mergeability check · retry at {time} UTC':
+    'Проверка возможности слияния GitHub · повтор в {time} UTC',
+  'GitHub mergeability check · retry at {time} UTC · PR #{number}':
+    'Проверка возможности слияния GitHub · повтор в {time} UTC · PR #{number}',
+  'retry at {time} UTC': 'повтор в {time} UTC',
+  'Waiting for task discussion': 'Ждёт обсуждения задачи',
   'Draft PR: mark it ready for review on GitHub':
     'PR в черновике. Отметь его готовым к ревью в GitHub',
   'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
@@ -673,11 +701,22 @@ export const daddyRu: Record<string, string> = {
   'GitHub refused the auto-merge check (HTTP {status})':
     'GitHub отклонил запрос автослияния (HTTP {status})',
   'Task queue': 'Очередь задач',
+  'Previous page': 'Предыдущая',
+  'Next page': 'Следующая',
+  'Waiting to start': 'Ждёт запуска',
+  'Waiting for GitHub quota': 'Ждёт квоту GitHub',
+  'Task discussion in progress': 'Обсуждает задачу',
+  'GitHub auto-merge': 'Автослияние в GitHub',
+  '{minutes} min since work began': '{minutes} мин с начала работы',
+  '<1 min since work began': 'меньше минуты с начала работы',
+  'Author worker {number}': 'Авторский воркер {number}',
+  'Requested author worker {number}': 'Запрошен авторский воркер {number}',
   'No unfinished tasks.': 'Открытых задач нет.',
   'Task queued': 'Задача в очереди',
   'Waiting for review': 'Ждёт ревью',
   'Unfinished tasks · {count}': 'Открытые задачи · {count}',
   'Worker {number}': 'Воркер {number}',
+  'Requested worker {number}': 'Запрошен воркер {number}',
   Free: 'Свободен',
   'Next task · {profile}': 'Для следующей задачи · {profile}',
   'Worker {number} model saved · {profile}': 'Модель воркера {number} сохранена · {profile}',
