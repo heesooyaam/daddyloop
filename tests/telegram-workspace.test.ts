@@ -939,3 +939,60 @@ it('offers an immediate model switch from the daddy effort picker', async () => 
     await f.close();
   }
 });
+
+it('binds the current turn to the quoted Telegram parent even after an unrelated update', async () => {
+  const f = daddyFixture();
+  const api = {
+    send: vi.fn(async () => ({ message_id: 1 })),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const chat = { id: 7, type: 'private' };
+  const message = {
+    message_id: 365,
+    from: { id: 7 },
+    chat,
+    text: 'а на что это влияет?',
+    reply_to_message: {
+      message_id: 359,
+      chat,
+      from: { id: 12, username: 'fixture_bot', is_bot: true },
+      text: 'Воркер · DADDY-ccf7e32c · PR #39. Какой контракт сохранить?',
+    },
+    quote: { text: 'Какой контракт сохранить?', position: 38, is_manual: true },
+  };
+  try {
+    f.store.daddyMessage(group.id, 'agent', 'Newer result about PR #64');
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({
+      update_id: 366,
+      message: { message_id: 366, chat, from: { id: 7 }, text: 'и отдельный вопрос' },
+    });
+    const jobs = f.store.daddyJobs(group.id);
+    expect(jobs.filter((j) => j.trigger === 'user')).toHaveLength(2);
+    expect(jobs[0].replyTo).toMatchObject({
+      messageId: 359,
+      text: message.reply_to_message.text,
+      quote: message.quote.text,
+    });
+    expect(jobs[1].replyTo).toBeUndefined();
+    const saved = f.store.messages(group.id).find((m) => m.text === message.text);
+    expect(saved?.origin).toMatchObject({ messageId: 365, replyTo: jobs[0].replyTo });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledOnce());
+    const context = JSON.parse(f.runtime.runSession.mock.calls[0][0].prompt);
+    expect(context.currentInstruction).toBe(message.text);
+    expect(context.replyTo).toMatchObject({
+      messageId: 359,
+      text: expect.stringContaining('PR #39'),
+      quote: message.quote.text,
+    });
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});

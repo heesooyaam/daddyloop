@@ -5,6 +5,7 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
   pinMessageId?: number;
@@ -90,6 +91,18 @@ export class TelegramDelivery {
       value.destination.chatId === pair.chatId ||
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
+  }
+  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+    // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
+    const row = this.store.db
+      .prepare(
+        `SELECT json_extract(value,'$.options.groupId') AS groupId FROM settings
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+        AND json_extract(value,'$.destination.chatId')=? AND json_extract(value,'$.options.groupId') IS NOT NULL
+        AND EXISTS(SELECT 1 FROM json_each(value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+      )
+      .get(this.bot, ownerId, chatId, messageId);
+    return typeof row?.groupId === 'string' ? row.groupId : undefined;
   }
   private createDelivery(
     destination: TelegramDestination,
