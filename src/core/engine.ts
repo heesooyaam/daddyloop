@@ -279,6 +279,7 @@ export class Engine {
         return task;
       }
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
+      if (await this.advancePublishedReview(task, pr)) return task;
       const action = this.prAction(task, pr);
       if (action.kind === 'publish-review')
         throw new AppError('publication_pending', 'The recorded review is being published.');
@@ -1173,7 +1174,7 @@ export class Engine {
         : 'New revision is ready for review',
     );
   }
-  private async reconcileLocked(id: string): Promise<Task> {
+  private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
     let task = this.store.getTask(id);
     if (task.state === 'paused' || isTicket(task)) return task;
     if (task.state === 'awaiting_publication' && task.partialReview) return task;
@@ -1221,6 +1222,11 @@ export class Engine {
       this.state(task, 'needs_input', `PR is ${pr.state}; automatic work stopped`);
       return task;
     }
+    if (
+      (publication || !sameRevision(task.revision, pr)) &&
+      (await this.advancePublishedReview(task, pr, publication))
+    )
+      return task;
     const action = this.prAction(task, pr);
     if (action.kind === 'repair') {
       await this.applyRepair(task, pr, action);
@@ -1302,15 +1308,7 @@ export class Engine {
       return task;
     }
     if (task.state === 'awaiting_publication' && snapshot.status === 'published') {
-      if (!task.reviewFinished) {
-        this.state(
-          task,
-          'needs_input',
-          'The review was not completed successfully; published feedback is held until verification',
-        );
-        return task;
-      }
-      await this.afterPublishedReview(task, pr, snapshot);
+      await this.advancePublishedReview(task, pr, snapshot);
     } else if (task.state === 'awaiting_merge' && !autoMergeRequested(this.store, task)) {
       if (snapshot.status === 'published' && task.reviewFinished && !snapshot.comments.length)
         await this.finish(task);
@@ -1513,6 +1511,32 @@ export class Engine {
         'The same findings keep returning; human decision is required',
       );
     else this.queuePublishedFix(task, 'Author is addressing the published review');
+  }
+  private async advancePublishedReview(task: Task, pr: PullRequest, publication?: ReviewSnapshot) {
+    if (
+      task.state !== 'awaiting_publication' ||
+      task.partialReview ||
+      !task.review ||
+      !sameOpenTarget(task.pr, pr) ||
+      this.store.busy(task.id)
+    )
+      return false;
+    const snapshot =
+      publication ?? (await this.provider(prRef(task)).getReview(prRef(task), task.review));
+    if (snapshot.status !== 'published') return false;
+    if (!task.reviewFinished) {
+      this.state(
+        task,
+        'needs_input',
+        'The review was not completed successfully; published feedback is held until verification',
+      );
+      return true;
+    }
+    task.snapshot = snapshot;
+    task.feedback = snapshot;
+    if (sameRevision(task.revision, pr)) task.pr = pr;
+    await this.afterPublishedReview(task, pr, snapshot);
+    return true;
   }
   private async afterPublishedReview(task: Task, pr: PullRequest, snapshot: ReviewSnapshot) {
     const action = this.prAction(task, pr, { nativeReview: snapshot });
@@ -1735,8 +1759,8 @@ export class Engine {
           'Wait until the reviewer has finished and discussion is idle',
         );
       if (task.partialReview) return this.releaseReviewFindings(task);
-      await this.broker.publish(task);
-      return this.reconcileLocked(id);
+      const publication = await this.broker.publish(task);
+      return this.reconcileLocked(id, publication);
     });
   }
   async chat(

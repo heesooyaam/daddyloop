@@ -94,6 +94,15 @@ export function nextPrAction(
 ): PrAction {
   const { autoMerge: enabled, jobs, mergePending, report, nativeReview, resumeRepair } = facts;
   if (mergePending) return { kind: 'confirm-merge' };
+  if (
+    !task.pr &&
+    pr.state === 'open' &&
+    !task.review &&
+    !task.pendingFix &&
+    !task.pendingAuthorHead &&
+    !task.fixingMergeConflict
+  )
+    return { kind: 'refresh' };
   if (!sameOpenTarget(task.pr, pr)) {
     if (task.fixingMergeConflict && task.state === 'fixing') return { kind: 'inspect-repair' };
     return { kind: 'target-changed' };
@@ -167,14 +176,14 @@ export function nextPrAction(
   if (report) return { kind: 'continue' };
 
   if (task.state === 'awaiting_publication' && (task.reviewFinished || task.partialReview)) {
-    if (
-      !sameHead ||
-      (!unchanged && !task.partialReview) ||
-      (nativeReview && !sameRevision(nativeReview.revision, pinned))
-    )
+    if (!sameHead || (nativeReview && !sameRevision(nativeReview.revision, pinned)))
       return { kind: 'refresh' };
+    // A verified publication on this source head can accompany a repair even if the
+    // target moved after publication. It cannot authorize merging the new revision.
+    if (nativeReview?.status === 'published' && conflict)
+      return { kind: 'repair', preparation: 'clean' };
+    if (!unchanged && !task.partialReview) return { kind: 'refresh' };
     if (nativeReview?.status !== 'published') return { kind: 'publish-review' };
-    if (conflict) return { kind: 'repair', preparation: 'clean' };
     if (enabled && pr.draft === false && pr.mergeable == null) return { kind: 'wait-mergeability' };
     if (nativeReview.comments.length) return { kind: 'fix-findings' };
     return task.reviewFinished ? { kind: 'finish' } : { kind: 'hold-incomplete' };

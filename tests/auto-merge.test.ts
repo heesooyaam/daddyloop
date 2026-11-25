@@ -222,6 +222,60 @@ describe('opt-in GitHub merging', () => {
       }
     },
   );
+  it.each(['review', 'reconcile', 'publish'] as const)(
+    'preserves a just-published review when the base moves before %s',
+    async (entry) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const job = f.store.claim()!;
+        await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'A confirmed finding' });
+        await f.engine.completeJob(job, {
+          status: 'completed',
+          summary: 'Checked',
+          checkedHead: f.task.revision!.head,
+        });
+        f.store.saveJob({ ...job, status: 'completed' });
+        const advance = () =>
+          f.setRemote({
+            base: 'f'.repeat(40),
+            start: 'f'.repeat(40),
+            mergeable: false,
+            mergeConflict: true,
+          });
+        const task = f.store.getTask(f.task.id);
+        if (entry === 'publish') {
+          const send = f.engine.broker.publish.bind(f.engine.broker);
+          vi.spyOn(f.engine.broker, 'publish').mockImplementationOnce(async (t) => {
+            const published = await send(t);
+            advance();
+            return published;
+          });
+          await f.engine.publish(task.id);
+        } else {
+          await f.provider.publish(prRef(task), task.review!);
+          advance();
+          if (entry === 'review') await f.engine.review(task.id, true);
+          else await f.engine.reconcile(task.id);
+        }
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'fixing',
+          fixingMergeConflict: true,
+          reviewFinished: false,
+          revision: { base: 'f'.repeat(40) },
+          feedback: {
+            status: 'published',
+            comments: [{ body: expect.stringContaining('A confirmed finding') }],
+          },
+        });
+        expect(f.store.activeJobs(task.id)).toMatchObject([{ role: 'author', kind: 'fix' }]);
+        expect(f.send).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
   it('reserves the original worker from clean review through a late conflict', async () => {
     const f = await setup();
     try {
