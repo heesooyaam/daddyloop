@@ -1978,6 +1978,13 @@ export class TelegramWorkspace {
       (choice.controlDestination ?? choice.destination).threadId !== destination.threadId
     )
       throw new Error(this.t('This selection expired. Choose the repository again.'));
+    if (choice.inputId) {
+      const pending = this.store.setting<{ id: string }>(
+        this.repoInputKey(choice.controlDestination!),
+      );
+      if (pending?.id !== choice.inputId)
+        throw new Error(this.t('This selection expired. Choose the repository again.'));
+    }
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     else if (
       !choice.creationExpiresAt ||

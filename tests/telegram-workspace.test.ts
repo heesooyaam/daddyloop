@@ -467,7 +467,12 @@ it('expires, cancels and isolates private repository input for its original rout
     const url = sent.at(-1)!.card.buttons[1][0].url as string;
     await bot.handle(message(`/start ${new URL(url).searchParams.get('start')}`));
     expect(sent.at(-1)!.card.text).toContain('Target: Session A · topic');
-    return sent.at(-1)!.card.buttons[0][0].callback_data as string;
+    const buttons = sent.at(-1)!.card.buttons.flat();
+    return {
+      use: buttons[0].callback_data as string,
+      browse: buttons.find((button: any) => button.text === 'Browse server folders')
+        .callback_data as string,
+    };
   };
   try {
     await open();
@@ -479,20 +484,27 @@ it('expires, cancels and isolates private repository input for its original rout
     expect(f.workspaces.selection).not.toHaveBeenCalled();
     expect(f.store.setting(inputKey)).toBeNull();
 
-    await open();
+    const sessionCard = await open();
     await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
     expect(f.store.setting(inputKey)).toBeNull();
+    await bot.handle(click(sessionCard.use));
+    expect(f.workspaces.selection).not.toHaveBeenCalled();
 
     await open();
+    await bot.handle(message('/repo /server/cancelled'));
+    const cancelledUse = sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle(message('/cancel'));
     expect(sent.at(-1)!.card).toContain('Repository selection cancelled');
     expect(f.store.setting(inputKey)).toBeNull();
+    await bot.handle(click(cancelledUse));
+    expect(f.workspaces.selection).not.toHaveBeenCalled();
 
-    const oldUse = await open();
+    const old = await open();
     await open();
     const latest = f.store.setting<{ id: string }>(inputKey)!;
-    await bot.handle(click(oldUse));
+    await bot.handle(click(old.browse));
     expect(f.store.setting<{ id: string }>(inputKey)?.id).toBe(latest.id);
+    expect(f.workspaces.selection).not.toHaveBeenCalled();
     await bot.handle(message('/repo /server/latest'));
     await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data));
     expect(
@@ -501,6 +513,25 @@ it('expires, cancels and isolates private repository input for its original rout
       )?.workspace.repoPath,
     ).toBe('/server/latest');
     expect(f.store.setting(`telegram.nextRepo:7:7:0:${second.id}`)).toBeUndefined();
+
+    const sessionCount = f.daddy.sessions().length;
+    await bot.handle(message('/new', -10042));
+    await bot.handle({
+      update_id: id++,
+      callback_query: {
+        id: String(id),
+        data: `dad:new:${f.workspace.id}`,
+        from: { id: 7 },
+        message: { chat: { id: -10042, type: 'supergroup' } },
+      },
+    });
+    const newUrl = sent.at(-1)!.card.buttons[1][0].url as string;
+    await bot.handle(message(`/start ${new URL(newUrl).searchParams.get('start')}`));
+    await bot.handle(message('/repo /server/cancelled-session'));
+    const cancelledStart = sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(message('/cancel'));
+    await bot.handle(click(cancelledStart));
+    expect(f.daddy.sessions()).toHaveLength(sessionCount);
   } finally {
     await bot.stop();
     await f.close();

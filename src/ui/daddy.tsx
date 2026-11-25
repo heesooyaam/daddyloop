@@ -1589,6 +1589,10 @@ function TaskReport({
       pendingVersion = false;
     const controller = new AbortController();
     const load = async (versionChanged: boolean) => {
+      if (!liveRef.current) {
+        setLoading(false);
+        return;
+      }
       if (inFlight) {
         if (versionChanged) pendingVersion = true;
         return;
@@ -1607,7 +1611,7 @@ function TaskReport({
         if (latest && detailVersionOf(result.task) === boardVersion(latest)) {
           pendingVersion = false;
           setValue({ ...result, statusLabel: latest.statusLabel });
-        } else pendingVersion = true;
+        }
       } catch (error) {
         if (active) setError((error as Error).message);
       } finally {
@@ -1653,8 +1657,7 @@ function TaskReport({
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
       });
       await onChange();
-      const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
-      setValue(next);
+      reloadRef.current();
     } catch (error) {
       setError((error as Error).message);
     } finally {

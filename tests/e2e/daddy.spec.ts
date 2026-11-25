@@ -488,6 +488,8 @@ test('keeps an open task report on one revision while board state changes', asyn
     fail = false,
     missing = false,
     responseDelay = 3200,
+    detailRequests = 0,
+    detailOverride: Partial<typeof snapshot> | undefined,
     releaseDetail: (() => void) | undefined,
     detailStarted: (() => void) | undefined;
   await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
@@ -511,6 +513,7 @@ test('keeps an open task report on one revision while board state changes', asyn
     await route.fulfill({ response, json: board });
   });
   await page.route(`**/api/tasks/${taskId}`, async (route) => {
+    detailRequests++;
     detailStarted?.();
     detailStarted = undefined;
     if (hold)
@@ -527,20 +530,21 @@ test('keeps an open task report on one revision while board state changes', asyn
       return;
     }
     const response = await route.fetch(),
-      detail = await response.json();
+      detail = await response.json(),
+      shown = { ...snapshot, ...detailOverride };
     Object.assign(detail.task, {
-      state: snapshot.state,
-      generation: snapshot.generation,
-      pendingAuthorHead: snapshot.pendingAuthorHead,
-      reason: snapshot.reason,
-      revision: { ...detail.task.revision, head: snapshot.head },
+      state: shown.state,
+      generation: shown.generation,
+      pendingAuthorHead: shown.pendingAuthorHead,
+      reason: shown.reason,
+      revision: { ...detail.task.revision, head: shown.head },
       policy: { ...detail.task.policy, autoPush: false },
       pr: {
-        checks: snapshot.checks,
+        checks: shown.checks,
         checkDetails: [
           {
-            name: snapshot.checkName,
-            status: snapshot.checks === 'passing' ? 'success' : 'failed',
+            name: shown.checkName,
+            status: shown.checks === 'passing' ? 'success' : 'failed',
           },
         ],
       },
@@ -623,12 +627,52 @@ test('keeps an open task report on one revision while board state changes', asyn
   await reason.fill('New revision verified offline');
   await expect(waive).toBeEnabled();
 
+  detailOverride = {
+    generation: 11,
+    head: '2'.repeat(40),
+    reason: 'Stale details behind the board',
+    checkName: 'Stale check',
+  };
+  responseDelay = 70;
+  const behindStart = detailRequests;
   started = new Promise<void>((resolve) => {
     detailStarted = resolve;
   });
-  missing = true;
   await started;
+  Object.assign(snapshot, {
+    generation: 13,
+    head: '4'.repeat(40),
+    reason: 'Board ahead of details',
+    checkName: 'Check D',
+  });
+  await page.waitForTimeout(500);
+  expect(detailRequests - behindStart).toBeLessThanOrEqual(2);
+  detailOverride = undefined;
+  await expect(report.getByText('4'.repeat(40), { exact: true })).toBeVisible({ timeout: 5000 });
+
+  detailOverride = {
+    generation: 14,
+    head: '5'.repeat(40),
+    reason: 'Details ahead of board',
+    checkName: 'Check E',
+  };
+  const aheadStart = detailRequests;
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  await started;
+  await page.waitForTimeout(500);
+  expect(detailRequests - aheadStart).toBeLessThanOrEqual(2);
+  Object.assign(snapshot, detailOverride);
+  await expect(report.getByText('5'.repeat(40), { exact: true })).toBeVisible({ timeout: 5000 });
+  detailOverride = undefined;
+
+  missing = true;
+  await expect(page.locator('.daddy-work-item')).toHaveCount(0, { timeout: 5000 });
   await expect(waive).toBeDisabled();
+  const missingRequests = detailRequests;
+  await page.waitForTimeout(2200);
+  expect(detailRequests).toBe(missingRequests);
 });
 
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
