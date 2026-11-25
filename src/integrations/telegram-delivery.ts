@@ -680,22 +680,43 @@ export class TelegramDelivery {
     }
     return changed;
   }
+  private restoreQuestionReceipt(value: Delivery) {
+    const key = value.options.questionSourceKey;
+    if (!key || value.messages.length) return;
+    const source = this.store.setting<Delivery>(key);
+    if (
+      !source?.messages.length ||
+      source.bot !== value.bot ||
+      source.ownerId !== value.ownerId ||
+      this.route(source.destination) !== this.route(value.destination) ||
+      !value.options.notificationId ||
+      !source.options.notificationId ||
+      notificationIdentity(source.options.notificationId) !==
+        notificationIdentity(value.options.notificationId) ||
+      this.inheritedPartsBelongToSibling(source)
+    )
+      return;
+    const candidate = { ...value, messages: source.messages };
+    if (this.acknowledgedPartsMatch(candidate)) value.messages = structuredClone(source.messages);
+  }
   private removeStaleMention(value: Delivery) {
     const mention = value.options.mention;
-    if (!mention || reminderOpen(this.store, mention) || !('messageId' in mention)) return;
-    const message = this.store.messageById(mention.groupId, mention.messageId);
-    if (!message || message.sender !== 'agent') return;
-    value.content = new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(message.text);
-    const source = value.options.questionSourceKey
-      ? this.store.setting<Delivery>(value.options.questionSourceKey)
-      : undefined;
-    if (!value.messages.length && source?.messages.length) {
-      value.messages = structuredClone(source.messages);
-      if (!this.acknowledgedPartsMatch(value)) value.messages = [];
+    if (mention) {
+      if (reminderOpen(this.store, mention) || !('messageId' in mention)) return;
+      const message = this.store.messageById(mention.groupId, mention.messageId);
+      if (!message || message.sender !== 'agent') return;
+      value.content = new TelegramText()
+        .add('👨‍💻 [daddy]', 'bold')
+        .add('\n\n')
+        .markdown(message.text);
+      value.options.mention = undefined;
+      value.revision++;
     }
-    value.options.mention = undefined;
-    value.options.questionSourceKey = undefined;
-    value.revision++;
+    // Replay can pick the ordinary message before the delivery worker ever sees a mention.
+    if (value.options.questionSourceKey) {
+      this.restoreQuestionReceipt(value);
+      value.options.questionSourceKey = undefined;
+    }
   }
   private notificationMessageId(value: Delivery) {
     const notificationId = value.options.notificationId;
@@ -1150,7 +1171,7 @@ export class TelegramDelivery {
       }
     }
     if (
-      value?.status === 'cancelled' &&
+      (value?.status === 'cancelled' || (value?.status === 'sent' && options.final)) &&
       options.replace &&
       options.notificationId?.startsWith('telegram:dialog:')
     )

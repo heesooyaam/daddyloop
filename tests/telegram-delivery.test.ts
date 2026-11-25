@@ -427,11 +427,13 @@ it.each([
 );
 
 it.each([
-  ['current message receipt', 'message', { chatId: 7 }, 100],
-  ['legacy turn receipt', 'turn', { chatId: -10042, threadId: 4 }, 5000],
-])(
+  ['current message receipt', 'message', { chatId: 7 }, 100, false],
+  ['legacy turn receipt', 'turn', { chatId: -10042, threadId: 4 }, 5000, false],
+  ['closed before replay, current', 'message', { chatId: 7 }, 100, true],
+  ['closed before replay, legacy', 'turn', { chatId: -10042, threadId: 4 }, 5000, true],
+] as const)(
   'reuses a fully sent progress receipt after its owner question closes: %s',
-  async (_case, sourceFormat, destination, size) => {
+  async (_case, sourceFormat, destination, size, closedBeforeReplay) => {
     const f = fixture();
     let restored: TelegramDelivery | undefined;
     try {
@@ -476,17 +478,32 @@ it.each([
         f.store.setSetting(String(row.key), saved);
       }
       restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
-      await restored.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
-        groupId: 'group',
-        key: finalNotification,
-        replacePending: true,
-        final: true,
-        notificationId: finalNotification,
-        mention: { groupId: 'group', messageId: message.id },
-      });
+      if (closedBeforeReplay) {
+        await restored.send(destination, agentText, {
+          groupId: 'group',
+          key: `message:${message.id}`,
+          replace: true,
+          replacePending: true,
+          final: true,
+          notificationId: finalNotification,
+        });
+      } else {
+        await restored.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
+          groupId: 'group',
+          key: finalNotification,
+          replacePending: true,
+          final: true,
+          notificationId: finalNotification,
+          mention: { groupId: 'group', messageId: message.id },
+        });
+      }
       await restored.finishRecovery();
       await restored.flush(10);
       expect(f.call).toHaveBeenCalledTimes(progressCalls);
+      await restored.send(destination, new TelegramText().add('Menu'), { key: 'next-menu' });
+      await restored.flush(10);
+      expect(f.call.mock.calls.filter(([, request]) => request.text === 'Menu')).toHaveLength(1);
+
       expect(f.call.mock.calls.some(([, request]) => request.text?.includes('@Owner'))).toBe(false);
     } finally {
       await restored?.stop();
