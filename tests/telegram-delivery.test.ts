@@ -470,6 +470,8 @@ it.each([
           .get(finalNotification)!;
         const saved = JSON.parse(String(row.value));
         saved.options.questionSourceKey = undefined;
+        saved.options.mention = undefined;
+        saved.options.replacePending = undefined;
         f.store.setSetting(String(row.key), saved);
       }
       restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
@@ -528,10 +530,8 @@ it.each([
       question.options = {
         groupId: 'group',
         key: notificationId,
-        replacePending: true,
         final: true,
         notificationId,
-        ...(closed ? { mention: { groupId: 'group', messageId: message.id } } : {}),
       };
       f.store.setSetting('telegram.delivery:separate-question', question);
       await f.queue.send(destination, text('Menu'), { key: 'menu' });

@@ -57,6 +57,12 @@ const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(va
 const notificationIdentity = (value: string) => value.replace(/:(?:progress|final)$/, '');
 const isIndependent = ({ options }: Delivery) =>
   options.operation === 'reaction' || options.operation === 'pin';
+const isSeparateQuestion = ({ options }: Delivery) =>
+  !!options.mention ||
+  (!!options.replacePending && !!options.final && !options.replace) ||
+  (!!options.final &&
+    !!options.notificationId?.endsWith(':final') &&
+    options.key === options.notificationId);
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
 }
@@ -188,11 +194,7 @@ export class TelegramDelivery {
       queuedDialogs.set(identity, rows);
     }
     for (const rows of queuedDialogs.values()) {
-      const question = rows.find(
-        ({ value }) =>
-          !!value.options.mention ||
-          (!!value.options.replacePending && !!value.options.final && !value.options.replace),
-      );
+      const question = rows.find(({ value }) => isSeparateQuestion(value));
       if (!question) continue;
       const sources = rows
         .filter(
@@ -223,7 +225,7 @@ export class TelegramDelivery {
         .filter(
           ({ value }) =>
             ['queued', 'sending'].includes(value.status) &&
-            !!value.options.mention &&
+            isSeparateQuestion(value) &&
             !value.options.questionSourceKey &&
             !!value.options.notificationId,
         )
