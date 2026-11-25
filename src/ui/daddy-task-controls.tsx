@@ -75,6 +75,7 @@ export function QueueTaskForm({
         />
       </label>
       <VoiceInput
+        key={board.group.id}
         onBusy={setVoiceBusy}
         disabled={busy}
         onText={(text) => setRequirements(appendDictation(requirements, text))}

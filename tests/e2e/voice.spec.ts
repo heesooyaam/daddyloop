@@ -23,6 +23,7 @@ test('records a microphone phrase and leaves the transcript in the editable chat
   await page.getByLabel('What should daddy do?').fill('Test dictation');
   await page.getByLabel('Session name (optional)').fill('Voice session');
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Voice session', exact: true })).toBeVisible();
   const input = page.getByLabel('Message daddy');
   await input.fill('My draft:');
   let bytes = 0;
