@@ -1,8 +1,11 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DaddyBoard } from '../../src/client/daddy.js';
 import type { Workspace } from '../../src/core/types.js';
+import { translator } from '../../src/i18n/index.js';
+import { mockTwoProviders } from './usage-helpers.js';
 async function login(page: Page) {
   await page.goto('/');
   await page
@@ -33,6 +36,10 @@ async function sessionFixture(page: Page, title: string) {
   expect(response.status()).toBe(201);
   return ((await response.json()) as DaddyBoard).group;
 }
+async function openWorkers(page: Page) {
+  await page.getByRole('button', { name: /^Workers \d/ }).click();
+  return page.getByRole('dialog', { name: 'Workers' });
+}
 test('starts from a registered workspace, adds N+1 tickets to daddy and exposes worker reports without a worker chat', async ({
   page,
 }) => {
@@ -41,8 +48,12 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await login(page);
   const issue = Date.now();
   await create(page, 'One daddy, several tasks', issue);
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('1');
-  await page.getByLabel('Maximum workers').selectOption('2');
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await expect(limit).toHaveValue('1');
+  await limit.selectOption('2');
+  await expect(limit).toHaveValue('2');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
   await page
     .getByLabel('Message daddy')
     .fill(`https://github.com/fixture/planning/issues/${issue + 1}`);
@@ -52,14 +63,15 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
   await expect(page.getByText('Read-only worker reports', { exact: true })).toBeVisible();
   await expect(page.getByRole('dialog').locator('textarea')).toHaveCount(0);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('2');
-  await expect(
-    page.locator('.daddy-pool-hint').filter({ hasText: 'Occupied by tasks: 2' }),
-  ).toBeVisible();
-  await page.getByLabel('Maximum workers').selectOption('1');
+  await openWorkers(page);
+  await expect(limit).toHaveValue('2');
+  await expect(workers.getByRole('status')).toContainText('Occupied by tasks: 2');
+  await limit.selectOption('1');
   await expect(
     page.getByText('Pool: 2 → 1. Changes apply in the background.', { exact: true }),
   ).toBeVisible();
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Workers \d\/2 → 1$/ })).toBeVisible();
   expect(errors).toEqual([]);
 });
 test('sets a one-message repository in session settings and sends the next message with the default', async ({
@@ -323,7 +335,7 @@ test('collapses each side panel independently and keeps the current conversation
 
   const sessions = page.getByRole('navigation', { name: 'Sessions' });
   const session = sessions.getByRole('button', { name: /^Panel layout session/ });
-  const workers = page.getByRole('heading', { name: 'Worker pool' });
+  const workers = page.locator('#daddy-tasks-panel');
   const chat = page.getByRole('region', { name: 'Conversation with daddy' });
   const composer = chat.getByLabel('Message daddy');
   await session.click();
@@ -364,9 +376,12 @@ test('collapses each side panel independently and keeps the current conversation
     await expect(openSessions).toBeFocused();
     await page.keyboard.press('Enter');
   };
-  const openTaskReport = async (number: number) => {
-    const title = `Ticket fixture ${number}`;
-    await page.getByRole('button', { name: new RegExp(title) }).click({ timeout: 5000 });
+  const openLastTaskReport = async () => {
+    const cards = workers.locator('.daddy-work-item');
+    await expect(cards.first()).toBeVisible();
+    const last = cards.last();
+    const title = await last.locator('.daddy-work-heading strong').innerText();
+    await last.click({ timeout: 5000 });
     const report = page.getByRole('dialog', { name: 'Work item' });
     await expect(report.getByRole('heading', { name: title, exact: true })).toBeVisible();
     await report.getByRole('button', { name: 'Close', exact: true }).click();
@@ -422,7 +437,7 @@ test('collapses each side panel independently and keeps the current conversation
   await expect(
     page.getByRole('heading', { name: 'Another panel layout session', exact: true }),
   ).toBeVisible();
-  await openTaskReport(issue + 1);
+  await openLastTaskReport();
   await hideTasks.click();
   await expect(workers).toBeHidden();
 
@@ -435,7 +450,7 @@ test('collapses each side panel independently and keeps the current conversation
   const tabs = page.locator('.daddy-mobile-tabs');
   await tabs.getByRole('button', { name: /Tasks/ }).click();
   await expect(workers).toBeVisible();
-  await openTaskReport(issue);
+  await openLastTaskReport();
   await expect(chat).toBeHidden();
   await tabs.getByRole('button', { name: 'daddy' }).click();
   await checkConversation();
@@ -444,6 +459,17 @@ test('collapses each side panel independently and keeps the current conversation
   await expect(sessions).toBeVisible();
   await page.keyboard.press('Escape');
   await returnToChat();
+  const mainWidth = () => page.locator('.daddy-main').evaluate((element) => element.clientWidth);
+  await page.setViewportSize({ width: 568, height: 320 });
+  await expect.poll(chatWidth).toBe(await mainWidth());
+  await tabs.getByRole('button', { name: /Tasks/ }).click();
+  await expect(workers.locator('.daddy-work-item').first()).toBeInViewport({ ratio: 1 });
+
+  await page.setViewportSize({ width: 1024, height: 480 });
+  await expect(workers).toBeHidden();
+  await expect.poll(chatWidth).toBe(await mainWidth());
+  await checkConversation();
+
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
   await page.setViewportSize(desktop);
@@ -463,6 +489,25 @@ test('collapses each side panel independently and keeps the current conversation
   await expect(hideTasks).toHaveAttribute('aria-expanded', 'true');
   await checkConversation();
   expect(await chatWidth()).toBe(initialWidth);
+
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('ru');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'ru');
+  const t = translator('ru');
+  await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  await page.setViewportSize({ width: 851, height: 480 });
+  await page.getByRole('button', { name: t('Pause'), exact: true }).click();
+  await expect(page.getByRole('button', { name: t('Resume'), exact: true })).toBeInViewport();
+  const title = page.getByRole('heading', { name: 'Panel layout session', exact: true });
+  await expect.poll(() => title.evaluate((element) => element.clientWidth)).toBeGreaterThan(120);
+  await expect(
+    page.getByRole('button', { name: t('Session settings'), exact: true }),
+  ).toBeInViewport();
+  await expect(
+    page.getByRole('button', { name: t('Hide workers and tasks panel') }),
+  ).toBeInViewport();
+  await expect(page.getByRole('button', { name: t('Hide sessions panel') })).toBeInViewport();
+  await page.locator('.daddy-language select').selectOption('en');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
 });
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
@@ -471,9 +516,11 @@ test('supports the phone task board, pool controls and workspace directory choos
   await create(page, 'Phone session', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await expect(page.getByLabel('Maximum workers')).toBeVisible();
-  await page.getByLabel('Maximum workers').selectOption('3');
-  await expect(page.getByLabel('Maximum workers')).toHaveValue('3');
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await limit.selectOption('3');
+  await expect(limit).toHaveValue('3');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
   await page.getByRole('button', { name: /Workspaces/ }).click();
@@ -490,8 +537,12 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await create(page, 'Shared task controls', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await page.getByLabel('Maximum workers').selectOption('2');
-  await page.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const workers = await openWorkers(page);
+  const limit = workers.getByLabel('Maximum workers');
+  await limit.selectOption('2');
+  await expect(limit).toHaveValue('2');
+  await workers.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
   const queue = page.getByRole('dialog', { name: 'Queue task' });
   await queue.getByLabel('Task description').fill('Repair the filter cache');
   await queue.getByLabel('Assign to worker').selectOption('2');
@@ -508,8 +559,7 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
   await report.getByRole('button', { name: 'Close', exact: true }).click();
 
-  await page.getByRole('button', { name: 'Workers', exact: true }).click();
-  const workers = page.getByRole('dialog', { name: 'Workers' });
+  await openWorkers(page);
   const worker = workers.getByRole('button', { name: 'Configure worker 2' });
   await expect(worker).toContainText('Repair the filter cache');
   await expect(worker).toContainText('gpt-6-astra · medium');
@@ -526,6 +576,466 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(worker).toContainText('Repair the filter cache');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+test('shows a full card on short screens and keeps actions available in a dense task list', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Dense task board', Date.now());
+  const sessionId = new URL(page.url()).hash.slice('#session/'.length);
+  const longTitle =
+    'Rebuild the response cache for imported records with missing workspace metadata';
+  const taskIds: string[] = [];
+  for (let index = 1; index <= 10; index++) {
+    const response = await page.request.post(`/api/daddy/sessions/${sessionId}/tasks`, {
+      headers: { 'X-daddyloop-Request': '1' },
+      data: { requirements: `${index}. ${longTitle}`, requestId: randomUUID() },
+    });
+    expect(response.status()).toBe(201);
+    const { id } = await response.json();
+    taskIds.push(id);
+  }
+  const path = `/test-workspaces${'/long-working-copy-directory'.repeat(9)}/session`;
+  let constrained = false;
+  let copyFailed = false;
+  let deletionFailed = false;
+  let visibleTaskCount: number | undefined;
+  const copyFailure = 'The session copy could not be written';
+  const longStatus = 'Waiting for GitHub to confirm the previous merge request';
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch();
+    const board: DaddyBoard = await response.json();
+    const prerequisite = board.tasks.find((task) => !taskIds.includes(task.id))!;
+    const tasks = taskIds.map((id) => ({
+      ...board.tasks.find((task) => task.id === id)!,
+      dependsOn: [prerequisite.id],
+      ...(constrained || deletionFailed ? { statusLabel: longStatus } : {}),
+    }));
+    const ordered = [...tasks.slice(0, -1), prerequisite, tasks.at(-1)!];
+    const visibleTasks =
+      visibleTaskCount === undefined
+        ? ordered
+        : Array.from({ length: visibleTaskCount }, (_, index) => {
+            const task = ordered[index % ordered.length]!;
+            return index < ordered.length ? task : { ...task, id: task.id + '-extra-' + index };
+          });
+    await route.fulfill({
+      response,
+      json: {
+        ...board,
+        workers: copyFailed
+          ? { ...board.workers, active: 7, limit: 8, target: 3, pending: true }
+          : board.workers,
+        group: {
+          ...board.group,
+          ...(deletionFailed ? { deletion: { state: 'error', error: copyFailure } } : {}),
+          workspacePreparation: copyFailed
+            ? { state: 'error', error: copyFailure }
+            : { state: 'ready', path },
+          ...(constrained
+            ? {
+                resourceWait: {
+                  state: 'waiting',
+                  since: new Date().toISOString(),
+                  reasons: ['Not enough available RAM', 'Disk-space threshold reached'],
+                },
+              }
+            : {}),
+        },
+        tasks: visibleTasks,
+        taskQueue: [],
+      } satisfies DaddyBoard,
+    });
+  });
+  await mockTwoProviders(page);
+
+  const list = page.locator('.daddy-work-items');
+  const cards = list.getByRole('button');
+  const fullTitle = `1. ${longTitle}`;
+  const queue = page.getByRole('button', { name: 'Queue a task', exact: true });
+  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+  for (const viewport of [
+    { width: 1024, height: 480 },
+    { width: 390, height: 540 },
+  ]) {
+    await page.setViewportSize(viewport);
+    if (viewport.width === 390) {
+      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+    }
+    await expect(cards).toHaveCount(11);
+    await expect(cards.first()).toHaveAttribute('title', fullTitle);
+    await expect(cards.first()).toContainText('Prerequisites: 1');
+    await expect(cards.last()).toHaveAttribute('title', `10. ${longTitle}`);
+    await expect(cards.last()).toContainText('Prerequisites: 1');
+    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(cards.first()).toBeInViewport({ ratio: 1 });
+    await expect(cards.first().locator('.daddy-work-state')).not.toBeEmpty();
+    await expect(cards.last()).not.toBeInViewport();
+
+    await list.hover();
+    await page.mouse.wheel(0, 1400);
+    await expect(cards.last()).toBeInViewport({ ratio: 1 });
+    await expect(queue).toBeInViewport({ ratio: 1 });
+    expect(await list.evaluate((element) => element.scrollWidth === element.clientWidth)).toBe(
+      true,
+    );
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+
+    await queue.click();
+    const dialog = page.getByRole('dialog', { name: 'Queue task' });
+    await expect(dialog.getByLabel('Task description')).toBeFocused();
+    await page.keyboard.press('Escape');
+
+    const longCard = cards.first();
+    await longCard.scrollIntoViewIfNeeded();
+    await expect(longCard.locator('strong')).toBeInViewport({ ratio: 1 });
+    await expect(longCard.locator('.daddy-work-state')).toBeInViewport({ ratio: 1 });
+    await longCard.locator('.daddy-work-heading svg').click();
+    const report = page.getByRole('dialog', { name: 'Work item' });
+    await expect(report.getByRole('heading', { name: fullTitle, exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await list.evaluate((element) => (element.scrollTop = 0));
+  }
+
+  const zoom = await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  const first = cards.first();
+  const title = first.locator('.daddy-work-heading strong');
+  await expect(title).toHaveCSS('font-size', '17.5px');
+  await expect(title).toHaveCSS('line-height', '24.5px');
+  await expect(title).toHaveCSS('-webkit-line-clamp', '2');
+  await expect(first.locator('.daddy-work-state')).toHaveCSS('font-size', '15px');
+  await expect(first).toBeInViewport({ ratio: 1 });
+
+  await list.hover();
+  await page.mouse.wheel(0, 1800);
+  await expect(cards.last()).toBeInViewport({ ratio: 1 });
+  await zoom.evaluate((node) => {
+    node.parentNode?.removeChild(node);
+  });
+  constrained = true;
+  await expect(first.locator('.daddy-work-state')).toHaveText(longStatus);
+  const indicator = page.getByRole('button', { name: 'Agent limits', exact: true });
+  for (const viewport of [
+    { width: 568, height: 320 },
+    { width: 640, height: 360 },
+    { width: 667, height: 375 },
+    { width: 700, height: 375 },
+    { width: 844, height: 390 },
+    { width: 1024, height: 480 },
+    { width: 320, height: 540 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await list.evaluate((element) => (element.scrollTop = 0));
+    await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+    await expect(first).toBeInViewport({ ratio: 1 });
+    await expect(indicator).toBeInViewport({ ratio: 1 });
+  }
+  await indicator.click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Agent limit details' })
+      .getByRole('heading', { name: 'Claude', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('link', { name: 'Open limits page', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: 'daddy' }).click();
+  await indicator.click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Agent limit details' })
+      .getByRole('heading', { name: 'Claude', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('link', { name: 'Open limits page', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
+
+  copyFailed = true;
+  const sendDiagnostic =
+    'ENOENT: no such file or directory, chdir /' + 'unavailable-folder/'.repeat(12);
+  await page.route('**/api/daddy/sessions/*/chat', (route) =>
+    route.fulfill({
+      status: 503,
+      json: { error: { code: 'unavailable', message: sendDiagnostic } },
+    }),
+  );
+  const composer = page.getByLabel('Message daddy');
+  await composer.fill('Keep this draft');
+  await composer.press('Enter');
+  const notices = page.getByRole('region', { name: 'Session status' });
+  const failedCopy = notices
+    .getByRole('alert')
+    .filter({ hasText: 'Could not prepare the session copy' });
+  await expect(failedCopy).toBeVisible();
+  await expect(notices.getByText('Request failed', { exact: true })).toBeVisible();
+  await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+  await expect(first).toBeInViewport({ ratio: 1 });
+  await expect(notices.getByText('Waiting for server resources')).toBeInViewport({ ratio: 1 });
+  for (const retry of await notices.getByRole('button', { name: 'Retry', exact: true }).all()) {
+    await expect(retry).toBeInViewport({ ratio: 1 });
+    await expect(retry).toBeEnabled();
+  }
+  await failedCopy.getByRole('button', { name: 'View details' }).click();
+  await expect(page.getByRole('dialog').getByText(copyFailure)).toBeInViewport({ ratio: 1 });
+  await page.keyboard.press('Escape');
+  for (const viewport of [
+    { width: 375, height: 320 },
+    { width: 360, height: 360 },
+    { width: 375, height: 375 },
+    { width: 375, height: 376 },
+    { width: 359, height: 320 },
+    { width: 320, height: 320 },
+    { width: 389, height: 375 },
+    { width: 480, height: 320 },
+    { width: 500, height: 320 },
+    { width: 390, height: 390 },
+    { width: 320, height: 480 },
+    { width: 650, height: 426 },
+    { width: 360, height: 640 },
+    { width: 390, height: 626 },
+    { width: 375, height: 667 },
+    { width: 1024, height: 626 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await list.evaluate((element) => (element.scrollTop = 0));
+    await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+    await expect(first).toBeInViewport({ ratio: 1 });
+    if ((await page.locator('.daddy-main').getAttribute('data-task-side')) !== null) {
+      for (const label of ['Copy failed', 'Awaiting resources', 'Low memory', 'Low disk space']) {
+        await expect(notices.getByText(label, { exact: true })).toBeInViewport({ ratio: 1 });
+      }
+    } else {
+      await expect(notices.getByText('Waiting for server resources')).toBeInViewport({ ratio: 1 });
+    }
+    await expect(failedCopy.getByRole('button', { name: 'Retry', exact: true })).toBeInViewport({
+      ratio: 1,
+    });
+    if (viewport.width === 375 && viewport.height === 320) {
+      await list.hover();
+      await page.mouse.wheel(0, 2200);
+      await expect(cards.last()).toBeInViewport();
+      await cards.last().click();
+      await expect(page.getByRole('dialog', { name: 'Work item' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await queue.click();
+      await expect(page.getByRole('dialog', { name: 'Queue task' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await failedCopy.getByRole('button', { name: 'View details' }).click();
+      await expect(page.getByRole('dialog').getByText(copyFailure)).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
+  }
+  await notices
+    .getByRole('alert')
+    .filter({ hasText: 'Request failed' })
+    .getByRole('button', { name: 'View details' })
+    .click();
+  await expect(page.getByRole('dialog').getByText(sendDiagnostic)).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.route('**/api/preferences', (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const { locale } = route.request().postDataJSON();
+    return route.fulfill({ json: { locale, version: Number.MAX_SAFE_INTEGER } });
+  });
+  for (const locale of ['en', 'ru'] as const) {
+    const t = translator(locale);
+    await page.setViewportSize({ width: 375, height: 376 });
+    const menu = page.getByRole('button', { name: 'Sessions', exact: true });
+    await menu.click();
+    await page.getByLabel('Language', { exact: true }).selectOption(locale);
+    await page.keyboard.press('Escape');
+    await page
+      .locator('.daddy-mobile-tabs')
+      .getByRole('button', { name: t('Tasks'), exact: false })
+      .click();
+    await list.evaluate((element) => (element.scrollTop = 0));
+    await page.getByRole('main').evaluate((element) => (element.scrollTop = 0));
+    await expect(first).toBeInViewport({ ratio: 1 });
+    await list.hover();
+    await page.mouse.wheel(0, 2200);
+    await expect(cards.last()).toBeInViewport({ ratio: 1 });
+    await cards.last().click();
+    await expect(page.getByRole('dialog', { name: t('Work item') })).toBeVisible();
+    await page.keyboard.press('Escape');
+    const localNotices = page.getByRole('region', { name: t('Session status') });
+    await localNotices
+      .getByRole('alert')
+      .filter({ hasText: t('Could not prepare the session copy') })
+      .getByRole('button', { name: t('View details') })
+      .click();
+    await expect(page.getByRole('dialog').getByText(copyFailure)).toBeVisible();
+    await page.keyboard.press('Escape');
+    await localNotices
+      .getByRole('alert')
+      .filter({ hasText: t('Request failed') })
+      .getByRole('button', { name: t('View details') })
+      .click();
+    await expect(page.getByRole('dialog').getByText(sendDiagnostic)).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: t('Agent limits'), exact: true }).click();
+    await expect(
+      page
+        .getByRole('region', { name: t('Agent limit details') })
+        .getByRole('heading', { name: 'Claude', exact: true }),
+    ).toBeVisible();
+    await page.getByRole('link', { name: t('Open limits page'), exact: true }).click();
+    await expect(page.getByRole('heading', { name: t('Agent limits'), exact: true })).toBeVisible();
+    await page.getByRole('link', { name: t('Back to workspace'), exact: true }).click();
+  }
+  await page.getByRole('button', { name: translator('ru')('Sessions'), exact: true }).click();
+  await page.getByLabel(translator('ru')('Language'), { exact: true }).selectOption('en');
+  await page.keyboard.press('Escape');
+
+  deletionFailed = true;
+  constrained = false;
+  await page.setViewportSize({ width: 320, height: 540 });
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  const retryDeletion = notices.getByRole('button', { name: 'Retry deletion' });
+  await retryDeletion.waitFor();
+  await list.evaluate((element) => (element.scrollTop = 0));
+  await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+  await expect(first).toBeInViewport({ ratio: 1 });
+  await expect(retryDeletion).toBeInViewport({ ratio: 1 });
+
+  deletionFailed = false;
+  constrained = true;
+  const tasksTab = page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ });
+  const counter = tasksTab.locator('span');
+  for (const count of [1, 12, 128]) {
+    visibleTaskCount = count;
+    await expect(counter).toHaveText(String(count));
+    for (const viewport of [
+      { width: 375, height: 320 },
+      { width: 390, height: 425 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+      await expect(counter).toBeInViewport({ ratio: 1 });
+      const hits = await counter.evaluate((element) => {
+        const tab = element.closest('button')!;
+        const text = element.firstChild!;
+        return Array.from(element.textContent!).map((_, index) => {
+          const range = document.createRange();
+          range.setStart(text, index);
+          range.setEnd(text, index + 1);
+          const rect = range.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          return { x, y, hitsTab: tab.contains(document.elementFromPoint(x, y)) };
+        });
+      });
+      expect(hits.every((hit) => hit.hitsTab)).toBe(true);
+      const lastDigit = hits.at(-1)!;
+      await page.mouse.click(lastDigit.x, lastDigit.y);
+      await expect(tasksTab).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    }
+  }
+});
+test('shows message send errors without scrolling on short screens', async ({ page }) => {
+  const message = 'The server is temporarily unavailable';
+  await mockTwoProviders(page);
+  await page.route('**/api/daddy/sessions/*/chat', (route) =>
+    route.fulfill({ status: 503, json: { error: { code: 'unavailable', message } } }),
+  );
+  await login(page);
+  await create(page, 'Send failure on a short screen', Date.now());
+  await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+
+  const main = page.getByRole('main');
+  const composer = page.getByLabel('Message daddy');
+  const alert = page.getByRole('alert').filter({ hasText: message });
+  for (const viewport of [
+    { width: 390, height: 540 },
+    { width: 1024, height: 480 },
+  ]) {
+    await page.setViewportSize(viewport);
+    expect(await main.evaluate((element) => element.scrollTop)).toBe(0);
+    const draft = `Keep this draft at ${viewport.width} pixels`;
+    await composer.fill(draft);
+    const rejected = page.waitForResponse(
+      (response) => response.url().endsWith('/chat') && response.status() === 503,
+    );
+    await composer.press('Enter');
+    await rejected;
+
+    await expect(alert).toBeInViewport({ ratio: 1 });
+    await expect(alert.getByRole('button', { name: 'Retry' })).toBeInViewport({ ratio: 1 });
+    await expect(composer).toHaveValue(draft);
+    expect(await main.evaluate((element) => element.scrollTop)).toBe(0);
+
+    if (viewport.width === 390) {
+      await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+    }
+    await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
+      ratio: 1,
+    });
+  }
+});
+test('shows copy and deletion failures with the task board without scrolling', async ({ page }) => {
+  await mockTwoProviders(page);
+  await login(page);
+  await create(page, 'Session maintenance failure', Date.now());
+  const sessionId = new URL(page.url()).hash.slice('#session/'.length);
+  let groupPatch: Partial<DaddyBoard['group']>;
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch();
+    const board: DaddyBoard = await response.json();
+    await route.fulfill({ response, json: { ...board, group: { ...board.group, ...groupPatch } } });
+  });
+
+  for (const { group, heading, reason, retry } of [
+    {
+      group: {
+        daddyState: 'needs_input',
+        workspacePreparation: { state: 'error', error: 'The session copy could not be written' },
+      },
+      heading: 'Could not prepare the session copy',
+      reason: 'The session copy could not be written',
+      retry: 'Retry',
+    },
+    {
+      group: {
+        daddyState: 'paused',
+        deletion: { state: 'error', error: 'The session archive could not be written' },
+      },
+      heading: 'Session deletion stopped; working copies were preserved',
+      reason: 'The session archive could not be written',
+      retry: 'Retry deletion',
+    },
+  ] satisfies {
+    group: Partial<DaddyBoard['group']>;
+    heading: string;
+    reason: string;
+    retry: string;
+  }[]) {
+    groupPatch = group;
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Agent limits', exact: true })).toBeVisible();
+    const main = page.getByRole('main');
+    const tasks = page.locator('.daddy-work-items .daddy-work-item');
+    for (const viewport of [
+      { width: 390, height: 540 },
+      { width: 1024, height: 480 },
+    ]) {
+      await page.setViewportSize(viewport);
+      if (viewport.width === 390) {
+        await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+      }
+      await expect(page.getByText(reason, { exact: true })).toBeInViewport({ ratio: 1 });
+      await expect(page.getByText(heading, { exact: true })).toBeInViewport({ ratio: 1 });
+      await expect(page.getByRole('button', { name: retry, exact: true })).toBeInViewport({
+        ratio: 1,
+      });
+      await expect(tasks.first()).toBeInViewport({ ratio: 1 });
+      expect(await main.evaluate((element) => element.scrollTop)).toBe(0);
+    }
+  }
+});
 test('switches English and Russian in the daddy UI, refreshes model choices and preserves original task text', async ({
   page,
 }) => {
@@ -535,6 +1045,13 @@ test('switches English and Russian in the daddy UI, refreshes model choices and 
   await page.getByLabel('Language', { exact: true }).selectOption('ru');
   await expect(page.getByRole('button', { name: 'Новая сессия', exact: true })).toBeVisible();
   await expect(page.getByText(`Ticket fixture ${issue}`, { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1024, height: 480 });
+  await expect(page.getByRole('button', { name: 'В очередь', exact: true })).toBeInViewport({
+    ratio: 1,
+  });
+  await expect(page.locator('.daddy-work-items .daddy-work-item').first()).toBeInViewport({
+    ratio: 1,
+  });
   await expect(page.getByRole('button', { name: /Воркспейсы/ })).toBeVisible();
   await page.getByRole('button', { name: 'Настройки сессии' }).click();
   await expect(page.getByLabel('daddy Модель')).toHaveValue('gpt-6-astra');
@@ -910,7 +1427,7 @@ for (const action of ['settings', 'tasks', 'session'] as const) {
       action === 'settings'
         ? 'Session settings'
         : action === 'tasks'
-          ? 'Queue task'
+          ? 'Queue a task'
           : 'New session';
     const submit =
       action === 'settings' ? 'Save settings' : action === 'tasks' ? 'Queue task' : 'Start session';
@@ -1116,3 +1633,49 @@ test('keeps a newly created chat selected when another client deletes it', async
   await page.getByRole('button', { name: new RegExp(a.title) }).click();
   await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
 });
+
+for (const locale of ['en', 'ru'] as const) {
+  test(`limits keep the chat hidden across compact layout boundaries (${locale})`, async ({
+    page,
+  }) => {
+    const t = translator(locale);
+    await login(page);
+    const session = await sessionFixture(page, 'Session with visible task board');
+    await page.route('**/api/preferences', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...(await response.json()), locale } });
+    });
+    await page.route('**/api/status', async (route) => {
+      const response = await route.fetch();
+      const status = await response.json();
+      await route.fulfill({
+        response,
+        json: { ...status, preferences: { ...status.preferences, locale } },
+      });
+    });
+    await page.goto(`/limits#session/${session.id}`);
+    const limits = page.getByRole('heading', { name: t('Agent limits'), exact: true });
+    await expect(limits).toBeVisible();
+    // The loaded task panel activates the compact desktop grid rules even when there are no tasks.
+    const hiddenChat = page.locator('.daddy-main[hidden]');
+    await expect(hiddenChat.locator('.daddy-board')).toHaveCount(1);
+    await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+    for (const [width, height] of [
+      [650, 425],
+      [651, 425],
+      [851, 480],
+      [1024, 480],
+      [1280, 625],
+      [1280, 626],
+    ]) {
+      await page.setViewportSize({ width, height });
+      await expect(page.getByRole('main')).toHaveCount(1);
+      await expect(limits).toBeVisible();
+      await expect(hiddenChat).toHaveCSS('display', 'none');
+      await expect(page.getByLabel(t('Message daddy'))).toBeHidden();
+    }
+    await page.getByRole('link', { name: t('Back to workspace'), exact: true }).click();
+    await expect(page.getByRole('heading', { name: session.title, exact: true })).toBeVisible();
+    await expect(page.getByLabel(t('Message daddy'))).toBeEditable();
+  });
+}

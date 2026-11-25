@@ -38,10 +38,17 @@ test('records a microphone phrase and leaves the transcript in the editable chat
   const stop = page.getByRole('button', { name: 'Stop recording and transcribe' });
   await expect(stop).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+  const submissions: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/chat'))
+      submissions.push(request.url());
+  });
+  await input.press('Enter');
   // MediaRecorder needs actual samples from the synthetic microphone.
   await page.waitForTimeout(1200);
   await stop.click();
   await expect(input).toHaveValue('My draft: Dictated phrase');
+  expect(submissions).toHaveLength(0);
   expect(bytes).toBeGreaterThan(44);
   await input.fill('Edited before sending');
   await expect(input).toHaveValue('Edited before sending');
@@ -100,7 +107,7 @@ test('keeps dictation scoped to the current session and records a task after vis
     await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
     await expect(message).toHaveValue('Current draft');
     await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled();
-    await page.getByRole('button', { name: 'Queue task', exact: true }).click();
+    await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
     const queue = page.getByRole('dialog', { name: 'Queue task' });
     await record(queue);
     await expect(queue.getByLabel('Task description')).toHaveValue('Dictated task');
@@ -124,8 +131,13 @@ declare global {
   }
 }
 
-for (const exit of ['indicator', 'mobile sidebar', 'browser history'] as const) {
-  test(`cancels microphone input when leaving for limits through ${exit}`, async ({ page }) => {
+for (const exit of [
+  'indicator',
+  'mobile sidebar',
+  'browser history',
+  'session deletion',
+] as const) {
+  test(`cancels microphone input through ${exit}`, async ({ page }) => {
     const delayPermission = exit === 'mobile sidebar';
     if (delayPermission) await page.setViewportSize({ width: 390, height: 540 });
     await page.addInitScript((delay) => {
@@ -182,6 +194,7 @@ for (const exit of ['indicator', 'mobile sidebar', 'browser history'] as const) 
     await page.getByLabel('Session name (optional)').fill(title);
     await page.getByRole('button', { name: 'Start session', exact: true }).click();
     await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    const sessionId = new URL(page.url()).hash.slice('#session/'.length);
     const message = page.getByLabel('Message daddy');
     const back = page.getByRole('link', { name: 'Back to workspace', exact: true });
     const visitLimitsFromHeader = async () => {
@@ -214,9 +227,21 @@ for (const exit of ['indicator', 'mobile sidebar', 'browser history'] as const) 
         page.getByRole('button', { name: 'Stop recording and transcribe', exact: true }),
       ).toBeVisible();
       if (exit === 'indicator') await visitLimitsFromHeader();
-      else await page.goBack();
+      else if (exit === 'browser history') await page.goBack();
+      else {
+        await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+          const response = await route.fetch();
+          const board = await response.json();
+          await route.fulfill({
+            response,
+            json: { ...board, group: { ...board.group, deletion: { state: 'running' } } },
+          });
+        });
+        await expect(page.getByLabel('Message daddy')).toBeDisabled();
+      }
     }
-    await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
+    if (exit !== 'session deletion')
+      await expect(page.getByRole('heading', { name: 'Agent limits', exact: true })).toBeVisible();
     await page.evaluate(() => window.limitsVoice.releasePermission());
     await expect
       .poll(() => page.evaluate(() => window.limitsVoice.tracks.map((track) => track.readyState)))
@@ -224,9 +249,11 @@ for (const exit of ['indicator', 'mobile sidebar', 'browser history'] as const) 
     expect(await page.evaluate(() => window.limitsVoice.recordings)).toBe(delayPermission ? 0 : 1);
     expect(await page.evaluate(() => window.limitsVoice.fireRecordingTimers())).toBe(0);
 
-    await back.click();
+    if (exit !== 'session deletion') await back.click();
     await expect(message).toHaveValue('Preserved text');
-    await expect(page.getByRole('button', { name: 'Dictate message', exact: true })).toBeEnabled();
+    const dictate = page.getByRole('button', { name: 'Dictate message', exact: true });
+    if (exit === 'session deletion') await expect(dictate).toBeDisabled();
+    else await expect(dictate).toBeEnabled();
     expect(transcriptions).toBe(0);
   });
 }

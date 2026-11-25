@@ -78,7 +78,7 @@ for (const locale of ['en', 'ru'] as const) {
     const heading = page.getByRole('heading', { name: title, exact: true });
     await expect(heading).toBeVisible();
 
-    await page.getByRole('button', { name: t('Queue task'), exact: true }).click();
+    await page.getByRole('button', { name: t('Queue a task'), exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByLabel(t('Task description')).fill(taskTitle);
     await dialog.getByRole('button', { name: t('Queue task'), exact: true }).click();
