@@ -517,6 +517,7 @@ export class Worker {
     this.active.set(job.taskId, abort);
     this.runningJobs.set(job.taskId, job);
     const store = this.engine.store;
+    let savedFix: { head: string; revision: Revision } | undefined;
     try {
       let task = store.getTask(job.taskId);
       const isolatedReview =
@@ -823,7 +824,6 @@ export class Worker {
           store.saveTask(latest);
         }
       }
-      let savedFix: { head: string; revision: Revision } | undefined;
       if (
         !abort.signal.aborted &&
         task.generation === job.generation &&
@@ -854,6 +854,7 @@ export class Worker {
       }
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
+      if (savedFix) await this.engine.recordSavedFix(job, savedFix);
       const capacity =
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       const quota = error instanceof GitHubRetryError && !abort.signal.aborted;

@@ -952,6 +952,15 @@ it.each([
   ['gitlab', 'edited on previous commit'],
   ['arcadia', 'edited on previous commit after restart'],
   ['arcadia', 'unchanged on previous commit after restart'],
+  ['github', 'edited on previous commit merged early'],
+  ['gitlab', 'edited on previous commit merged early after restart'],
+  ['arcadia', 'edited on previous commit merged early'],
+  ['github', 'edited on previous commit from legacy publication'],
+  ['gitlab', 'edited on previous commit from legacy publication'],
+  ['arcadia', 'edited on previous commit from legacy publication after restart'],
+  ['arcadia', 'unchanged on previous commit from legacy publication after restart'],
+  ['github', 'unchanged on previous commit merged early'],
+  ['github', 'unchanged on previous commit without source'],
 ] as const)(
   'verifies the wording presented to the merge reviewer on %s (%s)',
   async (provider, scenario) => {
@@ -961,6 +970,10 @@ it.each([
     let store = f.store;
     try {
       const task = f.store.getTask(f.task.id);
+      if (provider === 'arcadia' && scenario.includes('merged early')) {
+        task.revision = { ...task.revision!, revisionId: 'diff-1' };
+        task.pr = { ...task.pr!, revisionId: 'diff-1' };
+      }
       const ref = { ...prRef(task), provider };
       const confirmed = {
         ...task.pr!,
@@ -1003,15 +1016,38 @@ it.each([
           reviewFinished: true,
           pendingAuthorFix: { revision: task.revision!, generation: task.generation },
         });
-        store.setSetting('demo-pr:1', confirmed);
-        await f.engine.reconcile(task.id);
-        const saved = store.getTask(task.id);
-        expect(saved).toMatchObject({
-          state: 'queued',
-          savedFixReview: { handle: { id: review.id } },
-        });
-        expect(saved.review).toBeUndefined();
-        store.saveTask({ ...saved, state: 'needs_input' });
+        if (scenario.includes('merged early')) {
+          store.saveTask({ ...store.getTask(task.id), state: 'needs_input' });
+        } else if (scenario.includes('legacy publication') || scenario.includes('without source')) {
+          if (scenario.includes('legacy publication'))
+            store.event(task.id, 'review.published', { reviewId: review.id, snapshot });
+          const author = store.enqueue(task, 'author', 'fix', 'Save the fix');
+          store.saveJob({ ...author, status: 'completed' });
+          store.event(
+            task.id,
+            'author.fixes_saved',
+            { head: savedHead, revision: task.revision },
+            author.id,
+          );
+          store.saveTask({
+            ...store.getTask(task.id),
+            state: 'needs_input',
+            pr: confirmed,
+            revision: confirmed,
+            review: undefined,
+            snapshot: undefined,
+          });
+        } else {
+          store.setSetting('demo-pr:1', confirmed);
+          await f.engine.reconcile(task.id);
+          const saved = store.getTask(task.id);
+          expect(saved).toMatchObject({
+            state: 'queued',
+            savedFixReview: { handle: { id: review.id } },
+          });
+          expect(saved.review).toBeUndefined();
+          store.saveTask({ ...saved, state: 'needs_input' });
+        }
       }
       store.setSetting('demo-pr:1', merged);
       expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'reviewing' });
@@ -1038,7 +1074,12 @@ it.each([
           { id: finding.id, body: 'Check recovery after a restart' },
         ]);
       } else {
-        expect(completed.state).toBe('complete');
+        if (scenario.includes('without source')) {
+          expect(completed).toMatchObject({
+            state: 'needs_input',
+            reason: expect.stringContaining('source review'),
+          });
+        } else expect(completed.state).toBe('complete');
       }
     } finally {
       store.close();
@@ -1047,9 +1088,14 @@ it.each([
   },
 );
 
-it.each([false, true])(
-  'fences the old revision after SQLite blocks the task write (restart: %s)',
-  async (restart) => {
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const)(
+  'fences the old revision after SQLite blocks the task write (restart: %s, pause: %s)',
+  async (restart, pause) => {
     const dir = mkdtempSync(join(tmpdir(), 'daddy-fix-receipt-'));
     const path = join(dir, 'state.sqlite');
     const f = await fixture({ state: 'fixing' }, path);
@@ -1084,6 +1130,15 @@ it.each([false, true])(
         store.close();
         store = new Store(path);
         engine = new Engine(store, () => new DemoProvider(store));
+      }
+      if (pause) {
+        await engine.action(task.id, 'pause');
+        const resumed = await engine.action(task.id, 'resume');
+        expect(resumed.state).toBe('needs_input');
+        expect(resumed.reason).toContain(savedHead);
+        const prepare = vi.fn();
+        await engine.submitSavedFix(task.id, prepare);
+        expect(prepare).not.toHaveBeenCalled();
       }
       await expect(engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
       expect(store.getTask(task.id)).toMatchObject({

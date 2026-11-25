@@ -1,3 +1,4 @@
+import { setTimeout as delaySavedFixReceipt } from 'node:timers/promises';
 import {
   nextPrAction,
   completionGate,
@@ -822,6 +823,14 @@ export class Engine {
   private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
     // Settle the old intent before routing the new revision. Never replay an old POST.
     const intent = task.draftStart!;
+    if (intent.owner && pr.state === 'open' && !sameOpenTarget(task.pr, pr)) {
+      this.state(
+        task,
+        'needs_input',
+        `The PR branches changed during draft creation. Expected target ${task.pr?.targetBranch}, observed ${pr.targetBranch}. Inspect the earlier draft before retrying.`,
+      );
+      return task;
+    }
     const existing = await provider.findReview(prRef(task), intent.marker);
     if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
     if (existing) {
@@ -1761,8 +1770,54 @@ export class Engine {
     });
     return task;
   }
+  private recoverSavedFixReview(task: Task, head: string) {
+    const feedback = task.feedback;
+    if (
+      !feedback?.comments.length ||
+      feedback.revision.head === head ||
+      feedback.status !== 'published' ||
+      task.savedFixReview
+    )
+      return;
+    if (task.review && sameRevision(task.review.revision, feedback.revision)) {
+      task.savedFixReview = {
+        handle: task.review,
+        commentIds: feedback.comments.map(({ id }) => id),
+      };
+      return;
+    }
+
+    const rows = this.store.db
+      .prepare(
+        `SELECT e.data AS publication, o.result AS handle
+         FROM events e JOIN operations o ON o.task_id=e.task_id AND o.status='done'
+           AND json_extract(o.result,'$.id')=json_extract(e.data,'$.reviewId')
+         WHERE e.task_id=? AND e.type='review.published'
+           AND json_extract(e.data,'$.snapshot.revision.head')=?
+         ORDER BY e.id DESC`,
+      )
+      .all(task.id, feedback.revision.head);
+    const ids = new Set(feedback.comments.map(({ id }) => id));
+    for (const row of rows) {
+      if (typeof row.handle !== 'string' || typeof row.publication !== 'string') continue;
+      const review = JSON.parse(row.handle) as ReviewHandle;
+      const { snapshot } = JSON.parse(row.publication) as { snapshot: ReviewSnapshot };
+      if (
+        !review.marker ||
+        !sameRevision(snapshot.revision, feedback.revision) ||
+        review.revision?.head !== feedback.revision.head
+      )
+        continue;
+      const commentIds = snapshot.comments.map(({ id }) => id).filter((id) => ids.has(id));
+      if (!commentIds.length) continue;
+      task.savedFixReview = { handle: { ...review, revision: snapshot.revision }, commentIds };
+      return;
+    }
+  }
+
   private async prepareMergeVerificationFeedback(task: Task, pr: PullRequest): Promise<boolean> {
     if (task.pendingAuthorHead === pr.head) {
+      this.recoverSavedFixReview(task, pr.head);
       if (task.review?.revision.head === pr.head)
         this.trackRecoveredReview(task, task.review, task.snapshot);
       const stale = task.pendingAuthorFix?.staleDraft;
@@ -2685,13 +2740,23 @@ export class Engine {
     if (pr.state !== 'merged') return false;
     if (pr.mergeCommit) return true;
     // GitLab can omit the merge SHA, and Arcanum identifies the delivered diff instead.
+    const pinned = task.revision;
+    const firstObservation =
+      !!pinned &&
+      task.pendingAuthorHead === pr.head &&
+      pinned.head !== pr.head &&
+      sameRevision(pinned, task.pr) &&
+      sameRevision(pinned, task.pendingAuthorFix?.revision) &&
+      !savedFixBaseChange(pinned, pr) &&
+      (task.ref.provider !== 'arcadia' ||
+        (!!pinned.revisionId && pinned.revisionId !== pr.revisionId));
     return (
       (task.ref.provider === 'gitlab' || (task.ref.provider === 'arcadia' && !!pr.revisionId)) &&
       !!pr.base &&
       !!pr.start &&
       !!pr.branch &&
       !!pr.targetBranch &&
-      sameRevision(task.revision, pr) &&
+      (sameRevision(task.revision, pr) || firstObservation) &&
       samePullRequestBranches(task.pr, { ...pr, state: 'open' })
     );
   }
@@ -3350,8 +3415,7 @@ export class Engine {
     const interrupted =
       (!legacy || (job.status === 'cancelled' && typeof saved.revision === 'string')) &&
       this.fixRunInterrupted(job, Number(saved.id));
-    const failedAfterSave =
-      !legacy && job.status === 'failed' && job.generation === task.generation;
+    const failedAfterSave = !legacy && job.status === 'failed' && job.generation <= task.generation;
     const generation = failedAfterSave ? job.generation : job.generation + 1;
     if (!interrupted && generation > task.generation) return;
     const transition = this.store.db
@@ -3652,6 +3716,28 @@ export class Engine {
       this.store.enqueue(task, 'author', 'chat', next.text, next.id);
     });
   }
+  async recordSavedFix(job: Job, savedFix: { head: string; revision: Revision }) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const recorded = this.store.db
+          .prepare(
+            "SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved' AND json_extract(data,'$.head')=? LIMIT 1",
+          )
+          .get(job.taskId, job.id, savedFix.head);
+        if (!recorded) this.store.event(job.taskId, 'author.fixes_saved', savedFix, job.id);
+        return;
+      } catch (error) {
+        const busy =
+          error instanceof Error &&
+          'errcode' in error &&
+          typeof error.errcode === 'number' &&
+          (error.errcode & 255) === 5;
+        if (!busy || attempt === 4) throw error;
+        await delaySavedFixReceipt(25 * 2 ** attempt);
+      }
+    }
+  }
+
   async completeJob(
     job: Job,
     result: AgentResult,
@@ -3659,7 +3745,7 @@ export class Engine {
     saveFix?: (task: Task) => Promise<string>,
   ) {
     // Journal the local result before waiting on a task operation that may be reading the PR.
-    if (savedFix) this.store.event(job.taskId, 'author.fixes_saved', savedFix, job.id);
+    if (savedFix) await this.recordSavedFix(job, savedFix);
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state === 'paused') {
@@ -3774,6 +3860,19 @@ export class Engine {
             task,
             'needs_input',
             'Reviewer has not verified all previously published findings',
+          );
+        } else if (
+          task.pendingAuthorHead === pr.head &&
+          task.feedback?.status === 'published' &&
+          task.feedback.revision.head !== pr.head &&
+          task.feedback.comments.length &&
+          !task.savedFixReview &&
+          this.savedFixEvent(task, pr.head)
+        ) {
+          this.state(
+            task,
+            'needs_input',
+            'The source review of the carried findings could not be recovered. Inspect the published review before verifying the merge.',
           );
         } else if (!this.mergeFindingsWerePresented(task, job)) {
           this.state(

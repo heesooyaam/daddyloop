@@ -337,3 +337,55 @@ it('recovers a lost create for the saved fix before starting a new draft on the 
     f.store.close();
   }
 });
+
+it.each(['accepted', 'not accepted', 'owner changed', 'target changed'] as const)(
+  'reconciles a queued pre-upgrade draft creation (%s)',
+  async (scenario) => {
+    const f = await reviewFixture();
+    try {
+      if (scenario !== 'not accepted') f.accept();
+      const original = f.engine();
+      await original.review(f.task.id);
+      const pending = f.store.getTask(f.task.id);
+      expect(pending.draftStart?.owner).toBe('12');
+      f.store.db
+        .prepare(
+          "UPDATE events SET data=json_remove(data,'$.targetBranch','$.revision') WHERE task_id=? AND type='operation.started'",
+        )
+        .run(pending.id);
+      f.due();
+      if (scenario === 'owner changed') {
+        const changed = f.store.getTask(pending.id);
+        changed.draftStart!.owner = '34';
+        f.store.saveTask(changed);
+      }
+      if (scenario === 'target changed') f.remote.targetBranch = 'release';
+      const restored = f.engine();
+      if (scenario === 'owner changed') {
+        await expect(restored.review(pending.id)).rejects.toMatchObject({
+          code: 'draft_owner_changed',
+        });
+        expect(f.store.activeJobs(pending.id)).toHaveLength(0);
+        expect(f.posts).toHaveLength(1);
+        expect(f.reviews[0].state).toBe('PENDING');
+        return;
+      }
+      const result = await restored.review(pending.id);
+      if (scenario === 'target changed') {
+        expect(result.state).toBe('needs_input');
+        expect(f.store.activeJobs(pending.id)).toHaveLength(0);
+        expect(f.posts).toHaveLength(1);
+        expect(f.reviews[0].state).toBe('PENDING');
+      } else {
+        expect(result).toMatchObject({
+          state: 'reviewing',
+          review: { marker: pending.draftStart!.marker },
+        });
+        expect(f.store.activeJobs(pending.id)).toHaveLength(1);
+        expect(f.posts).toHaveLength(scenario === 'accepted' ? 1 : 2);
+      }
+    } finally {
+      f.store.close();
+    }
+  },
+);

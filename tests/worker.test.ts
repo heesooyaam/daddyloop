@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { GitHubQuotaError } from '../src/providers/github-quota.js';
 import { it, expect, vi } from 'vitest';
 import { fixture } from './helpers.js';
@@ -3049,3 +3050,72 @@ it.each(['published', 'draft', 'result after restart'] as const)(
     }
   },
 );
+
+it('journals the returned fix SHA when the first SQLite write is busy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daddy-first-fix-receipt-'));
+  const path = join(dir, 'state.sqlite');
+  const f = await fixture({}, path);
+  let store = f.store;
+  const other = new DatabaseSync(path);
+  const saved = 'f'.repeat(40);
+  const workspaces = new Workspaces(dir);
+  vi.spyOn(workspaces, 'prepare').mockResolvedValue(dir);
+  const runtime = { run: vi.fn(async () => f.result()) };
+  const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+  let locked = false;
+  let release: ReturnType<typeof setTimeout> | undefined;
+  try {
+    store.db.exec('PRAGMA busy_timeout=0');
+    await queueFix(f);
+    const task = store.getTask(f.task.id);
+    store.saveTask({ ...task, ref: { ...prRef(task), provider: 'github' } });
+    vi.spyOn(workspaces, 'commitFix').mockImplementation(async () => {
+      other.exec('BEGIN IMMEDIATE');
+      locked = true;
+      return saved;
+    });
+    const record = store.event.bind(store);
+    let failedWrites = 0;
+    vi.spyOn(store, 'event').mockImplementation((...args) => {
+      if (args[1] !== 'author.fixes_saved') return record(...args);
+      try {
+        return record(...args);
+      } catch (error) {
+        failedWrites++;
+        release ??= setTimeout(() => {
+          other.exec('ROLLBACK');
+          locked = false;
+        }, 10);
+        throw error;
+      }
+    });
+    await worker.tick();
+    await vi.waitFor(() =>
+      expect(store.getTask(task.id)).toMatchObject({
+        state: 'awaiting_push',
+        pendingAuthorHead: saved,
+      }),
+    );
+    expect(failedWrites).toBeGreaterThan(0);
+    expect(store.events(task.id).filter(({ type }) => type === 'author.fixes_saved')).toHaveLength(
+      1,
+    );
+    await worker.stop();
+    store.close();
+    store = new Store(path);
+    const restarted = new Engine(store, () => new DemoProvider(store));
+    await expect(restarted.review(task.id, true)).rejects.toMatchObject({
+      code: 'fix_pending',
+      message: expect.stringContaining(saved),
+    });
+    expect(store.getTask(task.id).revision).toEqual(task.revision);
+    expect(store.activeJobs(task.id)).toHaveLength(0);
+  } finally {
+    if (release) clearTimeout(release);
+    if (locked) other.exec('ROLLBACK');
+    await worker.stop();
+    other.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

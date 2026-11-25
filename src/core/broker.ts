@@ -216,9 +216,18 @@ export class Broker {
     const provider = this.provider(ref),
       revision = task.revision!,
       targetBranch = task.pr?.targetBranch;
+    const intentBranch = this.reviewIntent(task.id, marker).targetBranch;
+    const legacyQueuedStart =
+      ref.provider === 'github' &&
+      !!targetBranch &&
+      !intentBranch &&
+      !!task.draftStart?.owner &&
+      task.draftStart.marker === this.reviewMarker(task, task.generation, task.round) &&
+      sameRevision(task.draftStart.revision, revision);
     if (
       this.outbox.hasOperation(marker, revision) &&
-      this.reviewIntent(task.id, marker).targetBranch !== targetBranch
+      intentBranch !== targetBranch &&
+      !legacyQueuedStart
     )
       throw new AppError(
         'review_target_unverified',
@@ -259,6 +268,12 @@ export class Broker {
                   'draft_owner_changed',
                   'The GitHub account changed during draft recovery.',
                 );
+              if (legacyQueuedStart)
+                this.store.event(task.id, 'review.legacy_start_confirmed', {
+                  operationId: marker,
+                  revision,
+                  targetBranch,
+                });
               if (!intent.owner) {
                 intent.owner = owner;
                 task.draftStart!.owner = owner;
