@@ -359,6 +359,29 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const retryAt = Date.parse('2026-11-25T12:34:56Z');
     for (const locale of ['en', 'ru'] as const) {
       setLocale(f.store, locale);
+      const githubReviewRetries = [
+        {
+          state: 'queued',
+          draftStart: { marker: 'review', revision: prTask.revision!, retry: true, retryAt },
+          label: 'GitHub review draft · retry at 12:34:56 UTC',
+        },
+        {
+          state: 'awaiting_publication',
+          publicationRetry: { retryAt, delay: 15_000 },
+          label: 'GitHub review publication · retry at 12:34:56 UTC',
+        },
+      ] as const;
+      for (const { label, ...retry } of githubReviewRetries) {
+        f.store.saveTask({ ...prTask, ...retry });
+        f.store.saveJob({ ...authorJob, status: 'running', startedAt: started(5) });
+        await bot.handle(openTask());
+        expect(lastText()).toContain(translate(locale, 'Task discussion in progress'));
+        expect(await boardStatus()).toBe('Task discussion in progress');
+        f.store.saveJob({ ...authorJob, status: 'completed', startedAt: started(5) });
+        await bot.handle(message('/queue'));
+        expect(lastText()).toContain(translate(locale, label));
+        expect(await boardStatus()).toBe(label);
+      }
       for (const ref of [undefined, prRef]) {
         f.store.saveTask({
           ...reviewing,

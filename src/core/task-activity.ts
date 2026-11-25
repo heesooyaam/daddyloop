@@ -77,6 +77,10 @@ export function queueDetail(task: Task): string | undefined {
 }
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
+  if (task.state === 'awaiting_publication' && task.publicationRetry)
+    return `GitHub review publication · retry at ${new Date(task.publicationRetry.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (task.state === 'queued' && task.draftStart?.retryAt)
+    return `GitHub review draft · retry at ${new Date(task.draftStart.retryAt).toISOString().slice(11, 19)} UTC`;
   if (mergeStatus) return mergeStatus;
   if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
     return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
@@ -104,6 +108,8 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {
+    if (job?.timeoutRetry && job.status === 'queued' && job.notBefore)
+      return `Continuing conflict resolution after a timeout at ${new Date(job.notBefore).toISOString().slice(11, 19)} UTC`;
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
       ? `Conflict repair queued for worker ${assignedWorker}`

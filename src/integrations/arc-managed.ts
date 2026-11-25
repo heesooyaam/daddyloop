@@ -17,7 +17,7 @@ import { defaultDataDir, loadConfig, privateWrite } from '../ops/config.js';
 import { resources } from '../core/resources.js';
 import { AppError, type Role } from '../core/types.js';
 import { acquireFileLock } from '../ops/data-lock.js';
-import { leaseHelper } from './arc-lease.js';
+import { leaseHelper, runLeaseHelper } from './arc-lease.js';
 import type { ArcLease } from './arcadia.js';
 
 const identity = z.string().regex(/^[a-f0-9]{32}$|^[a-f0-9-]{36}$/);
@@ -143,7 +143,7 @@ export class ManagedArcMounts {
     return this.lock(fn);
   }
   private helperCommand(args: string[], options: Parameters<typeof command>[2] = {}) {
-    return this.run('bash', [this.helper(), ...args], options);
+    return runLeaseHelper(this.helper(), args, options, this.run);
   }
   directory(sessionId: string, taskId: string, role: Role) {
     identity.parse(sessionId);

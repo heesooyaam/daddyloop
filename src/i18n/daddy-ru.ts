@@ -635,8 +635,24 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing conflict resolution after a timeout at {time} UTC':
+    'Продолжит исправлять конфликт после таймаута в {time} UTC',
+  'Continuing conflict resolution in the saved worker copy after a timeout':
+    'Воркер продолжает исправлять конфликт в сохранённой копии после таймаута',
+  'The PR head or target history changed. The partial merge is preserved in the worker copy.':
+    'Изменился коммит PR или история целевой ветки. Незавершённое слияние сохранено в копии воркера.',
   'Continuing the fix with the answer from the session':
     'Воркер продолжает исправление с ответом из сессии',
+  'Waiting to retry GitHub review publication':
+    'Ждёт автоматического повтора публикации ревью GitHub',
+  'GitHub review publication · retry at {time} UTC':
+    'Публикация ревью GitHub · повтор в {time} UTC',
+  'Preparing the GitHub review draft': 'Готовит черновик ревью GitHub',
+  'Waiting to retry the GitHub review draft':
+    'Ждёт автоматического повтора создания черновика GitHub',
+  'GitHub review draft · retry at {time} UTC': 'Черновик ревью GitHub · повтор в {time} UTC',
+  'A different pending GitHub review belongs to this account. Its contents have been preserved.':
+    'У этой учётной записи есть другой черновик ревью. Его содержимое сохранено.',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',
