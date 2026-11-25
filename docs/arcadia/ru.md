@@ -25,7 +25,15 @@ daddy init --yes --no-service --modules codex,github,arcadia
 npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
 ```
 
-Перед установкой SkillStore найди существующий helper. Проверь сохранённый `arcadia.leaseHelper`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
+После включения модуля сначала проверь выбор helper в том же окружении, в котором работает служба:
+
+```bash
+daddy arcadia mounts
+```
+
+Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, выполни `daddy arcadia setup --workspace ~/arcadia2` в том же окружении: `setup` сохранит найденный путь.
+
+Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
 
 ```bash
 source="$HOME/arcadia2"
@@ -37,7 +45,7 @@ arc mount -l --json
 
 Успешный `status` подтверждает работу helper. Если найденный helper завершился с ошибкой, сохрани его диагностику, исправь указанную причину — например, путь из `ARCADIA_MOUNT_CONFIG` — и повтори ту же команду. Не устанавливай вторую копию навыка для исправления конфигурации уже найденного helper.
 
-В выводе Arc отдельно найди запись с `mount` равным `$HOME/arcadia2` и `status` равным `mounted`. Источник не обязан входить в список аренды helper. Если обе проверки прошли, подключи существующий helper напрямую:
+Источник не обязан входить в список аренды helper. Если helper найден вручную и исходная Arcadia смонтирована, подключи его напрямую:
 
 ```bash
 source="$HOME/arcadia2"
@@ -45,7 +53,7 @@ helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mou
 daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
 ```
 
-Только если helper не найден ни одним из перечисленных способов, установи корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
+Только если helper не выбран службой и не найден ни одним из перечисленных способов, установи корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
 
 ```bash
 SKILLS_DIR="$HOME/.codex/skills"
