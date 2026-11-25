@@ -29,9 +29,18 @@ export interface ArcNativePR {
   to_branch: string;
 }
 export class ArcBridge {
-  constructor(readonly dataDir = defaultDataDir()) {}
+  constructor(
+    readonly dataDir = defaultDataDir(),
+    private readonly leaseHelperPath?: string,
+  ) {}
+  private selectedHelper() {
+    return this.leaseHelperPath ?? leaseHelper();
+  }
+  private managedMounts() {
+    return new ManagedArcMounts(this.dataDir, undefined, undefined, () => this.selectedHelper());
+  }
   private helper(args: string[], options: Parameters<typeof command>[2] = {}) {
-    return command('bash', [leaseHelper(), ...args], options);
+    return command('bash', [this.selectedHelper(), ...args], options);
   }
   async mounts() {
     const r = await this.helper(['--json', 'status']);
@@ -40,9 +49,10 @@ export class ArcBridge {
       throw new Error('The Arc lease helper returned an invalid mount inventory');
     return [
       ...new Map(
-        [...value.data.mounts, ...(await new ManagedArcMounts(this.dataDir).status())].map(
-          (mount) => [mount.path, mount],
-        ),
+        [...value.data.mounts, ...(await this.managedMounts().status())].map((mount) => [
+          mount.path,
+          mount,
+        ]),
       ).values(),
     ] as {
       path: string;
@@ -57,24 +67,19 @@ export class ArcBridge {
     }[];
   }
   async sourceMounts() {
-    const managed = new ManagedArcMounts(this.dataDir);
+    const managed = this.managedMounts();
     return (await managed.nativeMounts()).filter(
       (mount) => !mount.mount.startsWith(managed.root + '/'),
     );
   }
   async sessionMount(task: Pick<Task, 'id' | 'groupId'>, role: Role, signal?: AbortSignal) {
-    return new ManagedArcMounts(this.dataDir).ensure(
-      task.groupId ?? task.id,
-      task.id,
-      role,
-      signal,
-    );
+    return this.managedMounts().ensure(task.groupId ?? task.id, task.id, role, signal);
   }
   saveSessionCheckpoint(lease: ArcLease, value: ArcCheckpoint) {
-    new ManagedArcMounts(this.dataDir).checkpoint(lease, value);
+    this.managedMounts().checkpoint(lease, value);
   }
   async parkSessionMount(lease: ArcLease) {
-    return new ManagedArcMounts(this.dataDir).park(lease);
+    return this.managedMounts().park(lease);
   }
   async provision(exclude?: string): Promise<boolean> {
     const candidate = (await this.mounts()).find(
@@ -111,7 +116,7 @@ export class ArcBridge {
     return { mount: value.data.mount, ownerId, objectStore: value.data.object_store };
   }
   async release(lease: ArcLease) {
-    if (lease.managed) return new ManagedArcMounts(this.dataDir).releaseLease(lease);
+    if (lease.managed) return this.managedMounts().releaseLease(lease);
     await this.helper(['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
   }
   async native(args: string[], mount: string, signal?: AbortSignal) {
@@ -124,7 +129,7 @@ export class ArcBridge {
       )
     ) {
       const id = randomUUID();
-      const managed = new ManagedArcMounts(this.dataDir);
+      const managed = this.managedMounts();
       const { lease } = await managed.ensure(id, id, 'reviewer');
       const initial = await this.native(['info', '--json'], lease.mount);
       if (await this.native(['status', '--short', '-u', 'all'], lease.mount))

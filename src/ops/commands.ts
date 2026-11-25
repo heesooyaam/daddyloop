@@ -514,11 +514,10 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
-      if (options.leaseHelper) config.arcadia.leaseHelper = resolve(options.leaseHelper);
-      saveConfig(config);
-      const identity = await new ArcBridge().doctor(options.workspace);
+      const selectedHelper = options.leaseHelper ? resolve(options.leaseHelper) : leaseHelper();
+      const identity = await new ArcBridge(dir(), selectedHelper).doctor(options.workspace);
       config.arcadia.enabled = true;
-      config.arcadia.leaseHelper = leaseHelper();
+      config.arcadia.leaseHelper = selectedHelper;
       saveConfig(config);
       output({
         connected: true,
