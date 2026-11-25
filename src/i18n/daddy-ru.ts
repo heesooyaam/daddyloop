@@ -367,6 +367,8 @@ export const daddyRu: Record<string, string> = {
   'Your sessions': 'Твои сессии',
   'YOUR SESSIONS': 'ТВОИ СЕССИИ',
   Sessions: 'Сессии',
+  'Show sessions panel': 'Развернуть панель сессий',
+  'Hide sessions panel': 'Свернуть панель сессий',
   done: 'готово',
   'Your next workspace starts with a conversation.': 'Следующий воркспейс начинается с разговора.',
   Workspaces: 'Воркспейсы',
@@ -392,6 +394,8 @@ export const daddyRu: Record<string, string> = {
     'Enter — отправить · Shift+Enter — новая строка · Можно закрыть страницу: работа продолжится',
   'Your team': 'Твоя команда',
   'Worker pool': 'Пул воркеров',
+  'Show workers and tasks panel': 'Развернуть панель воркеров и задач',
+  'Hide workers and tasks panel': 'Свернуть панель воркеров и задач',
   'Maximum workers': 'Максимум воркеров',
   'daddy decides what can run in parallel.': 'daddy сам решает, что можно выполнять параллельно.',
   'Prerequisites: {count}': 'Зависимостей: {count}',
@@ -487,6 +491,19 @@ export const daddyRu: Record<string, string> = {
   'Handling your request': 'Разбирает запрос',
   'Checking server resources': 'Проверяет ресурсы сервера',
   'Waiting for assignment': 'Ждёт назначения',
+  'Continuing the interrupted fix against confirmed published feedback.':
+    'Воркер продолжает прерванное исправление по подтверждённым замечаниям.',
+  'Open task': 'Открыть задачу',
+  'Apply now and restart the active daddy turn or review':
+    'Применить сейчас и перезапустить текущий ход daddy или ревью',
+  'Apply this profile to all worker slots': 'Применить этот профиль ко всем воркерам',
+  'Apply now · {effort}': 'Применить сейчас · {effort}',
+  'The session is busy. Choose Apply now to switch the active daddy turn or review.':
+    'Сессия занята. Выбери «Применить сейчас», чтобы переключить текущий ход daddy или ревью.',
+  'Session owner': 'Владелец сессии',
+  'Your reply is needed': 'Нужен твой ответ',
+  'The target branch advanced. Continuing the published feedback on the same PR commit.':
+    'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
   'The target branch advanced. Reviewing the updated change.':
     'Целевая ветка обновилась. daddy заново проверяет изменения.',
   'Rechecking the existing draft on the updated target branch':
@@ -592,6 +609,11 @@ export const daddyRu: Record<string, string> = {
   'Review reached the run time limit': 'Ревью остановилось по таймауту',
   'Continuing the independent review on the verified PR head':
     'Независимое ревью продолжается на проверенном коммите PR',
+  'Publishing recorded findings from an incomplete review':
+    'Публикует готовые замечания незавершённого ревью',
+  'Checking the GitHub draft': 'Сверяет черновик с GitHub',
+  'Waiting to confirm the GitHub draft or its target branch before restarting review.':
+    'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
   'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
     'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',

@@ -33,6 +33,9 @@ export class Outbox {
       .prepare('SELECT 1 FROM operations WHERE id=? AND request=?')
       .get(id, request);
   }
+  isActive(id: string) {
+    return this.active.has(id);
+  }
   async perform<T>(
     taskId: string,
     id: string,

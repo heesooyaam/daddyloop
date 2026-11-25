@@ -53,6 +53,37 @@ it('keeps unpublished native review and reviewer chat out of the coordination co
       ),
     ).rejects.toThrow('published');
     expect(f.store.jobs(task.id).some((job) => job.role === 'author')).toBe(false);
+    const stopped = f.store.getTask(task.id);
+    const review = f.store.jobs(task.id).at(-1)!;
+    const question = 'Where is the API decision recorded?';
+    f.store.event(
+      task.id,
+      'runtime.item',
+      {
+        type: 'agentMessage',
+        phase: 'final_answer',
+        text: JSON.stringify({
+          status: 'incomplete',
+          question,
+          summary: 'PRIVATE-REVIEWER-CHAT',
+          checkedHead: stopped.revision!.head,
+        }),
+      },
+      review.id,
+    );
+    f.store.saveJob({ ...review, status: 'completed' });
+    f.store.saveTask({
+      ...stopped,
+      state: 'needs_input',
+      resumeState: 'reviewing',
+      reason: question,
+    });
+    const blocked = await current.onTool('read_task', { taskId: task.id }, 'blocker');
+    expect(blocked).toMatchObject({ task: { blocker: { question } } });
+    expect(JSON.stringify(blocked)).not.toContain('PRIVATE-REVIEWER-CHAT');
+    await expect(
+      current.onTool('retry_review', { taskId: task.id }, 'retry-unchanged'),
+    ).rejects.toMatchObject({ code: 'review_clarification_required' });
   } finally {
     done?.();
     await f.close();

@@ -42,7 +42,7 @@ export const daddySchemas = {
   pause_task: z.object({ taskId: id, reason: text }).strict(),
   resume_task: z.object({ taskId: id }).strict(),
   submit_task: z.object({ taskId: id }).strict(),
-  retry_review: z.object({ taskId: id }).strict(),
+  retry_review: z.object({ taskId: id, clarification: text.optional() }).strict(),
   set_worker_model: z.object({ taskId: id, profile: profileSchema }).strict(),
 };
 const descriptions: Record<keyof typeof daddySchemas, string> = {

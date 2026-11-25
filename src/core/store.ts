@@ -25,9 +25,9 @@ function readTask(data: string): Task {
 }
 
 // A replacement run keeps the queue position of the original, including across restarts.
-const jobOrder = `ORDER BY coalesce(
-  (SELECT rowid FROM jobs AS first_attempt WHERE id=json_extract(jobs.data,'$.firstAttemptId')),
-  jobs.rowid
+const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
+  (SELECT rowid FROM ${table} AS first_attempt WHERE id=json_extract(${table}.data,'$.firstAttemptId')),
+  ${table}.rowid
 )`;
 
 export class Store {
@@ -140,6 +140,13 @@ export class Store {
       ]),
     );
   }
+  pendingReviewWrites(taskId: string, marker: string) {
+    return this.db
+      .prepare(
+        "SELECT id,request FROM operations WHERE task_id=? AND status='pending' AND id GLOB ?",
+      )
+      .all(taskId, marker + ':*');
+  }
   saveTask(task: Task) {
     task.updatedAt = now();
     this.db
@@ -223,8 +230,8 @@ export class Store {
   activeJobs(taskId?: string): Job[] {
     const active = "SELECT data FROM jobs WHERE status IN ('queued','running')";
     const rows = taskId
-      ? this.db.prepare(`${active} AND task_id=? ${jobOrder}`).all(taskId)
-      : this.db.prepare(`${active} ${jobOrder}`).all();
+      ? this.db.prepare(`${active} AND task_id=? ${jobOrder('jobs')}`).all(taskId)
+      : this.db.prepare(`${active} ${jobOrder('jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
   claim(
@@ -234,7 +241,7 @@ export class Store {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
-          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder}`,
+          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder('jobs')}`,
         )
         .all();
       for (const row of rows) {
@@ -298,8 +305,10 @@ export class Store {
   }
   daddyJobs(groupId?: string): DaddyJob[] {
     const rows = groupId
-      ? this.db.prepare('SELECT data FROM daddy_jobs WHERE group_id=? ORDER BY rowid').all(groupId)
-      : this.db.prepare('SELECT data FROM daddy_jobs ORDER BY rowid').all();
+      ? this.db
+          .prepare(`SELECT data FROM daddy_jobs WHERE group_id=? ${jobOrder('daddy_jobs')}`)
+          .all(groupId)
+      : this.db.prepare(`SELECT data FROM daddy_jobs ${jobOrder('daddy_jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
   activeDaddyJobs(): DaddyJob[] {
@@ -326,7 +335,7 @@ export class Store {
     text: string,
     runId?: string,
     workspace?: Message['workspace'],
-    metadata?: Pick<Message, 'origin' | 'phase'>,
+    metadata?: Pick<Message, 'origin' | 'phase' | 'needsReply'>,
   ) {
     const message: Message = {
       id: randomUUID(),
@@ -351,7 +360,7 @@ export class Store {
       .get(id, taskId);
     return row ? JSON.parse(String(row.data)) : undefined;
   }
-  finishDaddyReply(groupId: string, text: string, runId: string) {
+  finishDaddyReply(groupId: string, text: string, runId: string, needsReply = false) {
     const row = this.db
       .prepare(
         "SELECT data FROM messages WHERE task_id=? AND json_extract(data,'$.runId')=? AND json_extract(data,'$.sender')='agent' ORDER BY rowid DESC LIMIT 1",
@@ -360,13 +369,17 @@ export class Store {
     const previous: Message | undefined = row ? JSON.parse(String(row.data)) : undefined;
     if (previous?.text.trim() === text.trim()) {
       previous.phase = 'final';
+      if (needsReply) previous.needsReply = true;
       this.db
         .prepare('UPDATE messages SET data=? WHERE id=?')
         .run(JSON.stringify(previous), previous.id);
       this.event(groupId, 'daddy.message', { messageId: previous.id, sender: 'agent' }, runId);
       return previous;
     }
-    return this.daddyMessage(groupId, 'agent', text, runId, undefined, { phase: 'final' });
+    return this.daddyMessage(groupId, 'agent', text, runId, undefined, {
+      phase: 'final',
+      ...(needsReply ? { needsReply: true } : {}),
+    });
   }
   getGroup(id: string): ReviewGroup {
     const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);

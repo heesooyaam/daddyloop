@@ -280,6 +280,38 @@ it('keeps a saved fix when reconcile overlaps the author commit', async () => {
   }
 });
 
+it('records structured agent events containing quoted command text without interrupting review', async () => {
+  const f = await fixture();
+  const demo = new DemoRuntime();
+  const run = demo.run.bind(demo);
+  vi.spyOn(demo, 'run').mockImplementation(async (input) => {
+    input.onEvent('runtime.item', {
+      type: 'commandExecution',
+      command: 'inspect authorization: "test-fixture" then continue',
+      output: [{ private: { api_key: 'opaque test value' }, exitCode: 0 }, 'quoted "output"'],
+    });
+    return run(input);
+  });
+  const worker = new Worker(f.engine, new Workspaces('/tmp'), demo, demo, healthy, 0);
+  try {
+    await worker.tick();
+    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication'));
+    const item = f.store
+      .events(f.task.id)
+      .find(
+        (e) => e.type === 'runtime.item' && JSON.stringify(e.data).includes('commandExecution'),
+      );
+    expect(item?.data).toEqual({
+      type: 'commandExecution',
+      command: 'inspect authorization: "[REDACTED]" then continue',
+      output: [{ private: { api_key: '[REDACTED]' }, exitCode: 0 }, 'quoted "output"'],
+    });
+  } finally {
+    await worker.stop();
+    f.store.close();
+  }
+});
+
 it.each([
   'service.interrupted',
   'resource.pause',
@@ -398,6 +430,41 @@ it.each([
   }
 });
 
+it('recovers an outstanding pre-upgrade human question only when it still explains the task state', async () => {
+  const f = await fixture();
+  try {
+    await f.engine.review(f.task.id);
+    const job = f.store.claim()!;
+    const result = {
+      ...f.result(),
+      status: 'needs_input',
+      question: 'Which variant?',
+      summary: 'A choice is missing.',
+    };
+    f.store.event(
+      f.task.id,
+      'runtime.item',
+      { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify(result) },
+      job.id,
+    );
+    await f.engine.completeJob(job, { ...result, status: 'needs_input' });
+    f.store.saveJob({ ...job, status: 'completed' });
+    const task = f.store.getTask(job.taskId);
+    delete task.inputRequest;
+    f.store.saveTask({ ...task, reason: 'Another reason' });
+    f.engine.recoverInterruptedJobs();
+    expect(f.store.getTask(task.id).inputRequest).toBeUndefined();
+    f.store.saveTask(task);
+    f.engine.recoverInterruptedJobs();
+    expect(f.store.getTask(task.id).inputRequest).toEqual({
+      runId: job.id,
+      role: job.role,
+      generation: job.generation,
+    });
+  } finally {
+    f.store.close();
+  }
+});
 it('persists each completed draft before publishing it and running the next stage', async () => {
   const f = await fixture();
   const worker = new Worker(

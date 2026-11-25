@@ -565,6 +565,37 @@ describe('GitHub draft review contract', () => {
     await provider.publish(ref, review);
     expect(calls[1].body).toEqual({ event: 'COMMENT' });
   });
+  it('uses the pending review comment node for edits and removals on GitHub Enterprise', async () => {
+    const review = { id: '33', nodeId: 'PRR_33', marker: 'service', revision };
+    const item = { id: '4686809856', nodeId: 'PRRC_opaque', body: 'Original', url: ref.url };
+    const recorded: string[] = [];
+    const http = transport((path, method, body) => {
+      expect([method, path]).toEqual(['POST', '/api/graphql']);
+      const input = (body.variables as { input: Record<string, string> }).input;
+      recorded.push(String(body.query));
+      if (input.body) {
+        expect(input.pullRequestReviewCommentId).toBe(item.nodeId);
+        return {
+          data: {
+            updatePullRequestReviewComment: {
+              pullRequestReviewComment: { id: item.nodeId, body: input.body, url: item.url },
+            },
+          },
+        };
+      }
+      expect(input.id).toBe(item.nodeId);
+      return {
+        data: { deletePullRequestReviewComment: { clientMutationId: input.clientMutationId } },
+      };
+    });
+    const provider = new GitHubProvider('ghe.example', 'fake', http);
+    expect(await provider.updateComment(ref, review, item.id, '**Rechecked**', item)).toMatchObject(
+      { id: item.id, body: '**Rechecked**' },
+    );
+    await provider.deleteComment(ref, review, item.id, item);
+    expect(recorded[0]).toContain('updatePullRequestReviewComment');
+    expect(recorded[1]).toContain('deletePullRequestReviewComment');
+  });
   it('creates inline comments inside the pending review without flattening Markdown', async () => {
     let input: Record<string, unknown> = {};
     const http = transport((_path, _method, body) => {

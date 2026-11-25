@@ -2,15 +2,117 @@
 
 # Arcadia и Tracker
 
-При установке выбери `arcadia`. На сервере уже должны быть установлены и авторизованы Arc, Arcanum и корпоративный helper для аренды копий.
+При установке выбери `arcadia`. На сервере должны быть установлены и авторизованы Arc, Arcanum CLI и корпоративный helper для аренды копий.
+
+Для существующей управляемой установки сначала приостанови работу и повтори установку с полным текущим списком модулей и `arcadia`. Например, для установки только с Codex и GitHub:
 
 ```bash
-daddy arcadia setup
-daddy workspaces add ~/arcadia --name Work --base trunk --copies session
+curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
+  | bash -s -- --yes --modules codex,github,arcadia
+```
+
+Если `daddy` запускается пользовательским скриптом из исходников, не заменяй этот скрипт установщиком. Сначала обнови исходники до проверенной версии, затем включи полный набор модулей без переустановки и перезапуска службы:
+
+```bash
+daddy init --yes --no-service --modules codex,github,arcadia
+```
+
+При первом подключении с выключенным модулем старых Arc-воркеров нет: установи зависимости, выполни `daddy arcadia setup`, затем отдельно согласуй `daddy restart`. Работающая служба прочитает новый набор модулей только после этого перезапуска.
+
+Если Arcadia уже включена и нужно сменить helper при обновлении из исходников, сначала приостанови Arc-сессии и исключи запуск новых работ. Дождись завершения операций старой версии, затем согласованно перезапусти службу на проверенной новой версии, сохранив прежний helper. Только после этого выполни `setup` с новым helper, проверь `daddy arcadia mounts` и сохранённые журналы, затем возобнови сессии. Не меняй helper, пока старая служба ещё может выделить копию.
+
+Поставь штатный Arcanum CLI из внутреннего npm-реестра. Одноимённый скрипт из навыка `arcanum` не заменяет этот бинарь:
+
+```bash
+npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
+```
+
+После включения модуля сначала проверь выбор helper в том же окружении, в котором работает служба:
+
+```bash
+daddy arcadia mounts
+```
+
+Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, запиши выбранное значение из настройки, переменной окружения или `PATH` в `helper`. Сначала проверь файл с таким именем в текущем каталоге. Только если его нет, ищи короткое имя через `command -v`:
+
+```bash
+: "${helper:?укажи найденный helper}" &&
+if [ -f "$helper" ]; then
+  helper="$(realpath "$helper")"
+else
+  helper="$(command -v "$helper")" &&
+    helper="$(realpath "$helper")"
+fi &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
+```
+
+Не запускай на этом шаге `setup` без явного пути: флаг сохраняет абсолютное имя. Заключительный `mounts` должен вернуть исходный список после смены каталога; при ошибке `setup` он не запускается.
+
+Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
+
+```bash
+source="$HOME/arcadia2"
+helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+test -f "$helper"
+bash "$helper" --json status
+arc mount -l --json
+```
+
+Успешный `status` подтверждает работу helper. Если найденный helper завершился с ошибкой, сохрани его диагностику, исправь указанную причину — например, путь из `ARCADIA_MOUNT_CONFIG` — и повтори ту же команду. Не устанавливай вторую копию навыка для исправления конфигурации уже найденного helper.
+
+Источник не обязан входить в список аренды helper. Если helper найден вручную и исходная Arcadia смонтирована, подключи его напрямую:
+
+```bash
+source="$HOME/arcadia2" &&
+  helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease" &&
+  helper="$(realpath "$helper")" &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
+```
+
+Только если helper не выбран службой и не найден ни одним из перечисленных способов, установи корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
+
+```bash
+SKILLS_DIR="$HOME/.codex/skills"
+bash ~/.skillstore/store-install.sh --download-only --target-dir "$SKILLS_DIR"
+bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "$SKILLS_DIR"
+```
+
+Если SkillStore уже установлен, пропусти `--download-only` и укажи в `SKILLS_DIR` тот каталог, который раньше передавал как `--target-dir`.
+
+Если helper работает, но у источника нет `status: mounted`, SkillStore это не исправит: сначала подключи исходную Arcadia, затем повтори `setup`.
+
+После установки навыка также сохрани его абсолютный путь. Не меняй выбранный `SKILLS_DIR`; если это новая оболочка, сначала восстанови то же значение, которое использовал при `--download-only`:
+
+```bash
+: "${SKILLS_DIR:?восстанови прежний SKILLS_DIR}" &&
+  helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")" &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
+```
+
+Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
+
+Для Arcanum daddyloop использует, по порядку, `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia` или штатный `~/.arc/token`. Настройка проверяет чтение Arcanum, но не копирует и не меняет учётные данные.
+
+```bash
+daddy workspaces add ~/arcadia2 --name Work --base trunk --copies session
 daddy new --workspace Work "TEAM-123"
 ```
 
-Work уже есть? Обнови дефолты: `daddy workspaces set Work ~/arcadia --copies session`. Существующие сессии сохранят свои настройки.
+`setup` проверяет helper, подключённый источник, Arc и запрос Arcanum только на чтение до включения интеграции. Отсутствующая зависимость останавливает настройку с конкретной ошибкой.
+
+Work уже есть? Обнови дефолты: `daddy workspaces set Work ~/arcadia2 --copies session`. Существующие сессии сохранят свои настройки.
+
+## Инструкции агентов
+
+Codex читает глобальный `~/.codex/AGENTS.md` и подходящие `AGENTS.md` от корня репозитория до стартовой подпапки. Если правила лежат ниже корня Arcadia, сохрани эту подпапку как `scope` воркспейса или сессии. Личные файлы с другой машины автоматически не переносятся.
+
+Навыки сессии выбираются отдельно для daddy и воркеров. Навык Arc для работы с VCS можно дать обеим ролям. `arcadia-mounts` нужен сервису как установленный helper; агентам не нужно арендовать ещё одну копию поверх уже выданной. Навыки не включают модуль репозитория и не устанавливают свои скрипты — см. [инструкции и навыки](../instructions/ru.md).
 
 ## Автоматические копии
 

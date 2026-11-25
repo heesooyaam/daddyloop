@@ -28,6 +28,7 @@ type GHReview = {
 };
 type GHComment = {
   id: number;
+  node_id?: string;
   body: string;
   html_url: string;
   path?: string;
@@ -39,6 +40,7 @@ type GHComment = {
 const path = (ref: PRRef) => `/repos/${ref.repo}/pulls/${ref.number}`;
 const comment = (c: GHComment): ReviewComment => ({
   id: String(c.id),
+  nodeId: c.node_id,
   body: c.body,
   url: c.html_url,
   author: c.user?.login,
@@ -328,6 +330,39 @@ export class GitHubProvider implements ReviewProvider {
       );
     await this.http.request('DELETE', url);
   }
+  private async mutation<T>(query: string, input: object): Promise<T> {
+    const base = this.http.baseUrl.replace(/\/api\/v3$/, '/api');
+    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher, this.http.quota);
+    const value = await http.request<{ data?: T; errors?: { message: string }[] }>(
+      'POST',
+      '/graphql',
+      { query, variables: { input } },
+    );
+    if (value.errors?.length || !value.data)
+      throw new AppError(
+        'github_graphql',
+        value.errors?.map((e) => e.message).join('; ') || 'GitHub returned no mutation result',
+        502,
+      );
+    return value.data;
+  }
+  private async draftComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    current?: ReviewComment,
+  ) {
+    if (current?.id === id && current.nodeId) return current;
+    const draft = await this.getReview(ref, review);
+    const item = draft.status === 'draft' && draft.comments.find((c) => c.id === id);
+    if (!item || !item.nodeId)
+      throw new AppError(
+        'draft_changed',
+        'The comment is no longer available in the pending GitHub review',
+        409,
+      );
+    return item;
+  }
   async createComment(
     ref: PRRef,
     review: ReviewHandle,
@@ -341,68 +376,70 @@ export class GitHubProvider implements ReviewProvider {
         'GitHub inline comments require a diff location. Put general observations in the review summary.',
         400,
       );
-    const query = `mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){thread{comments(first:1){nodes{databaseId body url path line originalLine}}}}}`;
-    const base = this.http.baseUrl.endsWith('/api/v3')
-      ? this.http.baseUrl.slice(0, -7) + '/api'
-      : this.http.baseUrl;
-    const http = new ProviderHttp(base, this.http.headers, this.http.fetcher, this.http.quota);
-    const value = await http.request<{
-      errors?: { message: string }[];
-      data: {
-        addPullRequestReviewThread: {
-          thread: {
-            comments: {
-              nodes: {
-                databaseId: number;
-                body: string;
-                url: string;
-                path: string;
-                line: number;
-              }[];
-            };
-          };
+    const query = `mutation($input:AddPullRequestReviewThreadInput!){addPullRequestReviewThread(input:$input){thread{comments(first:1){nodes{id databaseId body url}}}}}`;
+    const data = await this.mutation<{
+      addPullRequestReviewThread: {
+        thread: {
+          comments: { nodes: { id: string; databaseId: number; body: string; url: string }[] };
         };
       };
-    }>('POST', '/graphql', {
-      query,
-      variables: {
-        input: {
-          pullRequestReviewId: review.nodeId,
-          path: location.path,
-          line: location.line,
-          side: location.side,
-          body: `${body}\n\n${tag(marker)}`,
-          ...(location.startLine
-            ? { startLine: location.startLine, startSide: location.side }
-            : {}),
-        },
-      },
+    }>(query, {
+      pullRequestReviewId: review.nodeId,
+      path: location.path,
+      line: location.line,
+      side: location.side,
+      body: `${body}\n\n${tag(marker)}`,
+      ...(location.startLine ? { startLine: location.startLine, startSide: location.side } : {}),
     });
-    if (value.errors?.length)
-      throw new AppError('github_graphql', value.errors.map((e) => e.message).join('; '), 502);
-    const item = value.data.addPullRequestReviewThread.thread.comments.nodes[0];
+    const item = data.addPullRequestReviewThread.thread.comments.nodes[0];
     return {
       id: String(item.databaseId),
+      nodeId: item.id,
       body: item.body,
       url: item.url || ref.url,
       location,
       marker,
     };
   }
-  async updateComment(ref: PRRef, _review: ReviewHandle, id: string, body: string) {
-    return comment(
-      await this.http.request<GHComment>(
-        'PATCH',
-        `/repos/${ref.repo}/pulls/comments/${encodeURIComponent(id)}`,
-        { body },
-      ),
+  async updateComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    body: string,
+    current?: ReviewComment,
+  ) {
+    const item = await this.draftComment(ref, review, id, current);
+    const result = await this.mutation<{
+      updatePullRequestReviewComment: {
+        pullRequestReviewComment: { id: string; body: string; url: string };
+      };
+    }>(
+      'mutation($input:UpdatePullRequestReviewCommentInput!){updatePullRequestReviewComment(input:$input){pullRequestReviewComment{id body url}}}',
+      { pullRequestReviewCommentId: item.nodeId, body },
     );
+    const updated = result.updatePullRequestReviewComment?.pullRequestReviewComment;
+    if (updated?.id !== item.nodeId || updated?.body !== body)
+      throw new AppError(
+        'unconfirmed_comment_edit',
+        'GitHub did not confirm the requested draft comment text',
+        502,
+      );
+    return { ...item, body: updated.body, url: updated.url };
   }
-  async deleteComment(ref: PRRef, _review: ReviewHandle, id: string) {
-    await this.http.request(
-      'DELETE',
-      `/repos/${ref.repo}/pulls/comments/${encodeURIComponent(id)}`,
+  async deleteComment(ref: PRRef, review: ReviewHandle, id: string, current?: ReviewComment) {
+    const item = await this.draftComment(ref, review, id, current);
+    const result = await this.mutation<{
+      deletePullRequestReviewComment: { clientMutationId: string };
+    }>(
+      'mutation($input:DeletePullRequestReviewCommentInput!){deletePullRequestReviewComment(input:$input){clientMutationId}}',
+      { id: item.nodeId, clientMutationId: item.nodeId },
     );
+    if (result.deletePullRequestReviewComment?.clientMutationId !== item.nodeId)
+      throw new AppError(
+        'unconfirmed_comment_removal',
+        'GitHub did not confirm the draft comment removal',
+        502,
+      );
   }
   async updateSummary(ref: PRRef, review: ReviewHandle, body: string) {
     await this.http.request('PUT', `${path(ref)}/reviews/${review.id}`, {

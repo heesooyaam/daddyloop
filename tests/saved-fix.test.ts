@@ -349,3 +349,97 @@ it('retains a worker message through push confirmation and delivers it once on t
     f.store.close();
   }
 });
+
+it.each([false, true])(
+  'verifies the merged saved fix (observed before merge: %s)',
+  async (confirmed) => {
+    const f = await fixture();
+    try {
+      const task = f.store.getTask(f.task.id);
+      const original = task.revision!;
+      const pr = { ...task.pr!, head: savedHead, state: 'merged' as const, mergeCommit: 'merge' };
+      f.store.saveTask({
+        ...task,
+        state: 'needs_input',
+        pendingAuthorHead: savedHead,
+        pr: confirmed ? { ...pr, state: 'open' } : task.pr,
+        revision: confirmed ? { ...original, head: savedHead } : original,
+        pendingAuthorFix: { revision: original, generation: task.generation, sent: true },
+      });
+      f.store.setSetting('demo-pr:1', pr);
+      const queued = await f.engine.action(task.id, 'verify-merge');
+      expect(queued.state).toBe('reviewing');
+      const job = f.store.claim()!;
+      expect(job.kind).toBe('verify_merge');
+      await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'complete',
+        verifiedMerge: { head: savedHead },
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each(['awaiting_push', 'paused'] as const)(
+  'rejects merge verification without changing %s',
+  async (state) => {
+    const f = await fixture({ state, pendingAuthorHead: savedHead });
+    try {
+      const task = f.store.getTask(f.task.id);
+      f.store.saveTask({
+        ...task,
+        pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+      });
+      await expect(f.engine.action(task.id, 'verify-merge')).rejects.toMatchObject({
+        code: 'task_busy',
+      });
+      expect(f.store.getTask(task.id).state).toBe(state);
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'honors the saved deadline when GitHub cannot compare bases (saved head visible: %s)',
+  async (visible) => {
+    const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider: 'github' as const };
+      const observed = {
+        ...task.pr!,
+        head: visible ? savedHead : task.revision!.head,
+        base: 'e'.repeat(40),
+      };
+      f.store.saveTask({
+        ...task,
+        ref,
+        pendingAuthorFix: {
+          revision: task.revision!,
+          generation: task.generation,
+          pushStarted: true,
+          confirmUntil: Date.now() - 1,
+        },
+      });
+      f.store.setSetting('demo-pr:1', observed);
+      Object.assign(f.provider, {
+        targetAdvanced: async () => {
+          throw new Error('comparison unavailable');
+        },
+      });
+      const restarted = new Engine(f.store, () => f.provider);
+      const held = await restarted.reconcile(task.id);
+      expect(held.state).toBe('needs_input');
+      for (const value of [savedHead, observed.head, observed.base, 'comparison unavailable'])
+        expect(held.reason).toContain(value);
+      const send = vi.fn();
+      await restarted.submitSavedFix(task.id, send);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      f.store.close();
+    }
+  },
+);

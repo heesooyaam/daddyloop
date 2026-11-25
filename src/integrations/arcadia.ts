@@ -1,6 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { command } from '../ops/process.js';
 import { defaultDataDir, loadConfig } from '../ops/config.js';
@@ -30,17 +29,30 @@ export interface ArcNativePR {
   to_branch: string;
 }
 export class ArcBridge {
-  constructor(readonly dataDir = defaultDataDir()) {}
+  constructor(
+    readonly dataDir = defaultDataDir(),
+    private readonly leaseHelperPath?: string,
+  ) {}
+  private selectedHelper() {
+    return this.leaseHelperPath ?? leaseHelper();
+  }
+  private managedMounts() {
+    return new ManagedArcMounts(this.dataDir, undefined, undefined, () => this.selectedHelper());
+  }
+  private helper(args: string[], options: Parameters<typeof command>[2] = {}) {
+    return command('bash', [this.selectedHelper(), ...args], options);
+  }
   async mounts() {
-    const r = await command(leaseHelper(), ['--json', 'status']);
+    const r = await this.helper(['--json', 'status']);
     const value = JSON.parse(r.stdout);
     if (value.status !== 'success' || !Array.isArray(value.data?.mounts))
       throw new Error('The Arc lease helper returned an invalid mount inventory');
     return [
       ...new Map(
-        [...value.data.mounts, ...(await new ManagedArcMounts(this.dataDir).status())].map(
-          (mount) => [mount.path, mount],
-        ),
+        [...value.data.mounts, ...(await this.managedMounts().status())].map((mount) => [
+          mount.path,
+          mount,
+        ]),
       ).values(),
     ] as {
       path: string;
@@ -55,24 +67,28 @@ export class ArcBridge {
     }[];
   }
   async sourceMounts() {
-    const managed = new ManagedArcMounts(this.dataDir);
+    const managed = this.managedMounts();
     return (await managed.nativeMounts()).filter(
       (mount) => !mount.mount.startsWith(managed.root + '/'),
     );
   }
   async sessionMount(task: Pick<Task, 'id' | 'groupId'>, role: Role, signal?: AbortSignal) {
-    return new ManagedArcMounts(this.dataDir).ensure(
-      task.groupId ?? task.id,
-      task.id,
-      role,
-      signal,
-    );
+    return this.managedMounts().ensure(task.groupId ?? task.id, task.id, role, signal);
   }
   saveSessionCheckpoint(lease: ArcLease, value: ArcCheckpoint) {
-    new ManagedArcMounts(this.dataDir).checkpoint(lease, value);
+    this.managedMounts().checkpoint(lease, value);
   }
   async parkSessionMount(lease: ArcLease) {
-    return new ManagedArcMounts(this.dataDir).park(lease);
+    return this.managedMounts().park(lease);
+  }
+  async withValidatedJournals<T>(fn: () => Promise<T>) {
+    const managed = this.managedMounts();
+    managed.validateSessionRoot();
+    return managed.withJournalLock(async () => {
+      await managed.validateHelperConfig();
+      await this.mounts();
+      return fn();
+    });
   }
   async provision(exclude?: string): Promise<boolean> {
     const candidate = (await this.mounts()).find(
@@ -87,13 +103,13 @@ export class ArcBridge {
     if (!candidate) return false;
     const status = resources(homedir(), loadConfig().resources);
     if (!status.ok) throw new AppError('resource_limit', status.reasons.join('; '), 422);
-    await command(leaseHelper(), ['--json', 'mount', String(candidate.number)], {
+    await this.helper(['--json', 'mount', String(candidate.number)], {
       timeoutMs: 120000,
     });
     return true;
   }
   async claim(ownerId: string, mount?: string): Promise<ArcLease> {
-    const result = await command(leaseHelper(), [
+    const result = await this.helper([
       '--json',
       'claim',
       '--owner-id',
@@ -109,8 +125,8 @@ export class ArcBridge {
     return { mount: value.data.mount, ownerId, objectStore: value.data.object_store };
   }
   async release(lease: ArcLease) {
-    if (lease.managed) return new ManagedArcMounts(this.dataDir).releaseLease(lease);
-    await command(leaseHelper(), ['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
+    if (lease.managed) return this.managedMounts().releaseLease(lease);
+    await this.helper(['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
   }
   async native(args: string[], mount: string, signal?: AbortSignal) {
     return (await command('arc', args, { cwd: mount, timeoutMs: 120000, signal })).stdout.trimEnd();
@@ -122,7 +138,7 @@ export class ArcBridge {
       )
     ) {
       const id = randomUUID();
-      const managed = new ManagedArcMounts(this.dataDir);
+      const managed = this.managedMounts();
       const { lease } = await managed.ensure(id, id, 'reviewer');
       const initial = await this.native(['info', '--json'], lease.mount);
       if (await this.native(['status', '--short', '-u', 'all'], lease.mount))
@@ -166,21 +182,35 @@ export class ArcBridge {
   }
   async api<T>(args: string[], mutation = false): Promise<T> {
     const token = credential('arcadia', 'a.yandex-team.ru');
+    const arcanumCli = loadConfig().arcadia.arcanumCli;
     const ca =
       process.env.NODE_EXTRA_CA_CERTS ??
       ['/usr/local/share/ca-certificates/Yandex/RootCA.crt', '/etc/ssl/certs/yandex-ca.pem'].find(
         existsSync,
       );
-    const result = await command(loadConfig().arcadia.arcanumCli, ['--json', ...args], {
-      env: {
-        ARC_TOKEN: token,
-        DISABLE_AUTO_FETCH_TOKEN: 'true',
-        NODE_USE_SYSTEM_CA: '1',
-        ...(ca ? { NODE_EXTRA_CA_CERTS: ca } : {}),
-        ARCANUM_CLI_RETRY_MAX_ATTEMPTS: mutation ? '1' : '3',
-      },
-      timeoutMs: 90000,
-    });
+    let result: Awaited<ReturnType<typeof command>>;
+    try {
+      result = await command(arcanumCli, ['--json', ...args], {
+        env: {
+          ARC_TOKEN: token,
+          DISABLE_AUTO_FETCH_TOKEN: 'true',
+          NODE_USE_SYSTEM_CA: '1',
+          ...(ca ? { NODE_EXTRA_CA_CERTS: ca } : {}),
+          ARCANUM_CLI_RETRY_MAX_ATTEMPTS: mutation ? '1' : '3',
+        },
+        timeoutMs: 90000,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new AppError(
+          'arcanum_cli_missing',
+          arcanumCli === 'arcanum-cli'
+            ? 'Arcanum client "arcanum-cli" was not found. Locate it with "ya tool --print-path gena-arcanum-cli", then set arcadia.arcanumCli in config.json to that absolute path.'
+            : `Configured Arcanum client ${JSON.stringify(arcanumCli)} was not found. Update arcadia.arcanumCli in config.json to the current executable path.`,
+          422,
+        );
+      throw error;
+    }
     let data: unknown;
     try {
       data = JSON.parse(result.stdout);
@@ -209,28 +239,30 @@ export class ArcBridge {
     return String(value.id);
   }
   async doctor(workspace?: string) {
-    if (!existsSync(join(homedir(), '.tokens/arcadia')) && !process.env.ARC_TOKEN)
-      throw new Error('Configure ~/.tokens/arcadia or ARC_TOKEN');
+    const sources = await this.sourceMounts();
+    let sourcePath: string;
     if (workspace) {
       const selected = realpathSync(workspace);
-      const source = (await this.sourceMounts()).find(
+      const source = sources.find(
         (mount) =>
           mount.status === 'mounted' &&
           (selected === mount.mount || selected.startsWith(mount.mount + '/')),
       );
       if (!source) throw new Error('The selected Arcadia source is not mounted');
-      return this.withMount(async (mount) => ({
-        ...JSON.parse(await this.native(['info', '--json'], mount)),
-        source: source.mount,
-      }));
+      sourcePath = source.mount;
+    } else {
+      const source = sources.find((mount) => mount.status === 'mounted');
+      if (!source) throw new Error('Choose an existing mounted Arcadia source with --workspace');
+      sourcePath = source.mount;
     }
-    return this.withMount(
-      async (mount) =>
-        JSON.parse(await this.native(['info', '--json'], mount)) as {
-          user_login: string;
-          hash: string;
-          branch: string;
-        },
-    );
+    // Verify the review transport, helper and existing journals without creating a probe copy.
+    await this.api(['repo', 'list', '--fields', 'repos(id)']);
+    await this.mounts();
+    const identity = JSON.parse(await this.native(['info', '--json'], sourcePath)) as {
+      user_login: string;
+      hash: string;
+      branch: string;
+    };
+    return { ...identity, source: sourcePath };
   }
 }

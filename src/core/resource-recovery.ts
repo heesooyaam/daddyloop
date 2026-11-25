@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import type { Engine } from './engine.js';
 import type { SessionRuntime, RuntimeTool } from '../runtime/agent.js';
 import { AppError, now, type DaddyJob, type ResourceStatus } from './types.js';
-import { redact } from './security.js';
+import { redact, redactEvent } from './security.js';
 import { normalizeLocale, translate } from '../i18n/index.js';
 
 export interface ResourceRecoveryActions {
@@ -103,12 +103,7 @@ export class ResourceRecovery {
         }),
         onSession: () => {},
         onEvent: (type, data) =>
-          store.event(
-            job.groupId,
-            `daddy.maintenance.${type}`,
-            JSON.parse(redact(JSON.stringify(data ?? null))),
-            job.id,
-          ),
+          store.event(job.groupId, `daddy.maintenance.${type}`, redactEvent(data), job.id),
         onAssistantMessage: ({ id, text }) => {
           if (
             signal.aborted ||

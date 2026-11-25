@@ -11,7 +11,7 @@ import {
   isTicket,
   reviewTargetChange,
 } from '../core/types.js';
-import { redact } from '../core/security.js';
+import { redact, redactEvent } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
@@ -46,6 +46,10 @@ export class Worker {
   private lastCleanup = 0;
   private lastArcRelease = 0;
   private reservedGroups = new Set<string>();
+  updateAuthorGroupGeneration(groupId: string, generation: number) {
+    for (const job of this.runningJobs.values())
+      if (job.groupId === groupId && job.role === 'author') job.groupGeneration = generation;
+  }
   reserveGroup(id: string) {
     if (
       this.reservedGroups.has(id) ||
@@ -238,7 +242,7 @@ export class Worker {
             task.ref.provider === 'github'
           ) {
             try {
-              await this.engine.recoverIncompleteFix(task.id, (t) =>
+              await this.engine.recoverInterruptedFix(task.id, (t) =>
                 this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
               );
             } catch (error) {
@@ -343,6 +347,7 @@ export class Worker {
       for (const task of store.tasks())
         if (
           task.state === 'awaiting_publication' &&
+          !(task.partialReview?.retryAt && task.partialReview.retryAt > Date.now()) &&
           !store.busy(task.id) &&
           !githubWait(store, task.ref)
         ) {
@@ -353,6 +358,24 @@ export class Worker {
             if (error instanceof GitHubQuotaError) continue;
             const current = store.getTask(task.id);
             if (current.generation === task.generation && current.state !== 'paused') {
+              if (
+                current.partialReview &&
+                error instanceof AppError &&
+                [
+                  'draft_unconfirmed',
+                  'publication_unconfirmed',
+                  'provider_unreachable',
+                  'provider_500',
+                  'provider_502',
+                  'provider_503',
+                  'provider_504',
+                ].includes(error.code)
+              ) {
+                current.partialReview.retryAt = Date.now() + this.pollMs;
+                store.saveTask(current);
+                store.event(task.id, 'publication.deferred', { errorCode: error.code });
+                continue;
+              }
               current.state = 'needs_input';
               current.reason = redact(String(error));
               store.saveTask(current);
@@ -538,7 +561,10 @@ export class Worker {
       if (
         startingPR &&
         (startingPR.state !== (job.kind === 'verify_merge' ? 'merged' : 'open') ||
-          !sameRevision(startingPR, task.revision))
+          (!sameRevision(startingPR, task.revision) &&
+            !(
+              job.kind === 'fix' && (await this.engine.publishedFixBaseAdvanced(task, startingPR))
+            )))
       ) {
         if (
           job.kind === 'review' &&
@@ -709,6 +735,12 @@ export class Worker {
               store.saveGroup(shared);
             }
           }
+          if (
+            job.role === 'author' &&
+            current.agents?.worker &&
+            current.agents.worker.engine !== job.profile?.engine
+          )
+            return;
           if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);
@@ -722,13 +754,7 @@ export class Worker {
             job.id,
           );
         },
-        onEvent: (type, data) =>
-          store.event(
-            job.taskId,
-            type,
-            typeof data === 'string' ? redact(data) : JSON.parse(redact(JSON.stringify(data))),
-            job.id,
-          ),
+        onEvent: (type, data) => store.event(job.taskId, type, redactEvent(data), job.id),
         onTool: async (name, args, callId) => {
           try {
             return await this.engine.broker.call(job, name, args, callId);

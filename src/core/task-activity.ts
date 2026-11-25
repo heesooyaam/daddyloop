@@ -2,6 +2,12 @@ import type { AgentProfile, Job, State, Task, WorkerSlot } from './types.js';
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const draftSyncPending =
+  'Waiting to confirm the GitHub draft or its target branch before restarting review.';
+
+export const draftInspectionRequired =
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.';
+
 const statusLabels: Record<State, string> = {
   discussing: 'Waiting for assignment',
   implementing: 'Implementing the task',
@@ -61,6 +67,7 @@ export function taskActivity(
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
   if (task.state === 'needs_input') {
+    if (task.reason === draftSyncPending) return 'Checking the GitHub draft';
     if (task.reason.startsWith('PR changed while a draft existed'))
       return 'The PR changed during draft review';
     if (
