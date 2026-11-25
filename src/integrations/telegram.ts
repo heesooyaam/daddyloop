@@ -619,13 +619,14 @@ export class Telegram {
       this.workspace &&
       (message?.voice ||
         message?.document ||
+        this.workspace.isRegistrationInput(update) ||
         (message?.text &&
           (!message.text.trim().startsWith('/') ||
             /^\/(task|worker)(?:@\w+)?(?:\s|$)/.test(message.text.trim()))))
     ) {
       // Persist voice, documents, conversation input and task commands before acknowledging.
       const handled = await this.workspace.handle(update);
-      if (handled) this.queueAcceptedReaction(message);
+      if (handled && message) this.queueAcceptedReaction(message);
       store.db
         .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
         .run(update.update_id, now());

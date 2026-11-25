@@ -294,12 +294,31 @@ export function applyInstructionChanges(
     for (const id of order.after.filter((id) => orderMoves.has(id))) {
       const entry = byId.get(id);
       if (!entry) continue;
-      const following = new Set(order.after.slice(order.after.indexOf(id) + 1)),
-        followingIndexes = current.flatMap((preset, index) =>
-          following.has(preset.preset.id) ? [index] : [],
-        ),
-        followingIndex = followingIndexes.length ? Math.min(...followingIndexes) : -1;
-      current.splice(followingIndex < 0 ? current.length : followingIndex, 0, entry);
+      const at = order.after.indexOf(id),
+        preceding = order.after
+          .slice(0, at)
+          .reverse()
+          .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
+        following = order.after
+          .slice(at + 1)
+          .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
+        precedingIndex = preceding
+          ? current.findIndex((preset) => preset.preset.id === preceding)
+          : -1,
+        followingIndex = following
+          ? current.findIndex((preset) => preset.preset.id === following)
+          : -1,
+        insertion =
+          at === 0
+            ? 0
+            : at === order.after.length - 1
+              ? current.length
+              : followingIndex >= 0 && (precedingIndex < 0 || precedingIndex < followingIndex)
+                ? followingIndex
+                : precedingIndex >= 0
+                  ? precedingIndex + 1
+                  : current.length;
+      current.splice(insertion, 0, entry);
     }
     const candidate = current.map((entry) => entry.preset.id),
       shared = order.before.filter(

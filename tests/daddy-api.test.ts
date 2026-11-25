@@ -659,6 +659,41 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       ).toEqual([presetB.id, presetA.id, presetD.id, presetC.id]);
     }
 
+    for (const reverse of [false, true]) {
+      const insertion = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: {},
+            presets: [selected(presetA), selected(presetB), selected(presetC)],
+          },
+        }),
+        moveLastFirst = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetC.id, presetA.id, presetB.id],
+          },
+        ],
+        insertBetween = [
+          { target: 'preset', id: presetD.id, before: null, after: state(presetD) },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetA.id, presetD.id, presetB.id, presetC.id],
+          },
+        ];
+      for (const changes of reverse
+        ? [insertBetween, moveLastFirst]
+        : [moveLastFirst, insertBetween]) {
+        const saved = await patchInstructions(insertion.id, changes);
+        expect(saved.statusCode, saved.body).toBe(200);
+      }
+      expect(
+        f.daddy.group(insertion.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual([presetC.id, presetA.id, presetD.id, presetB.id]);
+    }
+
     for (const { base, firstOrder, secondOrder, addition } of [
       {
         base: [presetA, presetB, presetC],

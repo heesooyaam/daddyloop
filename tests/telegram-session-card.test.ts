@@ -108,7 +108,7 @@ it('updates the initial private-chat card after /new as well', async () => {
     });
   try {
     await workspace.handle({ update_id: 1, message: { ...message, text: '/new' } });
-    await click(`dad:new:${f.workspace.id}`, 2);
+    await click(sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data, 2);
     await click(sent.at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data, 3);
     const group = f.daddy.sessions()[0];
     const initial = sent.find(

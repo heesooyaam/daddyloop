@@ -67,15 +67,24 @@ export function botSettings(locale: Locale): TelegramCard {
   };
 }
 
-export function workspacePicker(locale: Locale, workspaces: Workspace[], page = 0): TelegramCard {
+export function workspacePicker(
+  locale: Locale,
+  workspaces: Workspace[],
+  page = 0,
+  draftId?: string,
+): TelegramCard {
   const t = translator(locale),
     pageSize = 10,
     pages = Math.max(1, Math.ceil(workspaces.length / pageSize));
   page = Math.max(0, Math.min(page, pages - 1));
   const visible = workspaces.slice(page * pageSize, (page + 1) * pageSize),
     navigation = [
-      ...(page > 0 ? [{ text: '←', callback_data: `dad:new-page:${page - 1}` }] : []),
-      ...(page + 1 < pages ? [{ text: '→', callback_data: `dad:new-page:${page + 1}` }] : []),
+      ...(page > 0
+        ? [{ text: '←', callback_data: `dad:new-page:${draftId ?? 'legacy'}:${page - 1}` }]
+        : []),
+      ...(page + 1 < pages
+        ? [{ text: '→', callback_data: `dad:new-page:${draftId ?? 'legacy'}:${page + 1}` }]
+        : []),
     ];
   return {
     ...new TelegramText()
@@ -83,10 +92,18 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[], page = 
       .add(pages > 1 ? '\n' + t('Page {page} of {pages}', { page: page + 1, pages }) : ''),
     buttons: [
       ...visible.map((workspace) => [
-        { text: workspace.name, callback_data: `dad:new:${workspace.id}` },
+        {
+          text: workspace.name,
+          callback_data: `dad:new:${draftId ?? 'legacy'}:${workspace.id}`,
+        },
       ]),
       ...(navigation.length ? [navigation] : []),
-      [{ text: '＋ ' + t('Add repository'), callback_data: 'dad:add-workspace:new' }],
+      [
+        {
+          text: '＋ ' + t('Add repository'),
+          callback_data: `dad:add-workspace:new:${draftId ?? 'legacy'}`,
+        },
+      ],
       [{ text: t('Find on server'), callback_data: 'dad:discover' }],
       [{ text: t('Back'), callback_data: 'dad:home' }],
     ],

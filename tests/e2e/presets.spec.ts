@@ -175,23 +175,33 @@ test('merges a stale preset addition without undoing the order saved in another 
   const first = page.getByRole('dialog', { name: 'Session settings' });
   await first.getByText('Style and skills for this session', { exact: true }).click();
   await first.getByRole('button', { name: 'Add presets', exact: true }).click();
-  await first
-    .getByRole('button', {
-      name: `Remove preset Concurrent B ${suffix} from this session`,
-      exact: true,
-    })
-    .click();
-  await first
-    .getByRole('checkbox', { name: `Use preset Concurrent B ${suffix}`, exact: true })
-    .check();
+  for (const name of ['A', 'B'])
+    await first
+      .getByRole('button', {
+        name: `Remove preset Concurrent ${name} ${suffix} from this session`,
+        exact: true,
+      })
+      .click();
+  for (const name of ['A', 'B'])
+    await first
+      .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
+      .check();
 
   await other.getByRole('button', { name: 'Session settings', exact: true }).click();
   const second = other.getByRole('dialog', { name: 'Session settings' });
   await second.getByText('Style and skills for this session', { exact: true }).click();
   await second.getByRole('button', { name: 'Add presets', exact: true }).click();
-  await second
-    .getByRole('checkbox', { name: `Use preset Concurrent D ${suffix}`, exact: true })
-    .check();
+  for (const name of ['B', 'C'])
+    await second
+      .getByRole('button', {
+        name: `Remove preset Concurrent ${name} ${suffix} from this session`,
+        exact: true,
+      })
+      .click();
+  for (const name of ['D', 'B', 'C'])
+    await second
+      .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
+      .check();
 
   await first.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(first).toHaveCount(0);
@@ -199,10 +209,10 @@ test('merges a stale preset addition without undoing the order saved in another 
   await expect(second).toHaveCount(0);
   const board = await (await page.request.get(`/api/daddy/sessions/${session.id}`)).json();
   expect(board.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
-    `Concurrent A ${suffix}`,
     `Concurrent C ${suffix}`,
-    `Concurrent B ${suffix}`,
+    `Concurrent A ${suffix}`,
     `Concurrent D ${suffix}`,
+    `Concurrent B ${suffix}`,
   ]);
 
   const conflictResponse = await page.request.post('/api/daddy/sessions', {

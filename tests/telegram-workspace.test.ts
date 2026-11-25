@@ -174,7 +174,9 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     });
     expect(f.store.setting('telegram.group')).toMatchObject({ chatId: -10042, ownerId: 7 });
     await bot.handle(message('/new'));
-    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    const workspaceChoice = sent.filter((item) => item.method === 'sendMessage').at(-1)!.body
+      .reply_markup.inline_keyboard[0][0].callback_data;
+    await bot.handle(click(workspaceChoice));
     const start = sent.filter((item) => item.method === 'sendMessage').at(-1)!.body.reply_markup
       .inline_keyboard[0][0].callback_data;
     await bot.handle(click(start));
@@ -182,7 +184,7 @@ it('binds a forum selected by the paired owner, creates one topic per session an
     await vi.waitFor(() =>
       expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1),
     );
-    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    await bot.handle(click(workspaceChoice));
     expect(f.daddy.sessions()).toHaveLength(1);
     await bot.handle(message('Not the owner', -10042, 99, 17));
     expect(f.store.messages(group.id)).toHaveLength(0);
@@ -420,7 +422,7 @@ it('keeps repository paths private for topic, general-group and new-session choi
     expect(f.store.setting('telegram.currentDaddy')).toBe(privateGroup.id);
 
     await bot.handle(message('/new', -10042));
-    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data));
     const newCard = sent.at(-1)!.card;
     expect(newCard.text).toContain(f.workspace.name);
     expect(newCard.text).not.toContain(f.workspace.repoPath);
@@ -784,11 +786,12 @@ it('expires, cancels and isolates private repository input for its original rout
 
     const sessionCount = f.daddy.sessions().length;
     await bot.handle(message('/new', -10042));
+    const newWorkspace = sent.at(-1)!.card.buttons[0][0].callback_data;
     await bot.handle({
       update_id: id++,
       callback_query: {
         id: String(id),
-        data: `dad:new:${f.workspace.id}`,
+        data: newWorkspace,
         from: { id: 7 },
         message: { chat: { id: -10042, type: 'supergroup' } },
       },
@@ -1067,7 +1070,7 @@ it('creates a session from a group topic and isolates its wizard from another to
     await workspace.handle(message('/new Separate feature', a!.threadId));
     await workspace.handle(message('Keep this in the original peer session', b!.threadId));
     expect(f.store.messages(peer.id)[0].text).toBe('Keep this in the original peer session');
-    await workspace.handle(click(`dad:new:${f.workspace.id}`, a!.threadId));
+    await workspace.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, a!.threadId));
     const use = sent.at(-1)!.card.buttons[0][0].callback_data;
     await workspace.handle(click(use, b!.threadId));
     expect(f.daddy.sessions()).toHaveLength(2);
@@ -1287,7 +1290,7 @@ it('recovers the expected private registration reply after its delivery record f
       const name = String(card?.text ?? card).includes('Workspace name'),
         continuation = card?.buttons
           ?.flat()
-          .some((button: any) => String(button.text).includes('Continue new session'));
+          .some((button: any) => String(button.callback_data).startsWith('dad-workspace-new:'));
       if ((failure === 'name' && name) || (failure === 'continue' && continuation)) {
         failure = undefined;
         throw Object.assign(new Error('fixture delivery insert failed'), {
@@ -1321,10 +1324,16 @@ it('recovers the expected private registration reply after its delivery record f
     },
   });
   try {
+    vi.spyOn(f.workspaces, 'register').mockImplementation(async (input) => ({
+      ...f.workspace,
+      name: input.name,
+      repoPath: input.path,
+    }));
     await bot.handle(message('/new Keep the recovered reply'));
-    await bot.handle(click('dad:add-workspace:new'));
-    await bot.handle(click('dad:workspace-module:new:github'));
-    const address = message('https://example.test/recovered/reply');
+    const draftId = f.store.setting<{ id: string }>('telegram.newSession:7:7:0')!.id;
+    await bot.handle(click(`dad:add-workspace:new:${draftId}`));
+    await bot.handle(click(`dad:workspace-module:new:${draftId}:github`));
+    const address = message(f.workspace.repoPath);
     failure = 'name';
     await expect(bot.handle(address)).rejects.toThrow('fixture delivery insert failed');
     await bot.stop();
@@ -1335,7 +1344,7 @@ it('recovers the expected private registration reply after its delivery record f
     );
     expect(sent.at(-1)!.options.key).toBe(`registration:${address.update_id}:0`);
 
-    const name = message('Recovered reply repository');
+    const name = message('/project/team');
     failure = 'continue';
     await expect(bot.handle(name)).rejects.toThrow('fixture delivery insert failed');
     await bot.stop();
@@ -1344,7 +1353,7 @@ it('recovers the expected private registration reply after its delivery record f
     const continuations = sent.filter((item) =>
       item.card?.buttons
         ?.flat()
-        .some((button: any) => String(button.text).includes('Continue new session')),
+        .some((button: any) => String(button.callback_data).startsWith('dad-workspace-new:')),
     );
     expect(continuations).toHaveLength(1);
     expect(continuations[0]!.options.key).toBe(`registration:${name.update_id}:0`);
@@ -1393,9 +1402,30 @@ it('continues repository registration only for its exact new-session draft', asy
     },
   });
   try {
+    await bot.handle(message('/new First draft', 12));
+    const staleAdd = sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => String(button.text).includes('Add repository')).callback_data;
+    await bot.handle(message('/new Replacement draft', 12));
+    await bot.handle(click(staleAdd, 12));
+    expect(f.store.setting('telegram.addWorkspace:7:-10042:12')).toBeUndefined();
+
+    await bot.handle(message('/new First service draft', 12));
+    const currentAdd = sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => String(button.text).includes('Add repository')).callback_data;
+    await bot.handle(click(currentAdd, 12));
+    const staleService = sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(message('/new Replacement service draft', 12));
+    await bot.handle(click(staleService, 12));
+    expect(f.store.setting('telegram.addWorkspace:7:-10042:12')).toBeNull();
+
     await bot.handle(message('/new Preserve this instruction', 12));
-    await bot.handle(click('dad:add-workspace:new', 12));
-    await bot.handle(click('dad:workspace-module:new:github', 12));
+    let draftId = f.store.setting<{ id: string }>('telegram.newSession:7:-10042:12')!.id;
+    await bot.handle(click(`dad:add-workspace:new:${draftId}`, 12));
+    await bot.handle(click(`dad:workspace-module:new:${draftId}:github`, 12));
     const privateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
     await bot.handle(message('https://example.test/new/session'));
@@ -1412,8 +1442,9 @@ it('continues repository registration only for its exact new-session draft', asy
     );
 
     await bot.handle(message('/new Keep the valid instruction', 12));
-    await bot.handle(click('dad:add-workspace:new', 12));
-    await bot.handle(click('dad:workspace-module:new:github', 12));
+    draftId = f.store.setting<{ id: string }>('telegram.newSession:7:-10042:12')!.id;
+    await bot.handle(click(`dad:add-workspace:new:${draftId}`, 12));
+    await bot.handle(click(`dad:workspace-module:new:${draftId}:github`, 12));
     const validPrivateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(validPrivateUrl).searchParams.get('start')}`));
     await bot.handle(message('https://example.test/new/valid-session'));
@@ -1437,8 +1468,9 @@ it('continues repository registration only for its exact new-session draft', asy
     expect(f.store.messages(f.daddy.sessions()[0]!.id)[0].text).toBe('Keep the valid instruction');
 
     await bot.handle(message('/new Private original instruction'));
-    await bot.handle(click('dad:add-workspace:new'));
-    await bot.handle(click('dad:workspace-module:new:github'));
+    draftId = f.store.setting<{ id: string }>('telegram.newSession:7:7:0')!.id;
+    await bot.handle(click(`dad:add-workspace:new:${draftId}`));
+    await bot.handle(click(`dad:workspace-module:new:${draftId}:github`));
     await bot.handle(message('https://example.test/new/private-stale'));
     await bot.handle(message('Private stale repository'));
     const privateStale = sent.at(-1)!.card.buttons[0][0].callback_data as string;
@@ -1450,8 +1482,9 @@ it('continues repository registration only for its exact new-session draft', asy
     );
 
     await bot.handle(message('/new Private valid instruction'));
-    await bot.handle(click('dad:add-workspace:new'));
-    await bot.handle(click('dad:workspace-module:new:github'));
+    draftId = f.store.setting<{ id: string }>('telegram.newSession:7:7:0')!.id;
+    await bot.handle(click(`dad:add-workspace:new:${draftId}`));
+    await bot.handle(click(`dad:workspace-module:new:${draftId}:github`));
     await bot.handle(message('https://example.test/new/private-valid'));
     await bot.handle(message('Private valid repository'));
     const privateValid = sent.at(-1)!.card.buttons[0][0].callback_data as string;
@@ -1478,6 +1511,17 @@ it('continues repository registration only for its exact new-session draft', asy
     expect(
       f.workspaces.list().some((workspace) => workspace.name === 'Standalone repository'),
     ).toBe(true);
+
+    f.store.setSetting('telegram.workspacePrivate:unknownpurpose12', {
+      provider: 'github',
+      origin: { chatId: -10042, threadId: 13 },
+      ownerId: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await bot.handle(message('/start workspace_unknownpurpose12'));
+    await bot.handle(message('https://example.test/new/unknown-purpose'));
+    expect(sent.at(-1)!.card).toContain('selection expired');
+    expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
 
     const upgradedExpires = new Date(Date.now() + 60_000).toISOString();
     f.store.setSetting('telegram.newSession:7:-10042:13', {
@@ -1679,7 +1723,7 @@ it('creates a task-named topic from /new, renames that topic and adds tasks with
   });
   try {
     await bot.handle(message('/new Fix the search timeout'));
-    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
     const start = sent.at(-1).buttons[0][0].callback_data;
     await bot.handle(click(start));
     const group = f.daddy.sessions()[0];
@@ -1747,7 +1791,7 @@ it('keeps Arc copy modes behind an explained settings screen (issue 19, item 12)
   });
   try {
     await bot.handle(click('dad:new'));
-    await bot.handle(click(`dad:new:${f.workspace.id}`));
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
     const buttons = sent.at(-1).buttons.flat();
     expect(buttons.map((button: any) => button.text)).toEqual([
       'Start session',
@@ -2400,7 +2444,7 @@ it('pages through discovered repositories and server folders without losing the 
     expect(button('Discovered 35')).toBeTruthy();
 
     await bot.handle(message('/new Keep this phone task'));
-    await press(`dad:new:${f.workspace.id}`);
+    await press(button(f.workspace.name).callback_data);
     await press(button('Browse server folders').callback_data);
     for (let page = 0; page < 3; page++) await press(exactButton('→').callback_data);
     await press(button('Folder 35').callback_data);
