@@ -17,7 +17,9 @@ If `daddy` is a user-owned wrapper that runs a source checkout, do not replace t
 daddy init --yes --no-service --modules codex,github,arcadia
 ```
 
-After installing the dependencies and running `daddy arcadia setup`, obtain separate approval for `daddy restart`. The running service reads the new module set only after that restart.
+For a first connection with the module disabled, there are no old Arc workers: install the dependencies, run `daddy arcadia setup`, then obtain separate approval for `daddy restart`. The running service reads the new module set only after that restart.
+
+If Arcadia is already enabled and a source update changes the helper, pause the Arc sessions and prevent new work from starting first. Wait for operations from the old version to finish, then perform the agreed service restart onto the verified new version while retaining the old helper. Only then run `setup` with the new helper, check `daddy arcadia mounts` and the saved journals, and resume the sessions. Do not change the helper while the old service can still allocate a copy.
 
 Install the supported Arcanum CLI from the internal npm registry. The similarly named script in the `arcanum` skill is not a replacement for this binary:
 

@@ -266,16 +266,29 @@ it.skipIf(!existsSync('/usr/bin/flock'))(
         child.once('error', reject);
         child.once('exit', () => reject(new Error(stderr || 'flock exited before ready')));
       });
-      let entered = false;
-      const pending = f.manager.withJournalLock(async () => {
-        entered = true;
-      });
+      await expect(
+        f.manager.ensure(randomUUID(), randomUUID(), 'author', AbortSignal.abort()),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+
+      const controller = new AbortController();
+      const pending = f.manager.ensure(randomUUID(), randomUUID(), 'reviewer', controller.signal);
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(entered).toBe(false);
+      controller.abort();
+      let timer!: NodeJS.Timeout;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Cancellation did not stop flock')), 1000);
+        timer.unref();
+      });
+      await expect(Promise.race([pending, deadline])).rejects.toMatchObject({ name: 'AbortError' });
+      clearTimeout(timer);
+      expect(f.manager.records()).toEqual([]);
+      expect(child.exitCode).toBeNull();
+
       child.stdin.write('\n');
       await once(child, 'exit');
-      await pending;
-      expect(entered).toBe(true);
+      await expect(f.manager.ensure(randomUUID(), randomUUID(), 'author')).resolves.toHaveProperty(
+        'lease.mount',
+      );
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
       f.close();

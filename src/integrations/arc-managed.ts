@@ -66,7 +66,6 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
 /** Only paths with an owned journal under this data directory can be created or removed. */
 export class ManagedArcMounts {
-  private static locks = new Map<string, Promise<void>>();
   readonly root: string;
   constructor(
     readonly dataDir = defaultDataDir(),
@@ -79,26 +78,18 @@ export class ManagedArcMounts {
   ) {
     this.root = join(resolve(dataDir), 'arcadia-sessions');
   }
-  private async lock<T>(fn: () => Promise<T>): Promise<T> {
-    const before = ManagedArcMounts.locks.get(this.root) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    ManagedArcMounts.locks.set(this.root, next);
-    await before;
-    let releaseFile: (() => Promise<void>) | undefined;
+  private async lock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const release = await acquireFileLock(
+      join(this.dataDir, 'arcadia-session-journals.lock'),
+      120000,
+      signal,
+    );
     try {
-      releaseFile = await acquireFileLock(join(this.dataDir, 'arcadia-session-journals.lock'));
+      signal?.throwIfAborted();
       return await fn();
     } finally {
-      try {
-        await releaseFile?.();
-      } finally {
-        release();
-        if (ManagedArcMounts.locks.get(this.root) === next)
-          ManagedArcMounts.locks.delete(this.root);
-      }
+      await release();
     }
   }
   async withJournalLock<T>(fn: () => Promise<T>) {
@@ -376,7 +367,7 @@ export class ManagedArcMounts {
         checkpoint: record.checkpoint,
         wasMounted: current?.status === 'mounted',
       };
-    });
+    }, signal);
   }
   checkpoint(lease: ArcLease, value: z.infer<typeof checkpointSchema>) {
     if (!lease.managed) return;
