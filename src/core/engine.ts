@@ -2408,7 +2408,12 @@ export class Engine {
       }
     }
     for (const task of this.store.tasks())
-      if (task.state === 'submitting')
+      if (
+        task.state === 'submitting' &&
+        !(
+          task.prLink?.generation === task.generation && task.prLink.head === task.pendingAuthorHead
+        )
+      )
         this.state(
           task,
           'needs_input',
@@ -2888,11 +2893,26 @@ export class Engine {
           'repository_mismatch',
           'The PR must belong to this task’s configured repository',
         );
+      if (expectedHead && task.pendingAuthorHead !== expectedHead)
+        throw new AppError(
+          'submitted_head_changed',
+          'The task now has a different saved commit. Inspect the submission before connecting.',
+        );
       const pr = await this.provider(ref).getPR(ref);
       if (expectedHead && pr.head !== expectedHead)
         throw new AppError(
           'submitted_head_changed',
           'The PR does not point to the submitted implementation; inspect it before connecting',
+        );
+      if (
+        ref.provider === 'github' &&
+        task.ticketRepository &&
+        (pr.branch !== task.ticketRepository.branch ||
+          pr.targetBranch !== task.ticketRepository.baseBranch)
+      )
+        throw new AppError(
+          'submitted_branch_changed',
+          'The PR branches changed after submission; inspect it before connecting.',
         );
       if (pr.state !== 'open') throw new AppError('pr_closed', 'Connect an open PR');
       if (
@@ -2904,6 +2924,7 @@ export class Engine {
       )
         throw new AppError('already_attached', 'This PR is already attached');
       task.ref = ref;
+      delete task.prLink;
       task.pr = pr;
       task.revision = revisionOf(pr);
       task.generation++;

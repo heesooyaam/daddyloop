@@ -1,3 +1,4 @@
+import { reminderOpen, type OwnerQuestion } from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
@@ -5,6 +6,7 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  reminder?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
@@ -83,6 +85,7 @@ export class TelegramDelivery {
     else this.pending.delete(key);
   }
   private valid(value: Delivery) {
+    if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
@@ -273,6 +276,11 @@ export class TelegramDelivery {
   private async attempt(key: string, value: Delivery) {
     if (!this.valid(value)) {
       value.status = 'cancelled';
+      if (value.options.reminder && value.options.notificationId)
+        this.store.db
+          .prepare("UPDATE notifications SET status='superseded',at=? WHERE id=?")
+          .run(new Date(this.clock()).toISOString(), value.options.notificationId);
+
       this.save(key, value);
       return;
     }
@@ -396,8 +404,8 @@ export class TelegramDelivery {
         value.attempts = 0;
         if (options.notificationId)
           this.store.db
-            .prepare("UPDATE notifications SET status='sent' WHERE id=?")
-            .run(options.notificationId);
+            .prepare("UPDATE notifications SET status='sent',at=? WHERE id=?")
+            .run(new Date(this.clock()).toISOString(), options.notificationId);
         if (options.deletePrevious) {
           try {
             await this.api.call(

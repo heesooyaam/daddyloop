@@ -1,4 +1,4 @@
-import { GitHubQuota, GitHubQuotaError } from './github-quota.js';
+import { GitHubQuota, GitHubRetryError } from './github-quota.js';
 import type { Store } from '../core/store.js';
 import type {
   PRRef,
@@ -190,7 +190,7 @@ export class GitHubProvider implements ReviewProvider {
           merge_method: method,
         });
       } catch (error) {
-        if (error instanceof GitHubQuotaError) throw error;
+        if (error instanceof GitHubRetryError) throw error;
         if (error instanceof AppError)
           throw new AppError(
             error.code,
@@ -245,7 +245,7 @@ export class GitHubProvider implements ReviewProvider {
   async createReview(ref: PRRef, revision: Revision, marker: string) {
     const existing = await this.findReview(ref, marker).catch((error) => {
       // This lookup happens before the create request.
-      if (error instanceof GitHubQuotaError) throw new GitHubQuotaError(error.until, true);
+      if (error instanceof GitHubRetryError) throw error.beforeWrite();
       throw error;
     });
     if (existing) return { ...existing, revision };
