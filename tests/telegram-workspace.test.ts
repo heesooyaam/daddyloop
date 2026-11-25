@@ -1453,6 +1453,82 @@ it('recovers the first private registration step without consuming its handoff e
   }
 });
 
+it('keeps explicit replies bound to the delivered registration prompt', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [],
+    replyRegistration = vi.fn((_chatId: number, messageId: number) =>
+      messageId === 101
+        ? { id: 'registration-A', step: 'source' as const }
+        : { id: 'registration-A', step: 'name' as const },
+    );
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card) => {
+      sent.push({ destination, card });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+    delivery: { replyRegistration, replySession: () => undefined },
+  } as unknown as TelegramApi;
+  let bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 1040;
+  const reply = (text: string, messageId: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+      reply_to_message: {
+        message_id: messageId,
+        text: messageId === 101 ? 'Repository source' : 'Workspace name',
+        from: { id: 99, is_bot: true },
+        chat: { id: 7, type: 'private' },
+      },
+    },
+  });
+  const active = (step: 'source' | 'name') =>
+    f.store.setSetting('telegram.addWorkspace:7:7:0', {
+      id: 'registration-B',
+      step,
+      provider: 'github',
+      ...(step === 'name' ? { path: 'https://example.test/repository-b' } : {}),
+      creationBound: false,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  try {
+    active('source');
+    await bot.handle(reply('https://example.test/repository-a', 101));
+    expect(f.store.setting<any>('telegram.addWorkspace:7:7:0')).toMatchObject({
+      id: 'registration-B',
+      step: 'source',
+    });
+    expect(sent.at(-1)!.destination).toEqual({ chatId: 7, threadId: undefined });
+
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    active('name');
+    await bot.handle(reply('Repository A', 102));
+    expect(f.store.setting<any>('telegram.addWorkspace:7:7:0')).toMatchObject({
+      id: 'registration-B',
+      step: 'name',
+      path: 'https://example.test/repository-b',
+    });
+    expect(f.workspaces.list().some((workspace) => workspace.name === 'Repository A')).toBe(false);
+
+    f.store.setSetting('telegram.addWorkspace:7:7:0', null);
+    await bot.handle(reply('Do not route this', 101));
+    expect(f.store.messages(group.id)).toHaveLength(0);
+    expect(sent.at(-1)!.destination).toEqual({ chatId: 7, threadId: undefined });
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('continues repository registration only for its exact new-session draft', async () => {
   const f = daddyFixture(),
     sent: { destination: any; card: any }[] = [],

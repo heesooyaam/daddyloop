@@ -159,7 +159,7 @@ test('merges a stale preset addition without undoing the order saved in another 
         instructions: {
           daddy: {},
           worker: {},
-          presets: presets.slice(0, 4).map((preset) => ({ preset, enabled: true, omit: [] })),
+          presets: presets.slice(0, 5).map((preset) => ({ preset, enabled: true, omit: [] })),
         },
       },
     });
@@ -175,14 +175,14 @@ test('merges a stale preset addition without undoing the order saved in another 
   const first = page.getByRole('dialog', { name: 'Session settings' });
   await first.getByText('Style and skills for this session', { exact: true }).click();
   await first.getByRole('button', { name: 'Add presets', exact: true }).click();
-  for (const name of ['A', 'B'])
+  for (const name of ['A', 'D', 'E'])
     await first
       .getByRole('button', {
         name: `Remove preset Concurrent ${name} ${suffix} from this session`,
         exact: true,
       })
       .click();
-  for (const name of ['A', 'B'])
+  for (const name of ['A', 'D', 'E'])
     await first
       .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
       .check();
@@ -197,10 +197,9 @@ test('merges a stale preset addition without undoing the order saved in another 
       exact: true,
     })
     .click();
-  for (const name of ['E', 'D'])
-    await second
-      .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
-      .check();
+  await second
+    .getByRole('checkbox', { name: `Use preset Concurrent D ${suffix}`, exact: true })
+    .check();
 
   await second.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(second).toHaveCount(0);
@@ -208,11 +207,11 @@ test('merges a stale preset addition without undoing the order saved in another 
   await expect(first).toHaveCount(0);
   const board = await (await page.request.get(`/api/daddy/sessions/${session.id}`)).json();
   expect(board.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
+    `Concurrent B ${suffix}`,
     `Concurrent C ${suffix}`,
+    `Concurrent A ${suffix}`,
     `Concurrent E ${suffix}`,
     `Concurrent D ${suffix}`,
-    `Concurrent A ${suffix}`,
-    `Concurrent B ${suffix}`,
   ]);
 
   const conflictResponse = await page.request.post('/api/daddy/sessions', {

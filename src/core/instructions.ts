@@ -330,15 +330,14 @@ export function applyInstructionChanges(
           .slice(0, at)
           .reverse()
           .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
-        following = orderTarget
-          .slice(at + 1)
-          .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
         precedingIndex = preceding
           ? current.findIndex((preset) => preset.preset.id === preceding)
           : -1,
-        followingIndex = following
-          ? current.findIndex((preset) => preset.preset.id === following)
-          : -1,
+        following = new Set(orderTarget.slice(at + 1)),
+        followingIndexes = current.flatMap((preset, index) =>
+          following.has(preset.preset.id) && index > precedingIndex ? [index] : [],
+        ),
+        followingIndex = followingIndexes.length ? Math.min(...followingIndexes) : -1,
         insertion =
           at === 0
             ? 0

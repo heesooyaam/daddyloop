@@ -43,6 +43,23 @@ it('resolves a private reply only against a matching bot, owner, chat and native
     await f.close();
   }
 });
+it('binds a delivered registration prompt to its registration and step', async () => {
+  const f = fixture();
+  try {
+    await f.queue.send({ chatId: 7 }, new TelegramText().add('Repository source'), {
+      key: 'registration:source',
+      registration: { id: 'registration-A', step: 'source' },
+    });
+    expect(f.queue.replyRegistration(7, 1, 7)).toEqual({
+      id: 'registration-A',
+      step: 'source',
+    });
+    expect(f.queue.replyRegistration(-10042, 1, 7)).toBeUndefined();
+    expect(f.queue.replyRegistration(7, 1, 12)).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
 const text = (value: string) => new TelegramText().add(value);
 
 it('keeps status edits delivering while a durable pin retries', async () => {

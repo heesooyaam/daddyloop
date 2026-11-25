@@ -18,6 +18,7 @@ export interface DeliveryOptions {
   final?: boolean;
   notificationId?: string;
   deletePrevious?: { chatId: number; messageId: number };
+  registration?: { id: string; step: 'source' | 'name' };
 }
 type Delivery = {
   id: string;
@@ -119,6 +120,26 @@ export class TelegramDelivery {
         .get(key.slice(5));
       if (typeof job?.group_id === 'string') return job.group_id;
     }
+  }
+  replyRegistration(
+    chatId: number,
+    messageId: number,
+    ownerId: number,
+  ): { id: string; step: 'source' | 'name' | 'unknown' } | undefined {
+    const row = this.store.db
+      .prepare(
+        `SELECT json_extract(value,'$.options.registration.id') AS id,
+      json_extract(value,'$.options.registration.step') AS step,
+      json_extract(value,'$.options.key') AS deliveryKey FROM settings
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+        AND json_extract(value,'$.destination.chatId')=?
+        AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+      )
+      .get(this.bot, ownerId, chatId, messageId);
+    if (typeof row?.id === 'string' && ['source', 'name'].includes(String(row.step)))
+      return { id: row.id, step: row.step as 'source' | 'name' };
+    if (String(row?.deliveryKey ?? '').startsWith('registration:'))
+      return { id: '', step: 'unknown' };
   }
   private createDelivery(
     destination: TelegramDestination,
