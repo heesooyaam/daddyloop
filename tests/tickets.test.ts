@@ -248,6 +248,12 @@ it('looks up an uncertain GitHub create on the retry queue without sending a sec
       t.prLink!.retryAt = 0;
       store.saveTask(t);
     };
+    // Model a restart after the pending outbox receipt was saved, before the task got
+    // the uncertain response. Recovery must discover the existing PR with no second POST.
+    const interrupted = store.getTask(task.id);
+    delete interrupted.prLink;
+    store.saveTask(interrupted);
+    engine.recoverInterruptedJobs();
     expire();
     await expect(flow.submit(task.id, undefined, true)).rejects.toMatchObject({
       code: 'ambiguous_write',

@@ -47,6 +47,8 @@ import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
 
+const interruptedSubmission =
+  'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
 const reviewRetryInstruction =
   'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.';
 const clarifiedReviewPrefix =
@@ -2389,11 +2391,32 @@ export class Engine {
           .jobs(task.id)
           .findLast((j) => j.kind === 'review' && j.input.startsWith(clarifiedReviewPrefix));
         if (review) {
-          this.rememberClarification(task, review.input.slice(clarifiedReviewPrefix.length));
+          task.latestClarification = { text: review.input.slice(clarifiedReviewPrefix.length) };
           this.store.saveTask(task);
         }
       }
 
+      // The outbox commits its receipt before sending the POST. A process can exit before
+      // submit() records the response, so recover that window using the same request hash.
+      if (
+        isTicket(task) &&
+        task.ref.provider === 'github' &&
+        task.pendingAuthorHead &&
+        !task.prLink &&
+        task.resumeState === 'submitting' &&
+        (task.state === 'submitting' ||
+          (task.state === 'needs_input' && task.reason === interruptedSubmission)) &&
+        this.store.db
+          .prepare("SELECT 1 FROM operations WHERE id=? AND task_id=? AND status='pending'")
+          .get('ticket-submit:' + task.id, task.id)
+      ) {
+        task.prLink = { generation: task.generation, head: task.pendingAuthorHead };
+        this.state(
+          task,
+          'submitting',
+          'Checking GitHub for the result of the previous PR creation',
+        );
+      }
       if (task.state !== 'needs_input' || task.inputRequest) continue;
       const job = this.store.jobs(task.id).at(-1);
       if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;
@@ -2414,11 +2437,7 @@ export class Engine {
           task.prLink?.generation === task.generation && task.prLink.head === task.pendingAuthorHead
         )
       )
-        this.state(
-          task,
-          'needs_input',
-          'PR submission was interrupted. Submit again to reconcile its native result before retrying.',
-        );
+        this.state(task, 'needs_input', interruptedSubmission);
     for (const job of this.store.jobs())
       if (
         job.status === 'running' ||
