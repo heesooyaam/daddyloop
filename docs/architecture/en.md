@@ -249,6 +249,8 @@ sequenceDiagram
 
 If the target branch advances before or during a GitHub review, daddy can keep its draft on the same PR commit and immediately schedule a fresh review, including when auto-merge is off. The old result cannot release feedback. For a draft with findings it verifies the author, the recorded summary and each comment against confirmed review operations. The reviewer must check the complete change, update or withdraw the remaining findings and write a new summary before publication. Unrecognized edits stay in the draft for inspection.
 
+After a pause due to resource pressure, the same recovery applies to an interrupted review once the task resumes. A task already pinned to the new base can still recover its saved draft. The service checks the recorded pause and resume, confirms that the same target branch advanced, and verifies draft ownership and recorded writes before queuing a fresh independent review.
+
 A worker can continue fixing published findings on its pinned PR commit when GitHub confirms a fast-forward of the same target branch. Before pushing, daddy checks the source and target again. The new commit gets an independent review. A coordinator question about an already blocked task stays in the session history and other tasks can still wake the coordinator.
 
 GitHub draft comments are edited and removed by their node IDs in the pending review. After a lost response, the service compares the requested text with the current comment. A legacy REST edit refused with HTTP 404 can be retired when the comment still matches its confirmed receipt. A technical wait does not trigger an owner mention in Telegram.

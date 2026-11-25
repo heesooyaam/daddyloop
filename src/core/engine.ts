@@ -55,6 +55,9 @@ const reviewRetryInstruction =
 const clarifiedReviewPrefix =
   reviewRetryInstruction +
   '\nClarification from the session coordinator; verify it against the task: ';
+const resumedProviderState = 'Resumed by the user; current provider state will be reconciled';
+const staleNativeDraft =
+  'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.';
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
@@ -326,6 +329,8 @@ export class Engine {
         sameRevision(task.revision, pr) &&
         !sameRevision(task.review.revision, pr)
       ) {
+        if (retry && (await this.resumeReviewAfterResourcePause(task, pr, clarification)))
+          return task;
         const previous = await provider.getReview(prRef(task), task.review);
         if (previous.status === 'draft' || previous.status === 'partial')
           throw new AppError(
@@ -341,7 +346,7 @@ export class Engine {
         task.review &&
         task.snapshot?.status !== 'published'
       ) {
-        await this.changeReviewRevision(task, pr);
+        await this.changeReviewRevision(task, pr, retry ? clarification : undefined);
         return task;
       }
       if (changed) this.invalidate(task, pr);
@@ -812,12 +817,20 @@ export class Engine {
       draft.comments.length > 0 || draft.body !== `Review in progress.\n\n<!-- ${handle.marker} -->`
     );
   }
-  private async draftCarryProblem(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
+  private async draftCarryProblem(
+    task: Task,
+    pr: PullRequest,
+    draft: ReviewSnapshot,
+    requireConfirmedAdvance = false,
+  ) {
     const handle = task.review!;
     if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
     this.broker.reconcileDraftEdits(task, draft);
-    if (this.broker.hasUnsettledDraftWrites(task, draft)) return draftSyncPending;
-    if (!this.draftHasWork(handle, draft)) return;
+    const unsettled = requireConfirmedAdvance
+      ? this.store.pendingReviewWrites(task.id, handle.marker).length > 0
+      : this.broker.hasUnsettledDraftWrites(task, draft);
+    if (unsettled) return draftSyncPending;
+    if (!requireConfirmedAdvance && !this.draftHasWork(handle, draft)) return;
     if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (
       !sameRevision(handle.revision, pr) &&
@@ -828,6 +841,115 @@ export class Engine {
       ))
     )
       return draftSyncPending;
+  }
+  private async resumeReviewAfterResourcePause(
+    task: Task,
+    observed?: PullRequest,
+    clarification?: string,
+  ) {
+    const handle = task.review;
+    if (
+      task.ref.provider !== 'github' ||
+      task.state !== 'needs_input' ||
+      task.resumeState !== 'reviewing' ||
+      task.inputRequest ||
+      task.reviewFinished ||
+      task.pendingFix ||
+      task.partialReview ||
+      !handle?.authorId ||
+      task.snapshot?.status === 'published' ||
+      !task.revision ||
+      task.revision.head !== handle.revision.head ||
+      this.store.busy(task.id)
+    )
+      return false;
+
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const job = this.store.jobs(task.id).at(-1);
+    if (
+      job?.kind !== 'review' ||
+      job.status !== 'cancelled' ||
+      job.groupId !== task.groupId ||
+      job.groupGeneration !== group?.generation ||
+      group?.deletedAt ||
+      group?.deletion ||
+      group?.daddyState === 'paused' ||
+      group?.daddyState === 'archived'
+    )
+      return false;
+
+    // Older runs could advance the task pin once and leave the review handle on its old base.
+    const repinned = !sameRevision(task.revision, handle.revision);
+    if (
+      task.generation !== job.generation + (repinned ? 2 : 1) ||
+      task.reason !== (repinned ? staleNativeDraft : resumedProviderState)
+    )
+      return false;
+    const resumed = this.store.db
+      .prepare(
+        `SELECT 1 FROM events AS resumed
+         JOIN events AS paused ON paused.task_id=resumed.task_id AND paused.id<resumed.id
+         JOIN events AS stopped ON stopped.task_id=paused.task_id AND stopped.id<paused.id
+         WHERE resumed.task_id=? AND resumed.type='task.state'
+           AND json_extract(resumed.data,'$.reason')=?
+           AND json_extract(resumed.data,'$.generation')=?
+           AND paused.type='resource.pause' AND stopped.type='task.state'
+           AND json_extract(stopped.data,'$.state')='needs_input'
+           AND json_extract(stopped.data,'$.generation')=json_extract(resumed.data,'$.generation')
+           AND json_extract(stopped.data,'$.reason')=json_extract(paused.data,'$.reason')
+           AND json_extract(stopped.data,'$.head')=?
+         LIMIT 1`,
+      )
+      .get(task.id, resumedProviderState, job.generation + 1, handle.revision.head);
+    if (!resumed) return false;
+
+    const ref = prRef(task),
+      provider = this.provider(ref);
+    const pr = observed ?? (await provider.getPR(ref));
+    if (
+      !sameOpenTarget(task.pr, pr) ||
+      pr.draft !== false ||
+      pr.head !== handle.revision.head ||
+      pr.base === handle.revision.base
+    )
+      return false;
+    const action = this.prAction(task, pr);
+    if (action.kind !== 'refresh' && action.kind !== 'continue') return false;
+    const draft = await provider.getReview(ref, handle);
+    if (
+      draft.status !== 'draft' ||
+      draft.revision.head !== pr.head ||
+      (await this.draftCarryProblem(task, pr, draft, /* requireConfirmedAdvance */ true))
+    )
+      return false;
+
+    const currentPR = await provider.getPR(ref);
+    const current = this.store.getTask(task.id);
+    const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    if (
+      !sameRevision(currentPR, pr) ||
+      !sameOpenTarget(task.pr, currentPR) ||
+      currentPR.draft !== false ||
+      current.generation !== task.generation ||
+      current.state !== task.state ||
+      current.reason !== task.reason ||
+      currentGroup?.generation !== group?.generation ||
+      currentGroup?.deletedAt ||
+      currentGroup?.deletion ||
+      currentGroup?.daddyState === 'paused' ||
+      currentGroup?.daddyState === 'archived'
+    )
+      return false;
+    this.store.transaction(() => {
+      if (clarification?.trim()) this.rememberClarification(task, clarification);
+      this.restartNativeReview(
+        task,
+        currentPR,
+        draft,
+        'The target branch advanced. Reviewing the updated change.',
+      );
+    });
+    return true;
   }
   async retryInterruptedStep(id: string) {
     return this.lock(id, async () => {
@@ -862,6 +984,7 @@ export class Engine {
           );
         return;
       }
+      if (await this.resumeReviewAfterResourcePause(task)) return;
       if (
         job.kind === 'review' &&
         job.generation === task.generation &&
@@ -899,8 +1022,7 @@ export class Engine {
         job.kind === 'review' &&
         job.status === 'cancelled' &&
         job.generation + 1 === task.generation &&
-        (task.reason ===
-          'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
+        (task.reason === staleNativeDraft ||
           task.reason === draftInspectionRequired ||
           task.reason === draftSyncPending) &&
         !!task.review &&
@@ -1328,7 +1450,11 @@ export class Engine {
     });
   }
 
-  private async changeReviewRevision(task: Task, pr: PullRequest) {
+  private async changeReviewRevision(task: Task, pr: PullRequest, clarification?: string) {
+    if (task.state === 'needs_input' && task.resumeState === 'reviewing') {
+      if (await this.resumeReviewAfterResourcePause(task, pr, clarification)) return;
+      if (this.store.getTask(task.id).generation !== task.generation) return;
+    }
     const handle = task.review;
     if (
       task.ref.provider === 'github' &&
@@ -1382,9 +1508,7 @@ export class Engine {
     this.state(
       task,
       hadUnpublished ? 'needs_input' : 'queued',
-      hadUnpublished
-        ? 'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.'
-        : 'New revision is ready for review',
+      hadUnpublished ? staleNativeDraft : 'New revision is ready for review',
     );
   }
   private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
@@ -2533,7 +2657,7 @@ export class Engine {
               ? 'awaiting_push'
               : 'awaiting_publication'
           : 'queued';
-        this.state(task, target, 'Resumed by the user; current provider state will be reconciled');
+        this.state(task, target, resumedProviderState);
       } else if (action === 'approve-plan') {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')
           throw new AppError('plan_not_ready', 'This plan is not ready for approval');

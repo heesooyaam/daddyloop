@@ -634,6 +634,144 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it.each(['empty', 'findings'] as const)(
+    'recovers a resource-paused %s GitHub draft after the target advances',
+    async (contents) => {
+      const legacy = contents === 'findings';
+      const previousBase = 'b9fd4147112ca77d3d76a9cf5924ae2bce5a0590';
+      const f = await setup(daddyFixture(), {
+        head: legacy
+          ? 'f9b309ee72b7d5d1490c2d21c5653ea942c2747f'
+          : '743ed0b7404411a04341e85a4cd7291e523c1c4b',
+        base: previousBase,
+        start: previousBase,
+      });
+      try {
+        const generation = legacy ? 69 : 29;
+        f.store.saveTask({ ...f.store.getTask(f.task.id), generation: generation - 1 });
+        await f.engine.review(f.task.id, true);
+        const old = f.store.getTask(f.task.id);
+        const handle = { ...old.review!, authorId: 'reviewer' };
+        const key = 'demo-review:' + handle.id;
+        f.store.saveTask({ ...old, review: handle });
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(old), handle)),
+          authorId: handle.authorId,
+          body: `Review in progress.
+
+<!-- ${handle.marker} -->`,
+        });
+        const job = f.store.claim()!;
+        const finding = legacy
+          ? ((await f.engine.broker.call(job, 'add_comment', {
+              key: 'finding',
+              body: 'Check layout',
+            })) as { id: string })
+          : undefined;
+        if (finding) await f.engine.broker.call(job, 'set_summary', { body: 'Old summary' });
+        const draft = await f.provider.getReview(prRef(old), handle);
+        await f.engine.interruptTask(old.id, 'Disk threshold', 'resource.pause');
+        f.daddy.tick();
+        await vi.waitFor(() => expect(f.store.getTask(old.id).resourcePause).toBeUndefined());
+        expect(f.store.getTask(old.id)).toMatchObject({
+          state: 'needs_input',
+          generation: generation + 1,
+        });
+        const base = '9bf00a4f8ca1bb3ae882ed58da1a0186aaac73e7';
+        const targetAdvanced = vi.fn(async () => false);
+        Object.assign(f.provider, { targetAdvanced });
+        f.setRemote({ base, start: base });
+        if (legacy) {
+          // Reach the persisted stale-draft state while the native draft cannot be carried.
+          f.store.setSetting(key, { ...draft, body: 'Unrecognized native edit' });
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            state: 'needs_input',
+            generation: generation + 2,
+            revision: { base },
+            review: { revision: old.revision },
+          });
+          f.store.setSetting(key, draft);
+        }
+        await f.engine.retryInterruptedStep(old.id);
+        expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        targetAdvanced.mockResolvedValue(true);
+        for (const patch of [
+          { state: 'closed' as const },
+          { draft: true },
+          { branch: 'another-source' },
+          { targetBranch: 'another-target' },
+          { head: 'e'.repeat(40) },
+        ]) {
+          f.setRemote(patch);
+          await f.engine.retryInterruptedStep(old.id);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          f.setRemote({ ...old.pr!, base, start: base });
+        }
+        for (const patch of [
+          { authorId: 'another-reviewer' },
+          { body: 'Unrecognized native edit' },
+        ]) {
+          f.store.setSetting(key, { ...draft, ...patch });
+          await f.engine.retryInterruptedStep(old.id);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        }
+        f.store.setSetting(key, draft);
+        const pending = handle.marker + ':' + job.id + ':set_summary:lost-response';
+        f.store.db
+          .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+          .run(pending, old.id, 'pending', 'unconfirmed-summary');
+        await f.engine.retryInterruptedStep(old.id);
+        expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        f.store.db.prepare('DELETE FROM operations WHERE id=?').run(pending);
+
+        if (legacy) await f.engine.review(old.id, true);
+        else await f.engine.retryInterruptedStep(old.id);
+        expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), old.revision!.base, base);
+        const recovered = f.store.getTask(old.id);
+        expect(recovered).toMatchObject({
+          state: 'reviewing',
+          review: { id: handle.id, marker: handle.marker, revision: { base } },
+          reviewFinished: false,
+        });
+        expect(recovered.draftRecheck).toEqual(finding ? { commentIds: [finding.id] } : undefined);
+        expect(f.store.activeJobs(old.id)).toMatchObject([
+          { kind: 'review', generation: recovered.generation },
+        ]);
+        const result = {
+          status: 'completed' as const,
+          summary: 'Reviewed',
+          checkedHead: old.revision!.head,
+        };
+        await f.engine.completeJob(job, result);
+        await expect(
+          f.engine.broker.call(job, 'set_summary', { body: 'Late summary' }),
+        ).rejects.toMatchObject({ code: 'stale_run' });
+        expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+        expect(await f.provider.getReview(prRef(old), handle)).toEqual(draft);
+        if (finding) {
+          const unchecked = f.store.claim()!;
+          await f.engine.completeJob(unchecked, result);
+          expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+          f.store.saveJob({ ...unchecked, status: 'completed' });
+          const checked = f.store.claim()!;
+          await f.engine.broker.call(checked, 'edit_comment', {
+            id: finding.id,
+            body: 'Verified against the new base',
+          });
+          await f.engine.broker.call(checked, 'set_summary', { body: 'Rechecked' });
+          await f.engine.completeJob(checked, result);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            state: 'awaiting_publication',
+            reviewFinished: true,
+          });
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
     const f = await setup();
     try {
