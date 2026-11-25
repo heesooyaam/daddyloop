@@ -7,7 +7,8 @@ import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram
 import { UpdateMonitor } from '../src/core/updates.js';
 import { setLocale } from '../src/core/preferences.js';
 import { registerDaddy } from '../src/server/daddy.js';
-import { taskReference } from '../src/core/task-activity.js';
+import { draftSyncPending, taskReference } from '../src/core/task-activity.js';
+import { githubActivityStatus } from '../src/core/auto-merge.js';
 import { queueCard } from '../src/integrations/telegram-tasks.js';
 import type { Job, Task } from '../src/core/types.js';
 
@@ -251,7 +252,7 @@ it.each([
     'en',
     'Waiting to start',
     'Waiting for GitHub quota',
-    'Syncing the GitHub draft',
+    'Checking the GitHub draft',
     'Checking GitHub auto-merge',
     'Shared reviewer · 5 min elapsed',
   ],
@@ -267,7 +268,13 @@ it.each([
   'shows the effective queue status and the current reviewer in %s',
   (locale, assigned, quota, sync, merge, reviewer) => {
     const now = Date.parse('2026-11-25T12:05:30Z');
-    const task = { id: randomUUID(), title: 'Search', state: 'implementing', reason: '' } as Task;
+    const task = {
+      id: randomUUID(),
+      title: 'Search',
+      generation: 1,
+      state: 'implementing',
+      reason: '',
+    } as Task;
     const job = { status: 'queued', role: 'author' } as Job;
     const render = (item: Parameters<typeof queueCard>[2][number]) =>
       queueCard(locale, 'session', [item], { now }).text;
@@ -281,8 +288,7 @@ it.each([
         task: {
           ...task,
           state: 'needs_input',
-          reason:
-            'Waiting to confirm the GitHub draft or its target branch before restarting review.',
+          reason: draftSyncPending,
         },
       }),
     ).toContain(line + sync);
@@ -308,3 +314,46 @@ it.each([
     }
   },
 );
+
+it('shows GitHub recovery and owner questions while keeping private reviewer text out of the queue', () => {
+  const task = {
+    id: randomUUID(),
+    title: 'Search',
+    generation: 2,
+    state: 'submitting',
+    prLink: { head: 'saved-head', generation: 2 },
+  } as Task;
+  const until = Date.parse('2026-11-25T12:34:56Z');
+  const mergeStatus = githubActivityStatus(
+    task,
+    { mode: 'inherit', enabled: false, result: undefined },
+    {
+      kind: 'read',
+      status: 503,
+      until,
+      delay: 1_000,
+    },
+  );
+  const recovery = queueCard('en', 'session', [{ task, mergeStatus }]);
+  expect(recovery.text).toContain(
+    'GitHub HTTP 503 · retry at 12:34:56 UTC\nChecking GitHub for the result of the previous PR creation',
+  );
+
+  const blocked: Task = {
+    ...task,
+    state: 'needs_input',
+    resumeState: 'reviewing',
+    reason: 'Private reviewer text',
+  };
+  const hidden = queueCard('en', 'session', [{ task: blocked }]);
+  expect(hidden.text).toContain('Action needed');
+  expect(hidden.text).not.toContain(blocked.reason);
+  const question: Task = {
+    ...blocked,
+    reason: 'Should the old filters remain available?',
+    inputRequest: { role: 'reviewer', runId: 'review', generation: blocked.generation },
+  };
+  expect(queueCard('en', 'session', [{ task: question }]).text).toContain(
+    'Waiting for your answer\nShould the old filters remain available?',
+  );
+});

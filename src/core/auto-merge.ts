@@ -1,4 +1,4 @@
-import { githubWait } from '../providers/github-quota.js';
+import { githubWait, type githubBackoff } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
 import {
@@ -8,6 +8,8 @@ import {
   sameRevision,
   type AutoMergeMode,
   type ReviewGroup,
+  type PullRequest,
+  type ReviewSnapshot,
   type Task,
 } from './types.js';
 
@@ -40,10 +42,10 @@ export function autoMergeSettings(store: Store, group: ReviewGroup, task: Task) 
 export function githubActivityStatus(
   task: Task,
   settings: ReturnType<typeof autoMergeSettings>,
-  until?: number,
+  backoff?: ReturnType<typeof githubBackoff>,
 ) {
   if (
-    until &&
+    backoff &&
     [
       'queued',
       'fixing',
@@ -55,8 +57,14 @@ export function githubActivityStatus(
       'ready_for_review',
       'submitting',
     ].includes(task.state)
-  )
-    return `Waiting for GitHub API quota until ${new Date(until).toISOString().slice(11, 16)} UTC`;
+  ) {
+    const time = new Date(backoff.until).toISOString().slice(11, 19);
+    if (task.prLink?.ref && backoff.kind === 'read')
+      return `PR #${task.prLink.ref.number} · GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
+    if (backoff.kind === 'read')
+      return `GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
+    return `Waiting for GitHub API quota until ${time.slice(0, 5)} UTC`;
+  }
   if (!reviewed(task) || task.ref.provider !== 'github') return;
   if (settings.result?.state === 'merged') return settings.result.message;
   if (settings.enabled && task.pr?.state === 'open')
@@ -105,8 +113,8 @@ export function autoMergeEnabled(store: Store, task: Task) {
   return !!group && group.daddyState !== 'paused' && group.daddyState !== 'archived';
 }
 
-function pendingMerge(store: Store, task: Task) {
-  if (!task.revision) return;
+export function pendingMerge(store: Store, task: Task) {
+  if (!task.revision || task.ref.provider !== 'github') return;
   // An idle pause advances the run generation while the provider's answer can still be unknown.
   return store.db
     .prepare("SELECT id FROM operations WHERE task_id=? AND status='pending' AND id GLOB ?")
@@ -115,7 +123,12 @@ function pendingMerge(store: Store, task: Task) {
 }
 
 function enabled(store: Store, task: Task) {
-  return reviewed(task) && !store.busy(task.id) && autoMergeEnabled(store, task);
+  return (
+    reviewed(task) &&
+    !task.deferredWorkerInstructions?.length &&
+    !store.busy(task.id) &&
+    autoMergeEnabled(store, task)
+  );
 }
 
 export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
@@ -203,57 +216,54 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
           });
           return;
         }
-        if (
-          pr.state !== 'open' ||
-          pr.cloneUrl !== task.pr.cloneUrl ||
-          pr.targetBranch !== task.pr.targetBranch ||
-          pr.branch !== task.pr.branch
-        )
-          return record('waiting', 'The PR is closed or its branches changed');
         if (pending)
           return record('uncertain', 'Waiting for GitHub to confirm the previous merge request');
-        if (!enabled(store, store.getTask(task.id))) return;
-        if (pr.draft === true)
-          return record('waiting', 'Draft PR: mark it ready for review on GitHub');
-        if (!sameRevision(revision, pr) || (pr.mergeConflict && pr.draft === false)) return true;
-        if (
-          !task.reviewFinished ||
-          task.snapshot?.status !== 'published' ||
-          task.snapshot.comments.length ||
-          !sameRevision(task.snapshot.revision, revision) ||
-          !task.review ||
-          !sameRevision(task.review.revision, revision) ||
-          task.pendingFix ||
-          (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head) ||
-          (task.kind === 'plan' && task.policy.planApproval === 'human' && !task.approvedAt)
-        )
-          return record('waiting', 'Waiting for a completed review of this revision');
-        if (pr.checks !== 'passing') return record('waiting', 'Waiting for passing CI');
-        if (pr.mergeable === null) return record('waiting', 'GitHub is calculating mergeability');
-        if (pr.draft !== false || pr.mergeable !== true)
-          return record('waiting', 'Waiting for GitHub to allow this PR to merge');
-        const review = await provider.getReview(ref, task.review);
-        if (
-          review.status !== 'published' ||
-          review.comments.length ||
-          !sameRevision(review.revision, revision)
-        )
-          return record('waiting', 'Waiting for a published review with no outstanding findings');
+        // The last observation uses fresh GitHub state after the provider has prepared the
+        // write. It goes through the same decision as the first observation.
+        const observe = async (current: PullRequest, nativeReview?: ReviewSnapshot) => {
+          const latest = store.getTask(task.id);
+          if (
+            stopping() ||
+            !enabled(store, latest) ||
+            latest.generation !== task.generation ||
+            !sameRevision(latest.revision, revision)
+          )
+            return;
+          const action = engine.prAction(latest, current, { nativeReview });
+          switch (action.kind) {
+            case 'repair':
+              await engine.applyRepair(latest, current, action);
+              return;
+            case 'read-native-review':
+            case 'refresh':
+            case 'merge':
+              return action.kind;
+            case 'confirm-merge':
+              return record(
+                'uncertain',
+                'Waiting for GitHub to confirm the previous merge request',
+              );
+            case 'wait':
+              return record('waiting', action.reason);
+            case 'target-changed':
+              return record('waiting', 'The PR is closed or its branches changed');
+            case 'wait-mergeability':
+              return record('waiting', 'GitHub is calculating mergeability');
+            default:
+              return record('waiting', 'Waiting for a completed review of this revision');
+          }
+        };
+        const first = await observe(pr);
+        if (first !== 'read-native-review') return first === 'refresh';
         if (!provider.prepareMerge)
           return record('waiting', 'Auto-merge is unavailable for this provider');
         const send = await provider.prepareMerge(ref);
-        const fresh = await provider.getPR(ref);
-        if (
-          fresh.state !== 'open' ||
-          fresh.cloneUrl !== pr.cloneUrl ||
-          fresh.branch !== pr.branch ||
-          fresh.targetBranch !== pr.targetBranch ||
-          fresh.draft !== false ||
-          fresh.mergeable !== true ||
-          fresh.checks !== 'passing' ||
-          !sameRevision(revision, fresh)
-        )
-          return record('waiting', 'PR or checks changed during the merge check');
+        const [fresh, review] = await Promise.all([
+          provider.getPR(ref),
+          provider.getReview(ref, task.review!),
+        ]);
+        const final = await observe(fresh, review);
+        if (final !== 'merge') return final === 'refresh';
         if (stopping() || !enabled(store, store.getTask(task.id))) return;
         const commit = await engine.broker.outbox.perform(
           task.id,

@@ -2,10 +2,10 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { pipeline, env } from '@huggingface/transformers';
+import { decodeVoiceWav } from './voice-wav.js';
 import { OggOpusDecoder } from 'ogg-opus-decoder';
 const [file, model, language] = process.argv.slice(2);
-try {
-  const bytes = readFileSync(file);
+async function decodeOpus(bytes: Buffer) {
   if (bytes.length > 10 * 1024 * 1024 || bytes.subarray(0, 4).toString() !== 'OggS')
     throw new Error('Unsupported voice recording');
   let header = bytes.indexOf('OpusHead');
@@ -51,6 +51,12 @@ try {
     audio.set(chunk, at);
     at += chunk.length;
   }
+  return audio;
+}
+try {
+  const bytes = readFileSync(file);
+  const audio =
+    bytes.toString('ascii', 0, 4) === 'RIFF' ? decodeVoiceWav(bytes) : await decodeOpus(bytes);
   env.allowRemoteModels = false;
   env.localModelPath = dirname(model) + '/';
   const transcribe = await pipeline('automatic-speech-recognition', basename(model), {

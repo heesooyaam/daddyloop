@@ -1,3 +1,4 @@
+import { AppError } from '../src/core/types.js';
 import { it, expect, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -173,6 +174,8 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
   vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined);
   vi.spyOn(provider, 'getPR').mockResolvedValue({
     ...(await provider.getPR({ ...task.ref, kind: undefined })),
+    branch: task.ticketRepository!.branch,
+    targetBranch: task.ticketRepository!.baseBranch,
     head: task.pendingAuthorHead,
   });
   const workflow = new TicketWorkflow(engine, ws, reader);
@@ -192,6 +195,78 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
   }
 });
 
+it('looks up an uncertain GitHub create on the retry queue without sending a second POST', async () => {
+  const store = new Store(':memory:'),
+    provider = new DemoProvider(store),
+    engine = new Engine(store, () => provider),
+    ws = new Workspaces('/tmp');
+  try {
+    const task = await engine.createTicket(ticketInput());
+    store.cancelJobs(task.id);
+    task.pendingAuthorHead = 'e'.repeat(40);
+    task.state = 'ready_for_review';
+    store.saveTask(task);
+    let visible = false,
+      creates = 0;
+    const reader = new TicketReader(
+      async (url, opts) => {
+        if (String(url).endsWith('/user')) return response({ id: 7 });
+        if (opts?.method === 'POST') {
+          creates++;
+          return new Response('unavailable', { status: 503 });
+        }
+        return response(
+          visible
+            ? [
+                {
+                  number: 20,
+                  html_url: 'https://github.com/test/repo/pull/20',
+                  user: { id: 7 },
+                  head: { ref: task.ticketRepository!.branch, repo: { full_name: task.ref.repo } },
+                  body: '<!-- daddyloop:ticket:' + task.id + ' -->',
+                },
+              ]
+            : [],
+        );
+      },
+      () => '',
+      () => 'token',
+    );
+    const native = await provider.getPR({ ...task.ref, kind: undefined });
+    vi.spyOn(provider, 'getPR').mockResolvedValue({
+      ...native,
+      head: task.pendingAuthorHead,
+      branch: task.ticketRepository!.branch,
+      targetBranch: task.ticketRepository!.baseBranch,
+    });
+    const push = vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined),
+      flow = new TicketWorkflow(engine, ws, reader);
+    await expect(flow.submit(task.id)).rejects.toMatchObject({ code: 'provider_503' });
+    const expire = () => {
+      const t = store.getTask(task.id);
+      expect(t.state).toBe('submitting');
+      t.prLink!.retryAt = 0;
+      store.saveTask(t);
+    };
+    // Model a restart after the pending outbox receipt was saved, before the task got
+    // the uncertain response. Recovery must discover the existing PR with no second POST.
+    const interrupted = store.getTask(task.id);
+    delete interrupted.prLink;
+    store.saveTask(interrupted);
+    engine.recoverInterruptedJobs();
+    expire();
+    await expect(flow.submit(task.id, undefined, true)).rejects.toMatchObject({
+      code: 'ambiguous_write',
+    });
+    visible = true;
+    expire();
+    expect((await flow.submit(task.id, undefined, true)).ref.number).toBe(20);
+    expect(creates).toBe(1);
+    expect(push).toHaveBeenCalledOnce();
+  } finally {
+    store.close();
+  }
+});
 it('runs ticket discussion, isolated implementation, PR creation and automatic review to completion', async () => {
   const { Worker } = await import('../src/runtime/worker.js');
   const { healthy } = await import('./planning-fixture.js');
@@ -222,6 +297,8 @@ it('runs ticket discussion, isolated implementation, PR creation and automatic r
     const native = await provider.getPR({ ...input.ref, kind: undefined });
     vi.spyOn(provider, 'getPR').mockImplementation(async () => ({
       ...native,
+      branch: task.ticketRepository!.branch,
+      targetBranch: task.ticketRepository!.baseBranch,
       head: store.getTask(task.id).pendingAuthorHead ?? base,
       base,
       start: base,
@@ -319,4 +396,62 @@ it('follows Tracker comment ID cursors and rejects repeated pages', async () => 
     () => '',
   );
   await expect(repeated.read('QUEUE-123')).rejects.toThrow('did not advance');
+});
+
+it('retries a confirmed PR link after a temporary CI read failure, without pushing or creating twice', async () => {
+  const store = new Store(':memory:'),
+    provider = new DemoProvider(store),
+    engine = new Engine(store, () => provider),
+    ws = new Workspaces('/tmp');
+  try {
+    const task = await engine.createTicket(ticketInput());
+    store.cancelJobs(task.id);
+    task.state = 'ready_for_review';
+    task.pendingAuthorHead = 'e'.repeat(40);
+    store.saveTask(task);
+    let creates = 0;
+    const reader = new TicketReader(
+      async (url, opts) => {
+        if (String(url).endsWith('/user')) return response({ id: 7 });
+        if (opts?.method === 'POST') {
+          creates++;
+          return response({ number: 19, html_url: 'https://github.com/test/repo/pull/19' });
+        }
+        throw Error('Unexpected request');
+      },
+      () => '',
+      () => 'token',
+    );
+    const push = vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined);
+    const ref = { ...task.ref, kind: undefined };
+    const native = await provider.getPR(ref);
+    const get = vi
+      .spyOn(provider, 'getPR')
+      .mockRejectedValueOnce(new AppError('provider_500', 'GET check-runs: HTTP 500', 502))
+      .mockResolvedValue({
+        ...native,
+        head: task.pendingAuthorHead,
+        branch: task.ticketRepository!.branch,
+        targetBranch: task.ticketRepository!.baseBranch,
+      });
+    const workflow = new TicketWorkflow(engine, ws, reader);
+    await expect(workflow.submit(task.id)).rejects.toMatchObject({ code: 'provider_500' });
+    const saved = store.getTask(task.id);
+    expect(saved).toMatchObject({
+      state: 'submitting',
+      prLink: { ref: { number: 19 }, head: task.pendingAuthorHead },
+    });
+    engine.recoverInterruptedJobs();
+    await workflow.submit(task.id, undefined, true);
+    expect(get).toHaveBeenCalledTimes(1);
+    saved.prLink!.retryAt = Date.now() - 1;
+    store.saveTask(saved);
+    await workflow.submit(task.id, undefined, true);
+    expect(store.getTask(task.id)).toMatchObject({ state: 'queued', ref: { number: 19 } });
+    expect(store.getTask(task.id).prLink).toBeUndefined();
+    expect(creates).toBe(1);
+    expect(push).toHaveBeenCalledOnce();
+  } finally {
+    store.close();
+  }
 });

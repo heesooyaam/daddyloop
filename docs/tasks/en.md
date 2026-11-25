@@ -12,9 +12,11 @@ daddy talk SESSION_ID "Also take https://github.com/acme/app/issues/43"
 
 New messages in an existing session go to the same daddy. He imports requirements, creates work items, assigns workers and checks the result. To make an independent session, use `/new` or ask him explicitly to create a new session. In a connected Telegram forum it gets a separate topic.
 
+An answer to a blocked author fix resumes that worker. The task retains the clarification for subsequent author turns and independent reviews.
+
 ## Queue a task and choose a worker
 
-Open **Queue task** on the website or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.
+Click **Queue a task** in the web task panel or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.
 
 A worker can file issues or investigate a failure and return a report. daddy checks the report before the task completes. You can read the reviewed report on the website or through `/task DADDY-ID`. Saved code changes go through the usual PR review.
 
@@ -36,7 +38,9 @@ Host memory/process limits can allow fewer concurrent turns than the pool size. 
 
 ## Review and control
 
-The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. Workers receive the published snapshot. Incomplete reviews, disputes and stale revisions cannot become successful handoffs. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
+The service opens GitHub pull requests and GitLab merge requests ready for review. It publishes completed native reviews and sends saved fixes automatically. On GitHub it also publishes recorded findings when a review stops early, after checking the commit, owner and native comments. Workers receive the published snapshot. An incomplete review cannot authorize completion or a merge. Tasks with a PR still require passing CI and human plan approval if configured. GitHub auto-merge is off by default.
+
+For an existing GitHub issue, use its URL as the task source. A standalone issue URL or a line such as “GitHub issue: https://github.com/owner/repo/issues/42” imports the issue in the selected repository. Other links in the requirements are references. A PR for an imported issue includes its closing reference, so merging into the default branch closes that issue.
 
 With GitHub auto-merge enabled, a reviewed task waits for merge confirmation and keeps its assigned worker. A conflict goes back to that worker with the task’s working copy and conversation. Turning auto-merge off restores completion after review and required checks.
 

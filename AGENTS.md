@@ -17,3 +17,5 @@ This project is a standalone Git repository. It is unrelated to the machine's Ar
 - Use worker terminology and lowercase daddy. Keep destructive actions explicit even when other copy is informal.
 
 - Write docs in plain language: overview first, then focused diagrams of important flows with short explanations below. Explain what travels along each arrow and why a rule is needed, using a concrete example before naming methods, locks or indexes. Architecture docs must retain interfaces, state transitions and enforced invariants, with links to their checks in code. Avoid repeated names, dense prose tables and exhaustive field lists.
+
+- For each new pull request in this repository, reuse the GitHub issue for the work. If none exists, open an issue describing the requested outcome first. Include `Closes #N` in the PR description so GitHub links the change and closes the issue on merge into the default branch.

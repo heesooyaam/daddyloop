@@ -2,6 +2,12 @@ import type { AgentProfile, Job, State, Task, WorkerSlot } from './types.js';
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const draftSyncPending =
+  'Waiting to confirm the GitHub draft or its target branch before restarting review.';
+
+export const draftInspectionRequired =
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.';
+
 const statusLabels: Record<State, string> = {
   discussing: 'Waiting for assignment',
   implementing: 'Implementing the task',
@@ -58,9 +64,32 @@ export function taskActivity(
   return [...new Set([...ordered, ...byId.values()])];
 }
 
+export function queueDetail(task: Task): string | undefined {
+  if (task.prLink && task.state === 'submitting' && !task.prLink.ref)
+    return 'Checking GitHub for the result of the previous PR creation';
+  if (task.prLink && task.state === 'submitting')
+    return 'The PR already exists. daddy will connect it automatically.';
+  if (task.state !== 'needs_input') return;
+  // Private reviewer reports are not group notifications. Show an explicit owner question or an operational error.
+  if (task.inputRequest?.generation === task.generation || task.resumeState !== 'reviewing')
+    return task.reason;
+}
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
+  if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
+    return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (task.state === 'submitting' && task.prLink?.ref && task.prLink.retryAt)
+    return `PR #${task.prLink.ref.number} · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
   if (task.state === 'needs_input') {
+    if (task.inputRequest?.generation === task.generation) return 'Waiting for your answer';
+    if (task.reason === draftSyncPending) return 'Checking the GitHub draft';
+    if (task.reason.startsWith('PR changed while a draft existed'))
+      return 'The PR changed during draft review';
+    if (
+      task.reason.includes('The worker copy contains earlier changes') ||
+      task.reason.includes('additional local changes')
+    )
+      return 'Earlier worker changes need reconciliation';
     if (
       task.reason.includes('Inspect the earlier draft review') ||
       task.reason.includes('Inspect the old review draft')
@@ -85,6 +114,8 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
     job.status === 'running'
   )
     return 'Reviewing the worker report';
+  if (assignedWorker && job?.role === 'author' && job.status === 'queued')
+    return 'Assigned worker is waiting to start';
   return taskStatus(task.state, job?.status === 'queued', job?.role);
 }
 

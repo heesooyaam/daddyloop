@@ -22,6 +22,22 @@ export function redact(value: unknown): string {
       '$1$2[REDACTED]',
     );
 }
+// Scrub protocol fields before the store serializes them. Replacing bytes in encoded
+// JSON can remove an escape next to a quote inside a perfectly valid command string.
+export function redactEvent(value: unknown): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map(redactEvent);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redact(key),
+        /^(authorization|private-token|access_token|api_key)$/i.test(key)
+          ? '[REDACTED]'
+          : redactEvent(item),
+      ]),
+    );
+  return value ?? null;
+}
 export function safeEqual(a: string, b: string) {
   const x = Buffer.from(a),
     y = Buffer.from(b);
@@ -47,14 +63,21 @@ export function credential(provider: ProviderName, host: string): string {
         'Arcadia credentials are limited to the configured Arcanum host',
         422,
       );
-    const path = join(homedir(), '.tokens/arcadia'),
-      token =
-        process.env.ARC_TOKEN ||
-        process.env.ARC_OAUTH_TOKEN ||
-        (existsSync(path) ? readFileSync(path, 'utf8').trim() : '');
-    if (!token)
-      throw new AppError('credentials_missing', 'Configure ARC_TOKEN or ~/.tokens/arcadia', 422);
-    return rememberSecret(token);
+    const files = [join(homedir(), '.tokens/arcadia'), join(homedir(), '.arc/token')],
+      token = [process.env.ARC_TOKEN, process.env.ARC_OAUTH_TOKEN]
+        .map((value) => value?.trim())
+        .find((value) => value);
+    if (token) return rememberSecret(token);
+    for (const path of files)
+      if (existsSync(path)) {
+        const value = readFileSync(path, 'utf8').trim();
+        if (value) return rememberSecret(value);
+      }
+    throw new AppError(
+      'credentials_missing',
+      'Configure ARC_TOKEN, ~/.tokens/arcadia, or the standard ~/.arc/token',
+      422,
+    );
   }
   const key = provider.toUpperCase();
   const customFile = process.env[`DADDYLOOP_${key}_TOKEN_FILE`];

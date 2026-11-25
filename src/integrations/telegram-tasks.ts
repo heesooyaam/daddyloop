@@ -12,6 +12,7 @@ import {
   activityStatus,
   outstandingActivity,
   profileText,
+  queueDetail,
   taskReference,
   type TaskActivity,
 } from '../core/task-activity.js';
@@ -90,9 +91,11 @@ export function queueButtons(groupId: string, locale: Locale, page = 0) {
 function queueStatus(item: TaskActivity) {
   const { task, job, assignedWorker, mergeStatus } = item;
   const label = activityStatus(item);
+  const detail = queueDetail(task);
   if (mergeStatus) {
     if (label.startsWith('Waiting for GitHub API quota until '))
       return { label: 'Waiting for GitHub quota', detail: label };
+    if (label.includes(' · retry at ')) return { label, detail };
     if (label === 'Draft PR: mark it ready for review on GitHub')
       return { label: 'Action needed', detail: label };
     if (label !== 'Checking GitHub auto-merge' && label !== 'Merged on GitHub')
@@ -100,13 +103,9 @@ function queueStatus(item: TaskActivity) {
     return { label };
   }
   if (task.state === 'needs_input') {
-    if (
-      label === 'Checking the GitHub draft' ||
-      task.reason ===
-        'Waiting to confirm the GitHub draft or its target branch before restarting review.'
-    )
-      return { label: 'Syncing the GitHub draft' };
-    return { label: 'Action needed', detail: label === 'Action needed' ? task.reason : label };
+    if (label === 'Checking the GitHub draft') return { label };
+    if (label === 'Waiting for your answer') return { label, detail };
+    return { label: 'Action needed', detail: label === 'Action needed' ? detail : label };
   }
   if (task.state === 'paused') return { label: 'Paused' };
   if (task.state === 'fixing' && task.fixingMergeConflict) {
@@ -118,7 +117,7 @@ function queueStatus(item: TaskActivity) {
   }
   if (assignedWorker !== undefined && job?.role === 'author' && job.status === 'queued')
     return { label: 'Waiting to start' };
-  return { label };
+  return { label, detail };
 }
 
 function elapsedMinutes(startedAt: string | undefined, now: number) {
