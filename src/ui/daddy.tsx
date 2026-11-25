@@ -98,6 +98,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
   const menuButton = useRef<HTMLButtonElement>(null);
   const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const sessionSettingsButton = useRef<HTMLButtonElement>(null);
+  const messageInput = useRef<HTMLTextAreaElement>(null);
   const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
     chatScroll = useRef<HTMLDivElement>(null);
@@ -344,9 +346,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               </button>
               <button
                 className="daddy-icon"
+                ref={sessionSettingsButton}
                 aria-label={t('Session settings')}
                 onClick={() => setModal('settings')}
-                disabled={!!board.group.deletion}
+                disabled={state.busy || !!board.group.deletion}
               >
                 <Settings2 size={19} />
               </button>
@@ -507,6 +510,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   }}
                 >
                   <textarea
+                    ref={messageInput}
                     aria-label={t('Message daddy')}
                     placeholder={t(
                       paused
@@ -533,6 +537,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       <button
                         type="button"
                         className="daddy-text-button"
+                        disabled={state.busy}
                         onClick={() => setModal('settings')}
                       >
                         <FolderGit2 size={15} />
@@ -772,6 +777,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           title={t('Session settings')}
           onClose={() => setModal(null)}
           closeDisabled={previewingRepository}
+          fallbackFocus={() => {
+            const input = messageInput.current;
+            return input && !input.disabled && input.getClientRects().length
+              ? input
+              : sessionSettingsButton.current;
+          }}
         >
           <SessionSettings
             key={board.group.id}

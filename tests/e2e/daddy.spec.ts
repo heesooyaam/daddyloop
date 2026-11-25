@@ -112,12 +112,44 @@ test('sets a one-message repository in session settings and sends the next messa
   await expect(settings).toHaveCount(0);
   await expect(override).toBeVisible();
 
+  const headerSettings = page.getByRole('button', { name: 'Session settings', exact: true });
+  const assertSettingsBlockedDuringSend = async (
+    send: () => Promise<void>,
+    hasOverride: boolean,
+  ) => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(
+      '**/api/daddy/sessions/*/chat',
+      async (route) => {
+        const response = await route.fetch();
+        await pending;
+        await route.fulfill({ response });
+      },
+      { times: 1 },
+    );
+    const request = page.waitForRequest('**/api/daddy/sessions/*/chat');
+    try {
+      await send();
+      await request;
+      await expect(headerSettings).toBeDisabled();
+      if (hasOverride) await expect(override).toBeDisabled();
+      await expect(settings).toHaveCount(0);
+    } finally {
+      release();
+    }
+  };
   const sent = page.waitForResponse(
     (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
   );
   const message = page.getByLabel('Message daddy');
   await message.fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await assertSettingsBlockedDuringSend(
+    () => page.getByRole('button', { name: 'Send message', exact: true }).click(),
+    true,
+  );
   const response = await sent;
   expect(response.status()).toBe(200);
   expect(response.request().postDataJSON()).toMatchObject({ repository: { path: alternate } });
@@ -136,7 +168,7 @@ test('sets a one-message repository in session settings and sends the next messa
     (response) => response.url().endsWith('/chat') && response.request().method() === 'POST',
   );
   await message.fill(`https://github.com/fixture/planning/issues/${Date.now() + 1}`);
-  await message.press('Enter');
+  await assertSettingsBlockedDuringSend(() => message.press('Enter'), false);
   const defaultResponse = await sentWithDefault;
   expect(defaultResponse.status()).toBe(200);
   expect(defaultResponse.request().postDataJSON()).not.toHaveProperty('repository');
@@ -146,6 +178,43 @@ test('sets a one-message repository in session settings and sends the next messa
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
   await expect(page.locator('.daddy-work-item')).toHaveCount(3);
+});
+test('restores focus when resetting the one-message repository removes the settings opener', async ({
+  page,
+}) => {
+  await login(page);
+  await create(page, 'Repository focus fixture', Date.now());
+  const headerSettings = page.getByRole('button', { name: 'Session settings', exact: true });
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  const override = page.getByRole('button', { name: 'Repository override for the next message' });
+  const message = page.getByLabel('Message daddy');
+  for (const paused of [false, true]) {
+    if (paused) {
+      await page.getByRole('button', { name: 'Pause', exact: true }).click();
+      await expect(message).toBeDisabled();
+    }
+    await headerSettings.click();
+    await settings.getByRole('button', { name: 'Change folder for the next message' }).click();
+    await settings
+      .getByLabel('Repository URL or server folder')
+      .fill(resolve('.daddyloop/e2e/fixture-repository-alternate'));
+    await settings.getByRole('button', { name: 'Apply settings' }).click();
+    await expect(settings.getByRole('button', { name: 'Use workspace defaults' })).toBeVisible();
+    await settings.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(headerSettings).toBeFocused();
+
+    await override.press('Enter');
+    await page.keyboard.press('Escape');
+    await expect(override).toBeFocused();
+
+    await override.press('Enter');
+    await settings.getByRole('button', { name: 'Use workspace defaults' }).click();
+    await expect(override).toHaveCount(0);
+    if (paused) await page.locator('.daddy-overlay').click({ position: { x: 2, y: 2 } });
+    else await page.keyboard.press('Escape');
+    await expect(settings).toHaveCount(0);
+    await expect(paused ? headerSettings : message).toBeFocused();
+  }
 });
 test('keeps separate conversation drafts when changing daddy sessions', async ({ page }) => {
   await login(page);
