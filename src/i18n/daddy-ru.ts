@@ -609,6 +609,9 @@ export const daddyRu: Record<string, string> = {
   'Review reached the run time limit': 'Ревью остановилось по таймауту',
   'Continuing the independent review on the verified PR head':
     'Независимое ревью продолжается на проверенном коммите PR',
+  'Checking the GitHub draft': 'Сверяет черновик с GitHub',
+  'Waiting to confirm the GitHub draft or its target branch before restarting review.':
+    'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
   'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
     'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
   'Checking GitHub auto-merge': 'Проверяется автослияние PR',

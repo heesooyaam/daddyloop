@@ -1,4 +1,4 @@
-import { draftInspectionRequired } from './task-activity.js';
+import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
 import { legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
@@ -483,25 +483,22 @@ export class Engine {
       draft.comments.length > 0 || draft.body !== `Review in progress.\n\n<!-- ${handle.marker} -->`
     );
   }
-  private async canCarryDraft(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
+  private async draftCarryProblem(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
     const handle = task.review!;
+    if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
+    this.broker.reconcileDraftEdits(task, draft);
+    if (this.store.pendingReviewWrites(task.id, handle.marker).length) return draftSyncPending;
+    if (!this.draftHasWork(handle, draft)) return;
+    if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (
-      (handle.authorId && draft.authorId !== handle.authorId) ||
-      this.store.db
-        .prepare("SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='pending'")
-        .get(task.id, handle.marker + ':*')
+      !sameRevision(handle.revision, pr) &&
+      !(await this.provider(prRef(task)).targetAdvanced?.(
+        prRef(task),
+        handle.revision.base,
+        pr.base,
+      ))
     )
-      return false;
-    return (
-      !this.draftHasWork(handle, draft) ||
-      (this.recordedDraft(task, draft) &&
-        (sameRevision(handle.revision, pr) ||
-          (await this.provider(prRef(task)).targetAdvanced?.(
-            prRef(task),
-            handle.revision.base,
-            pr.base,
-          )) === true))
-    );
+      return draftSyncPending;
   }
   async retryInterruptedStep(id: string) {
     return this.lock(id, async () => {
@@ -530,7 +527,8 @@ export class Engine {
         job.generation + 1 === task.generation &&
         (task.reason ===
           'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.' ||
-          task.reason === draftInspectionRequired) &&
+          task.reason === draftInspectionRequired ||
+          task.reason === draftSyncPending) &&
         !!task.review &&
         task.review.revision.head === task.revision?.head &&
         task.review.revision.base !== task.revision.base &&
@@ -538,7 +536,14 @@ export class Engine {
         previous.branch === task.pr?.branch &&
         previous.baseBranch === task.pr.targetBranch &&
         previous.cloneUrl === task.pr.cloneUrl;
-      const restarted = restartInterrupted(task, job);
+      const waitingForSync =
+        task.reason === draftSyncPending &&
+        job.kind === 'review' &&
+        job.status === 'failed' &&
+        (job.generation === task.generation ||
+          (job.error === interruptedByRestart && job.generation + 1 === task.generation));
+      const restarted =
+        restartInterrupted(task, job) || (waitingForSync && job.error === interruptedByRestart);
       if (
         !movedBase &&
         !restarted &&
@@ -565,7 +570,7 @@ export class Engine {
         job.kind !== 'review' ||
         !task.review ||
         task.pendingFix ||
-        (!movedBase && job.error !== task.reason)
+        (!movedBase && !waitingForSync && job.error !== task.reason)
       )
         return;
       const context =
@@ -609,12 +614,13 @@ export class Engine {
           );
         return;
       }
-      if (
-        (restarted || !sameRevision(task.review.revision, pr)) &&
-        !(await this.canCarryDraft(task, pr, draft))
-      ) {
-        if (!context) this.state(task, 'needs_input', draftInspectionRequired);
-        return;
+      if (restarted || waitingForSync || !sameRevision(task.review.revision, pr)) {
+        const problem = await this.draftCarryProblem(task, pr, draft);
+        if (problem) {
+          if ((!context || problem === draftSyncPending) && task.reason !== problem)
+            this.state(task, 'needs_input', problem);
+          return;
+        }
       }
       const currentGroup = this.store.getGroup(task.groupId);
       if (
@@ -911,7 +917,7 @@ export class Engine {
       const reusable =
         draft.status === 'draft' &&
         draft.revision.head === pr.head &&
-        (await this.canCarryDraft(task, pr, draft));
+        !(await this.draftCarryProblem(task, pr, draft));
       const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
       if (
         this.store.getTask(task.id).generation !== task.generation ||

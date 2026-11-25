@@ -182,6 +182,7 @@ export interface Location {
   startLine?: number;
 }
 export interface ReviewComment {
+  nodeId?: string;
   id: string;
   body: string;
   url: string;

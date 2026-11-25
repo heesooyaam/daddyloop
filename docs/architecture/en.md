@@ -241,6 +241,8 @@ If the target branch advances before or during a GitHub review, daddy can keep i
 
 A worker can continue fixing published findings on its pinned PR commit when GitHub confirms a fast-forward of the same target branch. Before pushing, daddy checks the source and target again. The new commit gets an independent review. A coordinator question about an already blocked task stays in the session history and other tasks can still wake the coordinator.
 
+GitHub draft comments are edited and removed by their node IDs in the pending review. After a lost response, the service compares the requested text with the current comment. A legacy REST edit refused with HTTP 404 can be retired when the comment still matches its confirmed receipt. A technical wait does not trigger an owner mention in Telegram.
+
 After a service restart, daddy checks an interrupted GitHub review against the native draft and its confirmed writes before scheduling another review. For an interrupted author fix it checks the published review, PR head, target and outstanding operations before returning the existing working copy to its worker.
 
 When a conflict repair starts in a dirty, unscoped GitHub worker checkout, the service preserves the entire checkout alongside a clean copy at the expected commit. The same worker can read its staged and untracked files while resolving the merge. The preserved files remain available after a retry.
