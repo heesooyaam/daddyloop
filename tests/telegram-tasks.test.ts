@@ -8,6 +8,8 @@ import { UpdateMonitor } from '../src/core/updates.js';
 import { setLocale } from '../src/core/preferences.js';
 import { registerDaddy } from '../src/server/daddy.js';
 import { taskReference } from '../src/core/task-activity.js';
+import { queueCard } from '../src/integrations/telegram-tasks.js';
+import type { Job, Task } from '../src/core/types.js';
 
 it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
   const f = daddyFixture();
@@ -77,7 +79,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(sent.filter(({ body }) => String(body.text).startsWith('Task queued'))).toHaveLength(1);
 
     await bot.handle(message('/queue'));
-    expect(lastText()).toContain(`${id}  Fix search\nWaiting for a worker · Worker 2`);
+    expect(lastText()).toContain(`Fix search\n${id} · Waiting for a worker · Requested worker 2`);
     await bot.handle(message(`/task ${id}`));
     expect(lastText()).toContain('Worker 2\ncodex · gpt-5.6-sol · medium');
     await bot.handle(message('/worker 1 gpt-6-astra max'));
@@ -134,7 +136,33 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect((await enqueue()).json()).toEqual(webTask);
     expect((await app.inject(session)).json().taskQueue).toEqual([task!.id, webTask.id]);
     await bot.handle(message('/queue'));
-    expect(lastText()).toContain(taskReference(webTask) + '  Task from web');
+    expect(lastText()).toContain('Task from web\n' + taskReference(webTask));
+
+    for (let i = 3; i <= 10; i++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: session + '/tasks',
+        payload: { requirements: `Queue task ${i}`, requestId: randomUUID() },
+      });
+      expect(response.statusCode).toBe(201);
+    }
+    await bot.handle(message('/queue'));
+    expect(lastText()).toContain('Task queue · 1/2');
+    expect(lastText()).not.toContain('Queue task 10');
+    await bot.handle(click(`dad:queue:${group.id}:1`));
+    expect(lastText()).toContain('Task queue · 2/2\n\nQueue task 10');
+    const lastCard = sent.filter(({ method }) => method === 'sendMessage').at(-1)?.body;
+    expect(lastCard?.reply_markup).toMatchObject({
+      inline_keyboard: [
+        [
+          {
+            callback_data: `dad:task:${f.store.tasks(group.id).find((task) => task.title === 'Queue task 10')!.id}`,
+          },
+        ],
+        [{ callback_data: `dad:queue:${group.id}:0` }],
+        [{ callback_data: `dad:open:${group.id}` }],
+      ],
+    });
 
     const configured = await app.inject({
       method: 'POST',
@@ -149,4 +177,36 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await bot.stop();
     await f.close();
   }
+});
+
+it('shows the current run time and keeps status details on their own line', () => {
+  const now = Date.parse('2026-11-25T12:04:30Z');
+  const task = {
+    id: '12345678-0000-0000-0000-000000000000',
+    title: 'Починить поиск',
+    state: 'fixing',
+    fixingMergeConflict: true,
+    workerRequest: { slot: 2 },
+  } as Task;
+  const job = { status: 'running', role: 'author', startedAt: '2026-11-25T12:00:00Z' } as Job;
+  const card = queueCard('ru', 'session', [{ task, job, assignedWorker: 2 }], 0, now);
+  expect(card.text).toBe(
+    'Очередь задач\n\nПочинить поиск\n' +
+      'DADDY-12345678 · Конфликт слияния · Воркер 2 · 4 мин с запуска\n' +
+      'Воркер разрешает конфликт слияния',
+  );
+  expect(
+    card.entities.map(({ type, offset, length }) => [
+      type,
+      card.text.slice(offset, offset + length),
+    ]),
+  ).toEqual([
+    ['bold', 'Очередь задач'],
+    ['bold', 'Починить поиск'],
+    ['code', 'DADDY-12345678'],
+    ['italic', 'Воркер разрешает конфликт слияния'],
+  ]);
+  const waiting = queueCard('en', 'session', [{ task, job: { ...job, status: 'queued' } }], 0, now);
+  expect(waiting.text).toContain('Merge conflict · Requested worker 2\n');
+  expect(waiting.text).not.toContain('elapsed');
 });

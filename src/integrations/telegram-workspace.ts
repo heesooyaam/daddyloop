@@ -459,7 +459,12 @@ export class TelegramWorkspace {
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
     });
   }
-  private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
+  private async showTasks(
+    groupId: string,
+    destination: Destination,
+    view: 'queue' | 'workers',
+    page = 0,
+  ) {
     const group = this.authorize(destination, groupId);
     const slots = workerSlots(this.store, group);
     const tasks = taskActivity(
@@ -477,7 +482,7 @@ export class TelegramWorkspace {
     await this.api.send(
       destination,
       view === 'queue'
-        ? queueCard(locale, groupId, tasks)
+        ? queueCard(locale, groupId, tasks, page)
         : workersCard(
             locale,
             groupId,
@@ -1044,9 +1049,14 @@ export class TelegramWorkspace {
       return true;
     }
     if (await this.repositoryCallback(data, destination)) return true;
-    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})$/);
+    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})(?::(\d{1,10}))?$/);
     if (queue) {
-      await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
+      await this.showTasks(
+        queue[2]!,
+        destination,
+        queue[1] as 'queue' | 'workers',
+        Number(queue[3] ?? 0),
+      );
       return true;
     }
     const sessionMerge = /^dad:sm:([a-f0-9-]{36}):(on|off)$/.exec(data);

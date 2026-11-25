@@ -504,6 +504,7 @@ export const daddyRu: Record<string, string> = {
   'Request finished': 'Запрос обработан',
   'No work in progress': 'Сейчас задач в работе нет',
   '{minutes} min elapsed': '{minutes} мин с запуска',
+  '<1 min elapsed': 'меньше минуты с запуска',
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
@@ -540,6 +541,7 @@ export const daddyRu: Record<string, string> = {
     'Для исправления конфликта нужен свободный воркер',
   'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
   'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'Merge conflict': 'Конфликт слияния',
   'The PR changed during conflict resolution. Inspect the preserved worker copy.':
     'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
   'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
@@ -598,11 +600,14 @@ export const daddyRu: Record<string, string> = {
   'GitHub refused the auto-merge check (HTTP {status})':
     'GitHub отклонил запрос автослияния (HTTP {status})',
   'Task queue': 'Очередь задач',
+  'Previous page': 'Предыдущая',
+  'Next page': 'Следующая',
   'No unfinished tasks.': 'Открытых задач нет.',
   'Task queued': 'Задача в очереди',
   'Waiting for review': 'Ждёт ревью',
   'Unfinished tasks · {count}': 'Открытые задачи · {count}',
   'Worker {number}': 'Воркер {number}',
+  'Requested worker {number}': 'Запрошен воркер {number}',
   Free: 'Свободен',
   'Next task · {profile}': 'Для следующей задачи · {profile}',
   'Worker {number} model saved · {profile}': 'Модель воркера {number} сохранена · {profile}',

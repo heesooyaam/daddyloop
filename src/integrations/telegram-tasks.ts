@@ -13,6 +13,7 @@ import {
   outstandingActivity,
   profileText,
   taskReference,
+  taskStatus,
   type TaskActivity,
 } from '../core/task-activity.js';
 import { translator, type Locale } from '../i18n/index.js';
@@ -84,25 +85,67 @@ export function queueButtons(groupId: string, locale: Locale) {
   ];
 }
 
-export function queueCard(locale: Locale, groupId: string, activity: TaskActivity[]): TelegramCard {
+export function queueCard(
+  locale: Locale,
+  groupId: string,
+  activity: TaskActivity[],
+  requestedPage = 0,
+  now = Date.now(),
+): TelegramCard {
   const t = translator(locale);
-  const text = new TelegramText().add(t('Task queue'), 'bold');
   const tasks = activity.filter(outstandingActivity);
+  const pageSize = 9;
+  const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
+  const page = Math.min(requestedPage, pageCount - 1);
+  const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
+  const text = new TelegramText().add(t('Task queue'), 'bold');
+  if (pageCount > 1) text.add(` · ${page + 1}/${pageCount}`);
   const buttons: NonNullable<TelegramCard['buttons']> = [];
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
-  for (const item of tasks) {
-    const { task } = item;
+  for (const item of visible) {
+    const { task, job, assignedWorker } = item;
+    const status = t(
+      task.state === 'fixing' && task.fixingMergeConflict
+        ? 'Merge conflict'
+        : taskStatus(task.state, job?.status === 'queued', job?.role),
+    );
+    const metadata = [status];
+    if (assignedWorker !== undefined)
+      metadata.push(t('Worker {number}', { number: assignedWorker }));
+    else if (task.workerRequest?.slot !== undefined)
+      metadata.push(t('Requested worker {number}', { number: task.workerRequest.slot }));
+    else if (job?.status === 'running' && job.role === 'reviewer')
+      metadata.push(t('Shared reviewer'));
+    if (job?.status === 'running' && job.startedAt) {
+      const minutes = Math.floor((now - Date.parse(job.startedAt)) / 60_000);
+      if (Number.isFinite(minutes))
+        metadata.push(minutes > 0 ? t('{minutes} min elapsed', { minutes }) : t('<1 min elapsed'));
+    }
     text
       .add('\n\n')
+      .add(clipTitle(task.title.replace(/\s+/g, ' ').trim(), 90), 'bold')
+      .add('\n')
       .add(taskReference(task), 'code')
-      .add('  ' + clipTitle(task.title, 90))
-      .add('\n' + t(activityStatus(item)));
-    const number = item.assignedWorker ?? task.workerRequest?.slot;
-    if (number) text.add(' · ' + t('Worker {number}', { number }));
-    if (task.workerRequest?.profile) text.add(' · ' + profileText(task.workerRequest.profile));
+      .add(' · ' + metadata.join(' · '));
+    const activityLabel = t(activityStatus(item));
+    const detail =
+      activityLabel !== status
+        ? activityLabel
+        : task.state === 'needs_input'
+          ? t(redact(task.reason))
+          : '';
+    const line = detail.replace(/\s+/g, ' ').trim();
+    if (line && line !== status)
+      text.add('\n').add(line.length > 140 ? clipTitle(line, 139) + '…' : line, 'italic');
   }
-  for (let start = 0; start < Math.min(tasks.length, 9); start += 3)
-    buttons.push(tasks.slice(start, start + 3).map(({ task }) => taskButton(task)));
+  for (let start = 0; start < visible.length; start += 3)
+    buttons.push(visible.slice(start, start + 3).map(({ task }) => taskButton(task)));
+  const pages = [];
+  if (page > 0)
+    pages.push({ text: t('Previous page'), callback_data: `dad:queue:${groupId}:${page - 1}` });
+  if (page + 1 < pageCount)
+    pages.push({ text: t('Next page'), callback_data: `dad:queue:${groupId}:${page + 1}` });
+  if (pages.length) buttons.push(pages);
   buttons.push([{ text: t('Back'), callback_data: `dad:open:${groupId}` }]);
   return { ...text, buttons };
 }
