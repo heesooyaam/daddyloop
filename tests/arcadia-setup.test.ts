@@ -136,45 +136,57 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
   }
 });
 
-it('uses an uncommitted helper candidate for the setup probe', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
-  const candidate = join(directory, 'candidate-helper');
-  const status = JSON.stringify({
-    status: 'success',
-    data: { mounts: [{ path: '/new-pool', claimable: true, object_store_ok: true }] },
-  });
-  const config = JSON.stringify({
-    status: 'success',
-    data: {
-      object_store: join(directory, 'shared'),
-      lease_root: join(directory, 'leases'),
-      store_root: join(directory, 'stores'),
-      mount_prefix: join(directory, 'arcadia'),
-      mount_start: 1,
-      mount_end: 2,
-      extra_mounts: '',
-      human_reserved_mount_numbers: '1',
-    },
-  });
-  writeFileSync(
-    candidate,
-    `#!/usr/bin/env bash
-if [[ " $* " == *" config "* ]]; then
+it.each(['non-executable Bash script', 'executable Node script'])(
+  'validates the inventory and journals with a %s',
+  async (helperType) => {
+    const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+    const candidate = join(directory, 'candidate helper');
+    const status = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/new-pool', claimable: true, object_store_ok: true }] },
+    });
+    const config = JSON.stringify({
+      status: 'success',
+      data: {
+        object_store: join(directory, 'shared'),
+        lease_root: join(directory, 'leases'),
+        store_root: join(directory, 'stores'),
+        mount_prefix: join(directory, 'arcadia'),
+        mount_start: 1,
+        mount_end: 2,
+        extra_mounts: '',
+        human_reserved_mount_numbers: '1',
+      },
+    });
+    try {
+      const executable = helperType === 'executable Node script';
+      const script = executable
+        ? `#!/usr/bin/env node
+if (process.argv[2] !== '--json') process.exit(7);
+if (process.argv[3] === 'config') console.log(${JSON.stringify(config)});
+else if (process.argv[3] === 'status') console.log(${JSON.stringify(status)});
+else process.exit(7);
+`
+        : `#!/usr/bin/env bash
+if [[ "$1" != --json ]]; then
+  exit 7
+elif [[ "$2" == config ]]; then
   printf '%s\n' '${config}'
-else
+elif [[ "$2" == status ]]; then
   printf '%s\n' '${status}'
+else
+  exit 7
 fi
-`,
-    { mode: 0o600 },
-  );
-  try {
-    const bridge = new ArcBridge(directory, candidate);
-    await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/new-pool' }]);
-    await expect(bridge.withValidatedJournals(async () => undefined)).resolves.toBeUndefined();
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+`;
+      writeFileSync(candidate, script, { mode: executable ? 0o700 : 0o600 });
+      const bridge = new ArcBridge(directory, candidate);
+      await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/new-pool' }]);
+      await expect(bridge.withValidatedJournals(async () => undefined)).resolves.toBeUndefined();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 it('validates helper config before the first session journal exists', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-config-'));
