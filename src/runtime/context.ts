@@ -21,6 +21,7 @@ export function buildContext(store: Store, task: Task, job: Job): string {
       title: task.title,
       kind: task.kind,
       requirements: task.requirements,
+      telegramReplyContext: task.replyTo,
       pr: task.ref.url,
       referenceKind: ticket ? 'ticket' : 'pull_request',
       revision: task.revision,
