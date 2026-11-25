@@ -237,6 +237,135 @@ describe('opt-in GitHub merging', () => {
     },
   );
 
+  it.each([
+    { conflict: false, legacy: false },
+    { conflict: true, legacy: false },
+    { conflict: true, legacy: true },
+  ])(
+    'publishes incomplete findings and dispatches the assigned author: %j',
+    async ({ conflict, legacy }) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const task = f.store.getTask(f.task.id);
+        const handle = { ...task.review!, authorId: 'owner' };
+        f.store.saveTask({ ...task, review: handle });
+        saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
+        f.store.setSetting('demo-review:' + handle.id, {
+          ...(await f.provider.getReview(prRef(task), handle)),
+          authorId: 'owner',
+        });
+        const job = f.store.claim()!;
+        await f.engine.broker.call(job, 'add_comment', {
+          key: 'R1',
+          body: 'Fix the visible defect',
+        });
+        await f.engine.broker.call(job, 'set_summary', {
+          body: 'Verified one defect. Full validation remains open.',
+        });
+        const result = {
+          status: 'incomplete' as const,
+          summary: 'A required check is blocked.',
+          checkedHead: task.revision!.head,
+          question: conflict ? '' : 'Which API decision was approved?',
+        };
+        if (conflict) {
+          f.setRemote({
+            mergeable: false,
+            mergeConflict: true,
+            base: 'd'.repeat(40),
+            start: 'd'.repeat(40),
+          });
+          Object.assign(f.provider, { targetAdvanced: async () => true });
+        }
+        if (legacy) {
+          f.store.event(
+            task.id,
+            'runtime.item',
+            { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify(result) },
+            job.id,
+          );
+          f.store.saveTask({
+            ...f.store.getTask(task.id),
+            state: 'needs_input',
+            resumeState: 'reviewing',
+            reason: result.summary,
+          });
+        } else await f.engine.completeJob(job, result);
+        f.store.saveJob({ ...job, status: 'completed' });
+        if (legacy) {
+          await f.engine.retryInterruptedStep(task.id);
+          await f.engine.retryInterruptedStep(task.id);
+        }
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'awaiting_publication',
+          reviewFinished: false,
+        });
+
+        // A restart after the native write must adopt the same published review.
+        if (legacy) await f.provider.publish(prRef(task), handle);
+        await f.engine.publish(task.id);
+        expect((await f.provider.getReview(prRef(task), handle)).status).toBe('published');
+        expect(
+          f.store
+            .events(task.id)
+            .filter(
+              (e) =>
+                e.type === 'operation.completed' &&
+                (e.data as { operationId?: string }).operationId === handle.marker + ':publish',
+            ),
+        ).toHaveLength(legacy ? 0 : 1);
+        const next = f.store.getTask(task.id);
+        expect(next).toMatchObject({
+          state: 'fixing',
+          reviewFinished: false,
+          feedback: {
+            status: 'published',
+            comments: [{ body: expect.stringContaining('Fix the visible defect') }],
+          },
+        });
+        expect(!!next.fixingMergeConflict).toBe(conflict);
+        if (!conflict) expect(f.engine.coordinationBlocker(next)?.question).toBe(result.question);
+        expect(f.store.activeJobs(task.id)).toMatchObject([{ role: 'author', kind: 'fix' }]);
+        expect(workerSlots(f.store, f.store.getGroup(f.group.id))[0].taskId).toBe(task.id);
+        await f.poll();
+        expect(f.send).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it('keeps external edits private when the partial findings change before publication', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const t = f.store.getTask(f.task.id),
+        handle = { ...t.review!, authorId: 'owner' };
+      f.store.saveTask({ ...t, review: handle });
+      f.store.setSetting('demo-review:' + handle.id, {
+        ...(await f.provider.getReview(prRef(t), handle)),
+        authorId: 'owner',
+      });
+      const job = f.store.claim()!;
+      await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Service finding' });
+      await f.engine.broker.call(job, 'set_summary', { body: 'Service summary' });
+      await f.engine.completeJob(job, {
+        status: 'incomplete',
+        checkedHead: t.revision!.head,
+        summary: 'Blocked',
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      await f.provider.updateSummary(prRef(t), handle, 'Private human note');
+      await expect(f.engine.publish(t.id)).rejects.toMatchObject({ code: 'draft_changed' });
+      expect((await f.provider.getReview(prRef(t), handle)).status).toBe('draft');
+      expect(f.store.activeJobs(t.id)).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
     const f = await setup();
     try {

@@ -8,6 +8,7 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
 import { Outbox } from './outbox.js';
@@ -311,16 +312,24 @@ export class Broker {
     );
     return { summaryUpdated: true };
   }
-  async publish(task: Task): Promise<ReviewSnapshot> {
+  async publish(
+    task: Task,
+    verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
+  ): Promise<ReviewSnapshot> {
     const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
     const pr = await provider.getPR(prRef(task));
-    if (pr.state !== 'open' || !sameRevision(pr, task.review.revision))
+    if (
+      pr.state !== 'open' ||
+      pr.head !== task.review.revision.head ||
+      (!verifyFindings && !sameRevision(pr, task.review.revision))
+    )
       throw new AppError(
         'stale_revision',
         'PR revision changed. This review cannot release feedback for the new revision.',
       );
     const snapshot = await provider.getReview(prRef(task), task.review);
+    if (verifyFindings) await verifyFindings(pr, snapshot);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
     await this.outbox.perform(
