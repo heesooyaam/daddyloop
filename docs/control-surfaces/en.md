@@ -22,6 +22,8 @@ This page records current coverage. A check means that the capability is availab
 
 Telegram action buttons contain only a short-lived reference to service state. The saved reference binds the paired owner, chat, topic, session, task, revision and generation. The confirmation calls the same service method as the website. The coordinator’s ordinary reply never grants permission.
 
+Task and preset lists have in-chat page controls. Task cards render every reported CI check; safe private links stay attached to their corresponding check. These lists do not require a known item name, website or laptop to reach the final entry.
+
 ## Configuration and service controls
 
 | Capability                                       | Web                        | Telegram             | Remaining gap                                                   |

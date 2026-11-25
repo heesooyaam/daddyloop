@@ -278,7 +278,7 @@ export class Daddy {
     groupId: string,
     taskId: string,
     action: HumanTaskAction,
-    expected: { head: string; generation: number },
+    expected: { head: string; generation: number; pendingHead?: string },
     reason = '',
   ) {
     if (reason.length > 2000)
@@ -290,7 +290,10 @@ export class Daddy {
     const task = this.task(groupId, taskId);
     const version = { ...expected, groupId };
     if (action === 'publish') return this.engine.publish(task.id, version);
-    if (action === 'submit') return this.tickets.submit(task.id, version);
+    if (action === 'submit')
+      return task.ref.kind === 'ticket'
+        ? this.tickets.submit(task.id, version)
+        : this.tickets.pushFixes(task.id, version);
     return this.engine.action(task.id, action, reason, version);
   }
   async createTask(

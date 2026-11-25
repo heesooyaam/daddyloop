@@ -296,12 +296,12 @@ export class Worker {
             !!task.groupId &&
             store.getGroup(task.groupId).defaultPolicy?.autoPush === false &&
             task.policy.autoPush === false;
+          const readyTicket = isTicket(task) && task.state === 'ready_for_review';
+          const savedFix =
+            poll && !isTicket(task) && task.state === 'awaiting_push' && !!task.pendingAuthorHead;
           if (
-            ((isTicket(task) && task.state === 'ready_for_review' && !manualPush) ||
-              (poll &&
-                !isTicket(task) &&
-                task.state === 'awaiting_push' &&
-                task.pendingAuthorHead)) &&
+            (readyTicket || savedFix) &&
+            !manualPush &&
             !store.busy(task.id) &&
             !githubWait(store, task.ref) &&
             !this.submitting.has(task.id)

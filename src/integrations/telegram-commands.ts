@@ -69,7 +69,7 @@ const commands: Command[] = [
   },
   {
     name: 'waive',
-    args: 'reason',
+    args: '[DADDY-ID --] reason',
     en: 'Prepare a CI waiver',
     ru: 'Подготовить пропуск CI с причиной',
   },

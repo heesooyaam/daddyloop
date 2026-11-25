@@ -1,4 +1,4 @@
-import { sameAgentProfile } from '../core/types.js';
+import { canSubmitTask, sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { KeyboardEvent } from 'react';
@@ -945,7 +945,10 @@ function ModulesPanel({ api }: { api: DaddyApi }) {
           <span aria-hidden>{module.enabled ? '✅' : '○'}</span>
           <span>
             <strong>{module.name}</strong>
-            <small>{t(module.kind === 'agent' ? 'Agent' : 'Repository')}</small>
+            <small>
+              {t(module.kind === 'agent' ? 'Agent' : 'Repository')} ·{' '}
+              {t(module.enabled ? 'Enabled' : 'Disabled')}
+            </small>
           </span>
         </div>
       ))}
@@ -1570,6 +1573,7 @@ function TaskReport({
         action,
         expectedHead: value.task.revision?.head ?? '',
         expectedGeneration: value.task.generation,
+        expectedPendingHead: value.task.pendingAuthorHead,
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
       });
       await onChange();
@@ -1618,6 +1622,12 @@ function TaskReport({
               </div>
             )}
           </dl>
+          {value.task.pendingAuthorHead &&
+            value.task.pendingAuthorHead !== value.task.revision?.head && (
+              <p className="daddy-muted">
+                {t('Saved commit')}: <code>{value.task.pendingAuthorHead}</code>
+              </p>
+            )}
           {!!value.task.pr?.checkDetails.length && (
             <ul className="daddy-check-list">
               {value.task.pr.checkDetails.map((check) => (
@@ -1705,7 +1715,7 @@ function TaskReport({
                 {t('Publish review')}
               </button>
             )}
-          {value.task.state === 'ready_for_review' && value.task.policy.autoPush === false && (
+          {canSubmitTask(value.task) && value.task.policy.autoPush === false && (
             <button
               disabled={busy}
               className="daddy-button primary"

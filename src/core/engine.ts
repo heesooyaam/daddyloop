@@ -1208,9 +1208,14 @@ export class Engine {
     );
   }
 
-  async submitSavedFix(id: string, push: (task: Task, head: string) => Promise<void>) {
+  async submitSavedFix(
+    id: string,
+    push: (task: Task, head: string) => Promise<void>,
+    expected?: ExpectedTask,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      assertTaskVersion(task, expected);
       const head = task.pendingAuthorHead;
       if (
         task.state !== 'awaiting_push' ||

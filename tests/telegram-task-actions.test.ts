@@ -263,6 +263,217 @@ it('rejects an old selected session and confirmation after the topic is attached
   }
 });
 
+it('holds and explicitly submits a saved PR fix exactly once in manual mode', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, autoPush: false });
+  const task = await f.engine.create({
+    ref: {
+      provider: 'demo',
+      host: 'demo.local',
+      repo: 'test/repo',
+      number: 72,
+      url: 'https://demo.local/pull/72',
+    },
+    repoPath: f.dir,
+    requirements: 'Submit the saved fix manually',
+    groupId: group.id,
+    groupGeneration: group.generation,
+  });
+  const saved = 'f'.repeat(40);
+  task.state = 'awaiting_push';
+  task.pendingAuthorHead = saved;
+  f.store.saveTask(task);
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const push = vi.spyOn(f.tickets, 'pushFixes').mockImplementation(async (id, expected) => {
+    const current = f.store.getTask(id);
+    assertTaskVersion(current, expected);
+    current.revision = { ...current.revision!, head: saved };
+    f.store.saveTask(current);
+    return current;
+  });
+  let id = 780;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    const prepare = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Submit for review').callback_data;
+    await bot.handle(click(prepare));
+    const confirm = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    expect(telegram.sent.at(-1)!.card.text).toContain(saved);
+    await bot.handle(click(confirm));
+    await bot.handle(click(confirm));
+    expect(push).toHaveBeenCalledOnce();
+    expect(push).toHaveBeenCalledWith(task.id, expect.objectContaining({ pendingHead: saved }));
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('uses one selected task across task cards and accepts displayed DADDY IDs', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, autoPush: false });
+  const create = (title: string) =>
+    f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title,
+      requirements: title,
+      createdByAction: title,
+    });
+  const first = await create('Task A'),
+    second = await create('Task B');
+  first.state = 'ready_for_review';
+  first.pendingAuthorHead = first.revision!.head = 'b'.repeat(40);
+  second.state = 'ready_for_review';
+  second.pendingAuthorHead = second.revision!.head = 'c'.repeat(40);
+  f.store.saveTask(first);
+  f.store.saveTask(second);
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 860;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/tasks'));
+    const firstButton = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text.includes('Task A')).callback_data;
+    await bot.handle(click(firstButton));
+    await bot.handle(message(`/task ${second.source!.key}`));
+    await bot.handle(message('/submit'));
+    expect(telegram.sent.at(-1)!.card.text).toContain('c'.repeat(40));
+
+    await bot.handle(message(`/submit ${second.source!.key}`));
+    expect(telegram.sent.at(-1)!.card.text).toContain('c'.repeat(40));
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it.each([
+  ['ready_for_review', 'en'],
+  ['needs_input', 'ru'],
+  ['submitting', 'en'],
+] as const)('offers submit for a saved ticket in %s (%s)', async (state, locale) => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => locale);
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, autoPush: false });
+  const task = await f.tickets.local({
+    workspace: f.workspace,
+    groupId: group.id,
+    groupGeneration: group.generation,
+    title: `Retry ${state}`,
+    requirements: 'Retry the same saved commit',
+    createdByAction: state,
+  });
+  task.state = state;
+  task.pendingAuthorHead = 'd'.repeat(40);
+  f.store.saveTask(task);
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  try {
+    await bot.handle({
+      update_id: 910,
+      message: {
+        message_id: 911,
+        text: '/tasks',
+        from: { id: 7 },
+        chat: { id: 7, type: 'private' },
+      },
+    });
+    const open = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle({
+      update_id: 912,
+      callback_query: {
+        id: 'open-retry',
+        data: open,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+    expect(telegram.sent.at(-1)!.card.buttons.flat()).toContainEqual(
+      expect.objectContaining({
+        text: locale === 'ru' ? 'Отправить на ревью' : 'Submit for review',
+      }),
+    );
+
+    task.pendingAuthorHead = undefined;
+    f.store.saveTask(task);
+    await bot.handle({
+      update_id: 913,
+      message: {
+        message_id: 914,
+        text: '/tasks',
+        from: { id: 7 },
+        chat: { id: 7, type: 'private' },
+      },
+    });
+    await bot.handle({
+      update_id: 915,
+      callback_query: {
+        id: 'open-without-saved-head',
+        data: telegram.sent.at(-1)!.card.buttons[0][0].callback_data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+    expect(telegram.sent.at(-1)!.card.buttons.flat()).not.toContainEqual(
+      expect.objectContaining({
+        text: locale === 'ru' ? 'Отправить на ревью' : 'Submit for review',
+      }),
+    );
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['awaiting_plan_approval', 'plan', '/approve', 'approve-plan', undefined],
   ['awaiting_publication', 'code', '/publish', 'publish', undefined],
@@ -318,6 +529,12 @@ it.each([
       await bot.handle(message('/tasks'));
       const open = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
       await bot.handle(click(open));
+      const explicit =
+        expectedAction === 'waive-checks'
+          ? `/waive ${task.source!.key} -- Offline integration checks passed`
+          : `${command} ${task.source!.key}`;
+      await bot.handle(message(explicit));
+      expect(telegram.sent.at(-1)!.card.text).toContain(task.revision!.head);
       await bot.handle(message(command));
       const confirm = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
       await bot.handle(click(confirm));

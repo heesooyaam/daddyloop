@@ -387,6 +387,7 @@ export interface ExpectedTask {
   head: string;
   generation: number;
   groupId?: string;
+  pendingHead?: string;
 }
 export type HumanTaskAction =
   'approve-plan' | 'waive-checks' | 'verify-merge' | 'publish' | 'submit';
@@ -395,11 +396,19 @@ export function assertTaskVersion(task: Task, expected?: ExpectedTask) {
     expected &&
     (task.revision?.head !== expected.head ||
       task.generation !== expected.generation ||
+      (expected.pendingHead !== undefined && task.pendingAuthorHead !== expected.pendingHead) ||
       (expected.groupId !== undefined && task.groupId !== expected.groupId))
   )
     throw new AppError('stale_task', 'The task changed. Refresh it before confirming this action.');
 }
 export const isTicket = (task: Task) => task.ref.kind === 'ticket';
+export const canSubmitTask = (task: Task) =>
+  !!task.pendingAuthorHead &&
+  (task.ref.kind === 'ticket'
+    ? ['ready_for_review', 'needs_input', 'submitting'].includes(task.state)
+    : task.state === 'awaiting_push' &&
+      !!task.revision &&
+      task.pendingAuthorHead !== task.revision.head);
 export function prRef(task: Task): PRRef {
   if (task.ref.kind === 'ticket')
     throw new AppError('pr_required', 'Submit or attach a PR before starting native review');

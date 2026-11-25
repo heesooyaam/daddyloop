@@ -195,6 +195,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         action: z.enum(['approve-plan', 'waive-checks', 'verify-merge', 'publish', 'submit']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
+        expectedPendingHead: z.string().max(128).optional(),
         reason: z.string().trim().max(2000).optional(),
       })
       .strict()
@@ -203,7 +204,11 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       id.parse(request.params.id),
       input.taskId,
       input.action,
-      { head: input.expectedHead, generation: input.expectedGeneration },
+      {
+        head: input.expectedHead,
+        generation: input.expectedGeneration,
+        ...(input.expectedPendingHead ? { pendingHead: input.expectedPendingHead } : {}),
+      },
       input.reason,
     );
   });

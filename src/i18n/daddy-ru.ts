@@ -1,6 +1,7 @@
 export const daddyRu: Record<string, string> = {
   Presets: 'Пресеты',
   'Preset library': 'Библиотека пресетов',
+  'No presets yet.': 'Пресетов пока нет.',
   'Session presets': 'Пресеты сессии',
   'Refresh list': 'Обновить список',
   'Combine presets and choose their individual parts. Your own instructions below are applied last.':
@@ -724,6 +725,7 @@ export const daddyRu: Record<string, string> = {
   'This exception applies only to the exact revision and generation shown above.':
     'Исключение действует только для указанной выше ревизии и поколения.',
   'Allow without passing CI': 'Разрешить без успешного CI',
+  'Page {page} of {pages}': 'Страница {page} из {pages}',
   'Instruction files are accepted only in the paired private chat.':
     'Файлы инструкций принимаются только в привязанной личке с ботом.',
   'In the private chat send /session {id}, then repeat the command for {title}.':
@@ -736,6 +738,8 @@ export const daddyRu: Record<string, string> = {
     'Перед отправкой файла запусти импорт инструкций или навыка.',
   'The session changed. Start the file import again.':
     'Сессия изменилась. Запусти импорт файла заново.',
+  'The selected session changed. Start the file import again.':
+    'Выбранная сессия изменилась. Запусти импорт файла заново.',
   'Choose a JSON instruction set up to 1 MiB.': 'Выбери набор инструкций JSON размером до 1 МиБ.',
   'Choose a Markdown or text skill file up to 64 KiB.':
     'Выбери файл навыка Markdown или text размером до 64 КиБ.',
@@ -743,6 +747,8 @@ export const daddyRu: Record<string, string> = {
   'Choose a UTF-8 Markdown or text file.': 'Выбери файл Markdown или text в UTF-8.',
   'Instruction set imported.': 'Набор инструкций импортирован.',
   'Skill imported.': 'Навык импортирован.',
+  'Instruction set imported for {title}.': 'Набор инструкций импортирован для «{title}».',
+  'Skill imported for {title}.': 'Навык импортирован для «{title}».',
   'File import cancelled.': 'Импорт файла отменён.',
   'Instruction exports are available only in the paired private chat.':
     'Экспорт инструкций доступен только в привязанной личке с ботом.',
@@ -901,6 +907,9 @@ export const daddyRu: Record<string, string> = {
   'Engine configuration': 'Настройки движка',
   Repositories: 'Репозитории',
   Agent: 'Агент',
+  Modules: 'Модули',
+  Enabled: 'Включён',
+  Disabled: 'Выключен',
   'Choose your modules': 'Выбирай модули',
   '↑/↓ move · Space toggle · Enter install · Esc cancel':
     '↑/↓ выбор · Пробел — галочка · Enter — установка · Esc — отмена',

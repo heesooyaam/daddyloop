@@ -339,13 +339,111 @@ test('shows quota remaining on a phone and requires confirmation before spending
 });
 test('shows the same enabled module summary available from Telegram', async ({ page }) => {
   await login(page);
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/modules', async (route) => {
+    await wait;
+    const response = await route.fetch();
+    const modules = await response.json();
+    modules[0].enabled = true;
+    modules[1].enabled = false;
+    await route.fulfill({ response, json: modules });
+  });
   await page.getByRole('button', { name: 'Modules', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: 'Modules on this server' })).toBeVisible();
-  await expect(dialog.getByText('Codex', { exact: true })).toBeVisible();
-  await expect(dialog.getByText('GitHub', { exact: true })).toBeVisible();
-  await expect(dialog.getByText('Agent', { exact: true }).first()).toBeVisible();
-  await expect(dialog.getByText('Repository', { exact: true }).first()).toBeVisible();
+  await expect(dialog.getByText(/Enabled|Disabled/)).toHaveCount(0);
+  release();
+  await expect(dialog.locator('.daddy-module-item').nth(0)).toContainText('Agent · Enabled');
+  await expect(dialog.locator('.daddy-module-item').nth(1)).toContainText('Agent · Disabled');
+  await dialog.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByLabel('Language', { exact: true }).selectOption('ru');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Сессии', exact: true }).click();
+  await page.getByRole('button', { name: 'Модули', exact: true }).click();
+  await expect(dialog.locator('.daddy-module-item').nth(0)).toContainText('Агент · Включён');
+  await expect(dialog.locator('.daddy-module-item').nth(1)).toContainText('Агент · Выключен');
+  await dialog.getByRole('button', { name: 'Закрыть' }).click();
+
+  await page.unroute('**/api/modules');
+  await page.route('**/api/modules', (route) => route.abort());
+  await page.getByRole('button', { name: 'Модули', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.getByText(/Включён|Выключен/)).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Закрыть' }).click();
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.getByLabel('Язык', { exact: true }).selectOption('en');
+});
+
+test('offers retry submit only for a saved ticket across locales and layouts', async ({ page }) => {
+  await login(page);
+  await create(page, 'Retry submission states', Date.now());
+  const taskId = await page.evaluate(async () => {
+    const sessionId = location.hash.slice('#session/'.length);
+    const board = await fetch(`/api/daddy/sessions/${sessionId}`).then((response) =>
+      response.json(),
+    );
+    return board.tasks[0].id as string;
+  });
+  let state = 'ready_for_review';
+  let pending = true;
+  let pullRequest = false;
+  await page.route(`**/api/tasks/${taskId}`, async (route) => {
+    const response = await route.fetch();
+    const detail = await response.json();
+    detail.task.state = state;
+    detail.task.reason = `Fixture ${state}`;
+    detail.task.policy = { ...detail.task.policy, autoPush: false };
+    detail.task.pendingAuthorHead = pending ? 'd'.repeat(40) : undefined;
+    if (pullRequest)
+      detail.task.ref = {
+        kind: 'pull_request',
+        provider: 'github',
+        host: 'github.com',
+        repo: 'fixture/planning',
+        number: 77,
+        url: 'https://github.com/fixture/planning/pull/77',
+      };
+    await route.fulfill({ response, json: detail });
+  });
+  const cases = [
+    ['en', 1366, 'ready_for_review', true, false],
+    ['en', 390, 'needs_input', true, false],
+    ['en', 1366, 'submitting', true, false],
+    ['en', 390, 'awaiting_push', true, true],
+    ['ru', 390, 'ready_for_review', true, false],
+    ['ru', 1366, 'needs_input', true, false],
+    ['ru', 390, 'submitting', true, false],
+    ['ru', 1366, 'awaiting_push', true, true],
+    ['en', 1366, 'needs_input', false, false],
+    ['ru', 390, 'needs_input', false, false],
+  ] as const;
+  for (const [locale, width, nextState, hasPending, existingPr] of cases) {
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await page.getByLabel(/^(Language|Язык)$/).selectOption(locale);
+    await page.setViewportSize({ width, height: 844 });
+    state = nextState;
+    pending = hasPending;
+    pullRequest = existingPr;
+    if (width < 700)
+      await page
+        .locator('.daddy-mobile-tabs')
+        .getByRole('button', { name: locale === 'ru' ? /Задачи/ : /Tasks/ })
+        .click();
+    await page.locator('.daddy-work-item').first().click();
+    const dialog = page.getByRole('dialog');
+    const submit = dialog.getByRole('button', {
+      name: locale === 'ru' ? 'Отправить на ревью' : 'Submit for review',
+    });
+    if (hasPending) await expect(submit).toBeVisible();
+    else await expect(submit).toHaveCount(0);
+    await dialog.getByRole('button', { name: locale === 'ru' ? 'Закрыть' : 'Close' }).click();
+  }
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.getByLabel('Язык', { exact: true }).selectOption('en');
 });
 
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {

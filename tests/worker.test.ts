@@ -171,6 +171,25 @@ it('keeps explicit session submission and publication policies manual', async ()
     const publish = vi.spyOn(f.engine, 'publish');
     await f.worker.tick();
     expect(publish).not.toHaveBeenCalled();
+
+    const fix = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 71,
+        url: 'https://demo.local/pull/71',
+      },
+      repoPath: f.dir,
+      requirements: 'Keep saved fixes manual',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+    fix.state = 'awaiting_push';
+    fix.pendingAuthorHead = 'f'.repeat(40);
+    f.store.saveTask(fix);
+    await f.worker.tick();
+    expect(submit).not.toHaveBeenCalled();
   } finally {
     await f.close();
   }

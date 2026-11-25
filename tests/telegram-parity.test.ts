@@ -19,13 +19,14 @@ function apiFixture() {
       _caption?: string,
     ) => ({ message_id: 100 }),
   );
+  const downloadDocument = vi.fn(async () => document);
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
     send,
     call: vi.fn(async (method: string) =>
       method === 'createForumTopic' ? { message_thread_id: 51 } : true,
     ),
-    downloadDocument: vi.fn(async () => document),
+    downloadDocument,
     sendDocument,
   } as unknown as TelegramApi;
   return {
@@ -33,6 +34,7 @@ function apiFixture() {
     sent,
     send,
     sendDocument,
+    downloadDocument,
     document(value: string) {
       document = Buffer.from(value);
     },
@@ -90,6 +92,7 @@ it('imports and exports instructions and phone skill files only through the pair
     await bot.handle(message('/instructions import'));
     await bot.handle(file('instructions.json'));
     expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Imported from phone');
+    expect(telegram.sent.at(-1)?.card).toContain(group.title);
 
     telegram.document('# Phone skill\n\nKeep reports short.');
     await bot.handle(message('/skill worker file'));
@@ -98,6 +101,7 @@ it('imports and exports instructions and phone skill files only through the pair
       name: 'phone-skill.md',
       source: { kind: 'file' },
     });
+    expect(telegram.sent.at(-1)?.card).toContain(group.title);
 
     await bot.handle(message('/instructions export', -10042, topic!.threadId));
     expect(telegram.sendDocument).toHaveBeenCalledOnce();
@@ -116,6 +120,90 @@ it('imports and exports instructions and phone skill files only through the pair
     expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('Public group preference');
     expect(telegram.sent.at(-1)?.card).not.toContain('PRIVATE_TOKEN_MUST_NOT_BE_ECHOED');
     expect(telegram.sent.at(-1)?.card).toContain('Full text is available in the private chat');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('cancels pending instruction and skill files when the selected session changes', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const first = f.daddy.create({
+      workspaceId: f.workspace.id,
+      title: 'Import A',
+      instructions: { daddy: { prompt: 'A' }, worker: {} },
+    }),
+    second = f.daddy.create({
+      workspaceId: f.workspace.id,
+      title: 'Import B',
+      instructions: { daddy: { prompt: 'B' }, worker: {} },
+    });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  let id = 50;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const file = (name: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+      document: {
+        file_id: `file-${id}`,
+        file_unique_id: `unique-${id}`,
+        file_name: name,
+        file_size: 100,
+      },
+    },
+  });
+  const unchanged = () => {
+    expect(f.daddy.group(first.id).instructions).toEqual({
+      daddy: { prompt: 'A' },
+      worker: {},
+    });
+    expect(f.daddy.group(second.id).instructions).toEqual({
+      daddy: { prompt: 'B' },
+      worker: {},
+    });
+  };
+  try {
+    telegram.document(JSON.stringify({ daddy: { prompt: 'changed' }, worker: {} }));
+    await bot.handle(message('/instructions import'));
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(file('instructions.json'));
+    unchanged();
+
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await bot.handle(message('/skill worker file'));
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(file('skill.md'));
+    unchanged();
+
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await bot.handle(message('/instructions import'));
+    let release!: (value: Uint8Array<ArrayBuffer>) => void;
+    telegram.downloadDocument.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const uploading = bot.handle(file('instructions.json'));
+    await vi.waitFor(() => expect(telegram.downloadDocument).toHaveBeenCalled());
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    release(new TextEncoder().encode(JSON.stringify({ daddy: { prompt: 'late' }, worker: {} })));
+    await uploading;
+    unchanged();
   } finally {
     await bot.stop();
     await f.close();
@@ -333,9 +421,11 @@ it('shows individual CI checks and safe links in the Telegram task card', async 
     groupGeneration: group.generation,
   });
   task.pr!.checks = 'failing';
-  task.pr!.checkDetails = [
-    { name: 'Unit tests', status: 'failed', url: 'https://ci.example.test/run/7' },
-  ];
+  task.pr!.checkDetails = Array.from({ length: 13 }, (_, index) => ({
+    name: `Check ${index + 1}`,
+    status: index === 12 ? 'failed' : 'success',
+    url: `https://ci.example.test/run/${index + 1}`,
+  }));
   f.store.saveTask(task);
   f.store.setSetting('telegram.currentDaddy', group.id);
   try {
@@ -358,11 +448,73 @@ it('shows individual CI checks and safe links in the Telegram task card', async 
         message: { chat: { id: 7, type: 'private' } },
       },
     });
-    expect(telegram.sent.at(-1)!.card.text).toContain('Unit tests: failed');
-    expect(telegram.sent.at(-1)!.card.buttons.flat()).toContainEqual({
-      text: 'CI · Unit tests',
-      url: 'https://ci.example.test/run/7',
+    expect(telegram.sent.at(-1)!.card.text).toContain('Check 13: failed');
+    expect(telegram.sent.at(-1)!.card.entities).toContainEqual(
+      expect.objectContaining({ type: 'text_link', url: 'https://ci.example.test/run/13' }),
+    );
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('pages through every task and preset without requiring a known name', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  for (let index = 1; index <= 31; index++)
+    await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: `Paged task ${index}`,
+      requirements: `Task ${index}`,
+      createdByAction: `task-${index}`,
     });
+  const library = new InstructionPresets(f.store);
+  for (let index = 1; index <= 21; index++)
+    library.save({
+      name: `Paged preset ${index}`,
+      instructions: { daddy: { prompt: `Prompt ${index}` }, worker: {} },
+    });
+  let id = 600;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const button = (text: string) =>
+    telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(button('→').callback_data));
+    await bot.handle(click(button('Paged task 1').callback_data));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Paged task 1');
+
+    await bot.handle(message('/presets'));
+    await bot.handle(click(button('→').callback_data));
+    await bot.handle(click(button('→').callback_data));
+    await bot.handle(click(button('Paged preset 21').callback_data));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Paged preset 21');
   } finally {
     await bot.stop();
     await f.close();

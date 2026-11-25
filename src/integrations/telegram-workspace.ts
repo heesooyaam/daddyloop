@@ -5,6 +5,7 @@ import type { Daddy } from '../core/daddy.js';
 import {
   sameAgentProfile,
   AppError,
+  canSubmitTask,
   now,
   type Event,
   type HumanTaskAction,
@@ -40,7 +41,7 @@ import { InstructionSources } from '../ops/instruction-sources.js';
 import { InstructionPresets } from '../core/instruction-presets.js';
 import { sessionInstructionsSchema, type SkillSnapshot } from '../core/instructions.js';
 import { presetParts } from '../core/preset-parts.js';
-import { findPreset, selectPreset, presetLines } from '../client/presets.js';
+import { findPreset, selectPreset } from '../client/presets.js';
 import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
@@ -81,11 +82,13 @@ type TaskControl = {
   action?: HumanTaskAction;
   expectedHead?: string;
   expectedGeneration?: number;
+  expectedPendingHead?: string;
   reason?: string;
   expiresAt: string;
   outcome?: 'completed' | 'stale';
 };
 type PendingDocument = {
+  id: string;
   kind: 'instructions' | 'skill';
   ownerId: number;
   chatId: number;
@@ -96,7 +99,7 @@ type PendingDocument = {
   expiresAt: string;
 };
 type PresetControl = {
-  kind: 'delete' | 'part';
+  kind: 'delete' | 'part' | 'select';
   ownerId: number;
   destination: Destination;
   presetId: string;
@@ -513,7 +516,7 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, groupId),
       topic = await this.ensureTopic(group);
     if (destination.chatId === this.pair()?.chatId) {
-      this.store.setSetting('telegram.currentDaddy', group.id);
+      this.selectPrivateSession(destination, group.id);
       this.store.setSetting(this.creationKey(destination), null);
     }
     await this.api.send(
@@ -541,6 +544,23 @@ export class TelegramWorkspace {
   private documentKey(destination: Destination) {
     return `telegram.documentImport:${this.pair()!.userId}:${destination.chatId}`;
   }
+  private selectPrivateSession(destination: Destination, groupId: string) {
+    if (destination.chatId !== this.pair()?.chatId) return;
+    const pending = this.store.setting<PendingDocument>(this.documentKey(destination));
+    if (pending && pending.groupId !== groupId)
+      this.store.setSetting(this.documentKey(destination), null);
+    this.store.setSetting('telegram.currentDaddy', groupId);
+  }
+  private requirePendingDocument(destination: Destination, pending: PendingDocument) {
+    const current = this.store.setting<PendingDocument>(this.documentKey(destination));
+    if (
+      current?.id !== pending.id ||
+      this.store.setting<string>('telegram.currentDaddy') !== pending.groupId
+    ) {
+      if (current?.id === pending.id) this.store.setSetting(this.documentKey(destination), null);
+      throw new Error(this.t('The selected session changed. Start the file import again.'));
+    }
+  }
   private instructionsHash(group: ReviewGroup) {
     return createHash('sha256')
       .update(JSON.stringify(group.instructions ?? null))
@@ -559,6 +579,7 @@ export class TelegramWorkspace {
         this.t('Instruction files are accepted only in the paired private chat.'),
       );
     this.store.setSetting(this.documentKey(destination), {
+      id: randomBytes(12).toString('base64url'),
       kind,
       role,
       ownerId: this.pair()!.userId,
@@ -599,6 +620,7 @@ export class TelegramWorkspace {
       throw new Error(
         this.t('Start an instruction or skill import command before sending a file.'),
       );
+    this.requirePendingDocument(destination, pending);
     const group = this.daddy.group(pending.groupId);
     if (
       group.generation !== pending.generation ||
@@ -621,6 +643,7 @@ export class TelegramWorkspace {
         ),
       );
     const bytes = await this.api.downloadDocument(document.file_id);
+    this.requirePendingDocument(destination, pending);
     const current = this.daddy.group(pending.groupId);
     if (
       current.generation !== pending.generation ||
@@ -652,7 +675,12 @@ export class TelegramWorkspace {
     this.store.setSetting(this.documentKey(destination), null);
     await this.api.send(
       destination,
-      this.t(pending.kind === 'instructions' ? 'Instruction set imported.' : 'Skill imported.'),
+      this.t(
+        pending.kind === 'instructions'
+          ? 'Instruction set imported for {title}.'
+          : 'Skill imported for {title}.',
+        { title: current.title },
+      ),
     );
     return true;
   }
@@ -742,12 +770,47 @@ export class TelegramWorkspace {
       ],
     });
   }
+  private async presetsCard(group: ReviewGroup, destination: Destination, page = 0) {
+    this.authorize(destination, group.id);
+    const presets = new InstructionPresets(this.store).list(),
+      pageSize = 10,
+      pages = Math.max(1, Math.ceil(presets.length / pageSize));
+    page = Math.max(0, Math.min(page, pages - 1));
+    const visible = presets.slice(page * pageSize, (page + 1) * pageSize);
+    const text = new TelegramText().add('🧩 ' + this.t('Presets'), 'bold');
+    if (!presets.length) text.add('\n\n' + this.t('No presets yet.'));
+    else if (pages > 1)
+      text.add('\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }));
+    for (const preset of visible)
+      text.add('\n\n• ' + preset.name + (preset.description ? '\n' + preset.description : ''));
+    const navigation: TelegramButton[] = [];
+    if (page > 0) navigation.push({ text: '←', callback_data: `dad:presets:${page - 1}` });
+    if (page + 1 < pages) navigation.push({ text: '→', callback_data: `dad:presets:${page + 1}` });
+    await this.api.send(destination, {
+      ...text,
+      buttons: [
+        ...visible.map((preset) => [
+          {
+            text: preset.name.slice(0, 60),
+            callback_data: this.presetControl({
+              kind: 'select',
+              destination,
+              groupId: group.id,
+              presetId: preset.id,
+              revision: preset.revision,
+            }),
+          },
+        ]),
+        ...(navigation.length ? [navigation] : []),
+      ],
+    });
+  }
   private async presetControlCallback(data: string, destination: Destination) {
     const entry = this.readPresetControl(data, destination);
     if (!entry) return false;
     const { id, control } = entry;
     if (entry.consumed) {
-      if (control.kind === 'part' && control.groupId)
+      if ((control.kind === 'part' || control.kind === 'select') && control.groupId)
         await this.presetPartsCard(
           this.authorize(destination, control.groupId),
           control.presetId,
@@ -767,6 +830,20 @@ export class TelegramWorkspace {
       return true;
     }
     const group = this.authorize(destination, control.groupId!);
+    if (control.kind === 'select') {
+      const preset = library.get(control.presetId);
+      if (preset.revision !== control.revision)
+        throw new Error(this.t('This preset selection changed. Open it again.'));
+      await this.daddy.settings(
+        group.id,
+        { instructions: selectPreset(group.instructions, preset) },
+        () => {
+          this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+        },
+      );
+      await this.presetPartsCard(this.daddy.group(group.id), preset.id, destination);
+      return true;
+    }
     if (typeof control.enabled !== 'boolean')
       throw new Error(this.t('This preset action expired. Open the preset again.'));
     const instructions = structuredClone(group.instructions ?? { daddy: {}, worker: {} });
@@ -868,7 +945,7 @@ export class TelegramWorkspace {
     if (destination.chatId === pair.chatId) {
       id ??= this.store.setting<string>('telegram.currentDaddy');
       if (!id) throw new Error(this.t('Choose a session with /session <name or ID>.'));
-      if (selector) this.store.setSetting('telegram.currentDaddy', id);
+      if (selector) this.selectPrivateSession(destination, id);
       return this.daddy.group(id);
     }
     if (this.room()?.chatId !== destination.chatId)
@@ -897,11 +974,14 @@ export class TelegramWorkspace {
   }
   private findTask(groupId: string, value: string) {
     const query = value.trim().toLowerCase();
+    const reference = taskReferenceId(query);
     const matches = this.store
       .tasks(groupId)
       .filter(
         (task) =>
-          task.id === query || task.id.startsWith(query) || task.title.toLowerCase() === query,
+          (reference
+            ? task.id.startsWith(reference)
+            : task.id === query || task.id.startsWith(query)) || task.title.toLowerCase() === query,
       );
     if (matches.length !== 1)
       throw new Error(this.t('Choose one task by its exact name or unique ID prefix.'));
@@ -928,9 +1008,7 @@ export class TelegramWorkspace {
   }
   private availableTaskActions(task: Task): HumanTaskAction[] {
     return [
-      ...(task.state === 'ready_for_review' && task.policy.autoPush === false
-        ? (['submit'] as const)
-        : []),
+      ...(canSubmitTask(task) && task.policy.autoPush === false ? (['submit'] as const) : []),
       ...(task.state === 'awaiting_publication' && task.policy.publication === 'human'
         ? (['publish'] as const)
         : []),
@@ -971,6 +1049,7 @@ export class TelegramWorkspace {
     return {
       head: task.revision?.head ?? '',
       generation: task.generation,
+      pendingHead: task.pendingAuthorHead,
     };
   }
   private safeUrl(value: string) {
@@ -992,7 +1071,9 @@ export class TelegramWorkspace {
   }
   private sameTaskVersion(task: Task, control: TaskControl) {
     return (
-      task.revision?.head === control.expectedHead && task.generation === control.expectedGeneration
+      task.revision?.head === control.expectedHead &&
+      task.generation === control.expectedGeneration &&
+      task.pendingAuthorHead === control.expectedPendingHead
     );
   }
   private taskActionCompleted(task: Task, control: TaskControl) {
@@ -1000,7 +1081,10 @@ export class TelegramWorkspace {
     if (control.action === 'waive-checks') return !!task.checksWaivedAt;
     if (control.action === 'publish') return task.snapshot?.status === 'published';
     if (control.action === 'submit')
-      return task.ref.kind !== 'ticket' && task.revision?.head === control.expectedHead;
+      return (
+        task.ref.kind !== 'ticket' &&
+        task.revision?.head === (control.expectedPendingHead ?? control.expectedHead)
+      );
     return false;
   }
   private finishTaskControl(id: string, control: TaskControl, outcome: 'completed' | 'stale') {
@@ -1008,9 +1092,13 @@ export class TelegramWorkspace {
       .prepare('UPDATE bot_actions SET data=?,consumed=1 WHERE id=?')
       .run(JSON.stringify({ ...control, outcome }), id);
   }
-  private async tasksCard(group: ReviewGroup, destination: Destination) {
+  private async tasksCard(group: ReviewGroup, destination: Destination, page = 0) {
     this.authorizeControl(destination, group.id);
-    const tasks = this.store.tasks(group.id);
+    const tasks = this.store.tasks(group.id),
+      pageSize = 20,
+      pages = Math.max(1, Math.ceil(tasks.length / pageSize));
+    page = Math.max(0, Math.min(page, pages - 1));
+    const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
     const text = new TelegramText()
       .add('📋 ' + (this.locale() === 'ru' ? 'Задачи' : 'Tasks'), 'bold')
       .add('\n' + group.title);
@@ -1021,10 +1109,23 @@ export class TelegramWorkspace {
             ? 'В этой сессии пока нет задач.'
             : 'This session has no tasks yet.'),
       );
+    else if (pages > 1)
+      text.add(
+        '\n' +
+          this.t('Page {page} of {pages}', {
+            page: page + 1,
+            pages,
+          }),
+      );
+    const navigation: TelegramButton[] = [];
+    if (page > 0)
+      navigation.push({ text: '←', callback_data: `dad:tasks:${group.id}:${page - 1}` });
+    if (page + 1 < pages)
+      navigation.push({ text: '→', callback_data: `dad:tasks:${group.id}:${page + 1}` });
     await this.api.send(destination, {
       ...text,
       buttons: [
-        ...tasks.slice(0, 30).map((task) => [
+        ...visible.map((task) => [
           {
             text: `${task.state === 'complete' ? '✅' : '•'} ${task.title}`.slice(0, 60),
             callback_data: this.taskControl({
@@ -1035,6 +1136,7 @@ export class TelegramWorkspace {
             }),
           },
         ]),
+        ...(navigation.length ? [navigation] : []),
         [{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }],
       ],
     });
@@ -1057,6 +1159,10 @@ export class TelegramWorkspace {
       .add(
         '\n' + (this.locale() === 'ru' ? 'Поколение' : 'Generation') + ': ' + version.generation,
       );
+    if (version.pendingHead && version.pendingHead !== version.head)
+      text
+        .add('\n' + (this.locale() === 'ru' ? 'Сохранённый коммит' : 'Saved commit') + ': ')
+        .add(version.pendingHead, 'code');
     if (task.pr)
       text.add(
         '\n' +
@@ -1064,8 +1170,16 @@ export class TelegramWorkspace {
           ': ' +
           this.t(task.pr.checks),
       );
-    for (const check of task.pr?.checkDetails.slice(0, 12) ?? [])
-      text.add(`\n• ${check.name}: ${check.status}`);
+    for (const check of task.pr?.checkDetails ?? []) {
+      const url =
+        destination.chatId === this.pair()?.chatId && check.url
+          ? this.safeUrl(check.url)
+          : undefined;
+      text.add('\n• ');
+      if (url) text.add(check.name, 'text_link', { url });
+      else text.add(check.name);
+      text.add(`: ${check.status}`);
+    }
     if (task.summary && destination.chatId === this.pair()?.chatId)
       text
         .add('\n\n' + (this.locale() === 'ru' ? 'Сводка' : 'Summary'), 'bold')
@@ -1082,14 +1196,10 @@ export class TelegramWorkspace {
           action,
           expectedHead: version.head,
           expectedGeneration: version.generation,
+          expectedPendingHead: version.pendingHead,
         }),
       },
     ]);
-    if (destination.chatId === this.pair()?.chatId)
-      for (const check of task.pr?.checkDetails.slice(0, 12) ?? []) {
-        const url = check.url ? this.safeUrl(check.url) : undefined;
-        if (url) buttons.push([{ text: `CI · ${check.name}`.slice(0, 60), url }]);
-      }
     const reviewUrl = task.ref.kind !== 'ticket' ? this.safeUrl(task.ref.url) : undefined;
     if (reviewUrl) buttons.push([{ text: this.t('Open native review'), url: reviewUrl }]);
     buttons.push([
@@ -1123,13 +1233,15 @@ export class TelegramWorkspace {
       );
       return;
     }
+    const confirmedHead =
+      action === 'submit' ? (version.pendingHead ?? version.head) : version.head;
     const text = new TelegramText()
       .add(this.taskActionLabel(action), 'bold')
       .add('\n\n' + task.title)
       .add(
         '\n\n' + (this.locale() === 'ru' ? 'Подтверждается версия' : 'Confirming version') + ':\n',
       )
-      .add(version.head, 'code')
+      .add(confirmedHead, 'code')
       .add(
         '\n' + (this.locale() === 'ru' ? 'Поколение' : 'Generation') + ': ' + version.generation,
       );
@@ -1156,6 +1268,7 @@ export class TelegramWorkspace {
               action,
               expectedHead: version.head,
               expectedGeneration: version.generation,
+              expectedPendingHead: version.pendingHead,
               reason: reason?.trim(),
             }),
           },
@@ -1221,12 +1334,20 @@ export class TelegramWorkspace {
         control.groupId,
         control.taskId,
         control.action!,
-        { head: control.expectedHead!, generation: control.expectedGeneration! },
+        {
+          head: control.expectedHead!,
+          generation: control.expectedGeneration!,
+          ...(control.expectedPendingHead ? { pendingHead: control.expectedPendingHead } : {}),
+        },
         control.reason,
       );
     } catch (error) {
       task = this.daddy.task(control.groupId, control.taskId);
       if (!this.taskActionCompleted(task, control)) throw error;
+    }
+    if (!this.taskActionCompleted(task, control)) {
+      await this.taskCard(task, destination);
+      return true;
     }
     this.finishTaskControl(id, control, 'completed');
     await this.api.send(
@@ -1331,7 +1452,28 @@ export class TelegramWorkspace {
       group.workspace?.provider === 'github' && task.ref.provider === 'github'
         ? autoMergeSettings(this.store, group, task)
         : undefined;
-    await this.api.send(destination, activityTaskCard(this.locale(), activity!, slot, merge));
+    this.store.setSetting(this.selectedTaskKey(destination, groupId), task.id);
+    const card = activityTaskCard(this.locale(), activity!, slot, merge);
+    const version = this.taskVersion(task);
+    card.buttons = [
+      ...this.availableTaskActions(task).map((action) => [
+        {
+          text: this.taskActionLabel(action),
+          callback_data: this.taskControl({
+            kind: 'prepare',
+            destination,
+            groupId,
+            taskId,
+            action,
+            expectedHead: version.head,
+            expectedGeneration: version.generation,
+            expectedPendingHead: version.pendingHead,
+          }),
+        },
+      ]),
+      ...(card.buttons ?? []),
+    ];
+    await this.api.send(destination, card);
   }
   private async taskCommand(
     command: string,
@@ -1528,7 +1670,7 @@ export class TelegramWorkspace {
     });
     this.store.setSetting(this.creationKey(destination), null);
     if (destination.chatId === this.pair()?.chatId)
-      this.store.setSetting('telegram.currentDaddy', group.id);
+      this.selectPrivateSession(destination, group.id);
     if (text)
       this.daddy.chat(group.id, text, undefined, undefined, {
         channel: 'telegram',
@@ -1960,10 +2102,23 @@ export class TelegramWorkspace {
   }
   async callback(data: string, destination: Destination): Promise<boolean> {
     if (await this.presetControlCallback(data, destination)) return true;
+    const presetPage = /^dad:presets:([0-9]+)$/.exec(data);
+    if (presetPage) {
+      await this.presetsCard(
+        this.sessionForControl(destination),
+        destination,
+        Number(presetPage[1]),
+      );
+      return true;
+    }
     if (await this.taskControlCallback(data, destination)) return true;
-    const taskList = /^dad:tasks:([a-f0-9-]{36})$/.exec(data);
+    const taskList = /^dad:tasks:([a-f0-9-]{36})(?::([0-9]+))?$/.exec(data);
     if (taskList) {
-      await this.tasksCard(this.authorizeControl(destination, taskList[1]), destination);
+      await this.tasksCard(
+        this.authorizeControl(destination, taskList[1]),
+        destination,
+        Number(taskList[2] ?? 0),
+      );
       return true;
     }
     const language = data.match(/^language:(en|ru|show)$/);
@@ -2327,8 +2482,7 @@ export class TelegramWorkspace {
     if (action === 'pause') await this.daddy.pause(id);
     if (action === 'resume') await this.daddy.resume(id);
     if (action === 'add') {
-      if (destination.chatId === this.pair()?.chatId)
-        this.store.setSetting('telegram.currentDaddy', id);
+      if (destination.chatId === this.pair()?.chatId) this.selectPrivateSession(destination, id);
       await this.api.send(
         destination,
         this.t(
@@ -2640,13 +2794,16 @@ export class TelegramWorkspace {
       const waiver = text.match(/^\/waive(?:\s+([\s\S]+))?$/);
       if (waiver) {
         const selected = this.sessionForControl(destination);
-        const taskId = this.store.setting<string>(this.selectedTaskKey(destination, selected.id));
+        const explicit = waiver[1]?.match(/^(\S+)\s+--\s+([\s\S]+)$/);
+        const taskId = explicit
+          ? this.findTask(selected.id, explicit[1]).id
+          : this.store.setting<string>(this.selectedTaskKey(destination, selected.id));
         if (!taskId) throw new Error(this.t('Open a task with /task before confirming an action.'));
         await this.taskConfirmation(
           this.daddy.task(selected.id, taskId),
           destination,
           'waive-checks',
-          waiver[1],
+          explicit?.[2] ?? waiver[1],
         );
         return true;
       }
@@ -2805,15 +2962,8 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/presets') {
-        await this.api.send(
-          destination,
-          new TelegramText()
-            .add('🧩 ' + this.t('Presets'), 'bold')
-            .add(
-              '\n\n' +
-                presetLines(new InstructionPresets(this.store).list(), this.locale()).join('\n'),
-            ),
-        );
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        await this.presetsCard(this.authorize(destination, groupId), destination);
         return true;
       }
       const presetMetadata = text.match(
