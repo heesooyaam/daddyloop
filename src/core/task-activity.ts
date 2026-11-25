@@ -1,4 +1,11 @@
-import type { AgentProfile, Job, State, Task, WorkerSlot } from './types.js';
+import {
+  sameRevision,
+  type AgentProfile,
+  type Job,
+  type State,
+  type Task,
+  type WorkerSlot,
+} from './types.js';
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
@@ -35,13 +42,18 @@ export function taskStatus(state: State, queued = false, role?: Job['role']) {
 export type TaskActivity = { task: Task; job?: Job; mergeStatus?: string; assignedWorker?: number };
 
 export function outstandingActivity(item: TaskActivity) {
-  return item.task.state !== 'complete' || (item.task.pr?.state === 'open' && !!item.mergeStatus);
+  return (
+    item.task.state !== 'complete' ||
+    (item.job?.kind === 'chat' &&
+      (item.job.status === 'queued' || item.job.status === 'running')) ||
+    (item.task.pr?.state === 'open' && !!item.mergeStatus)
+  );
 }
 
 export function taskActivity(
   tasks: Task[],
   jobs: Job[],
-  mergeStatus?: (task: Task) => string | undefined,
+  mergeStatus?: (task: Task, job?: Job) => string | undefined,
   slots: WorkerSlot[] = [],
 ): TaskActivity[] {
   const byId = new Map<string, TaskActivity>(
@@ -49,7 +61,6 @@ export function taskActivity(
       task.id,
       {
         task,
-        mergeStatus: mergeStatus?.(task),
         assignedWorker: slots.find((slot) => slot.taskId === task.id)?.number,
       },
     ]),
@@ -61,6 +72,8 @@ export function taskActivity(
     if (!item.job || job.status === 'running') item.job = job;
     ordered.add(item);
   }
+  if (mergeStatus)
+    for (const item of byId.values()) item.mergeStatus = mergeStatus(item.task, item.job);
   return [...new Set([...ordered, ...byId.values()])];
 }
 
@@ -74,16 +87,83 @@ export function queueDetail(task: Task): string | undefined {
   if (task.inputRequest?.generation === task.generation || task.resumeState !== 'reviewing')
     return task.reason;
 }
+
+export function activityPrNumber(task: Task) {
+  return task.prLink?.ref?.number ?? (task.ref?.kind !== 'ticket' ? task.ref?.number : undefined);
+}
+
+export function retryTime(until: number) {
+  return new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
+}
+
+export const mergeabilityStatus = 'GitHub is calculating mergeability';
+
+export function waitingForMergeability(task: Task) {
+  return (
+    task.state === 'awaiting_publication' &&
+    task.snapshot?.status === 'published' &&
+    sameRevision(task.snapshot.revision, task.revision) &&
+    sameRevision(task.snapshot.revision, task.review?.revision)
+  );
+}
+
+export function activityReason(task: Task) {
+  return waitingForMergeability(task)
+    ? 'The review is published. Waiting for GitHub to determine mergeability.'
+    : task.reason;
+}
+
+export function localRetryStatus(task: Task, job?: Job) {
+  const number = activityPrNumber(task);
+  const pr = number ? ` · PR #${number}` : '';
+  if (task.state === 'awaiting_publication') {
+    const until = Math.max(task.publicationRetry?.retryAt ?? 0, task.partialReview?.retryAt ?? 0);
+    if (until) {
+      const phase = waitingForMergeability(task)
+        ? 'GitHub mergeability check'
+        : 'GitHub review publication';
+      return { until, label: `${phase} · retry at ${retryTime(until)} UTC${pr}` };
+    }
+  }
+  if (task.state === 'queued' && task.draftStart?.retryAt) {
+    const until = task.draftStart.retryAt;
+    return { until, label: `GitHub review draft · retry at ${retryTime(until)} UTC${pr}` };
+  }
+  if (task.state === 'submitting' && task.prLink?.retryAt) {
+    const until = task.prLink.retryAt;
+    const target = number ? `PR #${number}` : 'GitHub';
+    return { until, label: `${target} · retry at ${retryTime(until)} UTC` };
+  }
+  if (
+    task.state === 'fixing' &&
+    task.fixingMergeConflict &&
+    job?.timeoutRetry &&
+    job.status === 'queued' &&
+    job.notBefore
+  ) {
+    const until = Date.parse(job.notBefore);
+    return {
+      until,
+      label: `Continuing conflict resolution after a timeout at ${retryTime(until)} UTC${pr}`,
+    };
+  }
+}
+
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
-  if (task.state === 'awaiting_publication' && task.publicationRetry)
-    return `GitHub review publication · retry at ${new Date(task.publicationRetry.retryAt).toISOString().slice(11, 19)} UTC`;
-  if (task.state === 'queued' && task.draftStart?.retryAt)
-    return `GitHub review draft · retry at ${new Date(task.draftStart.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
+  if (waitingForMergeability(task)) {
+    if (mergeStatus) return `${mergeabilityStatus} · ${mergeStatus}`;
+    return localRetryStatus(task, job)?.label ?? mergeabilityStatus;
+  }
   if (mergeStatus) return mergeStatus;
-  if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
-    return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
-  if (task.state === 'submitting' && task.prLink?.ref && task.prLink.retryAt)
-    return `PR #${task.prLink.ref.number} · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (
+    job?.kind === 'chat' &&
+    job.status === 'queued' &&
+    (task.state === 'complete' || task.state === 'awaiting_merge')
+  )
+    return 'Waiting for task discussion';
+  const retry = localRetryStatus(task, job);
+  if (retry) return retry.label;
   if (task.state === 'needs_input') {
     if (task.inputRequest?.generation === task.generation) return 'Waiting for your answer';
     if (task.reason === draftSyncPending) return 'Checking the GitHub draft';
@@ -106,8 +186,6 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {
-    if (job?.timeoutRetry && job.status === 'queued' && job.notBefore)
-      return `Continuing conflict resolution after a timeout at ${new Date(job.notBefore).toISOString().slice(11, 19)} UTC`;
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
       ? `Conflict repair queued for worker ${assignedWorker}`

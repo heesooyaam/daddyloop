@@ -62,6 +62,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS event_task ON events(task_id,id);
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS job_status ON jobs(status);
+      CREATE INDEX IF NOT EXISTS jobs_by_task ON jobs(task_id);
       CREATE UNIQUE INDEX IF NOT EXISTS one_running_per_task ON jobs(task_id) WHERE status = 'running';
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
@@ -234,6 +235,21 @@ export class Store {
       : this.db.prepare(`${active} ${jobOrder('jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
+  firstTaskStarts(taskIds: string[]): Map<string, string> {
+    if (!taskIds.length) return new Map();
+    const rows = this.db
+      .prepare(
+        `SELECT jobs.task_id AS taskId,
+                min(coalesce(json_extract(jobs.data,'$.firstStartedAt'),
+                             json_extract(jobs.data,'$.startedAt'))) AS startedAt
+         FROM jobs
+         WHERE jobs.task_id IN (${taskIds.map(() => '?').join(',')})
+         GROUP BY jobs.task_id
+         HAVING startedAt IS NOT NULL`,
+      )
+      .all(...taskIds);
+    return new Map(rows.map((row) => [String(row.taskId), String(row.startedAt)]));
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,
@@ -267,7 +283,9 @@ export class Store {
           continue;
         job.status = 'running';
         onClaim?.(job);
-        job.startedAt = now();
+        const startedAt = now();
+        job.firstStartedAt ??= job.startedAt ?? startedAt;
+        job.startedAt = startedAt;
         this.saveJob(job);
         return job;
       }

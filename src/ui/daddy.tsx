@@ -62,7 +62,12 @@ import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
 import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
 import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
-import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
+import {
+  activityReason,
+  activityStatus,
+  profileText,
+  taskReference,
+} from '../core/task-activity.js';
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1959,12 +1964,12 @@ function TaskReport({
           <div className="daddy-task-meta">
             <code>{taskReference(value.task)}</code>
             <span className="daddy-status-pill">
-              {t(live?.statusLabel ?? taskStatus(value.task.state))}
+              {t(live?.statusLabel ?? activityStatus({ task: value.task }))}
             </span>
             {worker !== undefined && <span>{t('Worker {number}', { number: worker })}</span>}
             {profile && <span>{profileText(profile)}</span>}
           </div>
-          <p>{t(live?.reason ?? value.task.reason)}</p>
+          <p>{t(live?.reason ?? activityReason(value.task))}</p>
           {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
             <label className="daddy-pool-control">
               {t('Auto-merge GitHub PRs')}
