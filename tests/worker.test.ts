@@ -2876,3 +2876,93 @@ it.each([false, true])(
     }
   },
 );
+
+it.each(['advance', 'rollback', 'divergence', 'retargeted', 'unknown target'] as const)(
+  'checks the saved-fix confirmation before running restored merge verification (%s)',
+  async (movement) => {
+    const f = await fixture();
+    const workspaces = new Workspaces('/tmp');
+    const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+    try {
+      const task = f.store.getTask(f.task.id);
+      const original = task.revision!;
+      const saved = 'f'.repeat(40);
+      const base = 'c'.repeat(40);
+      const nextBase = movement === 'rollback' ? original.base : 'e'.repeat(40);
+      const author = f.store.enqueue(task, 'author', 'fix', 'Save the worker changes');
+      f.store.saveJob({ ...author, status: 'completed' });
+      f.store.event(task.id, 'author.fixes_saved', { head: saved, revision: original }, author.id);
+      f.store.event(task.id, 'author.submitted', { head: saved, pushed: true });
+      const generation = task.generation + 1;
+      f.store.event(task.id, 'revision.changed', {
+        revision: { head: saved, base, start: base },
+        generation,
+      });
+      f.store.event(task.id, 'task.state', {
+        state: 'queued',
+        reason: 'New revision is ready for review',
+        head: saved,
+        generation,
+      });
+      const targetBranch = movement === 'retargeted' ? 'release' : task.pr!.targetBranch;
+      if (movement !== 'unknown target')
+        f.store.event(task.id, 'task.state', {
+          state: 'needs_input',
+          reason: `Saved fix ${saved} is preserved. PR is merged at ${saved} (base ${nextBase}, target ${targetBranch}); expected ${saved} (base ${base}, target ${task.pr!.targetBranch}). Inspect the target and submission outcome.`,
+          generation,
+          head: saved,
+        });
+      const pr = {
+        ...task.pr!,
+        head: saved,
+        base: nextBase,
+        start: nextBase,
+        targetBranch,
+        state: 'merged' as const,
+        mergeCommit: 'merged-saved-fix',
+      };
+      const queued = {
+        ...task,
+        ref: { ...prRef(task), provider: 'github' as const },
+        state: 'reviewing' as const,
+        generation: generation + 1,
+        pr,
+        revision: revisionOf(pr),
+        pendingAuthorHead: saved,
+      };
+      f.store.saveTask(queued);
+      f.store.setSetting('demo-pr:1', pr);
+      const targetAdvanced = vi.fn(
+        async (_ref: unknown, before: string) => before === original.base || movement === 'advance',
+      );
+      Object.assign(f.provider, { targetAdvanced });
+      const job = f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged PR');
+      await worker.tick();
+      const allowed = movement === 'advance';
+      await vi.waitFor(() =>
+        expect(f.store.jobs(task.id).find(({ id }) => id === job.id)?.status).toBe(
+          allowed ? 'completed' : 'cancelled',
+        ),
+      );
+      expect(prepare).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      expect(runtime.run).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      if (allowed) {
+        expect(f.store.getTask(task.id)).toMatchObject({ state: 'complete' });
+      } else {
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          pendingAuthorHead: saved,
+          reason: expect.stringContaining(saved),
+        });
+      }
+      if (movement === 'retargeted' || movement === 'unknown target')
+        expect(targetAdvanced).not.toHaveBeenCalled();
+      else expect(targetAdvanced).toHaveBeenCalledWith(prRef(queued), base, nextBase);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);

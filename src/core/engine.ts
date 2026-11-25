@@ -400,6 +400,12 @@ export class Engine {
         if (!(await this.retireSupersededDraft(task, this.provider(prRef(task))))) return task;
       }
       const staleDraft = task.pendingAuthorFix?.staleDraft;
+      if (
+        pending &&
+        task.review?.revision.head === pending &&
+        !sameRevision(task.review.revision, pr)
+      )
+        this.trackRecoveredReview(task, task.review, task.snapshot);
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
       if (pr.state !== 'open') throw new AppError('pr_closed', 'The PR is closed');
       if (
@@ -498,8 +504,10 @@ export class Engine {
           // The recovered review may use an older comparison than the confirmed fix.
           if (pending !== pr.head && attempt.revision) task.revision = attempt.revision;
           task.snapshot = pending === pr.head ? completedSnapshot : undefined;
-          if (pending === pr.head && completedSnapshot)
+          if (pending === pr.head && completedSnapshot) {
+            this.trackRecoveredReview(task, attempted, completedSnapshot);
             retainPublishedFeedback(task, completedSnapshot, true);
+          }
           task.reviewFinished = false;
           task.generation = Math.max(task.generation, attempt.generation);
           task.round++;
@@ -620,6 +628,14 @@ export class Engine {
     });
   }
 
+  private trackRecoveredReview(task: Task, review: ReviewHandle, snapshot?: ReviewSnapshot) {
+    const retired = (task.retiredReviewHandles ??= []);
+    if (retired.some((handle) => handle.marker === review.marker)) return;
+    retired.push(review);
+    (task.retiredReviewCommentIds ??= {})[review.marker] =
+      snapshot?.status === 'published' ? snapshot.comments.map(({ id }) => id) : [];
+  }
+
   private async refreshRetiredReviewFeedback(
     task: Task,
     successor?: ReviewHandle,
@@ -638,6 +654,7 @@ export class Engine {
         );
         return false;
       }
+      if (task.review?.marker === review.marker) task.snapshot = snapshot;
       const ids = new Set(task.retiredReviewCommentIds?.[review.marker]);
       if (task.feedback)
         task.feedback = {
@@ -665,7 +682,8 @@ export class Engine {
     if (pendingNotes && ref.provider === 'gitlab') return gitLabDraftReason;
     if (pendingNotes && ref.provider === 'arcadia') return arcanumDraftReason;
     if (snapshot.status === 'draft' && ref.provider === 'github') return staleDraftReason;
-    this.retainPreviousReviewFeedback(task, review, snapshot);
+    if (!task.retiredReviewHandles?.some((retired) => retired.marker === review.marker))
+      this.retainPreviousReviewFeedback(task, review, snapshot);
   }
 
   private retainPreviousReviewFeedback(task: Task, review: ReviewHandle, snapshot: ReviewSnapshot) {
@@ -1218,6 +1236,7 @@ export class Engine {
       throw new AppError('merge_unconfirmed', 'The provider must confirm the merge');
     const head = this.pendingFixHead(task, pr);
     const pending = task.pendingAuthorFix;
+    if (await this.stopLegacyMergeBeforeSavedFix(task, pr)) return task;
     const check =
       pr.mergeCommit && head === pr.head && pending?.generation === task.generation
         ? await this.checkSavedFixForSubmission(task, { ...pr, state: 'open' }, head)
@@ -1237,6 +1256,10 @@ export class Engine {
         'unsubmitted_changes',
         'Inspect the saved worker changes before verifying this merge',
       );
+    const recovered = task.review ?? pending?.staleDraft;
+    if (head === pr.head && recovered?.revision.head === head)
+      this.trackRecoveredReview(task, recovered, task.review ? task.snapshot : undefined);
+    if (!(await this.refreshRetiredReviewFeedback(task))) return task;
     this.store.transaction(() => {
       if (!sameRevision(task.revision, pr)) {
         task.approvedAt = undefined;
@@ -1973,8 +1996,68 @@ export class Engine {
   async canStartMergeVerification(job: Job, pr: PullRequest): Promise<boolean> {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
-      return job.generation === task.generation && !this.stopReviewBeforeSavedFix(task, pr, true);
+      return (
+        job.generation === task.generation &&
+        !this.stopReviewBeforeSavedFix(task, pr, true) &&
+        !(await this.stopLegacyMergeBeforeSavedFix(task, pr))
+      );
     });
+  }
+
+  private async stopLegacyMergeBeforeSavedFix(task: Task, pr: PullRequest): Promise<boolean> {
+    const head = task.pendingAuthorHead;
+    if (
+      task.ref.provider !== 'github' ||
+      pr.state !== 'merged' ||
+      !head ||
+      head !== pr.head ||
+      task.pendingAuthorFix
+    )
+      return false;
+    const saved = this.savedFixEvent(task, head);
+    if (!saved || !this.savedFixSubmissionRecorded(task, head, Number(saved.id))) return false;
+    const observation = this.legacyFixObservations(task, head, Number(saved.id))[0];
+    if (!observation || this.savedFixSubmissionRecorded(task, head, Number(observation.id)))
+      return false;
+    const revision = parseRecordedRevision(observation.revision);
+    if (!revision) return false;
+    const held = this.store.db
+      .prepare(
+        `SELECT json_extract(data, '$.reason') AS reason FROM events
+         WHERE task_id=? AND id>? AND type='task.state'
+         AND json_extract(data, '$.generation')=?
+         AND json_extract(data, '$.state')='needs_input' ORDER BY id DESC`,
+      )
+      .all(task.id, observation.id!, observation.generation!);
+    // The old version recorded the expected target in its hold reason before replacing task.pr.
+    const prefix = `Saved fix ${head} is preserved. PR is `;
+    const expected = `expected ${head} (base ${revision.base}, target `;
+    let target = typeof saved.target_branch === 'string' ? saved.target_branch : undefined;
+    for (const { reason } of held) {
+      if (typeof reason !== 'string' || !reason.startsWith(prefix)) continue;
+      const start = reason.indexOf(expected);
+      const end = reason.lastIndexOf('). Inspect the target and submission outcome.');
+      if (start >= 0 && end > start) {
+        target = reason.slice(start + expected.length, end);
+        break;
+      }
+    }
+    if (!target && task.pr?.state === 'open' && sameRevision(task.pr, revision))
+      target = task.pr.targetBranch;
+    if (!target || target !== pr.targetBranch) {
+      this.holdLostFix(
+        task,
+        head,
+        `Expected target branch ${target ?? 'unknown'}. Observed ${pr.targetBranch}.`,
+      );
+      return true;
+    }
+    const baseChange = savedFixBaseChange(revision, pr);
+    if (!baseChange) return false;
+    const ref = prRef(task);
+    if (await this.provider(ref).targetAdvanced?.(ref, revision.base, pr.base)) return false;
+    this.holdLostFix(task, head, baseChange);
+    return true;
   }
 
   private stopReviewBeforeSavedFix(task: Task, pr: PullRequest, merged = false): boolean {
@@ -2485,32 +2568,32 @@ export class Engine {
       return;
     const saved = this.savedFixEvent(task, head);
     if (!saved) return;
-    // Older versions saved the remote comparison in the queued transition while
-    // leaving the original comparison in pendingFix.
-    const confirmed = this.store.db
+    return this.legacyFixObservations(task, head, Number(saved.id)).some((event) =>
+      sameRevision(revision, parseRecordedRevision(event.revision)),
+    )
+      ? revision
+      : undefined;
+  }
+
+  private legacyFixObservations(task: Task, head: string, after: number) {
+    // Older versions left the original comparison in pendingFix after observing the saved SHA.
+    return this.store.db
       .prepare(
-        `SELECT 1 FROM events observed JOIN events queued ON queued.task_id=observed.task_id
-         AND queued.id>observed.id AND queued.type='task.state'
-         AND json_extract(queued.data, '$.state')='queued'
-         AND json_extract(queued.data, '$.reason')='New revision is ready for review'
-         AND json_extract(queued.data, '$.head')=?
-         AND json_extract(queued.data, '$.generation')=json_extract(observed.data, '$.generation')
+        `SELECT observed.id, json_extract(observed.data, '$.revision') AS revision,
+                json_extract(observed.data, '$.generation') AS generation
+         FROM events observed
          WHERE observed.task_id=? AND observed.id>? AND observed.type='revision.changed'
          AND json_extract(observed.data, '$.revision.head')=?
-         AND json_extract(observed.data, '$.revision.base')=?
-         AND json_extract(observed.data, '$.revision.start')=?
-         AND json_extract(observed.data, '$.revision.revisionId') IS ? LIMIT 1`,
+         AND EXISTS (
+           SELECT 1 FROM events queued WHERE queued.task_id=observed.task_id
+           AND queued.id>observed.id AND queued.type='task.state'
+           AND json_extract(queued.data, '$.state')='queued'
+           AND json_extract(queued.data, '$.reason')='New revision is ready for review'
+           AND json_extract(queued.data, '$.head')=?
+           AND json_extract(queued.data, '$.generation')=json_extract(observed.data, '$.generation')
+         ) ORDER BY observed.id DESC`,
       )
-      .get(
-        head,
-        task.id,
-        saved.id!,
-        head,
-        revision.base,
-        revision.start,
-        revision.revisionId ?? null,
-      );
-    return confirmed ? revision : undefined;
+      .all(task.id, after, head, head);
   }
 
   private adoptPendingFix(task: Task) {
@@ -2929,6 +3012,7 @@ export class Engine {
       )
         return;
       if (job.kind === 'verify_merge') {
+        if (await this.stopLegacyMergeBeforeSavedFix(task, pr)) return;
         this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (
           pr.state !== 'merged' ||

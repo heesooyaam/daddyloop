@@ -1065,6 +1065,10 @@ const savedFixReviewCases = [
   'published on old base with conflict',
   'published on old base without auto-merge',
   'published after recovery on old base',
+  'published before merge verification',
+  'published after recovery before merge verification',
+  'published then deleted before review',
+  'published then deleted before repair',
   'auto-merge disabled',
   'advanced with conflict',
   'advanced after resume',
@@ -1078,7 +1082,10 @@ it.each(savedFixReviewCases)(
   async (entry) => {
     const f = await setup();
     try {
-      const enabled = entry !== 'auto-merge disabled' && !entry.endsWith('without auto-merge');
+      const enabled =
+        entry !== 'auto-merge disabled' &&
+        !entry.endsWith('without auto-merge') &&
+        !entry.endsWith('before review');
       await f.daddy.settings(f.group.id, { autoMerge: enabled });
       const task = f.store.getTask(f.task.id);
       const original = task.revision!;
@@ -1114,11 +1121,27 @@ it.each(savedFixReviewCases)(
       }
       const confirmed = f.store.getTask(task.id);
       let recoveredFinding: string | undefined;
-      const publishedAfterRecovery = entry === 'published after recovery on old base';
+      const publishedAfterRecovery = entry.startsWith('published after recovery');
+      const verifyMerge = entry.endsWith('merge verification');
+      const deleted = entry.includes('then deleted');
+      const earlierFinding = 'previous-finding';
       const recoveredReview = entry.startsWith('published')
         ? await f.engine.broker.ensureReview({ ...confirmed, round: confirmed.round + 1 })
         : undefined;
       if (recoveredReview) {
+        if (deleted)
+          f.store.saveTask({
+            ...confirmed,
+            feedback: {
+              status: 'published',
+              revision: original,
+              url: task.ref.url,
+              body: '',
+              comments: [
+                { id: earlierFinding, body: 'Check the earlier finding', url: task.ref.url },
+              ],
+            },
+          });
         const ref = prRef(task);
         const finding = await f.provider.createComment(
           ref,
@@ -1158,6 +1181,23 @@ it.each(savedFixReviewCases)(
         });
         expect(f.store.activeJobs(task.id)).toHaveLength(0);
         if (publishedAfterRecovery) await f.provider.publish(prRef(task), recoveredReview);
+        if (deleted)
+          await f.provider.deleteComment(prRef(task), recoveredReview, recoveredFinding!);
+        if (verifyMerge) {
+          f.setRemote({ state: 'merged', mergeCommit: 'merge' });
+          const merged = await f.engine.action(task.id, 'verify-merge');
+          expect(merged.state).toBe('reviewing');
+          expect(merged.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
+          const verification = f.store.claim()!;
+          expect(verification.kind).toBe('verify_merge');
+          await f.engine.completeJob(verification, {
+            status: 'completed',
+            summary: 'Checked without the restored finding',
+            checkedHead: saved,
+          });
+          expect(f.store.getTask(task.id).state).toBe('needs_input');
+          return;
+        }
         expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
       }
       const routed = await f.engine.review(task.id, entry === 'old draft');
@@ -1180,7 +1220,9 @@ it.each(savedFixReviewCases)(
       if (recoveredFinding && enabled) expect(routed.round).toBe(confirmed.round + 1);
       if (!enabled) {
         expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
-        if (recoveredFinding) {
+        if (deleted) {
+          expect(routed.feedback?.comments.map(({ id }) => id)).toEqual([earlierFinding]);
+        } else if (recoveredFinding) {
           expect(routed.round).toBe(confirmed.round + 2);
           expect(routed.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
           await f.engine.completeJob(f.store.claim()!, {
@@ -1218,12 +1260,14 @@ it.each(savedFixReviewCases)(
         state: 'reviewing',
         review: { revision: { head: resolved, base } },
       });
-      if (recoveredFinding) {
+      if (deleted) {
+        expect(next.feedback?.comments.map(({ id }) => id)).toEqual([earlierFinding]);
+      } else if (recoveredFinding) {
         expect(next.round).toBe(confirmed.round + 2);
         expect(next.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
       }
       expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
-      if (recoveredFinding) {
+      if (recoveredFinding && !deleted) {
         await f.engine.completeJob(f.store.claim()!, {
           status: 'completed',
           summary: 'Checked without the recovered finding',
