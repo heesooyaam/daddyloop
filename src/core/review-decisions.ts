@@ -1,18 +1,39 @@
+import { z } from 'zod';
 import type { Store } from './store.js';
 import type { Decision, Job, Task } from './types.js';
 
 const promptBudget = 64 * 1024;
 const pageSize = 10;
 
+export const reviewDecisionQuery = z
+  .object({
+    commentId: z.string().min(1).optional(),
+    head: z.string().min(1).optional(),
+    before: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const reviewDecisionTool = {
+  name: 'read_review_decisions',
+  description:
+    'Read recorded decisions for the pinned task. Filter by commentId or head, and pass nextBefore as before with the same filters for the next page.',
+  inputSchema: z.toJSONSchema(reviewDecisionQuery, { target: 'draft-7' }),
+};
+
+function publishedCommentIds(task: Task) {
+  return task.feedback?.status === 'published'
+    ? task.feedback.comments.map((comment) => comment.id)
+    : [];
+}
+
 function visibleDecisions(store: Store, task: Task, role: Job['role']): Decision[] {
   const decisions = store.decisions(task.id);
   if (role === 'reviewer') return decisions;
-  if (task.feedback?.status !== 'published') return [];
-  const published = new Set(task.feedback.comments.map((comment) => comment.id));
+  const published = new Set(publishedCommentIds(task));
   return decisions.filter((decision) => decision.commentId && published.has(decision.commentId));
 }
 
-export function reviewDecisionContext(store: Store, task: Task, role: Job['role']) {
+export function reviewDecisionContext(store: Store, task: Task, role: Job['role'], budget: number) {
   const history = visibleDecisions(store, task, role);
   const findings = new Set([
     ...(task.feedback?.comments.map((comment) => comment.id) ?? []),
@@ -20,7 +41,7 @@ export function reviewDecisionContext(store: Store, task: Task, role: Job['role'
   ]);
   const seen = new Set<string>();
   const selected = new Set<string>();
-  let remaining = promptBudget;
+  let remaining = Math.min(promptBudget, budget) - 2;
   const newest = history.toReversed();
   // Reserve room for findings the worker needs and for task-level decisions.
   const relevant = newest.filter((d) => !d.commentId || findings.has(d.commentId));
@@ -39,7 +60,9 @@ export function reviewDecisionContext(store: Store, task: Task, role: Job['role'
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const size = JSON.stringify(decision, null, 2).length + 64;
+    const serialized = JSON.stringify(decision, null, 2);
+    // Every line gains four spaces inside the top-level decisions array.
+    const size = serialized.length + 4 * serialized.split('\n').length + 2;
     if (size > remaining) continue;
     remaining -= size;
     selected.add(decision.id);
@@ -53,29 +76,23 @@ export function readReviewDecisions(
   store: Store,
   task: Task,
   role: Job['role'],
-  query: { commentId?: string; head?: string; before?: string },
+  query: z.infer<typeof reviewDecisionQuery>,
 ) {
-  const history = visibleDecisions(store, task, role)
-    .filter(
-      (decision) =>
-        (query.commentId === undefined || decision.commentId === query.commentId) &&
-        (query.head === undefined || decision.head === query.head),
-    )
-    .reverse();
-  const start =
-    query.before === undefined ? 0 : history.findIndex((d) => d.id === query.before) + 1;
-  if (query.before !== undefined && !start) return { decisions: [], nextBefore: null };
-
+  const rows = store.decisionPage(
+    task.id,
+    query,
+    role === 'author' ? publishedCommentIds(task) : undefined,
+    pageSize + 1,
+  );
   const decisions: Decision[] = [];
   let remaining = promptBudget;
-  for (const decision of history.slice(start, start + pageSize)) {
-    const size = JSON.stringify(decision).length;
-    if (decisions.length && size > remaining) break;
-    remaining -= size;
-    decisions.push(decision);
+  for (const row of rows.slice(0, pageSize)) {
+    if (decisions.length && row.data.length > remaining) break;
+    remaining -= row.data.length;
+    decisions.push(JSON.parse(row.data) as Decision);
   }
   return {
     decisions,
-    nextBefore: start + decisions.length < history.length ? decisions.at(-1)?.id : null,
+    nextBefore: decisions.length < rows.length ? rows[decisions.length - 1].id : null,
   };
 }

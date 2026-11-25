@@ -11,25 +11,14 @@ import {
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
-import { readReviewDecisions } from './review-decisions.js';
+import { readReviewDecisions, reviewDecisionQuery } from './review-decisions.js';
 import { Outbox } from './outbox.js';
 import { sameOpenTarget } from './pr-routing.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
 
 const body = z.string().min(1).max(60000);
 const schemas = {
-  read_review: z
-    .object({
-      decisions: z
-        .object({
-          commentId: z.string().min(1).optional(),
-          head: z.string().min(1).optional(),
-          before: z.string().min(1).optional(),
-        })
-        .strict()
-        .optional(),
-    })
-    .strict(),
+  read_review: z.object({}).strict(),
   add_comment: z
     .object({
       key: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
@@ -60,7 +49,7 @@ const schemas = {
 };
 const descriptions: Record<keyof typeof schemas, string> = {
   read_review:
-    'Read this task’s current native review and exact Markdown comments. Pass decisions to read a page of recorded decisions instead. Author access is limited to published feedback.',
+    'Read this task’s current native review and exact Markdown comments. Author access is limited to published feedback.',
   add_comment:
     'Create a native DRAFT comment. Use a stable key such as R1; preserve Markdown, code blocks, links and suggestions. Cite a concrete failure scenario. This does not publish anything.',
   edit_comment:
@@ -237,6 +226,22 @@ export class Broker {
       }
     });
   }
+  readDecisions(job: Job, pinned: Task, input: unknown) {
+    const task = this.store.getTask(job.taskId);
+    if (
+      task.id !== pinned.id ||
+      pinned.generation !== job.generation ||
+      task.generation !== job.generation ||
+      task.state === 'paused' ||
+      !sameRevision(task.revision, pinned.revision) ||
+      task.pr?.mergeCommit !== pinned.pr?.mergeCommit
+    )
+      throw new AppError(
+        'stale_run',
+        'This run no longer has access to the pinned decision history',
+      );
+    return readReviewDecisions(this.store, pinned, job.role, reviewDecisionQuery.parse(input));
+  }
   async call(
     job: Job,
     tool: string,
@@ -252,14 +257,12 @@ export class Broker {
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
-    const decisionQuery =
-      tool === 'read_review' ? schemas.read_review.parse(input).decisions : undefined;
-    if (decisionQuery) return readReviewDecisions(this.store, task, job.role, decisionQuery);
     const provider = this.provider(prRef(task));
     if (!task.review)
       throw new AppError('review_missing', 'No native review is attached to this task');
     const snapshot = await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
+      schemas.read_review.parse(input);
       if (job.role === 'author' && snapshot.status !== 'published')
         throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;

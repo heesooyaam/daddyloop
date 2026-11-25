@@ -1,17 +1,26 @@
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
 const mode = process.argv[2] ?? 'happy';
 const threadId = 'thread-fixture',
   turnId = 'turn-fixture';
 let result;
 let compacted = false;
-createInterface({ input: process.stdin }).on('line', (line) => {
+let historyConfig;
+createInterface({ input: process.stdin }).on('line', async (line) => {
   const m = JSON.parse(line);
-  if (process.argv[3]) appendFileSync(process.argv[3], line + '\n');
+  if (process.argv[3])
+    appendFileSync(
+      process.argv[3],
+      JSON.stringify(m, (key, value) => (key === 'http_headers' ? '[redacted]' : value)) + '\n',
+    );
   if (m.method === 'initialize') send({ id: m.id, result: { userAgent: 'fixture' } });
-  if (m.method === 'thread/start' || m.method === 'thread/resume')
+  if (m.method === 'thread/start' || m.method === 'thread/resume') {
+    historyConfig = m.params.config?.mcp_servers?.daddyloop_history;
     send({ id: m.id, result: { thread: { id: threadId } } });
+  }
   if (m.method === 'thread/inject_items')
     send(
       mode === 'policy-error'
@@ -74,6 +83,35 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       disputedCommentIds: [],
     });
     if (mode === 'malformed') result = 'Agent said done, but no valid structured result';
+    if (mode === 'review-history') {
+      try {
+        const { url, http_headers } = historyConfig;
+        const denied = await fetch(url);
+        if (denied.status !== 403) throw new Error('Missing authentication check');
+        const client = new Client({ name: 'test-codex', version: '1' });
+        await client.connect(
+          new StreamableHTTPClientTransport(new URL(url), {
+            requestInit: { headers: http_headers },
+          }),
+        );
+        try {
+          const { tools } = await client.listTools();
+          if (tools.length !== 1 || tools[0].name !== 'read_review_decisions')
+            throw new Error('Expected exactly one read-only history tool');
+          const response = await client.callTool({
+            name: tools[0].name,
+            arguments: JSON.parse(process.argv[4]),
+          });
+          if (response.isError) throw new Error('History lookup failed');
+          result = JSON.stringify({ ...JSON.parse(result), summary: response.content[0].text });
+        } finally {
+          await client.close();
+        }
+      } catch (error) {
+        send({ id: m.id, error: { code: -32603, message: String(error) } });
+        return;
+      }
+    }
     if (mode === 'tool') {
       send({ id: m.id, result: { turn: { id: turnId } } });
       send({
