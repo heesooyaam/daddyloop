@@ -923,9 +923,8 @@ export class Daddy {
       this.resumingResources = (async () => {
         for (const task of this.store.tasks()) {
           if (
-            !task.resourcePause ||
-            task.resourcePause.generation !== task.generation ||
             task.state !== 'needs_input' ||
+            !this.engine.matchesResourcePause(task) ||
             this.store.busy(task.id)
           )
             continue;

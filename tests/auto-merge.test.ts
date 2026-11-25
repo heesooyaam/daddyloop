@@ -640,11 +640,17 @@ describe('opt-in GitHub merging', () => {
       legacy: false,
       ownerPaused: false,
     },
-    { scenario: 'findings after multiple legacy base changes', legacy: true, ownerPaused: false },
-    { scenario: 'owner pause during resource wait', legacy: false, ownerPaused: true },
+    { scenario: 'findings after multiple legacy base changes', legacy: true },
+    { scenario: 'empty draft persisted with a stale resource marker', legacyPause: true },
+    {
+      scenario: 'findings persisted with a stale resource marker',
+      legacy: true,
+      legacyPause: true,
+    },
+    { scenario: 'owner pause with a stale resource marker', legacyPause: true, ownerPaused: true },
   ])(
     'handles a target-branch advance with a resource-paused GitHub review ($scenario)',
-    async ({ legacy, ownerPaused }) => {
+    async ({ legacy, legacyPause, ownerPaused }) => {
       const previousBase = 'b9fd4147112ca77d3d76a9cf5924ae2bce5a0590';
       const f = await setup(daddyFixture(), {
         head: legacy
@@ -684,6 +690,17 @@ describe('opt-in GitHub merging', () => {
             id: finding.id,
             body: 'Check spacing',
           });
+          if (legacyPause) {
+            for (let version = 0; version < 98; version++)
+              await f.engine.broker.call(job, 'set_summary', { body: `Intermediate ${version}` });
+            f.store.db
+              .prepare(
+                `WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n<50000)
+                 INSERT INTO events(task_id,type,data,at)
+                 SELECT ?, 'runtime.item', '{}', ? FROM history`,
+              )
+              .run(old.id, new Date().toISOString());
+          }
           await f.engine.broker.call(job, 'set_summary', { body: 'Current summary' });
           const removed = (await f.engine.broker.call(job, 'add_comment', {
             key: 'removed',
@@ -704,14 +721,34 @@ describe('opt-in GitHub merging', () => {
         const base = '9bf00a4f8ca1bb3ae882ed58da1a0186aaac73e7';
         const targetAdvanced = vi.fn(async () => false);
         Object.assign(f.provider, { targetAdvanced });
-        if (!legacy) {
+        if (!legacy || legacyPause) {
           f.setRemote({ base, start: base });
+          if (legacyPause) {
+            // Older reconciliation had no resource-pause guard and saved the new pin first.
+            const waiting = vi
+              .spyOn(
+                f.engine as unknown as { reviewWaitingForResources(): boolean },
+                'reviewWaitingForResources',
+              )
+              .mockReturnValue(false);
+            try {
+              await f.engine.reconcile(old.id);
+            } finally {
+              waiting.mockRestore();
+            }
+            expect(f.store.getTask(old.id)).toMatchObject({
+              generation: generation + 2,
+              revision: { base },
+              review: { revision: old.revision },
+              resourcePause: { generation: generation + 1 },
+            });
+          }
           await f.engine.reconcile(old.id);
           await f.engine.retryInterruptedStep(old.id);
           await f.engine.review(old.id, true);
           expect(f.store.activeJobs(old.id)).toHaveLength(0);
           expect(f.store.getTask(old.id)).toMatchObject({
-            revision: { base: previousBase },
+            revision: { base: legacyPause ? base : previousBase },
             resourcePause: { generation: generation + 1 },
           });
         }
@@ -731,11 +768,11 @@ describe('opt-in GitHub merging', () => {
         await vi.waitFor(() => expect(f.store.getTask(old.id).resourcePause).toBeUndefined());
         expect(f.store.getTask(old.id)).toMatchObject({
           state: 'needs_input',
-          generation: generation + 1,
+          generation: generation + (legacyPause ? 2 : 1),
         });
         f.setRemote({ base, start: base });
-        const currentBase = legacy ? 'd'.repeat(40) : base;
-        if (legacy) {
+        const currentBase = legacy && !legacyPause ? 'd'.repeat(40) : base;
+        if (legacy && !legacyPause) {
           // Reach the persisted stale-draft state while the native draft cannot be carried.
           f.store.setSetting(key, { ...draft, body: 'Unrecognized native edit' });
           await f.engine.reconcile(old.id);
@@ -808,8 +845,11 @@ describe('opt-in GitHub merging', () => {
           f.store.db
             .prepare("UPDATE operations SET result='null' WHERE task_id=? AND id GLOB ?")
             .run(old.id, handle.marker + ':*:remove_comment:*');
-          await f.engine.review(old.id, true);
-          expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), base, currentBase);
+          if (legacyPause) await f.engine.retryInterruptedStep(old.id);
+          else {
+            await f.engine.review(old.id, true);
+            expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), base, currentBase);
+          }
         } else await f.engine.retryInterruptedStep(old.id);
         await f.engine.retryInterruptedStep(old.id);
         expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), previousBase, base);

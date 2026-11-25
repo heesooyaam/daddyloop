@@ -564,15 +564,20 @@ export class Engine {
     const prefix = handle.marker + ':';
     const writes = this.store.db
       .prepare(
-        `SELECT o.id, o.request, o.result, MAX(e.id) AS confirmed
-         FROM operations o LEFT JOIN events e ON e.task_id=o.task_id
-           AND e.type IN ('operation.completed','operation.recovered')
-           AND json_extract(e.data,'$.operationId')=o.id
+        `WITH confirmations AS MATERIALIZED (
+           SELECT json_extract(data,'$.operationId') AS operation_id, MAX(id) AS confirmed
+           FROM events
+           WHERE task_id=? AND type IN ('operation.completed','operation.recovered')
+           GROUP BY operation_id
+         )
+         SELECT o.id, o.request, o.result, c.confirmed
+         FROM operations o LEFT JOIN confirmations c ON c.operation_id=o.id
          WHERE o.task_id=? AND o.status='done' AND
            (o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ?)
-         GROUP BY o.id ORDER BY confirmed`,
+         ORDER BY c.confirmed`,
       )
       .all(
+        task.id,
         task.id,
         prefix + 'comment:*',
         prefix + '*:edit_comment:*',
@@ -909,17 +914,53 @@ export class Engine {
     )
       return draftSyncPending;
   }
+  matchesResourcePause(task: Task) {
+    const pause = task.resourcePause;
+    if (!pause) return false;
+    if (pause.generation === task.generation) return true;
+    if (
+      task.ref.provider !== 'github' ||
+      task.state !== 'needs_input' ||
+      task.resumeState !== 'reviewing' ||
+      task.inputRequest ||
+      task.reviewFinished ||
+      task.pendingFix ||
+      task.partialReview ||
+      task.snapshot?.status === 'published' ||
+      pause.generation > task.generation
+    )
+      return false;
+    // Legacy reconciliation could advance the pinned base before the monitor resumed the task.
+    const history = this.resourceReviewHistory(task);
+    return !!history && !history.resumed && history.pausedGeneration === pause.generation;
+  }
+
   private reviewWaitingForResources(task: Task) {
     return (
       task.ref.provider === 'github' &&
       task.state === 'needs_input' &&
       task.resumeState === 'reviewing' &&
       !!task.review &&
-      task.resourcePause?.generation === task.generation
+      this.matchesResourcePause(task)
     );
   }
 
-  private resourceReviewBases(task: Task, job: Job, original: Revision) {
+  private resourceReviewHistory(task: Task) {
+    const original = task.review?.revision;
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const job = this.store.jobs(task.id).findLast((run) => run.kind !== 'chat');
+    if (
+      !original ||
+      job?.kind !== 'review' ||
+      job.status !== 'cancelled' ||
+      job.groupId !== task.groupId ||
+      job.groupGeneration !== group?.generation ||
+      group?.deletedAt ||
+      group?.deletion ||
+      group?.daddyState === 'paused' ||
+      group?.daddyState === 'archived'
+    )
+      return;
     const history = this.store.db
       .prepare(
         `SELECT type, data FROM events
@@ -978,12 +1019,11 @@ export class Engine {
       }
     }
     if (
-      resumed &&
       !awaitingStaleState &&
       generation === task.generation &&
       sameRevision(revision, task.revision)
     )
-      return bases;
+      return { bases, resumed, pausedGeneration: job.generation + 1 };
   }
 
   private async resumeReviewAfterResourcePause(
@@ -1010,21 +1050,9 @@ export class Engine {
       return false;
 
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-    const job = this.store.jobs(task.id).findLast((run) => run.kind !== 'chat');
-    if (
-      job?.kind !== 'review' ||
-      job.status !== 'cancelled' ||
-      job.groupId !== task.groupId ||
-      job.groupGeneration !== group?.generation ||
-      group?.deletedAt ||
-      group?.deletion ||
-      group?.daddyState === 'paused' ||
-      group?.daddyState === 'archived'
-    )
-      return false;
-
-    const bases = this.resourceReviewBases(task, job, handle.revision);
-    if (!bases) return false;
+    const history = this.resourceReviewHistory(task);
+    if (!history?.resumed) return false;
+    const { bases } = history;
 
     const ref = prRef(task),
       provider = this.provider(ref);
