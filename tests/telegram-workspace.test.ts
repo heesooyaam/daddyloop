@@ -370,6 +370,12 @@ it('keeps repository paths private for topic, general-group and new-session choi
     await bot.handle(click(browse, 7));
     await bot.handle(message('/repo /server/topic-choice', 7));
     await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
+    expect(sent.at(-1)!.card.text).toContain('/task');
+    expect(sent.at(-1)!.card.text).toContain(group.title);
+    expect(sent.at(-1)!.card.buttons[0][0]).toMatchObject({
+      text: 'Open session topic',
+      url: expect.stringContaining(`/${topic!.threadId}`),
+    });
     expect(
       f.store.setting<{ workspace: { repoPath: string } }>(
         `telegram.nextRepo:7:-10042:${topic!.threadId}:${group.id}`,
@@ -386,6 +392,9 @@ it('keeps repository paths private for topic, general-group and new-session choi
     );
     await bot.handle(message('/repo /server/general-choice', 7));
     await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
+    expect(sent.at(-1)!.card.text).toContain('/task');
+    expect(sent.at(-1)!.card.text).toContain('Work');
+    expect(sent.at(-1)!.card.buttons).toBeUndefined();
     expect(
       f.store.setting<{ workspace: { repoPath: string } }>(
         `telegram.nextRepo:7:-10042:0:${group.id}`,

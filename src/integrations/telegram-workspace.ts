@@ -2009,10 +2009,42 @@ export class TelegramWorkspace {
             '\n' + selected.repoPath + (selected.scope ? '/' + selected.scope : ''),
             'code',
           );
-        response.add(
-          '\n\n' + this.t('Send the task now. The following message will use the defaults again.'),
-        );
-        await this.api.send(destination, response);
+        const buttons: TelegramButton[][] = [];
+        if (choice.controlDestination) {
+          const group = this.daddy.group(choice.groupId);
+          if (choice.destination.threadId) {
+            response.add(
+              '\n\n' +
+                this.t(
+                  'Send /task in the original topic for {title}. This folder applies only to that topic.',
+                  { title: group.title },
+                ),
+            );
+            buttons.push([
+              {
+                text: this.t('Open session topic'),
+                url: this.link({
+                  ...choice.destination,
+                  threadId: choice.destination.threadId,
+                  groupId: group.id,
+                  ownerId: this.pair()!.userId,
+                }),
+              },
+            ]);
+          } else
+            response.add(
+              '\n\n' +
+                this.t(
+                  'Return to {title} and send /task there. This folder applies only to that group route.',
+                  { title: this.room()?.title ?? group.title },
+                ),
+            );
+        } else
+          response.add(
+            '\n\n' +
+              this.t('Send the task now. The following message will use the defaults again.'),
+          );
+        await this.api.send(destination, { ...response, ...(buttons.length ? { buttons } : {}) });
       } else await this.newSession(choice.workspace.id, choice.destination, selected);
       if (choice.controlDestination && choice.inputId) {
         const pending = this.store.setting<{ id: string }>(

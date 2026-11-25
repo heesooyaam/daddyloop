@@ -712,6 +712,8 @@ export const daddyRu: Record<string, string> = {
     'Укажи точное название задачи или однозначное начало её ID.',
   'This task action expired. Open the task again.':
     'Срок действия этой кнопки истёк. Открой задачу заново.',
+  'This task is no longer available in this session.':
+    'Эта задача больше недоступна в текущей сессии.',
   'The selected session changed. Open the task again.':
     'Выбранная сессия изменилась. Открой задачу заново.',
   'This action is not available for the current task state.':
@@ -757,6 +759,10 @@ export const daddyRu: Record<string, string> = {
   'Skill imported for {title}.': 'Навык импортирован для «{title}».',
   'File import cancelled.': 'Импорт файла отменён.',
   'Repository selection cancelled.': 'Выбор репозитория отменён.',
+  'Send /task in the original topic for {title}. This folder applies only to that topic.':
+    'Отправь /task в исходной теме сессии «{title}». Эта папка действует только для той темы.',
+  'Return to {title} and send /task there. This folder applies only to that group route.':
+    'Вернись в «{title}» и отправь там /task. Эта папка действует только для того маршрута группы.',
   'Instruction exports are available only in the paired private chat.':
     'Экспорт инструкций доступен только в привязанной личке с ботом.',
   'Instructions for {title}': 'Инструкции для {title}',

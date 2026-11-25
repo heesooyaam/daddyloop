@@ -649,6 +649,8 @@ test('keeps an open task report on one revision while board state changes', asyn
   expect(detailRequests - behindStart).toBeLessThanOrEqual(2);
   detailOverride = undefined;
   await expect(report.getByText('4'.repeat(40), { exact: true })).toBeVisible({ timeout: 5000 });
+  await reason.fill('Verified fourth revision');
+  await expect(waive).toBeEnabled();
 
   detailOverride = {
     generation: 14,
@@ -663,13 +665,18 @@ test('keeps an open task report on one revision while board state changes', asyn
   await started;
   await page.waitForTimeout(500);
   expect(detailRequests - aheadStart).toBeLessThanOrEqual(2);
+  await expect(waive).toBeDisabled();
   Object.assign(snapshot, detailOverride);
   await expect(report.getByText('5'.repeat(40), { exact: true })).toBeVisible({ timeout: 5000 });
+  await expect(reason).toHaveValue('');
+  await reason.fill('Verified fifth revision');
+  await expect(waive).toBeEnabled();
   detailOverride = undefined;
 
   missing = true;
   await expect(page.locator('.daddy-work-item')).toHaveCount(0, { timeout: 5000 });
-  await expect(waive).toBeDisabled();
+  await expect(report.getByText('This task is no longer available in this session.')).toBeVisible();
+  await expect(waive).toHaveCount(0);
   const missingRequests = detailRequests;
   await page.waitForTimeout(2200);
   expect(detailRequests).toBe(missingRequests);

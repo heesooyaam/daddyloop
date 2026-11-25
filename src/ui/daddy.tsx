@@ -1543,6 +1543,7 @@ function TaskReport({
     [value, setValue] = useState<{ task: Task; messages: Message[]; statusLabel?: string }>(),
     [error, setError] = useState(''),
     [loading, setLoading] = useState(true),
+    [stale, setStale] = useState(false),
     [busy, setBusy] = useState(false),
     [waiverReason, setWaiverReason] = useState('');
   const live = board?.tasks.find((task) => task.id === id);
@@ -1572,7 +1573,7 @@ function TaskReport({
   const detail = value?.task.id === id ? value : undefined;
   const detailVersion = detail ? detailVersionOf(detail.task) : '';
   const current = !!detail && !!live && detailVersion === liveVersion;
-  const controlsDisabled = busy || loading || !!error || !current;
+  const controlsDisabled = busy || loading || stale || !!error || !current;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
   const request = live?.workerRequest ?? detail?.task.workerRequest;
   const worker = slot?.number ?? request?.slot;
@@ -1590,6 +1591,7 @@ function TaskReport({
     const controller = new AbortController();
     const load = async (versionChanged: boolean) => {
       if (!liveRef.current) {
+        setStale(true);
         setLoading(false);
         return;
       }
@@ -1610,8 +1612,9 @@ function TaskReport({
         const latest = liveRef.current;
         if (latest && detailVersionOf(result.task) === boardVersion(latest)) {
           pendingVersion = false;
+          setStale(false);
           setValue({ ...result, statusLabel: latest.statusLabel });
-        }
+        } else setStale(true);
       } catch (error) {
         if (active) setError((error as Error).message);
       } finally {
@@ -1645,7 +1648,7 @@ function TaskReport({
     setWaiverReason('');
   }, [id, live?.generation, live?.head]);
   const action = async (action: string, reason?: string) => {
-    if (!board || !detail || !current || error) return;
+    if (!board || !detail || !current || stale || error) return;
     setBusy(true);
     try {
       await api(`/daddy/sessions/${board.group.id}/task-action`, {
@@ -1671,7 +1674,7 @@ function TaskReport({
           {t(error)}
         </p>
       )}
-      {detail ? (
+      {detail && live ? (
         <>
           <h3>{detail.task.title}</h3>
           <div className="daddy-task-meta">
@@ -1847,6 +1850,8 @@ function TaskReport({
               </div>
             ))}
         </>
+      ) : !error && board && !live ? (
+        <p role="status">{t('This task is no longer available in this session.')}</p>
       ) : (
         !error && <LoaderCircle className="spin" />
       )}
