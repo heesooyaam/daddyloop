@@ -1067,6 +1067,10 @@ const savedFixReviewCases = [
   'published after recovery on old base',
   'published before merge verification',
   'published after recovery before merge verification',
+  'published before recovery on merged original base',
+  'published before recovery on merged advanced base',
+  'draft before recovery on merged original base',
+  'draft before recovery on merged advanced base',
   'published then deleted before review',
   'published then deleted before repair',
   'auto-merge disabled',
@@ -1121,13 +1125,17 @@ it.each(savedFixReviewCases)(
       }
       const confirmed = f.store.getTask(task.id);
       let recoveredFinding: string | undefined;
-      const publishedAfterRecovery = entry.startsWith('published after recovery');
+      const mergedBeforeRecovery = entry.includes('on merged');
+      const publishedAfterRecovery =
+        entry.startsWith('published after recovery') || entry.startsWith('draft');
+      const initialDraft = entry.startsWith('draft');
       const verifyMerge = entry.endsWith('merge verification');
       const deleted = entry.includes('then deleted');
       const earlierFinding = 'previous-finding';
-      const recoveredReview = entry.startsWith('published')
-        ? await f.engine.broker.ensureReview({ ...confirmed, round: confirmed.round + 1 })
-        : undefined;
+      const recoveredReview =
+        entry.startsWith('published') || initialDraft
+          ? await f.engine.broker.ensureReview({ ...confirmed, round: confirmed.round + 1 })
+          : undefined;
       if (recoveredReview) {
         if (deleted)
           f.store.saveTask({
@@ -1154,7 +1162,7 @@ it.each(savedFixReviewCases)(
       }
       const recoveredOnNewBase = !!recoveredReview && entry !== 'published before recovery';
       const moved =
-        recoveredOnNewBase ||
+        (recoveredOnNewBase && !entry.endsWith('merged original base')) ||
         entry.startsWith('advanced') ||
         entry === 'rewritten base' ||
         entry === 'retargeted';
@@ -1172,6 +1180,36 @@ it.each(savedFixReviewCases)(
         expect(await f.engine.review(task.id)).toMatchObject({ state: 'needs_input' });
         expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
         targetAdvanced.mockClear();
+      }
+      if (mergedBeforeRecovery) {
+        if (!recoveredReview) throw new Error('Expected the native review creation');
+        f.setRemote({ state: 'merged', mergeCommit: 'merge' });
+        expect(await f.engine.review(task.id)).toMatchObject({ state: 'needs_input' });
+        expect(f.store.getTask(task.id).review).toBeUndefined();
+        if (initialDraft) {
+          const held = await f.engine.action(task.id, 'verify-merge');
+          expect(held).toMatchObject({
+            state: 'needs_input',
+            review: { id: recoveredReview.id },
+          });
+          expect(f.store.activeJobs(task.id)).toHaveLength(0);
+          await f.provider.publish(prRef(task), recoveredReview);
+        }
+        const merged = await f.engine.action(task.id, 'verify-merge');
+        expect(merged).toMatchObject({ state: 'reviewing', round: confirmed.round + 1 });
+        expect(merged.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
+        const verification = f.store.claim()!;
+        expect(verification.kind).toBe('verify_merge');
+        await f.engine.completeJob(verification, {
+          status: 'completed',
+          summary: 'Checked without the restored finding',
+          checkedHead: saved,
+        });
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          reason: 'Reviewer has not verified all previously published findings',
+        });
+        return;
       }
       if (recoveredOnNewBase) {
         expect(await f.engine.review(task.id)).toMatchObject({

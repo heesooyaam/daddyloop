@@ -1236,7 +1236,6 @@ export class Engine {
       throw new AppError('merge_unconfirmed', 'The provider must confirm the merge');
     const head = this.pendingFixHead(task, pr);
     const pending = task.pendingAuthorFix;
-    if (await this.stopLegacyMergeBeforeSavedFix(task, pr)) return task;
     const check =
       pr.mergeCommit && head === pr.head && pending?.generation === task.generation
         ? await this.checkSavedFixForSubmission(task, { ...pr, state: 'open' }, head)
@@ -1245,7 +1244,8 @@ export class Engine {
       this.holdLostFix(task, pr.head, check.reason);
       return task;
     }
-    if (check?.status !== 'confirmed' && this.stopReviewBeforeSavedFix(task, pr, true)) return task;
+    if (check?.status !== 'confirmed' && (await this.stopMergeBeforeSavedFix(task, pr)))
+      return task;
     if (pr.head !== task.revision?.head && pr.head !== task.pendingAuthorHead)
       throw new AppError(
         'merge_unconfirmed',
@@ -1257,8 +1257,12 @@ export class Engine {
         'Inspect the saved worker changes before verifying this merge',
       );
     const recovered = task.review ?? pending?.staleDraft;
-    if (head === pr.head && recovered?.revision.head === head)
-      this.trackRecoveredReview(task, recovered, task.review ? task.snapshot : undefined);
+    if (task.pendingAuthorHead === pr.head) {
+      if (recovered?.revision.head === pr.head)
+        this.trackRecoveredReview(task, recovered, task.review ? task.snapshot : undefined);
+      if (task.ref.provider === 'github' && !(await this.recoverReviewBeforeMerge(task, pr)))
+        return task;
+    }
     if (!(await this.refreshRetiredReviewFeedback(task))) return task;
     this.store.transaction(() => {
       if (!sameRevision(task.revision, pr)) {
@@ -1285,6 +1289,26 @@ export class Engine {
     });
     return task;
   }
+  private async recoverReviewBeforeMerge(task: Task, pr: PullRequest): Promise<boolean> {
+    const attempt = await this.broker.findAttemptedReview(task);
+    if (!attempt) return true;
+    const review = attempt.review;
+    const head = attempt.revision?.head ?? review?.revision.head;
+    if (head && head !== pr.head) return true;
+    if (!review) {
+      this.holdLostFix(task, pr.head, 'Could not verify the earlier creation of a native review.');
+      return false;
+    }
+    this.trackRecoveredReview(task, review);
+    if (!task.review) {
+      task.review = review;
+      task.snapshot = undefined;
+      task.reviewFinished = false;
+    }
+    task.round++;
+    return true;
+  }
+
   prAction(task: Task, pr: PullRequest, evidence: PrEvidence = {}) {
     return nextPrAction(task, pr, {
       ...evidence,
@@ -1996,31 +2020,34 @@ export class Engine {
   async canStartMergeVerification(job: Job, pr: PullRequest): Promise<boolean> {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
-      return (
-        job.generation === task.generation &&
-        !this.stopReviewBeforeSavedFix(task, pr, true) &&
-        !(await this.stopLegacyMergeBeforeSavedFix(task, pr))
-      );
+      return job.generation === task.generation && !(await this.stopMergeBeforeSavedFix(task, pr));
     });
   }
 
-  private async stopLegacyMergeBeforeSavedFix(task: Task, pr: PullRequest): Promise<boolean> {
+  private async stopMergeBeforeSavedFix(task: Task, pr: PullRequest): Promise<boolean> {
+    const legacyConfirmation = await this.confirmLegacyMergedFix(task, pr);
+    return legacyConfirmation === undefined
+      ? this.stopReviewBeforeSavedFix(task, pr, true)
+      : !legacyConfirmation;
+  }
+
+  private async confirmLegacyMergedFix(task: Task, pr: PullRequest): Promise<boolean | undefined> {
     const head = task.pendingAuthorHead;
     if (
       task.ref.provider !== 'github' ||
       pr.state !== 'merged' ||
       !head ||
       head !== pr.head ||
-      task.pendingAuthorFix
+      task.pendingAuthorFix ||
+      task.pendingFix
     )
-      return false;
+      return;
     const saved = this.savedFixEvent(task, head);
-    if (!saved || !this.savedFixSubmissionRecorded(task, head, Number(saved.id))) return false;
+    if (!saved) return;
     const observation = this.legacyFixObservations(task, head, Number(saved.id))[0];
-    if (!observation || this.savedFixSubmissionRecorded(task, head, Number(observation.id)))
-      return false;
+    if (!observation || this.savedFixSubmissionRecorded(task, head, Number(observation.id))) return;
     const revision = parseRecordedRevision(observation.revision);
-    if (!revision) return false;
+    if (!revision) return;
     const held = this.store.db
       .prepare(
         `SELECT json_extract(data, '$.reason') AS reason FROM events
@@ -2050,14 +2077,14 @@ export class Engine {
         head,
         `Expected target branch ${target ?? 'unknown'}. Observed ${pr.targetBranch}.`,
       );
-      return true;
+      return false;
     }
     const baseChange = savedFixBaseChange(revision, pr);
-    if (!baseChange) return false;
+    if (!baseChange) return true;
     const ref = prRef(task);
-    if (await this.provider(ref).targetAdvanced?.(ref, revision.base, pr.base)) return false;
+    if (await this.provider(ref).targetAdvanced?.(ref, revision.base, pr.base)) return true;
     this.holdLostFix(task, head, baseChange);
-    return true;
+    return false;
   }
 
   private stopReviewBeforeSavedFix(task: Task, pr: PullRequest, merged = false): boolean {
@@ -3006,13 +3033,9 @@ export class Engine {
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
-      if (
-        (job.kind === 'review' || job.kind === 'verify_merge') &&
-        this.stopReviewBeforeSavedFix(task, pr, job.kind === 'verify_merge')
-      )
-        return;
+      if (job.kind === 'review' && this.stopReviewBeforeSavedFix(task, pr)) return;
       if (job.kind === 'verify_merge') {
-        if (await this.stopLegacyMergeBeforeSavedFix(task, pr)) return;
+        if (await this.stopMergeBeforeSavedFix(task, pr)) return;
         this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (
           pr.state !== 'merged' ||

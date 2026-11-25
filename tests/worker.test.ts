@@ -2877,9 +2877,21 @@ it.each([false, true])(
   },
 );
 
-it.each(['advance', 'rollback', 'divergence', 'retargeted', 'unknown target'] as const)(
-  'checks the saved-fix confirmation before running restored merge verification (%s)',
-  async (movement) => {
+it.each([
+  ['advance', false],
+  ['rollback', false],
+  ['divergence', false],
+  ['retargeted', false],
+  ['unknown target', false],
+  ['original base', true],
+  ['confirmed base', true],
+  ['advance', true],
+  ['rollback', true],
+  ['divergence', true],
+  ['retargeted', true],
+] as const)(
+  'checks the saved-fix confirmation before running restored merge verification (%s, manual push: %s)',
+  async (movement, manualPush) => {
     const f = await fixture();
     const workspaces = new Workspaces('/tmp');
     const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
@@ -2889,12 +2901,13 @@ it.each(['advance', 'rollback', 'divergence', 'retargeted', 'unknown target'] as
       const task = f.store.getTask(f.task.id);
       const original = task.revision!;
       const saved = 'f'.repeat(40);
-      const base = 'c'.repeat(40);
-      const nextBase = movement === 'rollback' ? original.base : 'e'.repeat(40);
+      const base = movement === 'original base' ? original.base : 'c'.repeat(40);
+      const unchanged = movement === 'original base' || movement === 'confirmed base';
+      const nextBase = unchanged ? base : movement === 'rollback' ? original.base : 'e'.repeat(40);
       const author = f.store.enqueue(task, 'author', 'fix', 'Save the worker changes');
       f.store.saveJob({ ...author, status: 'completed' });
       f.store.event(task.id, 'author.fixes_saved', { head: saved, revision: original }, author.id);
-      f.store.event(task.id, 'author.submitted', { head: saved, pushed: true });
+      if (!manualPush) f.store.event(task.id, 'author.submitted', { head: saved, pushed: true });
       const generation = task.generation + 1;
       f.store.event(task.id, 'revision.changed', {
         revision: { head: saved, base, start: base },
@@ -2940,7 +2953,7 @@ it.each(['advance', 'rollback', 'divergence', 'retargeted', 'unknown target'] as
       Object.assign(f.provider, { targetAdvanced });
       const job = f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged PR');
       await worker.tick();
-      const allowed = movement === 'advance';
+      const allowed = unchanged || movement === 'advance';
       await vi.waitFor(() =>
         expect(f.store.jobs(task.id).find(({ id }) => id === job.id)?.status).toBe(
           allowed ? 'completed' : 'cancelled',
@@ -2957,7 +2970,7 @@ it.each(['advance', 'rollback', 'divergence', 'retargeted', 'unknown target'] as
           reason: expect.stringContaining(saved),
         });
       }
-      if (movement === 'retargeted' || movement === 'unknown target')
+      if (unchanged || movement === 'retargeted' || movement === 'unknown target')
         expect(targetAdvanced).not.toHaveBeenCalled();
       else expect(targetAdvanced).toHaveBeenCalledWith(prRef(queued), base, nextBase);
     } finally {
