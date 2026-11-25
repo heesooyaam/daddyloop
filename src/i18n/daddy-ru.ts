@@ -633,6 +633,8 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing the fix with the answer from the session':
+    'Воркер продолжает исправление с ответом из сессии',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',

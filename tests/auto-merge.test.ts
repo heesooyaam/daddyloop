@@ -1,3 +1,4 @@
+import { buildContext } from '../src/runtime/context.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -276,6 +277,45 @@ describe('opt-in GitHub merging', () => {
       }
     },
   );
+  it('resumes an author fix with the answer and keeps the decision for the next independent review', async () => {
+    const f = await setup();
+    try {
+      await f.engine.review(f.task.id, true);
+      const review = f.store.claim()!;
+      const head = f.store.getTask(f.task.id).revision!.head;
+      await f.engine.broker.call(review, 'add_comment', { key: 'F', body: 'Fix the queue' });
+      await f.engine.completeJob(review, {
+        status: 'completed',
+        checkedHead: head,
+        summary: 'Found a defect',
+      });
+      f.store.saveJob({ ...review, status: 'completed' });
+      await f.engine.publish(f.task.id);
+      const author = f.store.claim()!;
+      await f.engine.completeJob(author, {
+        status: 'needs_input',
+        summary: 'A decision is missing',
+        question: 'Keep the manual step?',
+        checkedHead: head,
+      });
+      f.store.saveJob({ ...author, status: 'completed' });
+      const answer = 'Use automatic publication per the approved issue.';
+      await f.engine.chat(f.task.id, 'author', answer, 'daddy:turn:answer');
+      const t = f.store.getTask(f.task.id);
+      expect(t).toMatchObject({
+        state: 'fixing',
+        latestClarification: { text: answer, question: 'Keep the manual step?' },
+      });
+      expect(t.inputRequest).toBeUndefined();
+      expect(f.store.activeJobs(t.id)).toMatchObject([
+        { kind: 'fix', role: 'author', input: answer },
+      ]);
+      const prompt = buildContext(f.store, t, { ...review, generation: t.generation });
+      expect(prompt).toContain(answer);
+    } finally {
+      await f.close();
+    }
+  });
   it('reserves the original worker from clean review through a late conflict', async () => {
     const f = await setup();
     try {

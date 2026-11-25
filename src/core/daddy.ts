@@ -1286,6 +1286,7 @@ export class Daddy {
           id: task.id,
           title: task.title,
           requirements: task.requirements,
+          clarification: task.latestClarification,
           source: task.source,
           ref: task.ref,
           state: task.state,
