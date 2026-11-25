@@ -682,7 +682,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     <VoiceInput
                       key={board.group.id}
                       onBusy={setVoiceBusy}
-                      disabled={paused}
+                      disabled={paused || limitsPage}
                       onText={(text) => {
                         const current = model.snapshot();
                         if (current.selected === board.group.id)
