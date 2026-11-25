@@ -260,6 +260,7 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  publicationRetry?: { retryAt: number; delay: number };
   draftStart?: {
     marker: string;
     owner?: string;

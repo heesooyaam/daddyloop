@@ -758,6 +758,7 @@ export class Engine {
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
+    delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
     task.snapshot = undefined;
@@ -815,7 +816,18 @@ export class Engine {
     const handle = task.review!;
     if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
     this.broker.reconcileDraftEdits(task, draft);
-    if (this.store.pendingReviewWrites(task.id, handle.marker).length) return draftSyncPending;
+    const publishKey = handle.marker + ':publish';
+    if (
+      this.store
+        .pendingReviewWrites(task.id, handle.marker)
+        .some(
+          (row) =>
+            row.id !== publishKey ||
+            draft.status !== 'draft' ||
+            this.broker.outbox.isActive(publishKey),
+        )
+    )
+      return draftSyncPending;
     if (!this.draftHasWork(handle, draft)) return;
     if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (
@@ -1752,6 +1764,7 @@ export class Engine {
     return true;
   }
   private async afterPublishedReview(task: Task, pr: PullRequest, snapshot: ReviewSnapshot) {
+    delete task.publicationRetry;
     const action = this.prAction(task, pr, { nativeReview: snapshot });
     if (action.kind === 'wait-mergeability') {
       if (task.partialReview) task.partialReview.retryAt = Date.now() + 5000;
@@ -1971,9 +1984,46 @@ export class Engine {
           'publication_unavailable',
           'Wait until the reviewer has finished and discussion is idle',
         );
-      if (task.partialReview) return this.releaseReviewFindings(task);
-      const publication = await this.broker.publish(task);
-      return this.reconcileLocked(id, publication);
+      if (task.publicationRetry && task.publicationRetry.retryAt > Date.now()) return task;
+      try {
+        if (task.partialReview) return await this.releaseReviewFindings(task);
+        const publication = await this.broker.publish(task);
+        return await this.reconcileLocked(id, publication);
+      } catch (error) {
+        const current = this.store.getTask(id);
+        if (
+          error instanceof AppError &&
+          error.code === 'stale_revision' &&
+          !task.partialReview &&
+          task.ref.provider === 'github' &&
+          current.generation === task.generation &&
+          current.state === 'awaiting_publication'
+        )
+          return this.reconcileLocked(id);
+
+        if (
+          task.ref.provider !== 'github' ||
+          current.generation !== task.generation ||
+          current.state !== 'awaiting_publication' ||
+          current.review?.id !== task.review?.id ||
+          !(
+            error instanceof AppError &&
+            (error instanceof GitHubRetryError ||
+              /^(provider_(408|500|502|503|504)|provider_unreachable)$/.test(error.code))
+          )
+        )
+          throw error;
+        const delay = Math.min((current.publicationRetry?.delay ?? 7500) * 2, 300000);
+        current.publicationRetry = {
+          delay,
+          retryAt: Math.max(
+            Date.now() + delay,
+            error instanceof GitHubRetryError ? error.until : 0,
+          ),
+        };
+        this.state(current, 'awaiting_publication', 'Waiting to retry GitHub review publication');
+        return current;
+      }
     });
   }
   private rememberClarification(task: Task, text: string) {
@@ -2575,6 +2625,22 @@ export class Engine {
           if (task.pendingAuthorHead === task.revision.head) task.pendingFix = undefined;
           this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
         }
+      }
+      if (
+        task.ref.provider === 'github' &&
+        task.state === 'needs_input' &&
+        !task.inputRequest &&
+        task.review &&
+        (task.reviewFinished || task.partialReview) &&
+        task.reason.startsWith(
+          `AppError: POST /repos/${task.ref.repo}/pulls/${task.ref.number}/reviews/${task.review.id}/events: HTTP `,
+        ) &&
+        /: HTTP (?:408|500|502|503|504)\b/.test(task.reason) &&
+        this.store.db
+          .prepare("SELECT 1 FROM operations WHERE task_id=? AND id=? AND status='pending'")
+          .get(task.id, task.review.marker + ':publish')
+      ) {
+        this.state(task, 'awaiting_publication', 'Waiting to retry GitHub review publication');
       }
       if (!task.latestClarification && task.state !== 'complete') {
         const review = this.store

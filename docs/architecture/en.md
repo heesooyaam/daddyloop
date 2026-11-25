@@ -196,7 +196,7 @@ For example, GitHub may still be calculating mergeability when findings are publ
 
 A transient GitHub read failure is retried by the scheduler, with a persistent backoff. When a PR was already created the service records its URL, submitted commit and task generation and retries only the read needed to attach it. If the response to PR creation was lost, daddy searches for the original submission using its marker, branch and author before taking further action. The queue displays the retry time or an actual owner question.
 
-If creating a GitHub review draft returns a transient error, the task records the marker and retry time. The scheduler rechecks the current revision and the account’s reviews, then resumes its marked draft or creates it on the verified commit if the draft slot is free. The queue shows the retry time. Existing edits are preserved.
+If creating a GitHub review draft returns a transient error, the task records the marker and retry time. The scheduler rechecks the current revision and the account’s reviews, then resumes its marked draft or creates it on the verified commit if the draft slot is free. The queue shows the retry time. Existing edits are preserved. Publication retries target the same review ID. The service checks its state and the recorded content of the draft before resubmitting it. If the base moves, the draft must be reviewed against the updated revision.
 
 When a conflict repair times out, the same worker resumes in its existing checkout after 30 seconds, or after five minutes on subsequent timeouts. If the target branch advanced, the service verifies ancestry before continuing and reviews the result against the current base.
 

@@ -366,32 +366,104 @@ export class Broker {
   ): Promise<ReviewSnapshot> {
     const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
-    const pr = await provider.getPR(prRef(task));
-    if (
-      pr.state !== 'open' ||
-      pr.head !== task.review.revision.head ||
-      (!verifyFindings && !sameRevision(pr, task.review.revision))
-    )
-      throw new AppError(
-        'stale_revision',
-        'PR revision changed. This review cannot release feedback for the new revision.',
-      );
-    const snapshot = await provider.getReview(prRef(task), task.review);
-    if (verifyFindings) await verifyFindings(pr, snapshot);
-    if (snapshot.status === 'published') return snapshot;
-    assertDraft(snapshot);
+    const ref = prRef(task),
+      handle = task.review;
+    const key = handle.marker + ':publish';
+    const read = async () => {
+      const pr = await provider.getPR(ref);
+      if (
+        !sameOpenTarget(task.pr, pr) ||
+        pr.head !== handle.revision.head ||
+        (!verifyFindings && !sameRevision(pr, handle.revision))
+      )
+        throw new AppError(
+          'stale_revision',
+          'PR revision changed. This review cannot release feedback for the new revision.',
+        );
+      const draft = await provider.getReview(ref, handle);
+      if (verifyFindings) await verifyFindings(pr, draft);
+      return draft;
+    };
+    const draft = await read();
+    if (draft.status === 'published') {
+      if (
+        this.store.db
+          .prepare("SELECT 1 FROM operations WHERE id=? AND task_id=? AND status='pending'")
+          .get(key, task.id)
+      )
+        await this.outbox.perform(
+          task.id,
+          key,
+          { review: handle.id },
+          async () => null,
+          async () => ({ found: true, value: null }),
+        );
+      return draft;
+    }
+    assertDraft(draft);
+    const baselineKey =
+      'review.publish-content:' + key + ':' + handle.revision.head + ':' + handle.revision.base;
+    const fingerprint = (s: ReviewSnapshot) =>
+      createHash('sha256')
+        .update(
+          JSON.stringify([
+            s.authorId,
+            s.revision.head,
+            s.body,
+            s.comments
+              .map((c) => [c.id, c.body, c.location])
+              .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+          ]),
+        )
+        .digest('hex');
+    const send = async () => {
+      await provider.publish(ref, handle);
+      return null;
+    };
     await this.outbox.perform(
       task.id,
-      `${task.review.marker}:publish`,
-      { review: task.review.id },
+      key,
+      { review: handle.id },
       async () => {
-        await provider.publish(prRef(task), task.review!);
-        return null;
+        if (ref.provider === 'github') this.store.setSetting(baselineKey, fingerprint(draft));
+        return send();
       },
-      async () =>
-        (await provider.getReview(prRef(task), task.review!)).status === 'published'
-          ? { found: true, value: null }
-          : { found: false },
+      async () => {
+        const current = await read();
+        if (current.status === 'published') return { found: true, value: null };
+        if (ref.provider !== 'github') return { found: false };
+        assertDraft(current);
+        const latest = this.store.getTask(task.id),
+          group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
+        const expected =
+          this.store.setting<string>(baselineKey) ??
+          (task.snapshot?.status === 'draft' &&
+          sameRevision(task.snapshot.revision, handle.revision)
+            ? fingerprint(task.snapshot)
+            : undefined);
+        if (
+          latest.generation !== task.generation ||
+          latest.state !== 'awaiting_publication' ||
+          latest.review?.id !== handle.id ||
+          group?.deletedAt ||
+          group?.deletion ||
+          group?.daddyState === 'paused' ||
+          group?.daddyState === 'archived' ||
+          !handle.authorId ||
+          handle.authorId !== current.authorId ||
+          current.revision.head !== handle.revision.head ||
+          !expected ||
+          expected !== fingerprint(current) ||
+          this.store.pendingReviewWrites(task.id, handle.marker).some((r) => r.id !== key)
+        )
+          throw new AppError(
+            'draft_changed',
+            'The review changed before publication could be confirmed. Its contents have been preserved.',
+          );
+        // Submitting one review ID is a single native transition. Confirm its current state before repeating it.
+        this.store.setSetting(baselineKey, expected);
+        return { found: true, value: await send() };
+      },
     );
     return provider.getReview(prRef(task), task.review);
   }

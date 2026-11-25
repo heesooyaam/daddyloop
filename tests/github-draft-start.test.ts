@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 import { fixture } from './helpers.js';
 import { Engine } from '../src/core/engine.js';
 import { GitHubProvider } from '../src/providers/github.js';
-import { prRef } from '../src/core/types.js';
+import { AppError, prRef } from '../src/core/types.js';
 import { activityStatus } from '../src/core/task-activity.js';
 
 async function reviewFixture() {
@@ -196,3 +196,74 @@ it('carries the confirmed empty draft to the new base and reviews that exact rev
     f.store.close();
   }
 });
+
+it.each(['accepted', 'not accepted', 'edited'] as const)(
+  'recovers a transient GitHub publication failure with the original review ID (%s)',
+  async (outcome) => {
+    const f = await fixture();
+    try {
+      const task = f.store.getTask(f.task.id);
+      task.ref = {
+        provider: 'github',
+        host: 'github.com',
+        repo: 'test/repo',
+        number: 39,
+        url: 'https://github.com/test/repo/pull/39',
+      };
+      f.store.saveTask(task);
+      await f.engine.review(task.id);
+      const inReview = f.store.getTask(task.id);
+      inReview.review!.authorId = '12';
+      f.store.saveTask(inReview);
+      const key = 'demo-review:' + inReview.review!.id;
+      f.store.setSetting(key, {
+        ...(await f.provider.getReview(prRef(task), inReview.review!)),
+        authorId: '12',
+      });
+      await f.run();
+      const publish = f.provider.publish.bind(f.provider);
+      const calls = vi.spyOn(f.provider, 'publish').mockImplementationOnce(async (ref, handle) => {
+        if (outcome === 'accepted') await publish(ref, handle);
+        throw new AppError(
+          'provider_500',
+          'POST /repos/test/repo/pulls/39/reviews/' + handle.id + '/events: HTTP 500 Server Error',
+        );
+      });
+      const waiting = await f.engine.publish(task.id);
+      expect(waiting.state).toBe('awaiting_publication');
+      expect(waiting.publicationRetry!.retryAt).toBeGreaterThan(Date.now());
+      await f.engine.publish(task.id);
+      expect(calls).toHaveBeenCalledTimes(1);
+      waiting.publicationRetry!.retryAt = 0;
+      if (outcome === 'not accepted') {
+        delete waiting.publicationRetry;
+        waiting.state = 'needs_input';
+        waiting.reason =
+          'AppError: POST /repos/test/repo/pulls/39/reviews/' +
+          inReview.review!.id +
+          '/events: HTTP 500 Server Error';
+      }
+      f.store.saveTask(waiting);
+      const restarted = new Engine(f.store, () => f.provider);
+      restarted.recoverInterruptedJobs();
+      if (outcome === 'edited') {
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(task), inReview.review!)),
+          body: 'Manually edited',
+        });
+        await expect(restarted.publish(task.id)).rejects.toMatchObject({ code: 'draft_changed' });
+        expect(calls).toHaveBeenCalledTimes(1);
+      } else {
+        await restarted.publish(task.id);
+        expect(calls).toHaveBeenCalledTimes(outcome === 'accepted' ? 1 : 2);
+        expect(
+          f.store.db
+            .prepare('SELECT status FROM operations WHERE id=?')
+            .get(inReview.review!.marker + ':publish')?.status,
+        ).toBe('done');
+      }
+    } finally {
+      f.store.close();
+    }
+  },
+);
