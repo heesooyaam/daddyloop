@@ -547,6 +547,144 @@ it('preserves acknowledged final chunks despite an older delivered sibling', asy
   }
 });
 
+it('does not treat a failed legacy sibling edit as an acknowledged final chunk', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const prefix = 'A'.repeat(3800);
+    const first = f.store.daddyMessage('group', 'agent', prefix, 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const middle = f.store.daddyMessage('group', 'agent', 'MID', 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const final = f.store.daddyMessage('group', 'agent', prefix + 'XYZ', 'legacy-run', undefined, {
+      phase: 'final',
+    });
+    f.store.db
+      .prepare('INSERT INTO daddy_jobs VALUES(?,?,?,?)')
+      .run('legacy-run', 'group', 'completed', '{}');
+    const notification = (id: string, phase: string) => `telegram:dialog:-10042:4:${id}:${phase}`;
+    for (const [message, phase] of [
+      [first, 'progress'],
+      [middle, 'progress'],
+      [final, 'final'],
+    ] as const)
+      f.store.db
+        .prepare('INSERT INTO notifications VALUES(?,?,?)')
+        .run(notification(message.id, phase), 'pending', message.at);
+    await f.queue.send(destination, text(first.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      notificationId: notification(first.id, 'progress'),
+    });
+    f.call.mockRejectedValueOnce(new Error('offline'));
+    await f.queue.send(destination, text(middle.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      notificationId: notification(middle.id, 'progress'),
+    });
+    await f.queue.stop();
+    await f.queue.send(destination, text(final.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId: notification(final.id, 'final'),
+    });
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text(middle.text), {
+      groupId: 'group',
+      key: `message:${middle.id}`,
+      replace: true,
+      notificationId: notification(middle.id, 'progress'),
+    });
+    await restored.send(destination, text(final.text), {
+      groupId: 'group',
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: notification(final.id, 'final'),
+    });
+    await restored.finishRecovery();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', prefix],
+      ['editMessageText', 'MID'],
+      ['sendMessage', 'MID'],
+      ['sendMessage', prefix],
+      ['sendMessage', 'XYZ'],
+    ]);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('keeps a legacy final chunk acknowledged after editing the latest sibling', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const prefix = 'A'.repeat(3800);
+    const first = f.store.daddyMessage('group', 'agent', prefix, 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const middle = f.store.daddyMessage('group', 'agent', 'MID', 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const final = f.store.daddyMessage('group', 'agent', prefix + 'XYZ', 'legacy-run', undefined, {
+      phase: 'final',
+    });
+    const notification = (id: string, phase: string) => `telegram:dialog:-10042:4:${id}:${phase}`;
+    for (const [message, phase] of [
+      [first, 'progress'],
+      [middle, 'progress'],
+      [final, 'final'],
+    ] as const)
+      f.store.db
+        .prepare('INSERT INTO notifications VALUES(?,?,?)')
+        .run(notification(message.id, phase), 'pending', message.at);
+    await f.queue.send(destination, text(first.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      notificationId: notification(first.id, 'progress'),
+    });
+    await f.queue.send(destination, text(middle.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      notificationId: notification(middle.id, 'progress'),
+    });
+    f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
+    await f.queue.send(destination, text(final.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId: notification(final.id, 'final'),
+    });
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await restored.send(destination, text(final.text), {
+      groupId: 'group',
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: notification(final.id, 'final'),
+    });
+    await restored.finishRecovery();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', prefix],
+      ['editMessageText', 'MID'],
+      ['editMessageText', prefix],
+      ['sendMessage', 'XYZ'],
+      ['sendMessage', 'XYZ'],
+    ]);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('restores one private-chat queue by saved order across sessions', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -641,6 +779,46 @@ it('keeps an older dialog reply ahead of a queued resource notice', async () => 
   }
 });
 
+it('releases private navigation after a saved reply moves to a topic', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const reply = f.store.daddyMessage('group', 'agent', 'A1');
+    const privateDestination = { chatId: 7 };
+    const privateNotification = `telegram:dialog:7:0:${reply.id}`;
+    await f.queue.send(privateDestination, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: privateNotification,
+    });
+    await f.queue.send(privateDestination, text('First menu'), { key: 'menu:first' });
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    const topic = { chatId: -10042, threadId: 4 };
+    restored.reconcileGroupRoute('group', topic);
+    await restored.send(privateDestination, text('Second menu'), { key: 'menu:second' });
+    await restored.send(topic, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      notificationId: `telegram:dialog:-10042:4:${reply.id}`,
+    });
+    await restored.finishRecovery();
+    await restored.flush(10);
+    expect(
+      f.call.mock.calls.map(([method, body]) => [method, body.text, body.message_thread_id]),
+    ).toEqual([
+      ['sendMessage', 'First menu', undefined],
+      ['sendMessage', 'Second menu', undefined],
+      ['sendMessage', 'A1', 4],
+    ]);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('keeps one canonical delivery across repeated owner-mention changes', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -673,6 +851,121 @@ it('keeps one canonical delivery across repeated owner-mention changes', async (
     expect(saved).toHaveLength(1);
   } finally {
     await restored?.stop();
+    await f.close();
+  }
+});
+
+it.each([
+  ['private chat', 'owner answered elsewhere', { chatId: 7 }, false],
+  ['private chat', 'notifications were disabled', { chatId: 7 }, true],
+  ['topic', 'owner answered elsewhere', { chatId: -10042, threadId: 4 }, false],
+  ['topic', 'notifications were disabled', { chatId: -10042, threadId: 4 }, true],
+])(
+  'finishes acknowledged progress in a %s after %s',
+  async (_route, _change, destination, discardMention) => {
+    const f = fixture();
+    let restored: TelegramDelivery | undefined;
+    let sending: TelegramDelivery | undefined;
+    try {
+      const message = f.store.daddyMessage('group', 'agent', 'A'.repeat(5000), 'run', undefined, {
+        phase: 'progress',
+      });
+      const notification = (phase: string) =>
+        `telegram:dialog:${destination.chatId}:${'threadId' in destination ? destination.threadId : 0}:${message.id}:${phase}`;
+      const progressNotification = notification('progress');
+      f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
+      await f.queue.send(destination, text(message.text), {
+        groupId: 'group',
+        key: `message:${message.id}`,
+        replace: true,
+        notificationId: progressNotification,
+      });
+      f.store.finishDaddyReply('group', message.text, 'run', true);
+      const finalNotification = notification('final');
+      await f.queue.stop();
+      restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restored.stop();
+      await restored.send(destination, text('@Owner · ' + message.text), {
+        groupId: 'group',
+        key: finalNotification,
+        replacePending: true,
+        final: true,
+        notificationId: finalNotification,
+      });
+      sending = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      if (discardMention) {
+        expect(sending.hasAcknowledgedMessage(destination, finalNotification)).toBe(true);
+        sending.discardDeferred(destination, finalNotification, false);
+      }
+      await sending.send(destination, text(message.text), {
+        groupId: 'group',
+        key: `message:${message.id}`,
+        replace: true,
+        replacePending: true,
+        final: true,
+        notificationId: finalNotification,
+      });
+      await sending.send(destination, text('Menu'), { key: 'menu' });
+      f.advance(1000);
+      await sending.finishRecovery();
+      await sending.flush(10);
+      expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+        ['sendMessage', 'A'.repeat(3800)],
+        ['sendMessage', 'A'.repeat(1200)],
+        ['sendMessage', 'A'.repeat(1200)],
+        ['sendMessage', 'Menu'],
+      ]);
+    } finally {
+      await sending?.stop();
+      await restored?.stop();
+      await f.close();
+    }
+  },
+);
+
+it('does not revive a cancelled progress tail after its late failure', async () => {
+  const f = fixture();
+  let rejectTail = (_error: Error) => {};
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const message = f.store.daddyMessage('group', 'agent', 'A'.repeat(5000), 'run', undefined, {
+      phase: 'progress',
+    });
+    const progressNotification = `telegram:dialog:-10042:4:${message.id}:progress`;
+    const tail = new Promise<never>((_resolve, reject) => {
+      rejectTail = reject;
+    });
+    f.call.mockResolvedValueOnce({ message_id: 41 }).mockImplementationOnce(() => tail);
+    const progress = f.queue.send(destination, text(message.text), {
+      groupId: 'group',
+      key: `message:${message.id}`,
+      replace: true,
+      notificationId: progressNotification,
+    });
+    await vi.waitFor(() => expect(f.call).toHaveBeenCalledTimes(2));
+    f.store.finishDaddyReply('group', message.text, 'run', true);
+    const finalNotification = `telegram:dialog:-10042:4:${message.id}:final`;
+    await f.queue.send(destination, text('@Owner · ' + message.text), {
+      groupId: 'group',
+      key: finalNotification,
+      replacePending: true,
+      final: true,
+      notificationId: finalNotification,
+    });
+    rejectTail(new Error('late failure'));
+    await progress;
+    await f.queue.flush(10);
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', 'A'.repeat(3800)],
+      ['sendMessage', 'A'.repeat(1200)],
+      ['sendMessage', '@Owner · ' + 'A'.repeat(3791)],
+      ['sendMessage', 'A'.repeat(1209)],
+    ]);
+    f.advance(10000);
+    await f.queue.flush(10);
+    expect(f.call).toHaveBeenCalledTimes(4);
+  } finally {
+    rejectTail(new Error('cleanup'));
     await f.close();
   }
 });

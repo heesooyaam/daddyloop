@@ -2193,16 +2193,30 @@ export class TelegramWorkspace {
           const prefs = notificationPreferences(this.store);
           if (job?.trigger !== 'user') {
             if (!prefs.enabled) {
+              const finishPartial =
+                !!messageNotificationId &&
+                !!this.api.delivery?.hasAcknowledgedMessage(destination, messageNotificationId);
               if (messageNotificationId)
-                this.api.delivery?.discardDeferred(destination, messageNotificationId);
-              return;
+                this.api.delivery?.discardDeferred(
+                  destination,
+                  messageNotificationId,
+                  !finishPartial,
+                );
+              if (!finishPartial) return;
             }
             if (prefs.mode === 'attention' && group.daddyState !== 'needs_input') {
               const tasks = this.store.tasks().filter((task) => task.groupId === group.id);
               if (!tasks.length || tasks.some((task) => task.state !== 'complete')) {
+                const finishPartial =
+                  !!messageNotificationId &&
+                  !!this.api.delivery?.hasAcknowledgedMessage(destination, messageNotificationId);
                 if (messageNotificationId)
-                  this.api.delivery?.discardDeferred(destination, messageNotificationId);
-                return;
+                  this.api.delivery?.discardDeferred(
+                    destination,
+                    messageNotificationId,
+                    !finishPartial,
+                  );
+                if (!finishPartial) return;
               }
             }
           }
@@ -2351,6 +2365,7 @@ export class TelegramWorkspace {
       : !room && pair
         ? { chatId: pair.chatId }
         : undefined;
+    if (destination) this.api.delivery?.reconcileGroupRoute(group.id, destination);
     const deliveredFinalRuns = new Set(
       messages
         .filter((message) => {

@@ -199,18 +199,26 @@ export class TelegramDelivery {
       .get(value.options.key.slice(5));
     return typeof job?.group_id === 'string' ? job.group_id : undefined;
   }
-  discardDeferred(destination: TelegramDestination, notificationId: string) {
+  discardDeferred(destination: TelegramDestination, notificationId: string, flush = true) {
     const identity = digest([destination, notificationIdentity(notificationId)]);
     const row = this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
     if (!row || !this.deferredKeys.has(row.key)) return;
-    this.historyDeferredKeys.delete(row.key);
-    this.deferredKeys.delete(row.key);
-    this.deferredValues.delete(row.key);
-    this.retainedDeferredKeys.delete(row.key);
-    row.value.status = 'cancelled';
-    this.save(row.key, row.value);
+    this.cancel(row.key, row.value);
     this.releaseUnblocked(row.value.destination);
-    void this.flush();
+    if (flush) void this.flush();
+  }
+  private cancel(key: string, value: Delivery) {
+    this.historyDeferredKeys.delete(key);
+    this.deferredKeys.delete(key);
+    this.deferredValues.delete(key);
+    this.retainedDeferredKeys.delete(key);
+    value.revision++;
+    value.status = 'cancelled';
+    if (value.options.notificationId)
+      this.store.db
+        .prepare("UPDATE notifications SET status='superseded' WHERE id=? AND status!='sent'")
+        .run(value.options.notificationId);
+    this.save(key, value);
   }
   discardGroup(groupId: string) {
     for (const [key, value] of [...this.deferredValues])
@@ -224,8 +232,26 @@ export class TelegramDelivery {
         }
       }
   }
+  reconcileGroupRoute(groupId: string, destination: TelegramDestination) {
+    const released = new Map<string, TelegramDestination>();
+    const values = new Map([...this.pending, ...this.deferredValues]);
+    for (const [key, value] of values) {
+      if (
+        this.deliveryGroupId(value) !== groupId ||
+        this.route(value.destination) === this.route(destination)
+      )
+        continue;
+      released.set(this.route(value.destination), value.destination);
+      this.cancel(key, value);
+    }
+    for (const previous of released.values()) this.releaseUnblocked(previous);
+    if (released.size) void this.flush();
+  }
   private route(destination: TelegramDestination) {
     return digest(destination);
+  }
+  private obsolete(value: Delivery, revision: number) {
+    return value.status === 'cancelled' || value.revision !== revision;
   }
   private compareDeliveries(a: Delivery, b: Delivery) {
     const aRecovery = a.recoveryOrder;
@@ -410,16 +436,6 @@ export class TelegramDelivery {
       .filter((entry): entry is NonNullable<typeof entry> => !!entry)
       .sort((a, b) => b.order - a.order)[0];
   }
-  private previousSibling(value: Delivery) {
-    const message = this.storedMessage(value);
-    if (!message?.runId) return;
-    return [...this.storedMessages.values()]
-      .filter(
-        (entry) =>
-          entry.id !== message.id && entry.runId === message.runId && entry.order < message.order,
-      )
-      .sort((a, b) => b.order - a.order)[0];
-  }
   private hasDeliveredSibling(value: Delivery) {
     return this.latestDeliveredSibling(value) !== undefined;
   }
@@ -477,8 +493,7 @@ export class TelegramDelivery {
   private inheritedPartsBelongToSibling(value: Delivery) {
     if (!value.options.key?.startsWith('turn:') || !this.hasDeliveredSibling(value)) return false;
     if (!this.acknowledgedPartsMatchSibling(value)) return false;
-    if (this.previousSibling(value)?.id === this.latestDeliveredSibling(value)?.id) return true;
-    return value.attempts === 0;
+    return true;
   }
   private receiptFor(messages: Delivery['messages'], value: Delivery) {
     if (!messages.length) return;
@@ -534,6 +549,7 @@ export class TelegramDelivery {
     if (!row || row.key === key) return;
     if (!includeSent && row.value.messages.length) {
       const receipt = this.receiptFor(row.value.messages, row.value);
+      row.value.revision++;
       row.value.status = 'cancelled';
       this.store.transaction(() => {
         if (receipt) this.store.setSetting(receipt.key, receipt.value);
@@ -574,6 +590,28 @@ export class TelegramDelivery {
     this.remember(key, row.value);
     if (wasHistory) this.releaseUnblocked(row.value.destination);
     return row.value;
+  }
+  private messageDelivery(destination: TelegramDestination, notificationId: string) {
+    const messageId = notificationIdentity(notificationId).split(':').at(-1);
+    if (!messageId) return;
+    const key = prefix + digest([this.bot, destination, `message:${messageId}`]);
+    const value =
+      this.pending.get(key) ?? this.deferredValues.get(key) ?? this.store.setting<Delivery>(key);
+    return value ? { key, value } : undefined;
+  }
+  hasAcknowledgedMessage(destination: TelegramDestination, notificationId: string) {
+    return !!this.messageDelivery(destination, notificationId)?.value.messages.length;
+  }
+  private cancelAlternatePending(
+    key: string,
+    destination: TelegramDestination,
+    notificationId: string,
+  ) {
+    const identity = digest([destination, notificationIdentity(notificationId)]);
+    const row = this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
+    if (!row || row.key === key) return;
+    this.cancel(row.key, row.value);
+    this.releaseUnblocked(row.value.destination);
   }
   replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
     // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
@@ -675,6 +713,12 @@ export class TelegramDelivery {
         options.groupId,
         !!options.replace,
       );
+    if (
+      value?.status === 'cancelled' &&
+      options.replace &&
+      options.notificationId?.startsWith('telegram:dialog:')
+    )
+      this.cancelAlternatePending(key, destination, options.notificationId);
     if (value && this.deferredKeys.has(key)) {
       this.activateDeferred(key, value);
     }
@@ -852,7 +896,7 @@ export class TelegramDelivery {
       }
       const chunks = splitTelegramText(content);
       for (let i = 0; i < chunks.length; i++) {
-        if (value.revision !== revision || !this.valid(value)) break;
+        if (this.obsolete(value, revision) || !this.valid(value)) break;
         const body = this.messageBody(value.destination, content, chunks, i);
         const fingerprint = digest(body);
         let existing: Delivery['messages'][number] | undefined = value.messages[i];
@@ -887,6 +931,7 @@ export class TelegramDelivery {
           value.messages[i] = { id: result.message_id, fingerprint };
         }
         this.save(key, value);
+        if (this.obsolete(value, revision)) return;
       }
       while (value.revision === revision && value.messages.length > chunks.length) {
         const part = value.messages.at(-1)!;
@@ -927,9 +972,10 @@ export class TelegramDelivery {
           }
           value.options.deletePrevious = undefined;
         }
-      } else value.status = 'queued';
+      } else if (!this.obsolete(value, revision)) value.status = 'queued';
       this.save(key, value);
     } catch (error) {
+      if (this.obsolete(value, revision)) return;
       const status = Number((error as { telegramStatus?: number })?.telegramStatus);
       const rateLimitUntil = this.applyRateLimit(error);
       if (options.operation === 'pin') {
