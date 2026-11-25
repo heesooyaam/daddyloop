@@ -538,22 +538,30 @@ export function registerOperations(program: Command) {
       const identity = await new ArcBridge(serviceDataDir, selectedHelper).doctor(
         options.workspace,
       );
-      const current = loadConfig();
-      const currentInputs = JSON.stringify({
-        dataDir: current.dataDir ? resolve(current.dataDir) : null,
-        resources: current.resources,
-        arcadia: current.arcadia,
-        moduleEnabled: current.modules.includes('arcadia'),
+      await new ArcBridge(serviceDataDir, selectedHelper).withValidatedJournals(async () => {
+        const current = loadConfig();
+        if (!current.dataDir || !isAbsolute(current.dataDir))
+          throw new AppError(
+            'arcadia_setup_changed',
+            'Arcadia setup inputs changed during validation; retry with the current configuration',
+            409,
+          );
+        const currentInputs = JSON.stringify({
+          dataDir: resolve(current.dataDir),
+          resources: current.resources,
+          arcadia: current.arcadia,
+          moduleEnabled: current.modules.includes('arcadia'),
+        });
+        if (currentInputs !== validationInputs)
+          throw new AppError(
+            'arcadia_setup_changed',
+            'Arcadia setup inputs changed during validation; retry with the current configuration',
+            409,
+          );
+        current.arcadia.enabled = true;
+        current.arcadia.leaseHelper = selectedHelper;
+        saveConfig(current);
       });
-      if (currentInputs !== validationInputs)
-        throw new AppError(
-          'arcadia_setup_changed',
-          'Arcadia setup inputs changed during validation; retry with the current configuration',
-          409,
-        );
-      current.arcadia.enabled = true;
-      current.arcadia.leaseHelper = selectedHelper;
-      saveConfig(current);
       output({
         connected: true,
         user: identity.user_login,

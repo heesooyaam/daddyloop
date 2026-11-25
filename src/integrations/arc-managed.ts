@@ -93,6 +93,9 @@ export class ManagedArcMounts {
       if (ManagedArcMounts.locks.get(this.root) === next) ManagedArcMounts.locks.delete(this.root);
     }
   }
+  async withJournalLock<T>(fn: () => Promise<T>) {
+    return this.lock(fn);
+  }
   private helperCommand(args: string[], options: Parameters<typeof command>[2] = {}) {
     return this.run('bash', [this.helper(), ...args], options);
   }
@@ -234,8 +237,8 @@ export class ManagedArcMounts {
   }
   async status() {
     const records = this.records();
-    if (!records.length) return [];
     const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
+    if (!records.length) return [];
     const visible = records.filter((record) => record.state !== 'creating');
     if (!visible.length) return [];
     const value = JSON.parse(

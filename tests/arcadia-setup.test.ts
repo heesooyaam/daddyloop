@@ -26,6 +26,9 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
   configured.arcadia.leaseHelper = previous;
   saveConfig(configured);
   const doctor = vi.spyOn(ArcBridge.prototype, 'doctor');
+  const journals = vi
+    .spyOn(ArcBridge.prototype, 'withValidatedJournals')
+    .mockImplementation(async (fn) => fn());
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   const originalDataDir = process.env.DADDYLOOP_DATA_DIR;
   const run = (dataDir = directory) =>
@@ -118,6 +121,7 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
     if (originalDataDir === undefined) delete process.env.DADDYLOOP_DATA_DIR;
     else process.env.DADDYLOOP_DATA_DIR = originalDataDir;
     output.mockRestore();
+    journals.mockRestore();
     doctor.mockRestore();
     saveConfig(original);
     rmSync(directory, { recursive: true, force: true });
@@ -127,15 +131,88 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
 it('uses an uncommitted helper candidate for the setup probe', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
   const candidate = join(directory, 'candidate-helper');
+  const status = JSON.stringify({
+    status: 'success',
+    data: { mounts: [{ path: '/new-pool', claimable: true, object_store_ok: true }] },
+  });
+  const config = JSON.stringify({
+    status: 'success',
+    data: {
+      object_store: join(directory, 'shared'),
+      lease_root: join(directory, 'leases'),
+      store_root: join(directory, 'stores'),
+      mount_prefix: join(directory, 'arcadia'),
+      mount_start: 1,
+      mount_end: 2,
+      extra_mounts: '',
+      human_reserved_mount_numbers: '1',
+    },
+  });
   writeFileSync(
     candidate,
-    '#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"status":"success","data":{"mounts":[{"path":"/new-pool","claimable":true,"object_store_ok":true}]}}\'\n',
+    `#!/usr/bin/env bash
+if [[ " $* " == *" config "* ]]; then
+  printf '%s\n' '${config}'
+else
+  printf '%s\n' '${status}'
+fi
+`,
     { mode: 0o600 },
   );
   try {
     await expect(new ArcBridge(directory, candidate).mounts()).resolves.toMatchObject([
       { path: '/new-pool' },
     ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('validates helper config before the first session journal exists', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-config-'));
+  const status = JSON.stringify({ status: 'success', data: { mounts: [] } });
+  const candidate = join(directory, 'candidate-helper');
+  try {
+    writeFileSync(
+      candidate,
+      `#!/usr/bin/env bash
+if [[ " $* " == *" config "* ]]; then
+  exit 7
+else
+  printf '%s\n' '${status}'
+fi
+`,
+      { mode: 0o600 },
+    );
+    await expect(new ArcBridge(directory, candidate).mounts()).rejects.toMatchObject({
+      code: 'command_failed',
+    });
+
+    const invalidConfig = JSON.stringify({
+      status: 'success',
+      data: {
+        object_store: 'relative-object-store',
+        lease_root: join(directory, 'leases'),
+        store_root: join(directory, 'stores'),
+        mount_prefix: join(directory, 'arcadia'),
+        mount_start: 1,
+        mount_end: 2,
+        extra_mounts: '',
+        human_reserved_mount_numbers: '1',
+      },
+    });
+    writeFileSync(
+      candidate,
+      `#!/usr/bin/env bash
+if [[ " $* " == *" config "* ]]; then
+  printf '%s\n' '${invalidConfig}'
+else
+  printf '%s\n' '${status}'
+fi
+`,
+      { mode: 0o600 },
+    );
+    await expect(new ArcBridge(directory, candidate).mounts()).rejects.toThrow('must live outside');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -81,6 +81,12 @@ export class ArcBridge {
   async parkSessionMount(lease: ArcLease) {
     return this.managedMounts().park(lease);
   }
+  async withValidatedJournals<T>(fn: () => Promise<T>) {
+    return this.managedMounts().withJournalLock(async () => {
+      await this.mounts();
+      return fn();
+    });
+  }
   async provision(exclude?: string): Promise<boolean> {
     const candidate = (await this.mounts()).find(
       (mount) =>

@@ -218,3 +218,29 @@ it('keeps an ownership journal when mounting fails so the same operation can rec
     f.close();
   }
 });
+it('serializes setup validation with session journal creation', async () => {
+  const f = managedFixture();
+  try {
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const validation = f.manager.withJournalLock(async () => {
+      enter();
+      await gate;
+    });
+    await entered;
+    const creation = f.manager.ensure(randomUUID(), randomUUID(), 'author');
+    await Promise.resolve();
+    expect(f.run.mock.calls.some(([, args]) => args[0] === 'mount')).toBe(false);
+    release();
+    await validation;
+    await expect(creation).resolves.toHaveProperty('lease.mount');
+  } finally {
+    f.close();
+  }
+});
