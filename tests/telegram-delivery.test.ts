@@ -492,6 +492,66 @@ it.each([
   },
 );
 
+it.each([
+  ['open question', false],
+  ['closed question', true],
+])(
+  'releases duplicate legacy question deliveries and the following menu: %s',
+  async (_case, closed) => {
+    const f = fixture();
+    let restored: TelegramDelivery | undefined;
+    try {
+      await f.queue.stop();
+      const destination = { chatId: 7 };
+      const message = f.store.daddyMessage('group', 'agent', 'Saved question', 'run', undefined, {
+        phase: 'final',
+        ...(closed ? { needsReply: true } : {}),
+      });
+      const notificationId = `telegram:dialog:7:0:${message.id}:final`;
+      await f.queue.send(destination, text('Saved question'), {
+        groupId: 'group',
+        key: 'turn:run',
+        replace: true,
+        final: true,
+        notificationId,
+      });
+      const legacy = f.store.db
+        .prepare(
+          `SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'
+         AND json_extract(value,'$.options.key')='turn:run'`,
+        )
+        .get()!;
+      const question = JSON.parse(String(legacy.value));
+      question.id = 'separate-question';
+      question.createdAt++;
+      question.content = text('@Owner · Saved question');
+      question.options = {
+        groupId: 'group',
+        key: notificationId,
+        replacePending: true,
+        final: true,
+        notificationId,
+        ...(closed ? { mention: { groupId: 'group', messageId: message.id } } : {}),
+      };
+      f.store.setSetting('telegram.delivery:separate-question', question);
+      await f.queue.send(destination, text('Menu'), { key: 'menu' });
+      f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 60000);
+      restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restored.send(destination, question.content, question.options);
+      await restored.finishRecovery();
+      f.advance(60000);
+      await restored.flush(20);
+      expect(f.call.mock.calls.map(([, request]) => request.text)).toEqual([
+        closed ? '👨‍💻 [daddy]\n\nSaved question' : '@Owner · Saved question',
+        'Menu',
+      ]);
+    } finally {
+      await restored?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('reuses a sent legacy progress receipt when the same message becomes final', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -756,6 +816,43 @@ it('persists a ready retry_after backlog with one write per new reply', async ()
     );
   } finally {
     await queue?.stop();
+    await f.close();
+  }
+});
+
+it('does not retain sent reply sources when no question needs recovery', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const insert = f.store.db.prepare('INSERT INTO settings VALUES(?,?)');
+    f.store.transaction(() => {
+      for (let i = 0; i < 5000; i++)
+        insert.run(
+          `telegram.delivery:sent-${i}`,
+          JSON.stringify({
+            id: `sent-${i}`,
+            bot: 'test_bot',
+            ownerId: 7,
+            destination: { chatId: 7 },
+            content: text(`Reply ${i}`),
+            options: {
+              key: `message:${i}`,
+              notificationId: `telegram:dialog:7:0:message-${i}`,
+            },
+            revision: 1,
+            createdAt: i,
+            status: 'sent',
+            attempts: 0,
+            nextAttemptAt: 0,
+            messages: [{ id: i + 1, fingerprint: `fingerprint-${i}` }],
+          }),
+        );
+    });
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    expect((restored as any).storedQuestionSources.size).toBe(0);
+  } finally {
+    await restored?.stop();
     await f.close();
   }
 });

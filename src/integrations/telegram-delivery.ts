@@ -174,9 +174,66 @@ export class TelegramDelivery {
           store.setSetting(key, value);
         }
     }
+    const queuedDialogs = new Map<string, { key: string; value: Delivery }[]>();
+    for (const row of deliveries) {
+      const notificationId = row.value.options.notificationId;
+      if (
+        !['queued', 'sending'].includes(row.value.status) ||
+        !notificationId?.startsWith('telegram:dialog:')
+      )
+        continue;
+      const identity = digest([row.value.destination, notificationIdentity(notificationId)]);
+      const rows = queuedDialogs.get(identity) ?? [];
+      rows.push(row);
+      queuedDialogs.set(identity, rows);
+    }
+    for (const rows of queuedDialogs.values()) {
+      const question = rows.find(
+        ({ value }) =>
+          !!value.options.mention ||
+          (!!value.options.replacePending && !!value.options.final && !value.options.replace),
+      );
+      if (!question) continue;
+      const sources = rows
+        .filter(
+          ({ key, value }) =>
+            key !== question.key &&
+            (value.options.key?.startsWith('message:') || value.options.key?.startsWith('turn:')),
+        )
+        .sort(
+          (a, b) =>
+            b.value.messages.length - a.value.messages.length ||
+            Number(!!b.value.options.key?.startsWith('message:')) -
+              Number(!!a.value.options.key?.startsWith('message:')),
+        );
+      if (!sources.length) continue;
+      question.value.options.questionSourceKey ??= sources[0].key;
+      store.setSetting(question.key, question.value);
+      for (const source of sources) {
+        source.value.revision++;
+        source.value.status = 'cancelled';
+        source.value.cancelledForRoute = undefined;
+        source.value.cancelledForQuestion = undefined;
+        store.setSetting(source.key, source.value);
+      }
+    }
     const deliveryKeys = new Set(deliveries.map(({ key }) => key));
+    const sourceIdentities = new Set(
+      deliveries
+        .filter(
+          ({ value }) =>
+            ['queued', 'sending'].includes(value.status) &&
+            !!value.options.mention &&
+            !value.options.questionSourceKey &&
+            !!value.options.notificationId,
+        )
+        .map(({ value }) =>
+          digest([value.destination, notificationIdentity(value.options.notificationId!)]),
+        ),
+    );
     for (const { key, value } of deliveries) {
       if (
+        !sourceIdentities.size ||
         !value.messages.length ||
         !value.options.notificationId ||
         (!value.options.key?.startsWith('message:') && !value.options.key?.startsWith('turn:'))
@@ -186,6 +243,7 @@ export class TelegramDelivery {
         value.destination,
         notificationIdentity(value.options.notificationId),
       ]);
+      if (!sourceIdentities.has(identity)) continue;
       const existing = this.storedQuestionSources.get(identity);
       if (!existing || value.options.key.startsWith('message:'))
         this.storedQuestionSources.set(identity, key);
@@ -328,6 +386,7 @@ export class TelegramDelivery {
       )
         this.indexPendingNotification(key, value);
     }
+    this.storedQuestionSources.clear();
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
   start() {
