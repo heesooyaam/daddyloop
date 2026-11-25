@@ -50,8 +50,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         message: z.string().trim().min(1).max(20000).optional(),
         workerLimit: workerNumber.optional(),
         requestId: id.optional(),
-        publication: z.enum(['auto', 'human']).optional(),
-        autoPush: z.boolean().optional(),
         instructions: sessionInstructionsSchema.optional(),
       })
       .strict()
@@ -192,10 +190,9 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const input = z
       .object({
         taskId: id,
-        action: z.enum(['approve-plan', 'waive-checks', 'verify-merge', 'publish', 'submit']),
+        action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
-        expectedPendingHead: z.string().max(128).optional(),
         reason: z.string().trim().max(2000).optional(),
       })
       .strict()
@@ -207,7 +204,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       {
         head: input.expectedHead,
         generation: input.expectedGeneration,
-        ...(input.expectedPendingHead ? { pendingHead: input.expectedPendingHead } : {}),
       },
       input.reason,
     );

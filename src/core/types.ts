@@ -17,18 +17,14 @@ export type State =
   | 'paused'
   | 'complete';
 export interface Policy {
-  publication: 'human' | 'auto';
   planApproval: 'human' | 'auto';
   maxNoProgress: number;
   requireChecks: boolean;
-  autoPush: boolean;
 }
 export const defaultPolicy: Policy = {
-  publication: 'auto',
   planApproval: 'human',
   maxNoProgress: 2,
   requireChecks: true,
-  autoPush: true,
 };
 export interface PRRef {
   kind?: 'pull_request';
@@ -112,7 +108,6 @@ export interface ReviewGroup {
   daddyToolSignature?: string;
   parentGroupId?: string;
   createdByAction?: string;
-  defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
   workspacePreparation?: {
     state: 'pending' | 'preparing' | 'ready' | 'error';
     path?: string;
@@ -141,6 +136,7 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  replyTo?: TelegramReply;
   firstAttemptId?: string;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
@@ -214,6 +210,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  replyTo?: TelegramReply;
   inputRequest?: { runId: string; role: Role; generation: number };
   resourcePause?: { generation: number; at: string };
   id: string;
@@ -308,11 +305,23 @@ export interface Event {
   data: unknown;
   at: string;
 }
+export interface TelegramReply {
+  messageId?: number;
+  author?: string;
+  text?: string;
+  quote?: string;
+}
 export interface Message {
   needsReply?: boolean;
   phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
-  origin?: { channel: 'telegram'; chatId: number; threadId?: number };
+  origin?: {
+    channel: 'telegram';
+    chatId: number;
+    threadId?: number;
+    messageId?: number;
+    replyTo?: TelegramReply;
+  };
   workspace?: Workspace;
   id: string;
   taskId: string;
@@ -395,28 +404,18 @@ export interface ExpectedTask {
   head: string;
   generation: number;
   groupId?: string;
-  pendingHead?: string;
 }
-export type HumanTaskAction =
-  'approve-plan' | 'waive-checks' | 'verify-merge' | 'publish' | 'submit';
+export type HumanTaskAction = 'approve-plan' | 'waive-checks' | 'verify-merge';
 export function assertTaskVersion(task: Task, expected?: ExpectedTask) {
   if (
     expected &&
     (task.revision?.head !== expected.head ||
       task.generation !== expected.generation ||
-      (expected.pendingHead !== undefined && task.pendingAuthorHead !== expected.pendingHead) ||
       (expected.groupId !== undefined && task.groupId !== expected.groupId))
   )
     throw new AppError('stale_task', 'The task changed. Refresh it before confirming this action.');
 }
 export const isTicket = (task: Task) => task.ref.kind === 'ticket';
-export const canSubmitTask = (task: Task) =>
-  !!task.pendingAuthorHead &&
-  (task.ref.kind === 'ticket'
-    ? ['ready_for_review', 'needs_input', 'submitting'].includes(task.state)
-    : task.state === 'awaiting_push' &&
-      !!task.revision &&
-      task.pendingAuthorHead !== task.revision.head);
 export function prRef(task: Task): PRRef {
   if (task.ref.kind === 'ticket')
     throw new AppError('pr_required', 'Submit or attach a PR before starting native review');

@@ -5,9 +5,22 @@ import type { Workspace, ReviewGroup } from '../core/types.js';
 import { taskReference } from '../core/task-activity.js';
 import { queueButtons } from './telegram-tasks.js';
 
-export function daddyHome(locale: Locale, groups: ReviewGroup[], currentId?: string): TelegramCard {
+export function daddyHome(
+  locale: Locale,
+  groups: ReviewGroup[],
+  currentId?: string,
+  page = 0,
+): TelegramCard {
   const t = translator(locale);
-  const sessions = groups.filter((group) => !group.deletedAt && group.daddyState !== 'archived');
+  const sessions = groups.filter((group) => !group.deletedAt && group.daddyState !== 'archived'),
+    pageSize = 10,
+    pages = Math.max(1, Math.ceil(sessions.length / pageSize));
+  page = Math.max(0, Math.min(page, pages - 1));
+  const visible = sessions.slice(page * pageSize, (page + 1) * pageSize),
+    navigation = [
+      ...(page > 0 ? [{ text: '←', callback_data: `dad:sessions-page:${page - 1}` }] : []),
+      ...(page + 1 < pages ? [{ text: '→', callback_data: `dad:sessions-page:${page + 1}` }] : []),
+    ];
   const current = sessions.find((group) => group.id === currentId);
   const text = new TelegramText()
     .add('daddyloop', 'bold')
@@ -18,12 +31,13 @@ export function daddyHome(locale: Locale, groups: ReviewGroup[], currentId?: str
     ...text,
     buttons: [
       [{ text: '＋ ' + t('New task'), callback_data: 'dad:new' }],
-      ...sessions.slice(0, 12).map((group) => [
+      ...visible.map((group) => [
         {
           text: (current?.id === group.id ? '✓ ' : '') + group.title.slice(0, 55),
           callback_data: `dad:open:${group.id}`,
         },
       ]),
+      ...(navigation.length ? [navigation] : []),
       [{ text: t('Settings'), callback_data: 'dad:settings' }],
     ],
   };
@@ -53,14 +67,25 @@ export function botSettings(locale: Locale): TelegramCard {
   };
 }
 
-export function workspacePicker(locale: Locale, workspaces: Workspace[]): TelegramCard {
-  const t = translator(locale);
+export function workspacePicker(locale: Locale, workspaces: Workspace[], page = 0): TelegramCard {
+  const t = translator(locale),
+    pageSize = 10,
+    pages = Math.max(1, Math.ceil(workspaces.length / pageSize));
+  page = Math.max(0, Math.min(page, pages - 1));
+  const visible = workspaces.slice(page * pageSize, (page + 1) * pageSize),
+    navigation = [
+      ...(page > 0 ? [{ text: '←', callback_data: `dad:new-page:${page - 1}` }] : []),
+      ...(page + 1 < pages ? [{ text: '→', callback_data: `dad:new-page:${page + 1}` }] : []),
+    ];
   return {
-    ...new TelegramText().add(t('Choose a repository'), 'bold'),
+    ...new TelegramText()
+      .add(t('Choose a repository'), 'bold')
+      .add(pages > 1 ? '\n' + t('Page {page} of {pages}', { page: page + 1, pages }) : ''),
     buttons: [
-      ...workspaces
-        .slice(0, 20)
-        .map((workspace) => [{ text: workspace.name, callback_data: `dad:new:${workspace.id}` }]),
+      ...visible.map((workspace) => [
+        { text: workspace.name, callback_data: `dad:new:${workspace.id}` },
+      ]),
+      ...(navigation.length ? [navigation] : []),
       [{ text: '＋ ' + t('Add repository'), callback_data: 'dad:add-workspace' }],
       [{ text: t('Find on server'), callback_data: 'dad:discover' }],
       [{ text: t('Back'), callback_data: 'dad:home' }],

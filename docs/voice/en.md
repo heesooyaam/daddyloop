@@ -19,10 +19,12 @@ The interface language selects recognition language too. Choose the language you
 - The destination session/generation is captured at receipt time. A late transcript cannot bypass a pause or a changed binding.
 - Raw audio is removed after processing; the transcript remains in the conversation.
 
-Recognition quality depends on the recording. The package tests an offline speech fixture; that is not a guarantee for every accent or noisy recording. For source development prepare the model with `npm run speech:prepare`.
+Recognition quality depends on the recording. The package tests an offline speech fixture; that is not a guarantee for every accent or noisy recording. On a source installation the first voice request downloads and verifies the model in the configured data directory. To prepare it in advance, run `npm run speech:prepare`.
+
+In the web chat or task form, press the microphone, allow recording, and press Stop recording and transcribe. The transcript is added to the draft. You can edit it before sending. Browsers require HTTPS or localhost for microphone access. Audio is transcribed on the daddy host.
 
 ## Model and license
 
-The bundled model is the quantized Whisper Small ONNX export from `onnx-community/whisper-small` (about 240 MiB). Its exact revision, files and SHA-256 digests are pinned in [speech-model.json](../../scripts/speech-model.json) and verified during preparation by [prepare-speech.mjs](../../scripts/prepare-speech.mjs). Downloads happen during installation/source preparation, not for each voice message. Inference uses Transformers.js and ONNX Runtime on the CPU.
+The bundled model is the quantized Whisper Small ONNX export from `onnx-community/whisper-small` (about 240 MiB). Its exact revision, files and SHA-256 digests are pinned in [speech-model.json](../../src/runtime/speech-model.json) and verified during preparation by [prepare-speech.mjs](../../scripts/prepare-speech.mjs). The release includes the model. Source installations reuse the verified local model. Inference uses Transformers.js and ONNX Runtime on the CPU.
 
 The model export declares Apache-2.0; the [original license](../licenses/Apache-2.0.txt) is retained verbatim. Dependencies carry their own notices. See [resources and cleanup](../operations/en.md).

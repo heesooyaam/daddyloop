@@ -8,41 +8,42 @@ This page records current coverage. A check means that the capability is availab
 
 ## Sessions and tasks
 
-| Capability                                   | Web | Telegram private chat                             | Telegram session topic                            | Remaining gap                                               |
-| -------------------------------------------- | --- | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
-| List, create and select sessions             | Yes | Yes                                               | Yes; `/new` creates another topic                 | None                                                        |
-| Select a session outside its topic           | Yes | Yes; `/session`                                   | Yes; `/session` in the general topic              | Ordinary general-topic messages are deliberately not routed |
-| Rename, pause, resume and delete a session   | Yes | Yes                                               | Yes                                               | None                                                        |
-| Read the task list and task state            | Yes | Yes; `/tasks` and `/task`                         | Yes; `/tasks` and `/task`                         | None                                                        |
-| See the exact task revision and generation   | Yes | Yes                                               | Yes                                               | None                                                        |
-| Submit saved work when automatic push is off | Yes | Yes, with a separate confirmation                 | Yes, with a separate confirmation                 | None                                                        |
-| Approve a plan or publish a manual review    | Yes | Yes, with a separate confirmation                 | Yes, with a separate confirmation                 | None                                                        |
-| View CI state and record a reasoned waiver   | Yes | Yes; `/waive <reason>` confirms the exact version | Yes; `/waive <reason>` confirms the exact version | None                                                        |
-| Read worker reports                          | Yes | Latest task summary and daddy’s conversation      | Through daddy’s conversation                      | Dedicated Telegram history belongs to the neighboring task  |
+| Capability                                 | Web       | Telegram private chat                             | Telegram session topic                            | Remaining gap                                               |
+| ------------------------------------------ | --------- | ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
+| List, create and select sessions           | Yes       | Yes                                               | Yes; `/new` creates another topic                 | None                                                        |
+| Select a session outside its topic         | Yes       | Yes; `/session`                                   | Yes; `/session` in the general topic              | Ordinary general-topic messages are deliberately not routed |
+| Rename, pause, resume and delete a session | Yes       | Yes                                               | Yes                                               | None                                                        |
+| Read the task list and task state          | Yes       | Yes; `/tasks` and `/task`                         | Yes; `/tasks` and `/task`                         | None                                                        |
+| See the exact task revision and generation | Yes       | Yes                                               | Yes                                               | None                                                        |
+| Submit saved work and publish reviews      | Automatic | Automatic                                         | Automatic                                         | No manual action; revision and provider checks still apply  |
+| Approve a plan                             | Yes       | Yes, with a separate confirmation                 | Yes, with a separate confirmation                 | None                                                        |
+| View CI state and record a reasoned waiver | Yes       | Yes; `/waive <reason>` confirms the exact version | Yes; `/waive <reason>` confirms the exact version | None                                                        |
+| Read worker reports                        | Yes       | Latest task summary and daddy’s conversation      | Through daddy’s conversation                      | Dedicated Telegram history belongs to the neighboring task  |
 
 Telegram action buttons contain only a short-lived reference to service state. The saved reference binds the paired owner, chat, topic, session, task, revision and generation. The confirmation calls the same service method as the website. The coordinator’s ordinary reply never grants permission.
 
-Task and preset lists have in-chat page controls. Task cards render every reported CI check; safe private links stay attached to their corresponding check. These lists do not require a known item name, website or laptop to reach the final entry.
+Session, workspace, task and preset lists have in-chat page controls. Task cards render every reported CI check; safe private links stay attached to their corresponding check. These lists do not require a known item name, website or laptop to reach the final entry. Paging during `/new` keeps the original chat route and typed request.
 
 The shared preset library can be browsed without selecting a session. Applying a preset remains bound to the session that produced the card; after a session switch the bot asks the user to reopen the library.
 
 ## Configuration and service controls
 
-| Capability                                       | Web                        | Telegram             | Remaining gap                                                   |
-| ------------------------------------------------ | -------------------------- | -------------------- | --------------------------------------------------------------- |
-| Add repositories and choose one for a request    | Yes                        | Yes                  | None                                                            |
-| Choose daddy and worker models and effort        | Yes                        | Yes                  | None                                                            |
-| Inspect and resize the worker pool               | Yes                        | Yes                  | None                                                            |
-| Set role instructions and attach a skill         | Yes                        | Yes                  | None                                                            |
-| Select and manage shared presets                 | Yes                        | Yes                  | None                                                            |
-| Import or export an instruction set              | Yes                        | Yes, in private chat | None                                                            |
-| View usage and confirm an available reset        | Yes                        | Yes                  | None                                                            |
-| Configure notifications and language             | Yes                        | Yes                  | None                                                            |
-| Check, install and roll back agent CLIs          | Yes                        | Yes, in private chat | None                                                            |
-| View enabled modules                             | Yes                        | Yes                  | None                                                            |
-| Connect a Telegram forum and repair a topic link | Explains the Telegram step | Yes                  | This is a Telegram transport operation, not a workflow decision |
-| Voice input                                      | No                         | Yes                  | Input modality differs; text has the same routing and policy    |
-| Theme and layout                                 | Yes                        | Telegram-controlled  | Presentation does not need identical controls                   |
+| Capability                                       | Web                                               | Telegram                        | Remaining gap                                                   |
+| ------------------------------------------------ | ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------- |
+| Add repositories and choose one for a request    | Yes                                               | Yes                             | None                                                            |
+| Choose daddy and worker models and effort        | Yes                                               | Yes                             | None                                                            |
+| Inspect and resize the worker pool               | Yes                                               | Yes                             | None                                                            |
+| Set role instructions and attach a skill         | Yes                                               | Yes                             | None                                                            |
+| Select and manage shared presets                 | Yes                                               | Yes                             | None                                                            |
+| Import or export an instruction set              | Yes                                               | Yes, in private chat            | None                                                            |
+| View usage and confirm an available reset        | Yes                                               | Yes                             | None                                                            |
+| Configure notifications and language             | Yes                                               | Yes                             | None                                                            |
+| Check, install and roll back agent CLIs          | Yes                                               | Yes, in private chat            | None                                                            |
+| View enabled modules                             | Yes                                               | Yes                             | None                                                            |
+| Connect a Telegram forum and repair a topic link | Explains the Telegram step                        | Yes                             | This is a Telegram transport operation, not a workflow decision |
+| Voice input                                      | Yes, in chat and new-task forms                   | Yes                             | Browser speech support depends on the device and permission     |
+| Scheduled disk cleanup                           | Yes; schedule, threshold, skill and latest report | Yes; `/cleanup` in private chat | Same service settings and report                                |
+| Theme and layout                                 | Yes                                               | Telegram-controlled             | Presentation does not need identical controls                   |
 
 Secrets and account credentials are never rendered in a group. CLI updates, browser login links and group connection stay in the paired private chat. A group command that needs a private step links to that chat instead of asking for a token.
 

@@ -1,6 +1,7 @@
+import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubQuotaError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
-import { confirmedSupersededDraft, staleConflictPreparation, type Engine } from '../core/engine.js';
+import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact, redactEvent } from '../core/security.js';
@@ -292,16 +293,11 @@ export class Worker {
       if (this.stopped) return;
       if (this.autoSubmit && resources.ok)
         for (const task of store.tasks()) {
-          const manualPush =
-            !!task.groupId &&
-            store.getGroup(task.groupId).defaultPolicy?.autoPush === false &&
-            task.policy.autoPush === false;
           const readyTicket = isTicket(task) && task.state === 'ready_for_review';
           const savedFix =
             poll && !isTicket(task) && task.state === 'awaiting_push' && !!task.pendingAuthorHead;
           if (
             (readyTicket || savedFix) &&
-            !manualPush &&
             !store.busy(task.id) &&
             !githubWait(store, task.ref) &&
             !this.submitting.has(task.id)
@@ -342,11 +338,6 @@ export class Worker {
       for (const task of store.tasks())
         if (
           task.state === 'awaiting_publication' &&
-          !(
-            task.groupId &&
-            store.getGroup(task.groupId).defaultPolicy?.publication === 'human' &&
-            task.policy.publication === 'human'
-          ) &&
           !(task.partialReview?.retryAt && task.partialReview.retryAt > Date.now()) &&
           !store.busy(task.id) &&
           !githubWait(store, task.ref)
@@ -571,11 +562,9 @@ export class Worker {
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
-          startingPR?.state !== 'open' ||
-          startingPR.draft !== false ||
-          startingPR.branch !== task.pr?.branch ||
-          startingPR.targetBranch !== task.pr.targetBranch ||
-          startingPR.cloneUrl !== task.pr.cloneUrl)
+          !startingPR ||
+          !sameOpenTarget(task.pr, startingPR) ||
+          startingPR.draft !== false)
       )
         throw new AppError(
           'conflict_repair_unavailable',

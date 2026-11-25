@@ -81,6 +81,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
       PRAGMA user_version=7;
     `);
+    this.db.exec(`
+      UPDATE tasks SET data=json_remove(data,'$.policy.publication','$.policy.autoPush')
+        WHERE json_type(data,'$.policy.publication') IS NOT NULL
+           OR json_type(data,'$.policy.autoPush') IS NOT NULL;
+      UPDATE review_groups SET data=json_remove(data,'$.defaultPolicy')
+        WHERE json_type(data,'$.defaultPolicy') IS NOT NULL;
+    `);
     this.changes.setMaxListeners(100);
   }
   transaction<T>(fn: () => T): T {

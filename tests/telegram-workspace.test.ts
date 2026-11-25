@@ -6,6 +6,7 @@ import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
 import { effectiveInstructions } from '../src/core/instructions.js';
+import { randomUUID } from 'node:crypto';
 afterEach(() => vi.restoreAllMocks());
 it('changes only the selected session role from a private chat or topic and ignores other senders', async () => {
   const f = daddyFixture();
@@ -546,6 +547,76 @@ it('expires, cancels and isolates private repository input for its original rout
     await f.close();
   }
 });
+it('pages through all sessions and workspaces without losing a group /new request', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async (method: string) =>
+      method === 'createForumTopic' ? { message_thread_id: sent.length + 70 } : true,
+    ),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  for (let index = 1; index <= 18; index++)
+    f.daddy.create({ workspaceId: f.workspace.id, title: `Paged session ${index}` });
+  const workspaces = [f.workspace];
+  for (let index = 2; index <= 23; index++) {
+    const workspace = { ...f.workspace, id: randomUUID(), name: `Paged workspace ${index}` };
+    f.store.saveWorkspace(workspace);
+    workspaces.push(workspace);
+  }
+  let id = 600;
+  const message = (text: string, chatId = 7): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+    },
+  });
+  const click = (data: string, chatId = 7): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' } },
+    },
+  });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    await bot.handle(message('/sessions'));
+    await bot.handle(click(button('→').callback_data));
+    await bot.handle(click(button('Paged session 1').callback_data));
+    expect(f.store.setting('telegram.currentDaddy')).toBe(
+      f.daddy.sessions().find((group) => group.title === 'Paged session 1')!.id,
+    );
+
+    await bot.handle(message('/new Preserve this request', -10042));
+    await bot.handle(click(button('→').callback_data, -10042));
+    await bot.handle(click(button('→').callback_data, -10042));
+    const last = workspaces.at(-1)!;
+    await bot.handle(click(button(last.name).callback_data, -10042));
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data, -10042));
+    const created = f.daddy.sessions().find((group) => group.workspace?.id === last.id)!;
+    expect(f.store.messages(created.id).at(-1)?.text).toBe('Preserve this request');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('shows shared limits and only the paired owner can confirm consuming a reset', async () => {
   const f = daddyFixture(),
     sent: any[] = [];
@@ -1183,6 +1254,224 @@ it('offers an immediate model switch from the daddy effort picker', async () => 
         forceDaddy: true,
       }),
     );
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('pages through every model and supports profiles without effort and engine defaults', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  let locale: 'en' | 'ru' = 'en';
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const models = Array.from({ length: 30 }, (_, index) => ({
+    id: `codex-${index + 1}`,
+    engine: 'codex',
+    name: `Codex ${index + 1}`,
+    efforts: ['medium'],
+    defaultEffort: 'medium',
+    isDefault: index === 0,
+  }));
+  models.push({
+    id: 'claude-no-effort',
+    engine: 'claude',
+    name: 'Claude without effort',
+    efforts: [],
+    defaultEffort: '',
+    isDefault: false,
+  });
+  vi.spyOn(f.daddy.catalogue, 'list').mockResolvedValue(models);
+  let n = 1400;
+  const press = (data: string) =>
+    bot.handle({
+      update_id: n++,
+      callback_query: {
+        id: String(n),
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    for (const role of ['daddy', 'worker'] as const) {
+      await press(`dad:models:${group.id}:${role}`);
+      for (let page = 0; page < 3; page++) await press(button('→').callback_data);
+      const last = button('Claude without effort');
+      expect(last).toBeTruthy();
+      await press(last.callback_data);
+      const selected = f.daddy.group(group.id);
+      expect((role === 'daddy' ? selected.daddy : selected.worker)?.model).toBe('claude-no-effort');
+      expect((role === 'daddy' ? selected.daddy : selected.worker)?.effort).toBeUndefined();
+
+      locale = 'ru';
+      await press(`dad:models:${group.id}:${role}`);
+      await press(button('по умолчанию').callback_data);
+      const reset = f.daddy.group(group.id),
+        expected = f.engine.defaultAgents()[role];
+      expect(role === 'daddy' ? reset.daddy : reset.worker).toMatchObject(expected);
+    }
+
+    locale = 'en';
+    await press(`dad:models:${group.id}:worker`);
+    await press(button('Codex 1').callback_data);
+    await press(button('Default effort').callback_data);
+    expect(f.daddy.group(group.id).worker).toMatchObject({
+      engine: 'codex',
+      model: 'codex-1',
+    });
+    expect(f.daddy.group(group.id).worker?.effort).toBeUndefined();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('pages through every model and supports profiles without effort and engine defaults', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  let locale: 'en' | 'ru' = 'en';
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const models = Array.from({ length: 30 }, (_, index) => ({
+    id: `codex-${index + 1}`,
+    engine: 'codex',
+    name: `Codex ${index + 1}`,
+    efforts: ['medium'],
+    defaultEffort: 'medium',
+    isDefault: index === 0,
+  }));
+  models.push({
+    id: 'claude-no-effort',
+    engine: 'claude',
+    name: 'Claude without effort',
+    efforts: [],
+    defaultEffort: '',
+    isDefault: false,
+  });
+  vi.spyOn(f.daddy.catalogue, 'list').mockResolvedValue(models);
+  let n = 1400;
+  const press = (data: string) =>
+    bot.handle({
+      update_id: n++,
+      callback_query: {
+        id: String(n),
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    for (const role of ['daddy', 'worker'] as const) {
+      await press(`dad:models:${group.id}:${role}`);
+      for (let page = 0; page < 3; page++) await press(button('→').callback_data);
+      await press(button('Claude without effort').callback_data);
+      const selected = f.daddy.group(group.id);
+      expect((role === 'daddy' ? selected.daddy : selected.worker)?.model).toBe('claude-no-effort');
+      expect((role === 'daddy' ? selected.daddy : selected.worker)?.effort).toBeUndefined();
+
+      locale = 'ru';
+      await press(`dad:models:${group.id}:${role}`);
+      await press(button('по умолчанию').callback_data);
+      expect(
+        role === 'daddy' ? f.daddy.group(group.id).daddy : f.daddy.group(group.id).worker,
+      ).toMatchObject(f.engine.defaultAgents()[role]);
+    }
+
+    locale = 'en';
+    await press(`dad:models:${group.id}:worker`);
+    await press(button('Codex 1').callback_data);
+    await press(button('Default effort').callback_data);
+    expect(f.daddy.group(group.id).worker).toMatchObject({ engine: 'codex', model: 'codex-1' });
+    expect(f.daddy.group(group.id).worker?.effort).toBeUndefined();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('binds the current turn to the quoted Telegram parent even after an unrelated update', async () => {
+  const f = daddyFixture();
+  const api = {
+    send: vi.fn(async () => ({ message_id: 1 })),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const chat = { id: 7, type: 'private' };
+  const message = {
+    message_id: 365,
+    from: { id: 7 },
+    chat,
+    text: 'а на что это влияет?',
+    reply_to_message: {
+      message_id: 359,
+      chat,
+      from: { id: 12, username: 'fixture_bot', is_bot: true },
+      text: 'Воркер · DADDY-ccf7e32c · PR #39. Какой контракт сохранить?',
+    },
+    quote: { text: 'Какой контракт сохранить?', position: 38, is_manual: true },
+  };
+  try {
+    f.store.daddyMessage(group.id, 'agent', 'Newer result about PR #64');
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({
+      update_id: 366,
+      message: { message_id: 366, chat, from: { id: 7 }, text: 'и отдельный вопрос' },
+    });
+    const jobs = f.store.daddyJobs(group.id);
+    expect(jobs.filter((j) => j.trigger === 'user')).toHaveLength(2);
+    expect(jobs[0].replyTo).toMatchObject({
+      messageId: 359,
+      text: message.reply_to_message.text,
+      quote: message.quote.text,
+    });
+    expect(jobs[1].replyTo).toBeUndefined();
+    const saved = f.store.messages(group.id).find((m) => m.text === message.text);
+    expect(saved?.origin).toMatchObject({ messageId: 365, replyTo: jobs[0].replyTo });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledOnce());
+    const context = JSON.parse(f.runtime.runSession.mock.calls[0][0].prompt);
+    expect(context.currentInstruction).toBe(message.text);
+    expect(context.replyTo).toMatchObject({
+      messageId: 359,
+      text: expect.stringContaining('PR #39'),
+      quote: message.quote.text,
+    });
   } finally {
     await bot.stop();
     await f.close();

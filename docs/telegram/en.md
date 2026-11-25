@@ -6,6 +6,8 @@ When daddy or a worker asks for a decision, the bot sends a new message with a m
 
 In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
 
+Replying in a topic sends the original message and the selected quotation to daddy with your question. You can reply to an older worker question after the conversation has moved on. A voice reply keeps the same context during transcription.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.
@@ -46,10 +48,10 @@ Each daddy session gets a topic. Send goals and tickets there. Workers report to
 
 Send `/help` in the private chat or a group topic to see available commands and descriptions. Use `/help task` or `/help /worker` for syntax and options. In groups, `/help@your_bot task` also works. Telegram suggests commands for the current chat type when you type `/`. Russian Telegram clients receive Russian menu descriptions. Use `/language` to select the language for bot replies.
 
-| Where                                     | Commands                                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Private chat and connected session topics | `/new`, `/sessions`, `/session`, `/tasks`, `/task`, `/queue`, `/workers`, `/worker`, `/submit`, `/approve`, `/publish`, `/waive`, `/workspaces`, `/workspace`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
-| Private chat                              | `/group`, `/updates`, `/web`, `/cleanup`                                                                                                                                                                                                                                                                                                           |
+| Where                                     | Commands                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private chat and connected session topics | `/new`, `/sessions`, `/session`, `/tasks`, `/task`, `/queue`, `/workers`, `/worker`, `/approve`, `/waive`, `/workspaces`, `/workspace`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
+| Private chat                              | `/group`, `/updates`, `/web`, `/cleanup`                                                                                                                                                                                                                                                                                    |
 
 In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enable cleanup and check its threshold, skill and most recent result here. See [operations](../operations/en.md) for the settings.
 

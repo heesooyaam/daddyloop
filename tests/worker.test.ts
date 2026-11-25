@@ -5,7 +5,6 @@ import { Worker } from '../src/runtime/worker.js';
 import { Workspaces } from '../src/runtime/workspaces.js';
 import { DemoRuntime } from '../src/runtime/demo.js';
 import { TicketWorkflow } from '../src/core/ticket-workflow.js';
-import { daddyFixture } from './daddy-fixture.js';
 const healthy = () => ({
   memoryAvailableGiB: 30,
   memoryTotalGiB: 90,
@@ -141,60 +140,6 @@ it('publishes automatically even when an older task stored a manual policy', asy
     f.store.close();
   }
 });
-it('keeps explicit session submission and publication policies manual', async () => {
-  const f = daddyFixture();
-  try {
-    const group = f.daddy.create({
-      workspaceId: f.workspace.id,
-      autoPush: false,
-      publication: 'human',
-    });
-    const task = await f.tickets.local({
-      workspace: f.workspace,
-      groupId: group.id,
-      groupGeneration: group.generation,
-      title: 'Manual workflow',
-      requirements: 'Wait for explicit actions',
-      createdByAction: 'fixture',
-    });
-    expect(task.policy).toMatchObject({ autoPush: false, publication: 'human' });
-    task.state = 'ready_for_review';
-    task.pendingAuthorHead = task.revision!.head;
-    f.store.saveTask(task);
-    const submit = vi.fn(async () => task);
-    f.worker.autoSubmit = submit;
-    await f.worker.tick();
-    expect(submit).not.toHaveBeenCalled();
-
-    task.state = 'awaiting_publication';
-    f.store.saveTask(task);
-    const publish = vi.spyOn(f.engine, 'publish');
-    await f.worker.tick();
-    expect(publish).not.toHaveBeenCalled();
-
-    const fix = await f.engine.create({
-      ref: {
-        provider: 'demo',
-        host: 'demo.local',
-        repo: 'test/repo',
-        number: 71,
-        url: 'https://demo.local/pull/71',
-      },
-      repoPath: f.dir,
-      requirements: 'Keep saved fixes manual',
-      groupId: group.id,
-      groupGeneration: group.generation,
-    });
-    fix.state = 'awaiting_push';
-    fix.pendingAuthorHead = 'f'.repeat(40);
-    f.store.saveTask(fix);
-    await f.worker.tick();
-    expect(submit).not.toHaveBeenCalled();
-  } finally {
-    await f.close();
-  }
-});
-
 it('sends an older task’s saved corrections and reconciles the new PR head', async () => {
   const f = await fixture();
   const workspaces = new Workspaces('/tmp');

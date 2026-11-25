@@ -5,6 +5,8 @@ import { InstructionPresets } from '../src/core/instruction-presets.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import type { TelegramApi, Update } from '../src/integrations/telegram.js';
 import { daddyFixture } from './daddy-fixture.js';
+import { InstructionSources } from '../src/ops/instruction-sources.js';
+import { rememberSecret } from '../src/core/security.js';
 
 function apiFixture() {
   const sent: { destination: any; card: any }[] = [];
@@ -865,6 +867,52 @@ it('shows individual CI checks and safe links in the Telegram task card', async 
   }
 });
 
+it('redacts preset and skill names from group library and component cards', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  const secret = rememberSecret('PRIVATE_PRESET_MARKER_12345');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Work' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id }),
+    skill = await new InstructionSources().import({
+      kind: 'text',
+      name: `Skill ${secret}`,
+      text: 'Keep this fixture private.',
+    }),
+    preset = new InstructionPresets(f.store).save({
+      name: `Preset ${secret}`,
+      instructions: { daddy: {}, worker: { skills: [skill] } },
+    });
+  await f.daddy.settings(group.id, {
+    instructions: { daddy: {}, worker: {}, presets: [{ preset, enabled: true, omit: [] }] },
+  });
+  const topic = await bot.ensureTopic(group);
+  let id = 540;
+  const message = (text: string, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: -10042, type: 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  try {
+    await bot.handle(message('/presets', topic!.threadId));
+    expect(JSON.stringify(telegram.sent.at(-1)!.card)).not.toContain(secret);
+    await bot.handle(message(`/preset parts ${preset.id}`, topic!.threadId));
+    expect(JSON.stringify(telegram.sent.at(-1)!.card)).not.toContain(secret);
+    f.store.setSetting('telegram.selectedSession:7:-10042:0', null);
+    await bot.handle(message('/presets'));
+    expect(JSON.stringify(telegram.sent.at(-1)!.card)).not.toContain(secret);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('pages through every task and preset without requiring a known name', async () => {
   const f = daddyFixture(),
     telegram = apiFixture(),
@@ -922,6 +970,53 @@ it('pages through every task and preset without requiring a known name', async (
     await bot.handle(click(button('→').callback_data));
     await bot.handle(click(button('Paged preset 21').callback_data));
     expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Paged preset 21');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('cleans expired task and preset button records during normal list browsing', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  await f.tickets.local({
+    workspace: f.workspace,
+    groupId: group.id,
+    groupGeneration: group.generation,
+    title: 'Control task',
+    requirements: 'Control task',
+    createdByAction: 'control-task',
+  });
+  new InstructionPresets(f.store).save({
+    name: 'Control preset',
+    instructions: { daddy: { prompt: 'Control prompt' }, worker: {} },
+  });
+  let id = 690;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  try {
+    for (let index = 0; index < 10; index++) {
+      await bot.handle(message('/tasks'));
+      await bot.handle(message('/presets'));
+    }
+    expect(f.store.db.prepare('SELECT count(*) AS count FROM bot_actions').get()!.count).toBe(20);
+    f.store.db
+      .prepare("UPDATE bot_actions SET data=json_set(data,'$.expiresAt',?)")
+      .run('2000-01-01T00:00:00.000Z');
+    await bot.handle(message('/tasks'));
+    await bot.handle(message('/presets'));
+    expect(f.store.db.prepare('SELECT count(*) AS count FROM bot_actions').get()!.count).toBe(2);
   } finally {
     await bot.stop();
     await f.close();

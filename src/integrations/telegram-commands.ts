@@ -50,22 +50,10 @@ const commands: Command[] = [
     },
   },
   {
-    name: 'submit',
-    args: '[DADDY-ID]',
-    en: 'Prepare explicit PR submission',
-    ru: 'Подготовить явную отправку PR',
-  },
-  {
     name: 'approve',
     args: '[DADDY-ID]',
     en: 'Prepare plan approval',
     ru: 'Подготовить принятие плана',
-  },
-  {
-    name: 'publish',
-    args: '[DADDY-ID]',
-    en: 'Prepare review publication',
-    ru: 'Подготовить публикацию ревью',
   },
   {
     name: 'waive',

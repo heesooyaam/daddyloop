@@ -749,7 +749,9 @@ export function DaddyTerminal({
     if (keyInfo.return && !keyInfo.shift && !keyInfo.meta) {
       if (editor.text.startsWith('/') && !editor.literal && !editor.text.includes('\n'))
         void execute(editor.text).catch((error) => model.error(error.message));
-      else if (!state.selected) {
+      else if (state.unavailableSession) {
+        open('sessions');
+      } else if (!state.selected) {
         open('workspaces', editor.text.trim() || undefined);
       } else void model.send();
       return;
@@ -861,6 +863,13 @@ export function DaddyTerminal({
           </Box>
           <Box flexGrow={1} />
           {state.error && <Text color={colors.error}>{clip(oneLine(t(state.error)), width)}</Text>}
+          {state.unavailableSession && (
+            <Text color={colors.error}>
+              {t('Session {id} is unavailable. Choose a session with Ctrl+T.', {
+                id: oneLine(state.unavailableSession),
+              })}
+            </Text>
+          )}
           <Box
             flexDirection="column"
             borderStyle="round"
@@ -899,14 +908,23 @@ export function DaddyTerminal({
                         (state.overrides[state.selected]?.path ??
                           state.board.workspace?.repoPath ??
                           '')
-                      : t('Start a daddy session first.')),
+                      : state.unavailableSession
+                        ? ''
+                        : t('Start a daddy session first.')),
                 width,
               )}
             </Text>
           </Box>
           <Box height={1}>
             <Text color={colors.muted}>
-              {clip(t('Enter send · Ctrl+J newline · /help · Ctrl+Q exit'), width)}
+              {clip(
+                t(
+                  state.unavailableSession
+                    ? 'Ctrl+T sessions · Ctrl+J newline · /help · Ctrl+Q exit'
+                    : 'Enter send · Ctrl+J newline · /help · Ctrl+Q exit',
+                ),
+                width,
+              )}
             </Text>
           </Box>
         </Box>

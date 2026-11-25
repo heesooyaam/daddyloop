@@ -57,6 +57,7 @@ import type { SessionRuntime } from '../runtime/agent.js';
 import type { DaddyWorkspace } from '../runtime/daddy-workspace.js';
 import type { UsageBackend } from '../core/usage.js';
 import { registerUsage } from './usage.js';
+import { registerVoice } from './voice.js';
 import { LocalSpeech, type Speech } from '../runtime/speech.js';
 
 export interface ServerOptions {
@@ -458,6 +459,8 @@ export async function buildApp(options: ServerOptions) {
     moduleCatalogue.map((module) => ({ ...module, enabled: config.modules.includes(module.id) })),
   );
   app.get('/api/health', async () => ({ ok: true, version: VERSION, pid: process.pid }));
+  const speech = options.speech ?? new LocalSpeech(dataDir);
+  registerVoice(app, dataDir, speech, () => preferences(store).locale, getResources);
   registerDaddy(app, daddy);
   const usage = options.usage ?? new ModuleUsage(agents, store);
   registerUsage(app, usage);
@@ -808,7 +811,7 @@ export async function buildApp(options: ServerOptions) {
             usage,
             voice: {
               dataDir,
-              speech: options.speech ?? new LocalSpeech(dataDir),
+              speech,
               resources: getResources,
             },
           });

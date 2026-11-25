@@ -62,7 +62,7 @@ On the website, describe the task first, then choose a workspace. Its saved fold
 
 ![Task and workspace selection](../media/en/daddy-new-session.png)
 
-In an existing conversation, **Change** beside the folder applies to the next message only. After sending, the session folder is selected again. Sending is paused while you edit folder settings: apply or cancel them first.
+In an existing conversation, open **Session settings → Repository** to see the workspace source and the path of the prepared copy, when available. To use a different folder for one message, choose **Change folder for the next message**, click **Apply settings**, and close the dialog. The composer shows when a different repository is selected. After a successful send, the next message uses the session source again. Copy preparation and errors appear above the conversation.
 
 The server folder picker works like this:
 

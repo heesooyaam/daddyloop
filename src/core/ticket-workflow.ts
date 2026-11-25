@@ -10,6 +10,7 @@ import {
   type AgentProfiles,
   type PRRef,
   type Task,
+  type TelegramReply,
   type Workspace,
   type WorkerRequest,
   type TicketRef,
@@ -60,6 +61,7 @@ export class TicketWorkflow {
       reader ?? new TicketReader(undefined, undefined, undefined, repositories, engine.store);
   }
   async start(input: {
+    replyTo?: TelegramReply;
     source: string;
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
@@ -104,6 +106,7 @@ export class TicketWorkflow {
       startImplementation: input.startImplementation,
       parentTaskId: input.parentTaskId,
       requirements: input.requirements,
+      replyTo: input.replyTo,
       agents: input.agents,
       groupId: input.groupId,
       groupGeneration: input.groupGeneration,
@@ -115,6 +118,7 @@ export class TicketWorkflow {
     return task;
   }
   async local(input: {
+    replyTo?: TelegramReply;
     source?: string;
     workspace: Workspace;
     groupId: string;
@@ -192,6 +196,7 @@ export class TicketWorkflow {
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
       requirements: input.requirements,
+      replyTo: input.replyTo,
       source: {
         kind: 'local',
         key: ref.key,
@@ -220,29 +225,14 @@ export class TicketWorkflow {
       });
     });
   }
-  async pushFixes(id: string, expected?: ExpectedTask) {
-    await this.engine.submitSavedFix(
-      id,
-      (task, head) => this.workspaces.pushSavedFix(task, head),
-      expected,
-    );
-    return this.engine.store.getTask(id);
+  async pushFixes(id: string) {
+    await this.engine.submitSavedFix(id, (task, head) => this.workspaces.pushSavedFix(task, head));
   }
 
   async submit(id: string, expected?: ExpectedTask): Promise<Task> {
     const result = await this.engine.lock(id, async () => {
       const task = this.engine.store.getTask(id);
-      if (expected?.pendingHead) assertTaskVersion(task, expected);
-      else if (
-        expected &&
-        (task.pendingAuthorHead !== expected.head ||
-          task.generation !== expected.generation ||
-          (expected.groupId !== undefined && task.groupId !== expected.groupId))
-      )
-        throw new AppError(
-          'stale_task',
-          'The task changed. Refresh it before confirming this action.',
-        );
+      assertTaskVersion(task, expected);
       if (
         !isTicket(task) ||
         !task.ticketRepository ||
