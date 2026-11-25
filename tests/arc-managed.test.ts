@@ -201,6 +201,18 @@ it('keeps an ownership journal when mounting fails so the same operation can rec
     await expect(f.manager.ensure(group, task, 'reviewer')).rejects.toThrow('mount interrupted');
     const record = f.manager.records(group)[0];
     expect(record.state).toBe('creating');
+    const interrupted = f.run.getMockImplementation()!;
+    f.run.mockImplementation(async (command, args, options) => {
+      const result = await interrupted(command, args, options);
+      if (command === 'bash' && args.includes('config')) {
+        const value = JSON.parse(result.stdout);
+        value.data.object_store = join(f.dir, 'another-shared-store');
+        return { ...result, stdout: JSON.stringify(value) };
+      }
+      return result;
+    });
+    await expect(f.manager.status()).rejects.toThrow('shared store or lease root changed');
+    f.run.mockImplementation(interrupted);
     expect((await f.manager.ensure(group, task, 'reviewer')).lease.ownerId).toBe(record.ownerId);
   } finally {
     f.close();

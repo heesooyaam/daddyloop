@@ -515,7 +515,13 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
-      const serviceDataDir = resolve(defaultDataDir(config));
+      if (!config.dataDir)
+        throw new AppError(
+          'service_data_dir_unknown',
+          'Run daddy init before configuring Arcadia for this service',
+          422,
+        );
+      const serviceDataDir = resolve(config.dataDir);
       if (dir() !== serviceDataDir)
         throw new AppError(
           'service_data_dir_mismatch',
@@ -534,7 +540,7 @@ export function registerOperations(program: Command) {
       );
       const current = loadConfig();
       const currentInputs = JSON.stringify({
-        dataDir: resolve(defaultDataDir(current)),
+        dataDir: current.dataDir ? resolve(current.dataDir) : null,
         resources: current.resources,
         arcadia: current.arcadia,
         moduleEnabled: current.modules.includes('arcadia'),

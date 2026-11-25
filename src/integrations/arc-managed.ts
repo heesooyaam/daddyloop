@@ -233,16 +233,18 @@ export class ManagedArcMounts {
     );
   }
   async status() {
-    const records = this.records().filter((record) => record.state !== 'creating');
+    const records = this.records();
     if (!records.length) return [];
     const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
+    const visible = records.filter((record) => record.state !== 'creating');
+    if (!visible.length) return [];
     const value = JSON.parse(
       (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
     );
     if (value.status !== 'success' || !Array.isArray(value.data?.mounts))
       throw new Error('The Arc lease helper returned an invalid session inventory');
     return value.data.mounts
-      .filter((mount: { path: string }) => records.some((record) => record.mount === mount.path))
+      .filter((mount: { path: string }) => visible.some((record) => record.mount === mount.path))
       .map((mount: object) => ({ ...mount, managed: true }));
   }
   async ensure(sessionId: string, taskId: string, role: Role, signal?: AbortSignal) {

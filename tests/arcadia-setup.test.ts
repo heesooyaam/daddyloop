@@ -27,6 +27,7 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
   saveConfig(configured);
   const doctor = vi.spyOn(ArcBridge.prototype, 'doctor');
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  const originalDataDir = process.env.DADDYLOOP_DATA_DIR;
   const run = (dataDir = directory) =>
     program().parseAsync([
       'node',
@@ -44,6 +45,15 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
     });
     expect(doctor).not.toHaveBeenCalled();
     expect(loadConfig().arcadia).toMatchObject({ enabled: true, leaseHelper: previous });
+
+    process.env.DADDYLOOP_DATA_DIR = join(directory, 'environment-data-dir');
+    await expect(
+      program().parseAsync(['node', 'daddy', 'arcadia', 'setup', '--lease-helper', candidate]),
+    ).rejects.toMatchObject({ code: 'service_data_dir_mismatch' });
+    expect(doctor).not.toHaveBeenCalled();
+    expect(loadConfig().arcadia).toMatchObject({ enabled: true, leaseHelper: previous });
+    if (originalDataDir === undefined) delete process.env.DADDYLOOP_DATA_DIR;
+    else process.env.DADDYLOOP_DATA_DIR = originalDataDir;
 
     for (const message of ['Arcanum is temporarily unavailable', 'lease helper failed']) {
       doctor.mockImplementationOnce(async function (this: ArcBridge) {
@@ -93,6 +103,8 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
     expect(loadConfig().arcadia).toMatchObject({ enabled: true, leaseHelper: candidate });
     expect(loadConfig().cache.auto).toBe(true);
   } finally {
+    if (originalDataDir === undefined) delete process.env.DADDYLOOP_DATA_DIR;
+    else process.env.DADDYLOOP_DATA_DIR = originalDataDir;
     output.mockRestore();
     doctor.mockRestore();
     saveConfig(original);
