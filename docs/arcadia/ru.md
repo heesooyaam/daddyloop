@@ -31,7 +31,7 @@ npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-c
 daddy arcadia mounts
 ```
 
-Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, выполни `daddy arcadia setup --workspace ~/arcadia2` в том же окружении: `setup` сохранит найденный путь.
+Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, возьми выбранный путь из настройки, переменной окружения или `PATH`. Для относительного пути выполни `realpath` из каталога, где прошёл `mounts`, и подставь результат в показанную ниже форму с `--lease-helper`. Не запускай на этом шаге `setup` без явного пути: флаг сохраняет абсолютное имя, которое останется рабочим после смены каталога.
 
 Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
 
@@ -50,6 +50,7 @@ arc mount -l --json
 ```bash
 source="$HOME/arcadia2"
 helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
+helper="$(realpath "$helper")"
 daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
 ```
 
@@ -65,7 +66,15 @@ bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "
 
 Если helper работает, но у источника нет `status: mounted`, SkillStore это не исправит: сначала подключи исходную Arcadia, затем повтори `setup`.
 
-После установки навыка выполни `daddy arcadia setup --workspace ~/arcadia2`. Команда находит helper в `PATH` и в стандартных каталогах навыков. Также можно передать его точный путь через `--lease-helper`. Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
+После установки навыка также сохрани его абсолютный путь:
+
+```bash
+SKILLS_DIR="$HOME/.codex/skills"
+helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")"
+daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+```
+
+Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
 
 Для Arcanum daddyloop использует, по порядку, `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia` или штатный `~/.arc/token`. Настройка проверяет чтение Arcanum, но не копирует и не меняет учётные данные.
 
