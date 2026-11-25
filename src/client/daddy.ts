@@ -33,6 +33,7 @@ export interface DaddyClientState {
   connected: boolean;
   busy: boolean;
   error?: string;
+  unavailableSession?: string;
 }
 
 function resolveSessionId(sessions: DaddySession[], reference: string) {
@@ -66,11 +67,13 @@ export class DaddyClient {
   private messageRequests = new Map<string, { text: string; key: string; id: string }>();
   private creation?: { key: string; id: string };
   private readonly createdSessionIds = new Set<string>();
+  private explicitSelection: boolean;
   constructor(
     readonly api: DaddyApi,
     selected = '',
   ) {
     this.value.selected = selected;
+    this.explicitSelection = !!selected;
   }
   snapshot = () => this.value;
   subscribe = (fn: () => void) => {
@@ -113,15 +116,32 @@ export class DaddyClient {
     this.update({ error: message });
   }
   async select(id: string) {
+    this.explicitSelection = false;
     this.sequence++;
-    this.update({ selected: id, board: undefined, error: undefined });
+    this.update({
+      selected: id,
+      board: undefined,
+      error: undefined,
+      unavailableSession: undefined,
+    });
     await this.detail();
   }
   selectFromReference(reference: string) {
+    if (!reference) return;
     const id = this.createdSessionIds.has(reference)
       ? reference
-      : resolveSessionId(this.value.sessions, reference);
-    if (id && id !== this.value.selected) void this.select(id);
+      : (resolveSessionId(this.value.sessions, reference) ?? reference);
+    this.explicitSelection = true;
+    if (id === this.value.selected) return;
+    this.sequence++;
+    this.update({
+      selected: id,
+      board: undefined,
+      error: undefined,
+      unavailableSession: undefined,
+    });
+    if (/^[a-f0-9-]{36}$/.test(id)) void this.detail();
+    else void this.refresh();
   }
   private async detail() {
     const id = this.value.selected,
@@ -134,10 +154,20 @@ export class DaddyClient {
         this.controller.signal,
       );
       if (this.value.selected === id && sequence === this.sequence)
-        this.update({ board, connected: true });
+        this.update({ board, connected: true, unavailableSession: undefined });
     } catch (error) {
-      if (this.value.selected === id && sequence === this.sequence && !this.stopped)
-        this.update({ error: (error as Error).message, connected: false });
+      if (this.value.selected === id && sequence === this.sequence && !this.stopped) {
+        if (
+          this.explicitSelection &&
+          error instanceof Error &&
+          'status' in error &&
+          error.status === 404
+        ) {
+          this.update({ board: undefined, unavailableSession: id, error: undefined });
+        } else {
+          this.update({ error: (error as Error).message, connected: false });
+        }
+      }
     }
   }
   refresh(): Promise<void> {
@@ -155,17 +185,21 @@ export class DaddyClient {
         ]);
         if (!current()) return;
         this.createdSessionIds.clear();
-        const selected = resolveSessionId(sessions, this.value.selected) ?? sessions[0]?.id ?? '';
-        if (selected !== this.value.selected) this.sequence++;
+        const resolved = resolveSessionId(sessions, this.value.selected);
+        const unavailableSession =
+          this.explicitSelection && !resolved ? this.value.selected : undefined;
+        const selected = resolved ?? unavailableSession ?? sessions[0]?.id ?? '';
+        if (unavailableSession || selected !== this.value.selected) this.sequence++;
         this.update({
           sessions,
           workspaces,
           status,
           selected,
+          unavailableSession,
           connected: true,
-          ...(selected !== this.value.selected ? { board: undefined } : {}),
+          ...(unavailableSession || selected !== this.value.selected ? { board: undefined } : {}),
         });
-        await this.detail();
+        if (!unavailableSession) await this.detail();
       } catch (error) {
         if (current()) this.update({ error: (error as Error).message, connected: false });
       }
@@ -276,7 +310,7 @@ export class DaddyClient {
       text = (this.value.drafts[id] ?? '').trim(),
       repository = this.value.overrides[id],
       key = JSON.stringify({ text, repository });
-    if (!id || !text || this.value.busy) return;
+    if (!id || !text || this.value.busy || this.value.unavailableSession) return;
     let request = this.messageRequests.get(id);
     if (request?.key !== key) {
       request = { text, key, id: crypto.randomUUID() };

@@ -5,17 +5,26 @@ export function Dialog({
   title,
   children,
   onClose,
+  fallbackFocus,
+  closeDisabled = false,
   wide = false,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  fallbackFocus?: () => HTMLElement | null;
+  closeDisabled?: boolean;
   wide?: boolean;
 }) {
   const { t } = useLocale();
+  const requestClose = () => {
+    if (!closeDisabled) onClose();
+  };
   const ref = useRef<HTMLDivElement>(null),
-    close = useRef(onClose);
-  close.current = onClose;
+    close = useRef(requestClose),
+    fallback = useRef(fallbackFocus);
+  close.current = requestClose;
+  fallback.current = fallbackFocus;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement;
     (
@@ -48,14 +57,19 @@ export function Dialog({
     document.addEventListener('keydown', key);
     return () => {
       document.removeEventListener('keydown', key);
-      previous?.focus();
+      if (previous?.isConnected) previous.focus();
+      if (!previous?.isConnected || document.activeElement !== previous)
+        fallback.current?.()?.focus();
     };
   }, []);
   return (
     <div
       className="daddy-overlay"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) {
+          event.preventDefault();
+          requestClose();
+        }
       }}
     >
       <div
@@ -67,7 +81,12 @@ export function Dialog({
       >
         <header>
           <h2>{title}</h2>
-          <button className="daddy-icon" aria-label={t('Close')} onClick={onClose}>
+          <button
+            className="daddy-icon"
+            aria-label={t('Close')}
+            onClick={requestClose}
+            disabled={closeDisabled}
+          >
             <X size={19} />
           </button>
         </header>
