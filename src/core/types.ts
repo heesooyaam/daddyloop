@@ -260,6 +260,15 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  draftStart?: {
+    marker: string;
+    owner?: string;
+    revision: Revision;
+    retry: boolean;
+    clarification?: string;
+    retryAt?: number;
+    delay?: number;
+  };
   prLink?: {
     ref?: PRRef;
     head: string;

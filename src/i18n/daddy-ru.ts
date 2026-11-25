@@ -641,6 +641,12 @@ export const daddyRu: Record<string, string> = {
     'Изменился коммит PR или история целевой ветки. Незавершённое слияние сохранено в копии воркера.',
   'Continuing the fix with the answer from the session':
     'Воркер продолжает исправление с ответом из сессии',
+  'Preparing the GitHub review draft': 'Готовит черновик ревью GitHub',
+  'Waiting to retry the GitHub review draft':
+    'Ждёт автоматического повтора создания черновика GitHub',
+  'GitHub review draft · retry at {time} UTC': 'Черновик ревью GitHub · повтор в {time} UTC',
+  'A different pending GitHub review belongs to this account. Its contents have been preserved.':
+    'У этой учётной записи есть другой черновик ревью. Его содержимое сохранено.',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',

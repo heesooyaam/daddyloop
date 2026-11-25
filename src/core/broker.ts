@@ -12,6 +12,7 @@ import {
 } from './types.js';
 import type { Store } from './store.js';
 import { Outbox } from './outbox.js';
+import { sameOpenTarget } from './pr-routing.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
 
 const body = z.string().min(1).max(60000);
@@ -76,15 +77,62 @@ export class Broker {
   }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
-    const marker = `daddyloop:${task.id}:${task.generation}:${task.round}`;
+    const marker =
+      task.draftStart?.marker ?? `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
       revision = task.revision!;
+    const create = (replay: boolean) =>
+      provider.createReview(
+        prRef(task),
+        revision,
+        marker,
+        task.draftStart
+          ? async (owner) => {
+              if (replay) {
+                const pr = await provider.getPR(prRef(task));
+                if (!sameOpenTarget(task.pr, pr) || !sameRevision(revision, pr) || pr.draft)
+                  throw new AppError(
+                    'draft_revision_changed',
+                    'The PR changed during draft recovery.',
+                  );
+              }
+              const latest = this.store.getTask(task.id);
+              const intent = latest.draftStart;
+              const group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
+              if (
+                !intent ||
+                intent.marker !== marker ||
+                latest.generation !== task.generation ||
+                latest.state === 'paused' ||
+                group?.deletion ||
+                group?.deletedAt ||
+                group?.daddyState === 'paused' ||
+                group?.daddyState === 'archived'
+              )
+                throw new AppError('stale_task', 'The task changed during draft recovery.');
+              if (intent.owner && intent.owner !== owner)
+                throw new AppError(
+                  'draft_owner_changed',
+                  'The GitHub account changed during draft recovery.',
+                );
+              if (!intent.owner) {
+                intent.owner = owner;
+                task.draftStart!.owner = owner;
+                this.store.saveTask(latest);
+              }
+            }
+          : undefined,
+      );
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => provider.createReview(prRef(task), revision, marker),
+      () => create(false),
       async () => {
+        // The GitHub draft create checks all of this account's reviews before writing,
+        // reuses the marked draft and refuses to touch a different pending review.
+        if (task.ref.provider === 'github' && task.draftStart)
+          return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
