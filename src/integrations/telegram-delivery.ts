@@ -43,6 +43,7 @@ type Delivery = {
   recoveryOrder?: number;
   queueOrder?: number;
   cancelledForRoute?: boolean;
+  cancelledForQuestion?: boolean;
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -74,6 +75,7 @@ export class TelegramDelivery {
   private deliveredByRouteRun = new Map<string, Set<string>>();
   private sentNotifications = new Set<string>();
   private cancelledRouteNotifications = new Set<string>();
+  private cancelledQuestionNotifications = new Set<string>();
   private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
@@ -119,6 +121,12 @@ export class TelegramDelivery {
       value.queueOrder = queueOrder;
       if (value.status === 'cancelled' && value.cancelledForRoute && value.options.notificationId)
         this.cancelledRouteNotifications.add(value.options.notificationId);
+      if (
+        value.status === 'cancelled' &&
+        value.cancelledForQuestion &&
+        value.options.notificationId
+      )
+        this.cancelledQuestionNotifications.add(value.options.notificationId);
       const restoreThroughHistory =
         value.options.notificationId?.startsWith('telegram:dialog:') &&
         this.storedMessage(value) !== undefined;
@@ -231,6 +239,7 @@ export class TelegramDelivery {
     value.revision++;
     value.status = 'cancelled';
     value.cancelledForRoute = forRoute || undefined;
+    value.cancelledForQuestion = undefined;
     if (forRoute && value.options.notificationId)
       this.cancelledRouteNotifications.add(value.options.notificationId);
     if (value.options.notificationId)
@@ -587,6 +596,7 @@ export class TelegramDelivery {
       row.value.revision++;
       row.value.status = 'cancelled';
       row.value.cancelledForRoute = undefined;
+      row.value.cancelledForQuestion = undefined;
       this.store.transaction(() => {
         if (receipt) this.store.setSetting(receipt.key, receipt.value);
         this.store.setSetting(row.key, row.value);
@@ -643,19 +653,19 @@ export class TelegramDelivery {
       .prepare('SELECT 1 FROM notifications WHERE id=? AND status=?')
       .get(notificationId, 'sent');
   }
-  canReactivateRoute(
-    destination: TelegramDestination,
-    deliveryKey: string,
-    notificationId: string,
-  ) {
+  canReactivate(destination: TelegramDestination, deliveryKey: string, notificationId: string) {
     destination = {
       chatId: destination.chatId,
       ...(destination.threadId === undefined ? {} : { threadId: destination.threadId }),
     };
     const key = prefix + digest([this.bot, destination, deliveryKey]);
     const value = this.store.setting<Delivery>(key);
-    if (value?.status === 'cancelled' && value.cancelledForRoute) return true;
-    return this.cancelledRouteNotifications.has(notificationId);
+    if (value?.status === 'cancelled' && (value.cancelledForRoute || value.cancelledForQuestion))
+      return true;
+    return (
+      this.cancelledRouteNotifications.has(notificationId) ||
+      this.cancelledQuestionNotifications.has(notificationId)
+    );
   }
   private cancelAlternatePending(
     key: string,
@@ -795,6 +805,7 @@ export class TelegramDelivery {
     if (
       value?.status === 'cancelled' &&
       (value.cancelledForRoute ||
+        value.cancelledForQuestion ||
         (!!options.replace &&
           !!options.notificationId?.startsWith('telegram:dialog:') &&
           !this.notificationWasSent(options.notificationId)))
@@ -802,6 +813,7 @@ export class TelegramDelivery {
       value.revision++;
       value.status = 'queued';
       value.cancelledForRoute = undefined;
+      value.cancelledForQuestion = undefined;
       this.save(key, value);
     }
     if (value && this.deferredKeys.has(key)) {
@@ -813,6 +825,20 @@ export class TelegramDelivery {
         (options.order && value.options.order && options.order < value.options.order)
       )
         return { status: 'superseded', deliveryId: value.id };
+      if (
+        value.status !== 'sent' &&
+        options.reminder &&
+        (!value.options.reminder || digest(value.options.reminder) !== digest(options.reminder))
+      ) {
+        value.options = {
+          ...value.options,
+          groupId: options.groupId ?? value.options.groupId,
+          reminder: structuredClone(options.reminder),
+        };
+        value.revision++;
+        value.status = 'queued';
+        this.save(key, value);
+      }
       if (!options.replace && !(options.replacePending && value.status !== 'sent')) {
         if (value.status === 'queued') await this.kick();
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
@@ -821,6 +847,8 @@ export class TelegramDelivery {
         digest([value.content, value.options.final, value.options.pin]) ===
         digest([content, options.final, options.pin])
       ) {
+        if (value.status === 'sent' && options.pin && value.messages[0])
+          this.enqueuePin(value.destination, value.messages[0].id);
         await this.kick();
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       }
@@ -840,6 +868,7 @@ export class TelegramDelivery {
       value.revision++;
       value.status = 'queued';
       value.cancelledForRoute = undefined;
+      value.cancelledForQuestion = undefined;
       value.nextAttemptAt = this.clock();
     } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
@@ -919,8 +948,17 @@ export class TelegramDelivery {
   private async attempt(key: string, value: Delivery) {
     if (!this.valid(value)) {
       if (value.options.operation === 'pin') this.clearPinError(value.error);
+      const routeValid = this.routeValid(value);
       value.status = 'cancelled';
-      value.cancelledForRoute = !this.routeValid(value) || undefined;
+      value.cancelledForRoute = !routeValid || undefined;
+      value.cancelledForQuestion =
+        routeValid && !!value.options.reminder && !reminderOpen(this.store, value.options.reminder)
+          ? true
+          : undefined;
+      if (value.cancelledForRoute && value.options.notificationId)
+        this.cancelledRouteNotifications.add(value.options.notificationId);
+      if (value.cancelledForQuestion && value.options.notificationId)
+        this.cancelledQuestionNotifications.add(value.options.notificationId);
       if (value.options.reminder && value.options.notificationId)
         this.store.db
           .prepare("UPDATE notifications SET status='superseded',at=? WHERE id=?")

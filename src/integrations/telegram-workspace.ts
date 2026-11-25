@@ -2167,12 +2167,17 @@ export class TelegramWorkspace {
           this.store
             .messages(group.id)
             .some((entry) => entry.sender === 'user' && entry.at > message.at);
-        const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
+        const messageQuestion: OwnerQuestion | undefined = message?.needsReply
+          ? { groupId: group.id, messageId: message.id }
+          : undefined;
+        const ping =
+          prefs.enabled &&
+          (!!task || (!!messageQuestion && !answered && reminderOpen(this.store, messageQuestion)));
         if (task && !ping) return;
         const question: OwnerQuestion | undefined = task
           ? { groupId: group.id, taskId: task.id, request: request! }
-          : message?.needsReply && ping
-            ? { groupId: group.id, messageId: message.id }
+          : reminder && messageQuestion
+            ? messageQuestion
             : undefined;
         if (reminder && (!ping || !question || !reminderOpen(this.store, question))) return;
         const topic = await this.ensureTopic(group);
@@ -2234,12 +2239,12 @@ export class TelegramWorkspace {
         const notificationStatus = String(
           this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
         );
-        const routeCancelled =
+        const cancelledDelivery =
           notificationStatus === 'superseded' &&
-          !!this.api.delivery?.canReactivateRoute(destination, deliveryKey, id);
+          !!this.api.delivery?.canReactivate(destination, deliveryKey, id);
         if (
           notificationStatus === 'sent' ||
-          (notificationStatus === 'superseded' && message?.sender !== 'agent' && !routeCancelled)
+          (notificationStatus === 'superseded' && message?.sender !== 'agent' && !cancelledDelivery)
         )
           return;
         this.store.db

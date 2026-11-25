@@ -734,6 +734,309 @@ it.each([
   },
 );
 
+it.each([
+  ['en', 'private chat', false],
+  ['ru', 'topic', true],
+] as const)(
+  'keeps every final agent question in history and mentions only the open one: %s, %s',
+  async (locale, _route, topicRoute) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let nextMessageId = 200;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (topicRoute)
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Question history' });
+    const first = f.store.finishDaddyReply(group.id, 'First question', 'run-one', true);
+    const second = f.store.finishDaddyReply(group.id, 'Second question', 'run-two', true);
+    f.store.saveGroup({ ...f.store.getGroup(group.id), daddyState: 'needs_input' });
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const questionCalls = () =>
+      calls.filter(
+        (call) =>
+          call.method === 'sendMessage' &&
+          (call.body.text?.includes(first.text) || call.body.text?.includes(second.text)),
+      );
+    try {
+      workspace.replay();
+      await vi.waitFor(() => expect(questionCalls()).toHaveLength(2));
+      expect(questionCalls().map((call) => call.body.text)).toEqual([
+        expect.stringContaining('First question'),
+        expect.stringContaining('Second question'),
+      ]);
+      expect(
+        questionCalls().map(
+          (call) =>
+            call.body.entities?.some((entity: any) => entity.url === 'tg://user?id=7') ?? false,
+        ),
+      ).toEqual([false, true]);
+      await workspace.stop();
+      await api.delivery.stop();
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+      workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+      workspace.replay();
+      await new Promise((resolve) => setImmediate(resolve));
+      await api.delivery.flush(20);
+      expect(questionCalls()).toHaveLength(2);
+    } finally {
+      await workspace.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  ['en', 'private chat', false, false],
+  ['ru', 'topic', true, true],
+] as const)(
+  'binds legacy queued task requests before sending: %s, %s, closed=%s',
+  async (locale, _route, topicRoute, closeBeforeSend) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 300;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (topicRoute)
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Legacy requests' });
+    let destination = { chatId: 7, threadId: undefined as number | undefined };
+    let setup: TelegramWorkspace | undefined;
+    if (topicRoute) {
+      setup = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+      const topic = await setup.ensureTopic(group);
+      destination = { chatId: topic!.chatId, threadId: topic!.threadId };
+      await setup.stop();
+    }
+    const clarification = await f.daddy.createTask(group.id, {
+      requirements: 'Legacy clarification',
+      requestId: 'legacy-question',
+    });
+    f.store.saveTask({
+      ...clarification,
+      state: 'needs_input',
+      reason: 'Legacy clarification',
+      inputRequest: {
+        runId: 'legacy-question',
+        role: 'author',
+        generation: clarification.generation,
+      },
+    });
+    const plan = await f.daddy.createTask(group.id, {
+      requirements: 'Legacy plan',
+      requestId: 'legacy-plan',
+    });
+    f.store.saveTask({ ...plan, state: 'awaiting_plan_approval', reason: 'Legacy plan approval' });
+    const clarificationRequest = 'legacy-question';
+    const planRequest = `plan:${plan.contextVersion}:${plan.revision?.head}:${plan.revision?.base}:`;
+    const clarificationNotification = `telegram:question:7:${clarification.id}:${clarificationRequest}`;
+    const planNotification = `telegram:question:7:${plan.id}:${planRequest}`;
+    for (const notification of [clarificationNotification, planNotification])
+      f.store.db
+        .prepare('INSERT INTO notifications VALUES(?,?,?)')
+        .run(notification, 'pending', new Date(clock).toISOString());
+    const legacy = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    api.delivery = legacy;
+    await legacy.stop();
+    await legacy.send(destination, new TelegramText().add('Legacy clarification'), {
+      groupId: group.id,
+      key: clarificationNotification,
+      notificationId: clarificationNotification,
+    });
+    await legacy.send(destination, new TelegramText().add('Legacy plan approval'), {
+      groupId: group.id,
+      key: planNotification,
+      notificationId: planNotification,
+    });
+    f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const reminderTask = (notificationId: string) =>
+      f.store.db
+        .prepare(
+          `SELECT json_extract(value,'$.options.reminder.taskId') AS taskId FROM settings
+           WHERE key LIKE 'telegram.delivery:%'
+           AND json_extract(value,'$.options.notificationId')=?`,
+        )
+        .get(notificationId)?.taskId;
+    try {
+      workspace.replay();
+      await vi.waitFor(() => {
+        expect(reminderTask(clarificationNotification)).toBe(clarification.id);
+        expect(reminderTask(planNotification)).toBe(plan.id);
+      });
+      if (closeBeforeSend) {
+        f.store.saveTask({
+          ...f.store.getTask(clarification.id),
+          state: 'fixing',
+          inputRequest: undefined,
+        });
+        f.store.saveTask({ ...f.store.getTask(plan.id), state: 'fixing' });
+      }
+      clock += 60000;
+      await api.delivery.flush(20);
+      const delivered = calls.filter(
+        (call) =>
+          call.method === 'sendMessage' &&
+          (call.body.text === 'Legacy clarification' || call.body.text === 'Legacy plan approval'),
+      );
+      expect(delivered).toHaveLength(closeBeforeSend ? 0 : 2);
+    } finally {
+      await workspace.stop();
+      await api.delivery.stop();
+      await legacy.stop();
+      await setup?.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  ['en', 'private chat notifications', false, 'notifications'],
+  ['ru', 'topic pause', true, 'pause'],
+] as const)(
+  'restores temporarily suppressed task requests: %s, %s',
+  async (locale, _case, topicRoute, suppression) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 400;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (topicRoute)
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Suppressed requests' });
+    const clarification = await f.daddy.createTask(group.id, {
+      requirements: 'Temporary clarification',
+      requestId: 'temporary-question',
+    });
+    f.store.saveTask({
+      ...clarification,
+      state: 'needs_input',
+      reason: 'Temporary clarification',
+      inputRequest: {
+        runId: 'temporary-question',
+        role: 'author',
+        generation: clarification.generation,
+      },
+    });
+    const plan = await f.daddy.createTask(group.id, {
+      requirements: 'Temporary plan',
+      requestId: 'temporary-plan',
+    });
+    f.store.saveTask({
+      ...plan,
+      state: 'awaiting_plan_approval',
+      reason: 'Temporary plan approval',
+    });
+    f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const taskDeliveries = () =>
+      f.store.db
+        .prepare(
+          `SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'
+           AND json_extract(value,'$.options.reminder.taskId') IN (?,?)`,
+        )
+        .all(clarification.id, plan.id)
+        .map((row) => JSON.parse(String(row.value)));
+    try {
+      workspace.replay();
+      await vi.waitFor(() => expect(taskDeliveries()).toHaveLength(2));
+      if (suppression === 'notifications')
+        f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
+      else f.store.saveGroup({ ...f.store.getGroup(group.id), daddyState: 'paused' });
+      clock += 60000;
+      await api.delivery.flush(20);
+      expect(taskDeliveries().every((value) => value.status === 'cancelled')).toBe(true);
+      if (suppression === 'notifications')
+        f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+      else f.store.saveGroup({ ...f.store.getGroup(group.id), daddyState: 'active' });
+      workspace.replay();
+      await vi.waitFor(() => {
+        expect(
+          calls.filter(
+            (call) =>
+              call.method === 'sendMessage' &&
+              (call.body.text?.includes('Temporary clarification') ||
+                call.body.text?.includes('Temporary plan approval')),
+          ),
+        ).toHaveLength(2);
+      });
+      await api.delivery.flush(20);
+      expect(
+        calls.filter(
+          (call) =>
+            call.method === 'sendMessage' &&
+            (call.body.text?.includes('Temporary clarification') ||
+              call.body.text?.includes('Temporary plan approval')),
+        ),
+      ).toHaveLength(2);
+    } finally {
+      await workspace.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('migrates a queued legacy progress delivery when the same message becomes final', async () => {
   const f = daddyFixture();
   const calls: { method: string; body: Record<string, any> }[] = [];

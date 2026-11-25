@@ -1330,9 +1330,10 @@ it('pins an existing replaceable status card once and keeps editing that message
 });
 
 it.each([
-  ['before the first pin and restart', false],
-  ['after the first pin', true],
-])('keeps one pin when the topic is disconnected %s', async (_case, pinBeforeSwitch) => {
+  ['before the first pin and restart with changed text', false, false],
+  ['before the first pin and restart with identical text', false, true],
+  ['after the first pin', true, false],
+])('keeps one pin when the topic is disconnected %s', async (_case, pinBeforeSwitch, identical) => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
   try {
@@ -1349,12 +1350,14 @@ it.each([
       delivery = restored;
     }
     f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
-    await delivery.send(destination, text('Working'), options);
+    await delivery.send(destination, text(identical ? 'Preparing' : 'Working'), options);
     await delivery.flush(10);
     expect(f.call.mock.calls.map(([method]) => method)).toEqual(
       pinBeforeSwitch
         ? ['sendMessage', 'pinChatMessage', 'editMessageText']
-        : ['sendMessage', 'editMessageText', 'pinChatMessage'],
+        : identical
+          ? ['sendMessage', 'pinChatMessage']
+          : ['sendMessage', 'editMessageText', 'pinChatMessage'],
     );
     expect(f.call.mock.calls.filter(([method]) => method === 'pinChatMessage')).toHaveLength(1);
     expect(f.call.mock.calls.some(([method]) => method.startsWith('unpin'))).toBe(false);
@@ -1364,69 +1367,80 @@ it.each([
   }
 });
 
-it('reactivates every current topic message after an invalid-route flush before replay', async () => {
-  const f = fixture();
-  let invalid: TelegramDelivery | undefined;
-  let restored: TelegramDelivery | undefined;
-  try {
-    await f.queue.stop();
-    const destination = { chatId: -10042, threadId: 4 };
-    const deliveries = [
-      {
-        content: 'Clarification',
-        options: {
-          groupId: 'group',
-          key: 'task-question',
-          notificationId: 'telegram:question:7:task:question',
+it.each([false, true])(
+  'reactivates every current topic message after an invalid-route flush, restart=%s',
+  async (restart) => {
+    const f = fixture();
+    let invalid: TelegramDelivery | undefined;
+    let restored: TelegramDelivery | undefined;
+    try {
+      await f.queue.stop();
+      const destination = { chatId: -10042, threadId: 4 };
+      const deliveries = [
+        {
+          content: 'Clarification',
+          options: {
+            groupId: 'group',
+            key: 'task-question',
+            notificationId: 'telegram:question:7:task:question',
+          },
         },
-      },
-      {
-        content: 'Plan approval',
-        options: {
-          groupId: 'group',
-          key: 'plan-question',
-          notificationId: 'telegram:question:7:plan:approval',
+        {
+          content: 'Plan approval',
+          options: {
+            groupId: 'group',
+            key: 'plan-question',
+            notificationId: 'telegram:question:7:plan:approval',
+          },
         },
-      },
-      {
-        content: 'Message from web',
-        options: {
-          groupId: 'group',
-          key: 'web-message',
-          notificationId: 'telegram:dialog:-10042:4:web-message',
+        {
+          content: 'Message from web',
+          options: {
+            groupId: 'group',
+            key: 'web-message',
+            notificationId: 'telegram:dialog:-10042:4:web-message',
+          },
         },
-      },
-      {
-        content: 'Agent answer',
-        options: {
-          groupId: 'group',
-          key: 'message:agent-answer',
-          replace: true,
-          notificationId: 'telegram:dialog:-10042:4:agent-answer',
+        {
+          content: 'Agent answer',
+          options: {
+            groupId: 'group',
+            key: 'message:agent-answer',
+            replace: true,
+            notificationId: 'telegram:dialog:-10042:4:agent-answer',
+          },
         },
-      },
-    ];
-    for (const delivery of deliveries)
-      await f.queue.send(destination, text(delivery.content), delivery.options);
-    f.store.setSetting('telegram.group', null);
-    invalid = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
-    await invalid.flush(20);
-    expect(f.call).not.toHaveBeenCalled();
-    await invalid.stop();
-    f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
-    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
-    for (const delivery of deliveries)
-      await restored.send(destination, text(delivery.content), delivery.options);
-    await restored.flush(20);
-    expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual(
-      deliveries.map(({ content }) => content),
-    );
-  } finally {
-    await restored?.stop();
-    await invalid?.stop();
-    await f.close();
-  }
-});
+      ];
+      for (const delivery of deliveries)
+        await f.queue.send(destination, text(delivery.content), delivery.options);
+      f.store.setSetting('telegram.group', null);
+      invalid = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await invalid.flush(20);
+      expect(f.call).not.toHaveBeenCalled();
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+      let currentDelivery = invalid;
+      if (restart) {
+        await invalid.stop();
+        restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+        currentDelivery = restored;
+      }
+      for (const delivery of deliveries)
+        await (restart ? restored! : invalid).send(
+          destination,
+          text(delivery.content),
+          delivery.options,
+        );
+      await currentDelivery.flush(20);
+      expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual(
+        deliveries.map(({ content }) => content),
+      );
+    } finally {
+      await restored?.stop();
+      await invalid?.stop();
+      await f.close();
+    }
+  },
+);
 
 it('keeps a status update queued while the initial pin request is in flight', async () => {
   const f = fixture();
