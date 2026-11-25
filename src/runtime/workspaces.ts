@@ -229,6 +229,16 @@ export class Workspaces {
       parents === head + ' ' + base && !(await git(['status', '--porcelain'], cwd, {}, signal))
     );
   }
+  async pendingConflictBase(task: Task) {
+    if (!task.authorWorktree || !task.revision || task.ref.provider !== 'github') return;
+    const { root, bare } = await this.initialize(task);
+    const cwd = task.authorWorktree;
+    if (cwd !== join(root, 'author')) return;
+    await this.verifyCopy(cwd, bare);
+    if ((await git(['rev-parse', 'HEAD'], cwd)) !== (task.conflictCheckpoint ?? task.revision.head))
+      return;
+    return git(['rev-parse', '--verify', '-q', 'MERGE_HEAD'], cwd).catch(() => undefined);
+  }
   async prepareConflict(task: Task, signal?: AbortSignal) {
     if (!task.authorWorktree || !task.revision || task.ref.provider !== 'github')
       throw new AppError(

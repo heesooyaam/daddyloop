@@ -1,7 +1,12 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { GitHubQuota, GitHubQuotaError, githubWait } from '../src/providers/github-quota.js';
 import { fixture } from './helpers.js';
 import { Engine } from '../src/core/engine.js';
+import { Store } from '../src/core/store.js';
+import { DemoProvider } from '../src/providers/demo.js';
 import { prRef } from '../src/core/types.js';
 
 const savedHead = 'f'.repeat(40);
@@ -838,6 +843,9 @@ it.each([
 
 it.each([
   ['gitlab', 'published'],
+  ['arcadia', 'published'],
+  ['arcadia', 'draft'],
+  ['arcadia', 'partial'],
   ['gitlab', 'draft'],
   ['gitlab', 'partial'],
   ['gitlab', 'stale draft'],
@@ -854,8 +862,16 @@ it.each([
       const task = f.store.getTask(f.task.id);
       const ref = { ...prRef(task), provider };
       const original = task.revision!;
-      const confirmed = { ...task.pr!, head: savedHead };
-      const merged = { ...confirmed, state: 'merged' as const, mergeCommit: 'merge' };
+      const confirmed = {
+        ...task.pr!,
+        head: savedHead,
+        revisionId: provider === 'arcadia' ? 'diff-2' : undefined,
+      };
+      const merged = {
+        ...confirmed,
+        state: 'merged' as const,
+        mergeCommit: provider === 'arcadia' ? undefined : 'merge',
+      };
       const next = { ...task, ref, revision: confirmed, pr: confirmed };
       const stale = scenario.startsWith('stale');
       const attempt = {
@@ -911,6 +927,7 @@ it.each([
       );
       const job = f.store.claim()!;
       expect(job.kind).toBe('verify_merge');
+      expect(await f.engine.canStartMergeVerification(job, merged)).toBe(true);
       await f.engine.completeJob(
         job,
         f.result({ checkedHead: savedHead, verifiedCommentIds: ['earlier'] }),
@@ -920,6 +937,80 @@ it.each([
       );
     } finally {
       f.store.close();
+    }
+  },
+);
+
+it.each([
+  ['github', 'edited'],
+  ['gitlab', 'edited'],
+  ['arcadia', 'edited'],
+  ['arcadia', 'edited after restart'],
+  ['arcadia', 'unchanged after restart'],
+] as const)(
+  'verifies the wording presented to the merge reviewer on %s (%s)',
+  async (provider, scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-merge-findings-'));
+    const path = join(dir, 'state.sqlite');
+    const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead }, path);
+    let store = f.store;
+    try {
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider };
+      const confirmed = {
+        ...task.pr!,
+        head: savedHead,
+        revisionId: provider === 'arcadia' ? 'diff-2' : undefined,
+      };
+      const merged = {
+        ...confirmed,
+        state: 'merged' as const,
+        mergeCommit: provider === 'arcadia' ? undefined : 'merge',
+      };
+      const next = { ...task, ref, revision: confirmed, pr: confirmed };
+      const review = await f.engine.broker.ensureReview({ ...next, round: next.round + 1 });
+      if (!review) throw new Error('Expected the native review in the operation log');
+      const finding = await f.provider.createComment(
+        ref,
+        review,
+        'Check the saved SHA',
+        review.marker + ':comment:R1',
+      );
+      await f.provider.publish(ref, review);
+      store.saveTask({
+        ...next,
+        pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+      });
+      store.setSetting('demo-pr:1', merged);
+      expect(await f.engine.action(task.id, 'verify-merge')).toMatchObject({ state: 'reviewing' });
+      const job = store.claim()!;
+      expect(await f.engine.canStartMergeVerification(job, merged)).toBe(true);
+      const result = f.result({ checkedHead: savedHead, verifiedCommentIds: [finding.id] });
+      if (scenario.startsWith('edited'))
+        await f.provider.updateComment(ref, review, finding.id, 'Check recovery after a restart');
+      let engine = f.engine;
+      if (scenario.endsWith('after restart')) {
+        store.saveJob({ ...job, deferredResult: result });
+        store.close();
+        store = new Store(path);
+        const restoredProvider = new DemoProvider(store);
+        engine = new Engine(store, () => restoredProvider);
+      }
+      const restored = store.jobs(task.id).find(({ id }) => id === job.id)!;
+      await engine.completeJob(restored, restored.deferredResult ?? result);
+      const completed = store.getTask(task.id);
+      if (scenario.startsWith('edited')) {
+        expect(completed.state).toBe('needs_input');
+        expect(completed.reason).toContain('Published findings changed');
+        expect(completed.feedback?.comments).toMatchObject([
+          { id: finding.id, body: 'Check recovery after a restart' },
+        ]);
+      } else {
+        expect(completed.state).toBe('complete');
+      }
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   },
 );

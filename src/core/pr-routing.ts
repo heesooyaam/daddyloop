@@ -141,7 +141,10 @@ export function nextPrAction(
     return { kind: 'confirm-fix' };
   const conflict = enabled && pr.draft === false && pr.mergeConflict === true;
   const recovered = staleConflictPreparation(task);
-  if (task.fixingMergeConflict && (task.state === 'fixing' || recovered)) {
+  if (
+    task.fixingMergeConflict &&
+    (task.state === 'fixing' || (task.state === 'needs_input' && task.resumeState === 'fixing'))
+  ) {
     if (!sameHead) return { kind: 'inspect-repair' };
     if (
       recovered &&

@@ -102,6 +102,8 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {
+    if (job?.timeoutRetry && job.status === 'queued' && job.notBefore)
+      return `Continuing conflict resolution after a timeout at ${new Date(job.notBefore).toISOString().slice(11, 19)} UTC`;
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
       ? `Conflict repair queued for worker ${assignedWorker}`
