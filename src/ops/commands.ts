@@ -28,6 +28,7 @@ import { TelegramApi } from '../integrations/telegram.js';
 import { setupTailscale } from './network.js';
 import { openWebTunnel, webConnectionText } from './web.js';
 import { ArcBridge, leaseHelper } from '../integrations/arcadia.js';
+import { AppError } from '../core/types.js';
 
 export async function promptSecret(label: string): Promise<string> {
   if (!process.stdin.isTTY) throw new Error('Use --token-file for non-interactive setup');
@@ -514,11 +515,39 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
+      const serviceDataDir = resolve(defaultDataDir(config));
+      if (dir() !== serviceDataDir)
+        throw new AppError(
+          'service_data_dir_mismatch',
+          'Run Arcadia setup with the data directory configured for this daddyloop service',
+          422,
+        );
+      const validationInputs = JSON.stringify({
+        dataDir: serviceDataDir,
+        resources: config.resources,
+        arcadia: config.arcadia,
+        moduleEnabled: config.modules.includes('arcadia'),
+      });
       const selectedHelper = options.leaseHelper ? resolve(options.leaseHelper) : leaseHelper();
-      const identity = await new ArcBridge(dir(), selectedHelper).doctor(options.workspace);
-      config.arcadia.enabled = true;
-      config.arcadia.leaseHelper = selectedHelper;
-      saveConfig(config);
+      const identity = await new ArcBridge(serviceDataDir, selectedHelper).doctor(
+        options.workspace,
+      );
+      const current = loadConfig();
+      const currentInputs = JSON.stringify({
+        dataDir: resolve(defaultDataDir(current)),
+        resources: current.resources,
+        arcadia: current.arcadia,
+        moduleEnabled: current.modules.includes('arcadia'),
+      });
+      if (currentInputs !== validationInputs)
+        throw new AppError(
+          'arcadia_setup_changed',
+          'Arcadia setup inputs changed during validation; retry with the current configuration',
+          409,
+        );
+      current.arcadia.enabled = true;
+      current.arcadia.leaseHelper = selectedHelper;
+      saveConfig(current);
       output({
         connected: true,
         user: identity.user_login,
