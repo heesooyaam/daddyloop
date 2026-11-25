@@ -15,7 +15,12 @@ export interface ReviewProvider {
   targetAdvanced?(ref: PRRef, before: string, after: string): Promise<boolean>;
   prepareMerge?(ref: PRRef): Promise<(expectedHead: string) => Promise<string>>;
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
-  createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
+  createReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    confirmOwner?: (owner: string) => Promise<void>,
+  ): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
   discardSupersededDraft?(
     ref: PRRef,
