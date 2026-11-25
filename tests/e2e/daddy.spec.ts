@@ -273,6 +273,114 @@ test('renames an existing session from web settings and keeps it after reload', 
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Renamed from the web' })).toBeVisible();
 });
+test('saves only fields changed in an open session settings form', async ({ page }) => {
+  await login(page);
+  const initialTitle = 'Concurrent session settings';
+  await create(page, initialTitle, Date.now());
+  const sessions = (await (await page.request.get('/api/daddy/sessions')).json()) as {
+    id: string;
+    title: string;
+  }[];
+  const id = sessions.find((session) => session.title === initialTitle)!.id;
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Session settings' }),
+    name = dialog.getByLabel('Session name');
+  await expect(name).toHaveValue(initialTitle);
+
+  const renamed = await page.request.post(`/api/daddy/sessions/${id}/rename`, {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { title: 'Renamed by another client' },
+  });
+  expect(renamed.status()).toBe(200);
+  await expect(page.getByRole('heading', { name: 'Renamed by another client' })).toBeVisible({
+    timeout: 5000,
+  });
+  await expect(name).toHaveValue(initialTitle);
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  let board = (await (await page.request.get(`/api/daddy/sessions/${id}`)).json()) as DaddyBoard;
+  expect(board.group.title).toBe('Renamed by another client');
+
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const instructions = await page.request.post(`/api/daddy/sessions/${id}/settings`, {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: {
+      instructions: {
+        daddy: { prompt: 'Instructions from another client' },
+        worker: {},
+      },
+    },
+  });
+  expect(instructions.status()).toBe(200);
+  await page.waitForTimeout(2200);
+  await dialog.getByLabel('Session name').fill('Only the local name changed');
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  board = (await (await page.request.get(`/api/daddy/sessions/${id}`)).json()) as DaddyBoard;
+  expect(board.group.title).toBe('Only the local name changed');
+  expect(board.group.instructions?.daddy.prompt).toBe('Instructions from another client');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Only the local name changed' })).toBeVisible();
+});
+test('omits an unavailable effort and can keep engine model defaults', async ({ page }) => {
+  await page.route('**/api/agents*', async (route) => {
+    await route.fulfill({
+      json: {
+        engines: [
+          { id: 'codex', name: 'Codex' },
+          { id: 'claude', name: 'Claude' },
+        ],
+        models: [
+          {
+            id: 'claude-no-effort',
+            engine: 'claude',
+            name: 'Claude without effort',
+            efforts: [],
+            defaultEffort: '',
+            isDefault: true,
+          },
+        ],
+      },
+    });
+  });
+  await login(page);
+  await create(page, 'Model without effort', Date.now());
+  const sessions = (await (await page.request.get('/api/daddy/sessions')).json()) as {
+    id: string;
+    title: string;
+  }[];
+  const id = sessions.find((session) => session.title === 'Model without effort')!.id;
+  let board = (await (await page.request.get(`/api/daddy/sessions/${id}`)).json()) as DaddyBoard;
+  const payloads: any[] = [];
+  await page.route(`**/api/daddy/sessions/${id}/settings`, async (route) => {
+    const payload = route.request().postDataJSON();
+    payloads.push(payload);
+    if (payload.profiles?.daddy) board.group.daddy = payload.profiles.daddy;
+    await route.fulfill({ json: board });
+  });
+
+  const open = async () => {
+    await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+    return page.getByRole('dialog', { name: 'Session settings' });
+  };
+  let dialog = await open();
+  await dialog.getByLabel('daddy Agent module').selectOption('claude');
+  await dialog.getByLabel('daddy Model').selectOption('claude-no-effort');
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(payloads[0].profiles.daddy).toEqual({
+    engine: 'claude',
+    model: 'claude-no-effort',
+  });
+
+  dialog = await open();
+  await dialog.getByLabel('daddy Agent module').selectOption('claude');
+  await dialog.getByLabel('daddy Model').selectOption('claude-no-effort');
+  await dialog.getByLabel('daddy Model').selectOption('');
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(payloads[1].profiles.daddy).toEqual({ engine: 'claude' });
+});
 test('Escape in the folder browser returns to the session settings draft', async ({ page }) => {
   await login(page);
   await create(page, 'Folder browser keyboard fixture', Date.now());

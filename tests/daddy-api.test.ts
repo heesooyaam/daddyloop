@@ -186,6 +186,31 @@ it('rejects removed submit and publish task actions without side effects', async
     await f.close();
   }
 });
+it('accepts and discards legacy manual workflow fields when creating a session', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  const create = vi.spyOn(f.daddy, 'create');
+  try {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/daddy/sessions',
+      payload: {
+        workspaceId: f.workspace.id,
+        autoPush: false,
+        publication: 'human',
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('autoPush');
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('publication');
+    expect(response.json().group).not.toHaveProperty('defaultPolicy');
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
 it('authenticates workspace/session controls, deduplicates messages and closes public worker chat', async () => {
   const f = daddyFixture(),
     server = await buildApp({

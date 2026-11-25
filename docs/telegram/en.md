@@ -61,7 +61,7 @@ In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enab
 
 Telegram receives separate slash-command menus for the private chat and the connected group. Both `/command` and `/command@botname` work; commands addressed to another bot are ignored. `/help` explains the routing rules for the current chat.
 
-Use `/tasks` and `/task` to open a task. Manual submit, plan approval, review publication and CI waiver show the exact revision and generation, then require a separate button confirmation. `/waive <reason>` also records the reason. The confirmation is bound to the paired owner, chat, topic, session and task, and becomes stale when the task changes. An ordinary message or an agent reply is never authorization.
+Use `/tasks` and `/task` to open a task. Plan approval and a reasoned CI waiver show the exact revision and generation, then require a separate button confirmation. `/waive <reason>` records the reason. The confirmation is bound to the paired owner, chat, topic, session and task, and becomes stale when the task changes. An ordinary message or an agent reply is never authorization. Saved commits are sent and completed reviews are published automatically after the service checks their revision and provider state, as defined by [#44](https://github.com/heesooyaam/daddyloop/pull/44).
 
 Outside a session topic, choose the session explicitly with `/session <name or ID>`. In the group’s general topic this selection applies only to control commands; ordinary messages are not routed to that session. This prevents a message intended for one topic from reaching another.
 

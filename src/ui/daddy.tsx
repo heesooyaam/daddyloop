@@ -1803,6 +1803,8 @@ function SessionSettings({
       board.group.instructions,
     ),
     [title, setTitle] = useState(board.group.title),
+    [instructionsChanged, setInstructionsChanged] = useState(false),
+    [titleChanged, setTitleChanged] = useState(false),
     [editingFolder, setEditingFolder] = useState(false),
     [importingInstructions, setImportingInstructions] = useState(false),
     [error, setError] = useState(''),
@@ -1837,11 +1839,11 @@ function SessionSettings({
           changed.worker = profiles.worker;
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          instructions,
+          instructionsChanged ? instructions : undefined,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
           forceDaddy || undefined,
           applyWorkers || undefined,
-          title.trim() !== board.group.title ? title.trim() : undefined,
+          titleChanged ? title.trim() : undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1853,7 +1855,10 @@ function SessionSettings({
           required
           maxLength={200}
           value={title}
-          onChange={(event) => setTitle(event.target.value)}
+          onChange={(event) => {
+            setTitle(event.target.value);
+            setTitleChanged(true);
+          }}
         />
       </label>
       {board.workspace.provider === 'github' && (
@@ -1933,7 +1938,10 @@ function SessionSettings({
       <InstructionFields
         api={api}
         value={instructions}
-        onChange={setInstructions}
+        onChange={(value) => {
+          setInstructions(value);
+          setInstructionsChanged(true);
+        }}
         onBusyChange={setImportingInstructions}
       />
       <button type="button" className="daddy-text-button" onClick={() => void load(true)}>

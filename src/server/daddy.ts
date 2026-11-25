@@ -51,10 +51,12 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         workerLimit: workerNumber.optional(),
         requestId: id.optional(),
         instructions: sessionInstructionsSchema.optional(),
+        autoPush: z.boolean().optional(),
+        publication: z.enum(['auto', 'human']).optional(),
       })
       .strict()
       .parse(request.body);
-    const { repository, ...options } = input;
+    const { repository, autoPush: _autoPush, publication: _publication, ...options } = input;
     const workspace = await daddy.workspaces.selection(
       daddy.workspaces.get(input.workspaceId),
       repository,

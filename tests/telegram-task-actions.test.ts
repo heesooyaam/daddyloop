@@ -268,3 +268,88 @@ it('rejects legacy submit and publish commands and confirmation records', async 
     await f.close();
   }
 });
+
+it('binds merge verification to the selected session and exact task version', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session A' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session B' }),
+    task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 88,
+        url: 'https://demo.local/pull/88',
+      },
+      repoPath: f.dir,
+      requirements: 'Verify the merged result',
+      groupId: first.id,
+      groupGeneration: first.generation,
+    });
+  task.state = 'needs_input';
+  f.store.saveTask(task);
+  const remote = task.pr!;
+  f.store.setSetting('demo-pr:' + task.ref.number, {
+    ...remote,
+    state: 'merged',
+    head: task.revision!.head,
+    checks: 'pending',
+    mergeCommit: 'c'.repeat(40),
+  });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  let id = 1100;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const openTask = async () => {
+    await bot.handle(message('/tasks'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+  };
+  try {
+    await bot.handle(click(`dad:merge:${task.id}:${task.generation}`));
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+
+    await openTask();
+    const prepare = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Verify merge');
+    expect(prepare).toBeTruthy();
+    await bot.handle(click(prepare.callback_data));
+    const staleConfirmation = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(click(staleConfirmation));
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await openTask();
+    const freshPrepare = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Verify merge');
+    await bot.handle(click(freshPrepare.callback_data));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
+    expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'verify_merge', role: 'reviewer' }]);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});

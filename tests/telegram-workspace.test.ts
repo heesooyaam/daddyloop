@@ -1443,6 +1443,12 @@ it('pages through every model and supports profiles without effort and engine de
       const last = button('Claude without effort');
       expect(last).toBeTruthy();
       await press(last.callback_data);
+      const noEffort = sent
+        .at(-1)
+        .buttons.flat()
+        .find((item: any) => item.callback_data?.endsWith(':default'));
+      expect(noEffort).toBeTruthy();
+      await press(noEffort.callback_data);
       const selected = f.daddy.group(group.id);
       expect((role === 'daddy' ? selected.daddy : selected.worker)?.model).toBe('claude-no-effort');
       expect((role === 'daddy' ? selected.daddy : selected.worker)?.effort).toBeUndefined();
@@ -1450,12 +1456,33 @@ it('pages through every model and supports profiles without effort and engine de
       locale = 'ru';
       await press(`dad:models:${group.id}:${role}`);
       await press(button('по умолчанию').callback_data);
-      const reset = f.daddy.group(group.id),
-        expected = f.engine.defaultAgents()[role];
-      expect(role === 'daddy' ? reset.daddy : reset.worker).toMatchObject(expected);
+      const saveDefault = sent
+        .at(-1)
+        .buttons.flat()
+        .find((item: any) => item.callback_data?.endsWith(':save'));
+      await press(saveDefault.callback_data);
+      const reset = f.daddy.group(group.id);
+      expect(role === 'daddy' ? reset.daddy : reset.worker).toEqual({ engine: 'claude' });
     }
 
     locale = 'en';
+    f.daddy.chat(group.id, 'Keep this turn queued while changing models');
+    await press(`dad:models:${group.id}:daddy`);
+    for (let page = 0; page < 3; page++) await press(button('→').callback_data);
+    await press(button('Claude without effort').callback_data);
+    const normal = button('Default effort').callback_data,
+      force = sent
+        .at(-1)
+        .buttons.flat()
+        .find((item: any) => item.callback_data?.endsWith(':force')).callback_data;
+    await press(normal);
+    expect(f.daddy.group(group.id).daddy).toEqual({ engine: 'claude' });
+    await press(force);
+    expect(f.daddy.group(group.id).daddy).toEqual({
+      engine: 'claude',
+      model: 'claude-no-effort',
+    });
+
     await press(`dad:models:${group.id}:worker`);
     await press(button('Codex 1').callback_data);
     await press(button('Default effort').callback_data);
@@ -1464,6 +1491,90 @@ it('pages through every model and supports profiles without effort and engine de
       model: 'codex-1',
     });
     expect(f.daddy.group(group.id).worker?.effort).toBeUndefined();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('pages through discovered repositories and server folders without losing the new-session target', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7 });
+  vi.spyOn(f.workspaces, 'suggestions').mockResolvedValue(
+    Array.from({ length: 35 }, (_, index) => ({
+      name: `Discovered ${index + 1}`,
+      path: `/fixture/discovered-${index + 1}`,
+    })),
+  );
+  vi.spyOn(f.workspaces, 'browse').mockImplementation(async (path?: string) => ({
+    path: path ?? '',
+    parent: null,
+    directories: Array.from({ length: 35 }, (_, index) => ({
+      name: `Folder ${index + 1}`,
+      path: `/fixture/folder-${index + 1}`,
+    })),
+    truncated: false,
+  }));
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => ({
+    ...workspace,
+    repoPath: input?.path ?? workspace.repoPath,
+  }));
+  let id = 1600;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const press = (data: string) =>
+    bot.handle({
+      update_id: id++,
+      callback_query: {
+        id: String(id),
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text === text || item.text.includes(text));
+  const exactButton = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text === text);
+  try {
+    await bot.handle(message('/new Keep this phone task'));
+    await press(button('Find on server').callback_data);
+    for (let page = 0; page < 3; page++) await press(exactButton('→').callback_data);
+    expect(button('Discovered 35')).toBeTruthy();
+
+    await bot.handle(message('/new Keep this phone task'));
+    await press(`dad:new:${f.workspace.id}`);
+    await press(button('Browse server folders').callback_data);
+    for (let page = 0; page < 3; page++) await press(exactButton('→').callback_data);
+    await press(button('Folder 35').callback_data);
+    expect(sent.at(-1).text).toContain('/fixture/folder-35');
+    await press(button('Start session').callback_data);
+    const created = f.daddy.sessions()[0]!;
+    expect(created.workspace?.repoPath).toBe('/fixture/folder-35');
+    expect(f.store.daddyJobs(created.id)[0]?.input).toBe('Keep this phone task');
   } finally {
     await bot.stop();
     await f.close();
@@ -1524,6 +1635,12 @@ it('pages through every model and supports profiles without effort and engine de
       await press(`dad:models:${group.id}:${role}`);
       for (let page = 0; page < 3; page++) await press(button('→').callback_data);
       await press(button('Claude without effort').callback_data);
+      await press(
+        sent
+          .at(-1)
+          .buttons.flat()
+          .find((item: any) => item.callback_data?.endsWith(':default')).callback_data,
+      );
       const selected = f.daddy.group(group.id);
       expect((role === 'daddy' ? selected.daddy : selected.worker)?.model).toBe('claude-no-effort');
       expect((role === 'daddy' ? selected.daddy : selected.worker)?.effort).toBeUndefined();
@@ -1531,9 +1648,15 @@ it('pages through every model and supports profiles without effort and engine de
       locale = 'ru';
       await press(`dad:models:${group.id}:${role}`);
       await press(button('по умолчанию').callback_data);
+      await press(
+        sent
+          .at(-1)
+          .buttons.flat()
+          .find((item: any) => item.callback_data?.endsWith(':save')).callback_data,
+      );
       expect(
         role === 'daddy' ? f.daddy.group(group.id).daddy : f.daddy.group(group.id).worker,
-      ).toMatchObject(f.engine.defaultAgents()[role]);
+      ).toEqual({ engine: 'claude' });
     }
 
     locale = 'en';

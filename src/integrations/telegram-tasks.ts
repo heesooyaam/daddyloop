@@ -179,10 +179,6 @@ export function taskCard(
       })),
     );
   }
-  if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
-    buttons.unshift([
-      { text: t('Verify merge'), callback_data: `dad:merge:${task.id}:${task.generation}` },
-    ]);
   return { ...text, buttons };
 }
 

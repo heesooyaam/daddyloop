@@ -89,7 +89,10 @@ export function AgentProfileFields({
               ...(selected
                 ? {
                     model: selected.id,
-                    effort: selectDefaultEffort ? selected.defaultEffort : undefined,
+                    effort:
+                      selectDefaultEffort && selected.defaultEffort
+                        ? selected.defaultEffort
+                        : undefined,
                   }
                 : {}),
             });

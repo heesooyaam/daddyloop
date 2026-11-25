@@ -78,6 +78,7 @@ type RepoChoice = {
   workspace: Workspace;
   groupId?: string;
   input?: RepositorySelection;
+  browsePage?: number;
   expiresAt: string;
   creationExpiresAt?: string;
 };
@@ -297,7 +298,7 @@ export class TelegramWorkspace {
         '\n\n' +
         this.t('In the private chat send /session {id}, then repeat the command for {title}.', {
           id: group.id.slice(0, 8),
-          title: group.title,
+          title: this.groupText(destination, group.title),
         }),
     );
   }
@@ -350,7 +351,7 @@ export class TelegramWorkspace {
     const key = this.key(room, group.id),
       existing = this.topic(room, group.id);
     if (existing) {
-      const title = clipTitle(group.title);
+      const title = clipTitle(redact(group.title));
       if (existing.title !== title) {
         if (this.api.delivery) {
           const result = await this.api.delivery.send(existing, new TelegramText().add(title), {
@@ -387,7 +388,7 @@ export class TelegramWorkspace {
         async () => {
           const value = await this.api.call<{ message_thread_id: number }>('createForumTopic', {
             chat_id: room.chatId,
-            name: clipTitle(group.title),
+            name: clipTitle(redact(group.title)),
           });
           if (!Number.isSafeInteger(value.message_thread_id) || value.message_thread_id <= 0)
             throw new Error('Telegram returned an invalid topic ID');
@@ -396,7 +397,7 @@ export class TelegramWorkspace {
             threadId: value.message_thread_id,
             groupId: group.id,
             ownerId: room.ownerId,
-            title: clipTitle(group.title),
+            title: clipTitle(redact(group.title)),
           };
           this.saveTopic(topic);
           return topic;
@@ -564,7 +565,7 @@ export class TelegramWorkspace {
       destination,
       daddyBoard(
         this.locale(),
-        this.daddy.board(group.id),
+        this.groupBoard(destination, this.daddy.board(group.id)),
         destination.chatId === this.pair()?.chatId && topic ? this.link(topic) : undefined,
       ),
     );
@@ -572,7 +573,7 @@ export class TelegramWorkspace {
   private async showStatus(groupId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
     await this.api.send(destination, {
-      ...this.progress.card(group),
+      ...this.progress.card(this.groupBoard(destination, this.daddy.board(group.id)).group),
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
     });
   }
@@ -793,7 +794,7 @@ export class TelegramWorkspace {
         {
           name: skill.name,
           role: role === 'daddy' ? 'daddy' : this.t('All workers'),
-          title: group.title,
+          title: this.groupText(destination, group.title),
         },
       ),
     );
@@ -1145,6 +1146,24 @@ export class TelegramWorkspace {
   private groupText(destination: Destination, value: string) {
     return destination.chatId === this.pair()?.chatId ? value : redact(value);
   }
+  private groupBoard(destination: Destination, board: ReturnType<Daddy['board']>) {
+    if (destination.chatId === this.pair()?.chatId) return board;
+    return {
+      ...board,
+      group: { ...board.group, title: redact(board.group.title) },
+      workspace: { ...board.workspace, name: redact(board.workspace.name) },
+    };
+  }
+  private workspacePickerCard(destination: Destination, workspaces: Workspace[], page = 0) {
+    return workspacePicker(
+      this.locale(),
+      workspaces.map((workspace) => ({
+        ...workspace,
+        name: this.groupText(destination, workspace.name),
+      })),
+      page,
+    );
+  }
   private groupTask(destination: Destination, task: Task): Task {
     if (destination.chatId === this.pair()?.chatId) return task;
     return {
@@ -1199,6 +1218,9 @@ export class TelegramWorkspace {
     return [
       ...(task.state === 'awaiting_plan_approval' ? (['approve-plan'] as const) : []),
       ...(task.state === 'awaiting_checks' ? (['waive-checks'] as const) : []),
+      ...(task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision
+        ? (['verify-merge'] as const)
+        : []),
     ];
   }
   private taskControl(data: Omit<TaskControl, 'ownerId' | 'expiresAt'>) {
@@ -1274,6 +1296,10 @@ export class TelegramWorkspace {
   private taskActionCompleted(task: Task, control: TaskControl) {
     if (control.action === 'approve-plan') return !!task.approvedAt;
     if (control.action === 'waive-checks') return !!task.checksWaivedAt;
+    if (control.action === 'verify-merge')
+      return (
+        task.state === 'reviewing' && task.generation === (control.expectedGeneration ?? 0) + 1
+      );
     return false;
   }
   private finishTaskControl(id: string, control: TaskControl, outcome: 'completed' | 'stale') {
@@ -1790,12 +1816,17 @@ export class TelegramWorkspace {
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
     const board = this.daddy.board(groupId);
     const id = `telegram:daddy-intro:${destination.chatId}:${groupId}`;
-    return this.api.send(destination, daddyBoard(this.locale(), board, link), undefined, {
-      key: id,
-      replace: true,
-      order: board.group.updatedAt,
-      notificationId: id,
-    });
+    return this.api.send(
+      destination,
+      daddyBoard(this.locale(), this.groupBoard(destination, board), link),
+      undefined,
+      {
+        key: id,
+        replace: true,
+        order: board.group.updatedAt,
+        notificationId: id,
+      },
+    );
   }
   private async home(destination: Destination, page = 0) {
     this.store.setSetting(this.creationKey(destination), null);
@@ -1829,7 +1860,7 @@ export class TelegramWorkspace {
           const topic = this.room() ? this.topic(this.room()!, group.id) : undefined;
           return [
             {
-              text: group.title,
+              text: this.groupText(destination, group.title),
               ...(topic ? { url: this.link(topic) } : { callback_data: `dad:open:${group.id}` }),
             },
           ];
@@ -1944,7 +1975,9 @@ export class TelegramWorkspace {
     if (topic && destination.chatId === topic.chatId && destination.threadId !== topic.threadId) {
       await this.api.send(destination, {
         ...new TelegramText().add(
-          this.t('New session created: {title}', { title: group.title }),
+          this.t('New session created: {title}', {
+            title: this.groupText(destination, group.title),
+          }),
           'bold',
         ),
         buttons: [[{ text: this.t('Open session topic'), url: this.link(topic) }]],
@@ -1984,7 +2017,7 @@ export class TelegramWorkspace {
     await this.api.send(choice.destination, {
       ...new TelegramText()
         .add('📁 ' + this.t('Repository for this request'), 'bold')
-        .add('\n\n' + choice.workspace.name)
+        .add('\n\n' + this.groupText(choice.destination, choice.workspace.name))
         .add(
           '\n\n' +
             this.t(
@@ -2123,18 +2156,31 @@ export class TelegramWorkspace {
     if (browse) {
       const source = choice.input?.path ?? choice.workspace.repoPath;
       const listing = await this.daddy.workspaces.browse(isGitAddress(source) ? undefined : source);
+      const pageSize = 10,
+        pages = Math.max(1, Math.ceil(listing.directories.length / pageSize)),
+        page = Math.max(0, Math.min(choice.browsePage ?? 0, pages - 1));
       if (listing.parent)
         buttons.push([
           button(
             '↑ ' + this.t('Parent folder'),
-            { ...choice, input: { path: listing.parent } },
+            { ...choice, input: { path: listing.parent }, browsePage: 0 },
             'browse',
           ),
         ]);
-      for (const entry of listing.directories.slice(0, 30))
+      for (const entry of listing.directories.slice(page * pageSize, (page + 1) * pageSize))
         buttons.push([
-          button(entry.name + ' →', { ...choice, input: { path: entry.path } }, 'browse'),
+          button(
+            entry.name + ' →',
+            { ...choice, input: { path: entry.path }, browsePage: 0 },
+            'browse',
+          ),
         ]);
+      const navigation = [
+        ...(page > 0 ? [button('←', { ...choice, browsePage: page - 1 }, 'browse')] : []),
+        ...(page + 1 < pages ? [button('→', { ...choice, browsePage: page + 1 }, 'browse')] : []),
+      ];
+      if (navigation.length) buttons.push(navigation);
+      if (pages > 1) title.add('\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }));
       title.add(
         '\n\n' + this.t('You can also send /repo followed by a repository URL or server path.'),
       );
@@ -2377,10 +2423,13 @@ export class TelegramWorkspace {
     );
     await this.workspaceCard(saved, destination);
   }
-  private async discover(destination: Destination) {
-    const suggestions = (await this.daddy.workspaces.suggestions()).slice(0, 20);
+  private async discover(destination: Destination, page = 0) {
+    const suggestions = await this.daddy.workspaces.suggestions(),
+      pageSize = 10,
+      pages = Math.max(1, Math.ceil(suggestions.length / pageSize));
+    page = Math.max(0, Math.min(page, pages - 1));
     const text = new TelegramText().add('📁 ' + this.t('Workspaces on this server'), 'bold');
-    const buttons = suggestions.map((item) => {
+    const buttons = suggestions.slice(page * pageSize, (page + 1) * pageSize).map((item) => {
       const id = 'dad-workspace:' + randomBytes(12).toString('base64url');
       this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
         id,
@@ -2391,8 +2440,9 @@ export class TelegramWorkspace {
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         }),
       );
-      return [{ text: item.name, callback_data: id }];
+      return [{ text: this.groupText(destination, item.name), callback_data: id }];
     });
+    text.add(pages > 1 ? '\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }) : '');
     text.add(
       '\n\n' +
         this.t(
@@ -2401,7 +2451,16 @@ export class TelegramWorkspace {
     );
     await this.api.send(destination, {
       ...text,
-      buttons: [...buttons, [{ text: this.t('Back'), callback_data: 'dad:workspaces' }]],
+      buttons: [
+        ...buttons,
+        [
+          ...(page > 0 ? [{ text: '←', callback_data: `dad:discover-page:${page - 1}` }] : []),
+          ...(page + 1 < pages
+            ? [{ text: '→', callback_data: `dad:discover-page:${page + 1}` }]
+            : []),
+        ],
+        [{ text: this.t('Back'), callback_data: 'dad:workspaces' }],
+      ].filter((row) => row.length),
     });
   }
   private async limits(destination: Destination, data = 'dad:limits') {
@@ -2531,7 +2590,10 @@ export class TelegramWorkspace {
       const id = sessionMerge[1]!;
       this.authorize(destination, id);
       const board = await this.daddy.settings(id, { autoMerge: sessionMerge[2] === 'on' });
-      await this.api.send(destination, sessionSettings(this.locale(), board));
+      await this.api.send(
+        destination,
+        sessionSettings(this.locale(), this.groupBoard(destination, board)),
+      );
       return true;
     }
     const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
@@ -2541,20 +2603,6 @@ export class TelegramWorkspace {
       this.authorize(destination, task.groupId);
       this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
       await this.showTask(task.groupId, task.id, destination);
-      return true;
-    }
-    const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);
-    if (merge) {
-      const item = this.store.getTask(merge[1]!);
-      if (!item.groupId || !item.revision)
-        throw new AppError('wrong_session', 'Task not found in this session', 404);
-      this.authorize(destination, item.groupId);
-      await this.daddy.engine.action(item.id, 'verify-merge', '', {
-        groupId: item.groupId,
-        head: item.revision.head,
-        generation: Number(merge[2]),
-      });
-      await this.showTask(item.groupId, item.id, destination);
       return true;
     }
     const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
@@ -2576,13 +2624,46 @@ export class TelegramWorkspace {
       });
       return true;
     }
-    const modelDefault = /^dad:model-default:([a-f0-9-]{36}):(worker|daddy)$/.exec(data);
+    const modelDefault =
+      /^dad:model-default:([a-f0-9-]{36}):(worker|daddy)(?::(save|force))?$/.exec(data);
     if (modelDefault) {
       const group = this.authorize(destination, modelDefault[1]),
         role = modelDefault[2] as 'worker' | 'daddy',
-        profile = this.daddy.engine.defaultAgents()[role];
+        profile = {
+          engine:
+            role === 'daddy'
+              ? group.daddy.engine
+              : (group.worker ?? this.daddy.engine.defaultAgents().worker).engine,
+        };
+      if (!modelDefault[3]) {
+        await this.api.send(destination, {
+          ...new TelegramText()
+            .add(this.t('Use engine defaults'), 'bold')
+            .add('\n\n' + this.t('Model') + ': ' + this.t('Engine configuration'))
+            .add('\n' + this.t('Reasoning effort') + ': ' + this.t('Default')),
+          buttons: [
+            [
+              {
+                text: this.t('Use engine defaults'),
+                callback_data: `dad:model-default:${group.id}:${role}:save`,
+              },
+              ...(role === 'daddy'
+                ? [
+                    {
+                      text: this.t('Apply now · {effort}', { effort: this.t('Default') }),
+                      callback_data: `dad:model-default:${group.id}:${role}:force`,
+                    },
+                  ]
+                : []),
+            ],
+            [{ text: this.t('Back'), callback_data: `dad:models:${group.id}:${role}` }],
+          ],
+        });
+        return true;
+      }
       await this.daddy.settings(group.id, {
         profiles: { [role]: profile },
+        forceDaddy: role === 'daddy' && modelDefault[3] === 'force',
         applyWorkers: role === 'worker',
       });
       await this.models(group.id, destination);
@@ -2619,17 +2700,6 @@ export class TelegramWorkspace {
         throw new Error(this.t('This model selection expired. Open Models again.'));
       const group = this.authorize(destination, action.groupId);
       if (modelAction[2] === undefined) {
-        if (!action.model.efforts.length) {
-          await this.daddy.settings(group.id, {
-            profiles: {
-              [action.role]: { engine: action.model.engine, model: action.model.id },
-            },
-            applyWorkers: action.role === 'worker',
-          });
-          this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
-          await this.models(group.id, destination);
-          return true;
-        }
         const text = new TelegramText()
           .add(action.model.name, 'bold')
           .add('\n\n' + this.t('Reasoning effort'));
@@ -2711,7 +2781,7 @@ export class TelegramWorkspace {
         path: action.path,
       });
       this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(data);
-      await this.api.send(destination, workspacePicker(this.locale(), [workspace]));
+      await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
       return true;
     }
     if (!data.startsWith('dad:')) return false;
@@ -2796,12 +2866,20 @@ export class TelegramWorkspace {
       if (action === 'status') await this.showStatus(id, destination);
       else {
         this.authorize(destination, id);
-        await this.api.send(destination, sessionSettings(this.locale(), this.daddy.board(id)));
+        await this.api.send(
+          destination,
+          sessionSettings(this.locale(), this.groupBoard(destination, this.daddy.board(id))),
+        );
       }
       return true;
     }
     if (data === 'dad:discover') {
       await this.discover(destination);
+      return true;
+    }
+    const discoverPage = /^dad:discover-page:(\d+)$/.exec(data);
+    if (discoverPage) {
+      await this.discover(destination, Number(discoverPage[1]));
       return true;
     }
     if (data === 'dad:workspaces') {
@@ -2814,7 +2892,7 @@ export class TelegramWorkspace {
       });
       await this.api.send(
         destination,
-        workspacePicker(this.locale(), this.daddy.workspaces.list()),
+        this.workspacePickerCard(destination, this.daddy.workspaces.list()),
       );
       return true;
     }
@@ -2825,7 +2903,11 @@ export class TelegramWorkspace {
         throw new Error(this.t('This selection expired. Start a new session again.'));
       await this.api.send(
         destination,
-        workspacePicker(this.locale(), this.daddy.workspaces.list(), Number(workspacePage[1])),
+        this.workspacePickerCard(
+          destination,
+          this.daddy.workspaces.list(),
+          Number(workspacePage[1]),
+        ),
       );
       return true;
     }
@@ -2837,7 +2919,7 @@ export class TelegramWorkspace {
       if (deleting[1] === 'delete') {
         await this.api.send(destination, {
           ...new TelegramText()
-            .add(this.t('Delete session') + ': ' + group.title, 'bold')
+            .add(this.t('Delete session') + ': ' + this.groupText(destination, group.title), 'bold')
             .add(
               '\n\n' +
                 this.t(
@@ -2857,7 +2939,11 @@ export class TelegramWorkspace {
       } else {
         if (!deleting[3]) throw new Error(this.t('Open the current deletion confirmation'));
         const result = await this.daddy.remove(group.id, Number(deleting[3]));
-        if ('group' in result) await this.api.send(destination, daddyBoard(this.locale(), result));
+        if ('group' in result)
+          await this.api.send(
+            destination,
+            daddyBoard(this.locale(), this.groupBoard(destination, result)),
+          );
       }
       return true;
     }
@@ -2923,7 +3009,10 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, id);
     if (action === 'pool') {
       if (limit) await this.daddy.settings(id, { workerLimit: Number(limit) });
-      await this.api.send(destination, poolCard(this.locale(), this.daddy.board(id)));
+      await this.api.send(
+        destination,
+        poolCard(this.locale(), this.groupBoard(destination, this.daddy.board(id))),
+      );
       return true;
     }
     if (action === 'pause') await this.daddy.pause(id);
@@ -3073,7 +3162,7 @@ export class TelegramWorkspace {
           if (text === '/cancel') {
             await this.api.send(
               destination,
-              workspacePicker(this.locale(), this.daddy.workspaces.list()),
+              this.workspacePickerCard(destination, this.daddy.workspaces.list()),
             );
             return true;
           }
@@ -3096,7 +3185,7 @@ export class TelegramWorkspace {
             provider: registration.provider,
           });
           this.store.setSetting(registrationKey, null);
-          await this.api.send(destination, workspacePicker(this.locale(), [workspace]));
+          await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
           return true;
         }
       }
@@ -3171,7 +3260,7 @@ export class TelegramWorkspace {
           });
           await this.api.send(
             destination,
-            workspacePicker(this.locale(), this.daddy.workspaces.list()),
+            this.workspacePickerCard(destination, this.daddy.workspaces.list()),
           );
           return true;
         }
@@ -3316,7 +3405,9 @@ export class TelegramWorkspace {
         const board = this.daddy.rename(groupId, rename[1]);
         await this.api.send(
           destination,
-          this.t('Session renamed: {title}', { title: board.group.title }),
+          this.t('Session renamed: {title}', {
+            title: this.groupText(destination, board.group.title),
+          }),
         );
         return true;
       }
@@ -3612,7 +3703,7 @@ export class TelegramWorkspace {
         });
         await this.api.send(
           destination,
-          workspacePicker(this.locale(), this.daddy.workspaces.list()),
+          this.workspacePickerCard(destination, this.daddy.workspaces.list()),
         );
         return true;
       }
@@ -3687,7 +3778,9 @@ export class TelegramWorkspace {
     const parent = this.room()
       ? await this.ensureTopic(this.daddy.group(group.parentGroupId))
       : undefined;
-    const destination = parent ? { chatId: parent.chatId, threadId: parent.threadId } : pair.chatId;
+    const destination = parent
+      ? { chatId: parent.chatId, threadId: parent.threadId }
+      : { chatId: pair.chatId };
     if (this.pair()?.userId !== pair.userId || (parent && this.room()?.chatId !== parent.chatId))
       return;
     this.store.db
@@ -3697,7 +3790,9 @@ export class TelegramWorkspace {
       destination,
       {
         ...new TelegramText().add(
-          this.t('New session created: {title}', { title: group.title }),
+          this.t('New session created: {title}', {
+            title: this.groupText(destination, group.title),
+          }),
           'bold',
         ),
         buttons: [
@@ -3815,13 +3910,13 @@ export class TelegramWorkspace {
           const topic = room ? this.topic(room, group.id) : undefined;
           const destination = topic
             ? { chatId: topic.chatId, threadId: topic.threadId }
-            : pair.chatId;
+            : { chatId: pair.chatId };
           if (group.deletedAt) {
             if (event.type !== 'daddy.deleted') return;
             if (this.store.setting('telegram.currentDaddy') === group.id)
               this.store.setSetting('telegram.currentDaddy', null);
             const text = new TelegramText().add(
-              this.t('Session deleted') + ': ' + group.title,
+              this.t('Session deleted') + ': ' + this.groupText(destination, group.title),
               'bold',
             );
             if (group.deletion?.archivePath)

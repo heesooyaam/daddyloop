@@ -913,6 +913,58 @@ it('redacts preset and skill names from group library and component cards', asyn
   }
 });
 
+it('redacts session and workspace names from group cards while keeping private labels', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  const secret = rememberSecret('PRIVATE_SESSION_WORKSPACE_MARKER_12345');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Work' });
+  const workspace = { ...f.workspace, name: `Repository ${secret}` };
+  f.store.saveWorkspace(workspace);
+  const group = f.daddy.create({
+    workspaceId: workspace.id,
+    title: `Session ${secret}`,
+  });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const topic = await bot.ensureTopic(group);
+  let id = 570;
+  const message = (text: string, chatId: number, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  const latest = () => JSON.stringify(telegram.sent.at(-1)!.card);
+  try {
+    for (const command of [
+      '/sessions',
+      '/new',
+      `/session ${group.id.slice(0, 8)}`,
+      '/status',
+      '/pool',
+      '/instructions',
+    ]) {
+      await bot.handle(message(command, -10042));
+      expect(latest()).not.toContain(secret);
+    }
+    await bot.handle(message('/status', -10042, topic!.threadId));
+    expect(latest()).not.toContain(secret);
+
+    await bot.handle(message('/sessions', 7));
+    expect(latest()).toContain(secret);
+    await bot.handle(message('/new', 7));
+    expect(latest()).toContain(secret);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('pages through every task and preset without requiring a known name', async () => {
   const f = daddyFixture(),
     telegram = apiFixture(),
