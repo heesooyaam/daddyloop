@@ -740,6 +740,8 @@ export const daddyRu: Record<string, string> = {
     'Сессия изменилась. Запусти импорт файла заново.',
   'The selected session changed. Start the file import again.':
     'Выбранная сессия изменилась. Запусти импорт файла заново.',
+  'Session instructions changed. Start the import again.':
+    'Инструкции сессии изменились. Запусти импорт заново.',
   'Choose a JSON instruction set up to 1 MiB.': 'Выбери набор инструкций JSON размером до 1 МиБ.',
   'Choose a Markdown or text skill file up to 64 KiB.':
     'Выбери файл навыка Markdown или text размером до 64 КиБ.',
@@ -764,6 +766,10 @@ export const daddyRu: Record<string, string> = {
   'Preset deleted.': 'Пресет удалён.',
   'This preset selection changed. Open it again.':
     'Выбор частей пресета изменился. Открой его заново.',
+  'The selected session changed. Open the preset library again.':
+    'Выбранная сессия изменилась. Открой библиотеку пресетов заново.',
+  'Confirm the exact saved commit before submitting fixes':
+    'Перед отправкой исправлений подтверди точный сохранённый коммит',
   'Preset updated from this session.': 'Пресет обновлён из этой сессии.',
   'Preset saved from this session.': 'Пресет сохранён из этой сессии.',
   version: 'версия',

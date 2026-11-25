@@ -288,6 +288,12 @@ export class Daddy {
         400,
       );
     const task = this.task(groupId, taskId);
+    if (action === 'submit' && task.ref.kind !== 'ticket' && !expected.pendingHead)
+      throw new AppError(
+        'pending_head_required',
+        'Confirm the exact saved commit before submitting fixes',
+        400,
+      );
     const version = { ...expected, groupId };
     if (action === 'publish') return this.engine.publish(task.id, version);
     if (action === 'submit')
@@ -635,6 +641,40 @@ export class Daddy {
       if (changeDaddy) this.worker.updateAuthorGroupGeneration(id, group.generation);
       if (restartCoordinator) this.running.get(id)?.controller.abort();
       for (const taskId of restartReviews) this.engine.onCancel(taskId);
+    });
+    return this.board(id);
+  }
+  async updateInstructions(
+    id: string,
+    expected: { generation: number; instructionsHash: string },
+    update: (current: SessionInstructions | undefined) => SessionInstructions,
+    validate?: () => void,
+  ) {
+    await this.withSessionTasks(id, (group) => {
+      validate?.();
+      const instructionsHash = createHash('sha256')
+        .update(JSON.stringify(group.instructions ?? null))
+        .digest('hex');
+      if (
+        group.generation !== expected.generation ||
+        instructionsHash !== expected.instructionsHash
+      )
+        throw new AppError(
+          'stale_instructions',
+          'Session instructions changed. Start the import again.',
+          409,
+        );
+      group.instructions = sessionInstructionsSchema.parse(update(group.instructions));
+      this.store.transaction(() => {
+        this.store.saveGroup(group);
+        this.store.event(id, 'daddy.settings', {
+          workerLimit: group.workerLimit,
+          requestedWorkerLimit: group.requestedWorkerLimit,
+          autoMerge: sessionAutoMerge(this.store, id),
+          restartReviews: [],
+          restartCoordinator: false,
+        });
+      });
     });
     return this.board(id);
   }

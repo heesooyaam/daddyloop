@@ -5,6 +5,7 @@ import { buildApp } from '../src/server/app.js';
 import { registerDaddy } from '../src/server/daddy.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { healthy, catalogue } from './planning-fixture.js';
+import { assertTaskVersion } from '../src/core/types.js';
 
 it('lists session counts and running roles without reading job or conversation history', async () => {
   const f = daddyFixture(),
@@ -140,6 +141,64 @@ it('routes web task actions through the shared revision-bound service with the w
       { head: task.revision!.head, generation: task.generation },
       'Offline checks passed on the saved revision',
     );
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
+it('requires the exact pending head before a web action submits saved PR fixes', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, autoPush: false });
+    const task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 91,
+        url: 'https://demo.local/pull/91',
+      },
+      repoPath: f.dir,
+      requirements: 'Submit this saved fix explicitly',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+    const saved = 'f'.repeat(40);
+    task.state = 'awaiting_push';
+    task.pendingAuthorHead = saved;
+    f.store.saveTask(task);
+    let pushes = 0;
+    vi.spyOn(f.tickets, 'pushFixes').mockImplementation(async (id, expected) =>
+      f.engine.lock(id, async () => {
+        const current = f.store.getTask(id);
+        assertTaskVersion(current, expected);
+        pushes++;
+        current.revision = { ...current.revision!, head: saved };
+        f.store.saveTask(current);
+        return current;
+      }),
+    );
+    const action = (expectedPendingHead?: string) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/daddy/sessions/${group.id}/task-action`,
+        payload: {
+          taskId: task.id,
+          action: 'submit',
+          expectedHead: task.revision!.head,
+          expectedGeneration: task.generation,
+          ...(expectedPendingHead !== undefined ? { expectedPendingHead } : {}),
+        },
+      });
+    expect((await action()).statusCode).toBe(400);
+    expect((await action('')).statusCode).toBe(400);
+    expect((await action('e'.repeat(40))).statusCode).toBe(409);
+    expect(pushes).toBe(0);
+    expect((await action(saved)).statusCode).toBe(200);
+    expect((await action(saved)).statusCode).toBe(409);
+    expect(pushes).toBe(1);
   } finally {
     await app.close();
     await f.close();

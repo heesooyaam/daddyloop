@@ -24,6 +24,8 @@ Telegram action buttons contain only a short-lived reference to service state. T
 
 Task and preset lists have in-chat page controls. Task cards render every reported CI check; safe private links stay attached to their corresponding check. These lists do not require a known item name, website or laptop to reach the final entry.
 
+The shared preset library can be browsed without selecting a session. Applying a preset remains bound to the session that produced the card; after a session switch the bot asks the user to reopen the library.
+
 ## Configuration and service controls
 
 | Capability                                       | Web                        | Telegram             | Remaining gap                                                   |

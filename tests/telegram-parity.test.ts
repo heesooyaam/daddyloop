@@ -210,6 +210,89 @@ it('cancels pending instruction and skill files when the selected session change
   }
 });
 
+it('rechecks instruction snapshots after waiting for the session lock', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    instructions: { daddy: { prompt: 'Initial' }, worker: {} },
+  });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  let id = 120;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const file = (name: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+      document: {
+        file_id: `file-${id}`,
+        file_unique_id: `unique-${id}`,
+        file_name: name,
+        file_size: 100,
+      },
+    },
+  });
+  const block = async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const locked = f.engine.lock(`create-task:${group.id}`, async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await ready;
+    return { release, locked };
+  };
+  try {
+    telegram.document(JSON.stringify({ daddy: { prompt: 'Imported' }, worker: {} }));
+    await bot.handle(message('/instructions import'));
+    const first = await block();
+    const web = f.daddy.settings(group.id, {
+      instructions: { daddy: { prompt: 'Web change' }, worker: {} },
+    });
+    const upload = bot.handle(file('instructions.json'));
+    first.release();
+    await Promise.all([first.locked, web, upload]);
+    expect(f.daddy.group(group.id).instructions).toEqual({
+      daddy: { prompt: 'Web change' },
+      worker: {},
+    });
+
+    telegram.document('# Skill\n\nDo not restore an old prompt.');
+    await bot.handle(message('/skill worker file'));
+    const second = await block();
+    const nextWeb = f.daddy.settings(group.id, {
+      instructions: { daddy: { prompt: 'Later web change' }, worker: {} },
+    });
+    const skill = bot.handle(file('skill.md'));
+    second.release();
+    await Promise.all([second.locked, nextWeb, skill]);
+    expect(f.daddy.group(group.id).instructions).toEqual({
+      daddy: { prompt: 'Later web change' },
+      worker: {},
+    });
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('manages preset snapshots and per-session components from Telegram', async () => {
   const f = daddyFixture(),
     telegram = apiFixture(),
@@ -515,6 +598,72 @@ it('pages through every task and preset without requiring a known name', async (
     await bot.handle(click(button('→').callback_data));
     await bot.handle(click(button('Paged preset 21').callback_data));
     expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Paged preset 21');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('keeps preset pages bound to their session while allowing global browsing', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Preset A' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Preset B' });
+  const library = new InstructionPresets(f.store);
+  for (let index = 1; index <= 21; index++)
+    library.save({
+      name: `Global preset ${index}`,
+      instructions: { daddy: { prompt: `Global ${index}` }, worker: {} },
+    });
+  let id = 700;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  const buttons = () => telegram.sent.at(-1)!.card.buttons.flat();
+  try {
+    f.store.setSetting('telegram.currentDaddy', null);
+    await bot.handle(message('/presets'));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Global preset 1');
+    await bot.handle(click(buttons().find((button: any) => button.text === '→').callback_data));
+    await bot.handle(click(buttons().find((button: any) => button.text === '→').callback_data));
+    expect(telegram.sent.at(-1)!.card.text).toContain('Global preset 21');
+
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await bot.handle(message('/presets'));
+    const oldSelect = buttons().find(
+      (button: any) => button.text === 'Global preset 1',
+    ).callback_data;
+    const oldNext = buttons().find((button: any) => button.text === '→').callback_data;
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await bot.handle(click(oldSelect));
+    expect(telegram.sent.at(-1)!.card.text).toContain('selected session changed');
+    await bot.handle(click(oldNext));
+    expect(telegram.sent.at(-1)!.card.text).toContain('selected session changed');
+    expect(f.daddy.group(first.id).instructions?.presets).toBeUndefined();
+    expect(f.daddy.group(second.id).instructions?.presets).toBeUndefined();
+
+    await bot.handle(message('/presets'));
+    await bot.handle(
+      click(buttons().find((button: any) => button.text === 'Global preset 1').callback_data),
+    );
+    expect(f.daddy.group(second.id).instructions?.presets?.[0].preset.name).toBe('Global preset 1');
   } finally {
     await bot.stop();
     await f.close();

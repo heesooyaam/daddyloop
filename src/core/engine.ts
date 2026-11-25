@@ -1215,6 +1215,12 @@ export class Engine {
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (expected && !expected.pendingHead)
+        throw new AppError(
+          'pending_head_required',
+          'Confirm the exact saved commit before submitting fixes',
+          400,
+        );
       assertTaskVersion(task, expected);
       const head = task.pendingAuthorHead;
       if (

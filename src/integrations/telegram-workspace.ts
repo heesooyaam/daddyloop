@@ -657,9 +657,13 @@ export class TelegramWorkspace {
       } catch {
         throw new Error(this.t('Choose a valid UTF-8 JSON instruction set.'));
       }
-      await this.daddy.settings(current.id, {
-        instructions: sessionInstructionsSchema.parse(value),
-      });
+      const imported = sessionInstructionsSchema.parse(value);
+      await this.daddy.updateInstructions(
+        current.id,
+        { generation: pending.generation, instructionsHash: pending.instructionsHash },
+        () => imported,
+        () => this.requirePendingDocument(destination, pending),
+      );
     } else {
       if (bytes.byteLength > 65536)
         throw new Error(this.t('Choose a Markdown or text skill file up to 64 KiB.'));
@@ -670,7 +674,7 @@ export class TelegramWorkspace {
         throw new Error(this.t('Choose a UTF-8 Markdown or text file.'));
       }
       const skill = await new InstructionSources().import({ kind: 'file', name: filename, text });
-      await this.addSkill(current, pending.role!, skill);
+      await this.addSkill(current, pending.role!, skill, pending, destination);
     }
     this.store.setSetting(this.documentKey(destination), null);
     await this.api.send(
@@ -701,13 +705,28 @@ export class TelegramWorkspace {
         .slice(0, 1024),
     );
   }
-  private async addSkill(group: ReviewGroup, role: 'daddy' | 'worker', skill: SkillSnapshot) {
-    const current = this.daddy.group(group.id);
-    const instructions = structuredClone(current.instructions ?? { daddy: {}, worker: {} });
-    const skills = instructions[role].skills ?? [];
-    if (!skills.some((item) => item.checksum === skill.checksum))
-      instructions[role].skills = [...skills, skill];
-    await this.daddy.settings(current.id, { instructions });
+  private async addSkill(
+    group: ReviewGroup,
+    role: 'daddy' | 'worker',
+    skill: SkillSnapshot,
+    pending?: PendingDocument,
+    destination?: Destination,
+  ) {
+    await this.daddy.updateInstructions(
+      group.id,
+      {
+        generation: pending?.generation ?? group.generation,
+        instructionsHash: pending?.instructionsHash ?? this.instructionsHash(group),
+      },
+      (current) => {
+        const instructions = structuredClone(current ?? { daddy: {}, worker: {} });
+        const skills = instructions[role].skills ?? [];
+        if (!skills.some((item) => item.checksum === skill.checksum))
+          instructions[role].skills = [...skills, skill];
+        return instructions;
+      },
+      pending && destination ? () => this.requirePendingDocument(destination, pending) : undefined,
+    );
   }
   private presetControl(data: Omit<PresetControl, 'ownerId' | 'expiresAt'>) {
     const id = randomBytes(12).toString('base64url');
@@ -736,8 +755,21 @@ export class TelegramWorkspace {
       throw new Error(this.t('This preset action expired. Open the preset again.'));
     return { id, control, consumed: !!row.consumed };
   }
+  private presetSession(destination: Destination, groupId: string) {
+    const group = this.authorize(destination, groupId);
+    if (
+      destination.chatId === this.pair()?.chatId &&
+      this.store.setting<string>('telegram.currentDaddy') !== groupId
+    )
+      throw new AppError(
+        'stale_preset_session',
+        'The selected session changed. Open the preset library again.',
+        409,
+      );
+    return group;
+  }
   private async presetPartsCard(group: ReviewGroup, presetId: string, destination: Destination) {
-    this.authorize(destination, group.id);
+    this.presetSession(destination, group.id);
     const applied = group.instructions?.presets?.find((item) => item.preset.id === presetId);
     if (!applied) throw new Error(this.t('Enable this preset in the session first.'));
     const parts = presetParts(applied.preset);
@@ -770,8 +802,8 @@ export class TelegramWorkspace {
       ],
     });
   }
-  private async presetsCard(group: ReviewGroup, destination: Destination, page = 0) {
-    this.authorize(destination, group.id);
+  private async presetsCard(group: ReviewGroup | undefined, destination: Destination, page = 0) {
+    if (group) this.presetSession(destination, group.id);
     const presets = new InstructionPresets(this.store).list(),
       pageSize = 10,
       pages = Math.max(1, Math.ceil(presets.length / pageSize));
@@ -781,26 +813,29 @@ export class TelegramWorkspace {
     if (!presets.length) text.add('\n\n' + this.t('No presets yet.'));
     else if (pages > 1)
       text.add('\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }));
-    for (const preset of visible)
-      text.add('\n\n• ' + preset.name + (preset.description ? '\n' + preset.description : ''));
-    const navigation: TelegramButton[] = [];
-    if (page > 0) navigation.push({ text: '←', callback_data: `dad:presets:${page - 1}` });
-    if (page + 1 < pages) navigation.push({ text: '→', callback_data: `dad:presets:${page + 1}` });
+    for (const preset of visible) text.add('\n\n• ' + preset.name);
+    const navigation: TelegramButton[] = [],
+      route = group?.id ?? 'library';
+    if (page > 0) navigation.push({ text: '←', callback_data: `dad:presets:${route}:${page - 1}` });
+    if (page + 1 < pages)
+      navigation.push({ text: '→', callback_data: `dad:presets:${route}:${page + 1}` });
     await this.api.send(destination, {
       ...text,
       buttons: [
-        ...visible.map((preset) => [
-          {
-            text: preset.name.slice(0, 60),
-            callback_data: this.presetControl({
-              kind: 'select',
-              destination,
-              groupId: group.id,
-              presetId: preset.id,
-              revision: preset.revision,
-            }),
-          },
-        ]),
+        ...(group
+          ? visible.map((preset) => [
+              {
+                text: preset.name.slice(0, 60),
+                callback_data: this.presetControl({
+                  kind: 'select',
+                  destination,
+                  groupId: group.id,
+                  presetId: preset.id,
+                  revision: preset.revision,
+                }),
+              },
+            ])
+          : []),
         ...(navigation.length ? [navigation] : []),
       ],
     });
@@ -812,7 +847,7 @@ export class TelegramWorkspace {
     if (entry.consumed) {
       if ((control.kind === 'part' || control.kind === 'select') && control.groupId)
         await this.presetPartsCard(
-          this.authorize(destination, control.groupId),
+          this.presetSession(destination, control.groupId),
           control.presetId,
           destination,
         );
@@ -829,7 +864,7 @@ export class TelegramWorkspace {
       await this.api.send(destination, this.t('Preset deleted.'));
       return true;
     }
-    const group = this.authorize(destination, control.groupId!);
+    const group = this.presetSession(destination, control.groupId!);
     if (control.kind === 'select') {
       const preset = library.get(control.presetId);
       if (preset.revision !== control.revision)
@@ -2102,12 +2137,12 @@ export class TelegramWorkspace {
   }
   async callback(data: string, destination: Destination): Promise<boolean> {
     if (await this.presetControlCallback(data, destination)) return true;
-    const presetPage = /^dad:presets:([0-9]+)$/.exec(data);
+    const presetPage = /^dad:presets:(library|[a-f0-9-]{36}):([0-9]+)$/.exec(data);
     if (presetPage) {
       await this.presetsCard(
-        this.sessionForControl(destination),
+        presetPage[1] === 'library' ? undefined : this.presetSession(destination, presetPage[1]),
         destination,
-        Number(presetPage[1]),
+        Number(presetPage[2]),
       );
       return true;
     }
@@ -2962,8 +2997,10 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/presets') {
-        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
-        await this.presetsCard(this.authorize(destination, groupId), destination);
+        await this.presetsCard(
+          groupId ? this.authorize(destination, groupId) : undefined,
+          destination,
+        );
         return true;
       }
       const presetMetadata = text.match(
