@@ -907,11 +907,23 @@ it('replays every saved agent message into the topic in order and only once', as
   f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
   const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Saved history' });
   const setup = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
-  await setup.ensureTopic(group);
+  const topic = await setup.ensureTopic(group);
   await setup.stop();
-  f.store.daddyMessage(group.id, 'agent', 'First progress event.', 'run-one', undefined, {
-    phase: 'progress',
-  });
+  const firstProgress = f.store.daddyMessage(
+    group.id,
+    'agent',
+    'First progress event.',
+    'run-one',
+    undefined,
+    { phase: 'progress' },
+  );
+  f.store.db
+    .prepare('INSERT INTO notifications VALUES(?,?,?)')
+    .run(
+      `telegram:dialog:-10042:${topic!.threadId}:${firstProgress.id}:progress`,
+      'superseded',
+      firstProgress.at,
+    );
   f.store.daddyMessage(group.id, 'agent', 'Second progress event.', 'run-one', undefined, {
     phase: 'progress',
   });

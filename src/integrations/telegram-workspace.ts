@@ -2184,12 +2184,12 @@ export class TelegramWorkspace {
         const id = task
           ? `telegram:question:${pair.userId}:${task.id}:${request}`
           : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;
+        const notificationStatus = String(
+          this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
+        );
         if (
-          ['sent', 'superseded'].includes(
-            String(
-              this.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(id)?.status,
-            ),
-          )
+          notificationStatus === 'sent' ||
+          (notificationStatus === 'superseded' && message?.sender !== 'agent')
         )
           return;
         this.store.db
@@ -2299,14 +2299,21 @@ export class TelegramWorkspace {
       (message) =>
         ['user', 'agent'].includes(message.sender) &&
         !(message.phase === 'progress' && deliveredFinalRuns.has(message.runId)),
-    ))
-      this.onEvent({
+    )) {
+      const event = {
         id: retry ? -1 : 0,
         taskId: group.id,
         type: 'daddy.message',
         data: { messageId: message.id, retryAttempt },
         at: now(),
-      });
+      } satisfies Event;
+      if (destination && this.eventDeferred(event))
+        this.api.delivery?.retainDeferred(
+          destination,
+          `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`,
+        );
+      this.onEvent(event);
+    }
   }
   replay() {
     for (const group of this.daddy.sessions()) this.replayGroup(group);

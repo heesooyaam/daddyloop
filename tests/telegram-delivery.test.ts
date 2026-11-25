@@ -280,6 +280,42 @@ it('redirects an in-flight legacy attempt to the migrated delivery', async () =>
   }
 });
 
+it('reuses a sent legacy progress receipt when the same message becomes final', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const message = f.store.daddyMessage('group', 'agent', 'Same reply', 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const progressNotification = `telegram:dialog:7:0:${message.id}:progress`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(progressNotification, 'pending', message.at);
+    await f.queue.send({ chatId: 7 }, text(message.text), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: false,
+      notificationId: progressNotification,
+    });
+    f.store.finishDaddyReply('group', message.text, 'legacy-run');
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send({ chatId: 7 }, text(message.text), {
+      groupId: 'group',
+      key: `message:${message.id}`,
+      replace: true,
+      final: true,
+      notificationId: `telegram:dialog:7:0:${message.id}:final`,
+    });
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual(['sendMessage']);
+    expect(restored.replySession(7, 1, 7)).toBe('group');
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['answered elsewhere', true, false],
   ['notifications enabled', false, true],
@@ -362,6 +398,7 @@ it('keeps a deferred reply queued when its replay is temporarily skipped', async
     };
     await f.queue.send({ chatId: 7 }, text(message.text), options);
     restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    restored.retainDeferred({ chatId: 7 }, options.notificationId);
     await restored.finishRecovery();
     expect(f.call).not.toHaveBeenCalled();
     await restored.send({ chatId: 7 }, text(message.text), options);

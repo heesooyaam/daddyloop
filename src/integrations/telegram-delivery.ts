@@ -66,6 +66,7 @@ export class TelegramDelivery {
   private deferredKeys = new Set<string>();
   private historyDeferredKeys = new Set<string>();
   private deferredValues = new Map<string, Delivery>();
+  private retainedDeferredKeys = new Set<string>();
   private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
   private acknowledgedCurrent = new Set<string>();
@@ -153,11 +154,29 @@ export class TelegramDelivery {
   async finishRecovery() {
     if (!this.recovering) return;
     this.recovering = false;
+    for (const key of [...this.historyDeferredKeys]) {
+      if (this.retainedDeferredKeys.has(key)) continue;
+      const value = this.deferredValues.get(key);
+      this.historyDeferredKeys.delete(key);
+      this.deferredKeys.delete(key);
+      this.deferredValues.delete(key);
+      if (value) {
+        value.status = 'cancelled';
+        this.save(key, value);
+        this.releaseUnblocked(value.destination);
+      }
+    }
+    this.retainedDeferredKeys.clear();
     for (const value of [...this.deferredValues.values()]) this.releaseUnblocked(value.destination);
     await this.flush();
   }
   needsRecovery() {
     return this.recovering;
+  }
+  retainDeferred(destination: TelegramDestination, notificationId: string) {
+    const identity = digest([destination, notificationIdentity(notificationId)]);
+    const row = this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
+    if (row && this.historyDeferredKeys.has(row.key)) this.retainedDeferredKeys.add(row.key);
   }
   private route(destination: TelegramDestination) {
     return digest(destination);
@@ -369,12 +388,16 @@ export class TelegramDelivery {
   private acknowledgedPartsMatchSibling(value: Delivery) {
     const message = this.storedMessage(value);
     if (!message?.runId || !value.messages.length) return false;
+    const routeRun = `telegram:dialog:${value.destination.chatId}:${value.destination.threadId ?? 0}:${message.runId}`;
+    const delivered = this.deliveredByRouteRun.get(routeRun);
+    if (!delivered) return false;
     for (const row of this.store.db
       .prepare(
         "SELECT data FROM messages WHERE json_extract(data,'$.runId')=? AND id<>? AND json_extract(data,'$.sender')='agent'",
       )
       .all(message.runId, message.id)) {
-      const sibling = JSON.parse(String(row.data)) as { text: string };
+      const sibling = JSON.parse(String(row.data)) as { id: string; text: string };
+      if (!delivered.has(sibling.id)) continue;
       const contents = [
         new TelegramText().markdown(sibling.text),
         new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(sibling.text),
@@ -423,6 +446,26 @@ export class TelegramDelivery {
       value: receipt,
     };
   }
+  private sentDelivery(destination: TelegramDestination, notificationId: string) {
+    const identity = notificationIdentity(notificationId);
+    return this.store.db
+      .prepare(
+        `SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+         AND json_extract(value,'$.bot')=? AND json_extract(value,'$.status')='sent'
+         AND json_extract(value,'$.destination.chatId')=?
+         AND COALESCE(json_extract(value,'$.destination.threadId'),0)=?`,
+      )
+      .all(this.bot, destination.chatId, destination.threadId ?? 0)
+      .map((row) => ({
+        key: String(row.key),
+        value: JSON.parse(String(row.value)) as Delivery,
+      }))
+      .find(
+        ({ value }) =>
+          !!value.options.notificationId &&
+          notificationIdentity(value.options.notificationId) === identity,
+      );
+  }
   private migrateByNotification(
     key: string,
     destination: TelegramDestination,
@@ -432,7 +475,9 @@ export class TelegramDelivery {
   ) {
     const legacyKey = digest([destination, notificationIdentity(notificationId)]);
     const row =
-      this.pendingByNotification.get(legacyKey) ?? this.legacyByNotification.get(legacyKey);
+      this.pendingByNotification.get(legacyKey) ??
+      this.legacyByNotification.get(legacyKey) ??
+      this.sentDelivery(destination, notificationId);
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
@@ -550,7 +595,8 @@ export class TelegramDelivery {
     };
     let key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
     key = this.resolveKey(key);
-    let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
+    let value =
+      this.pending.get(key) ?? this.deferredValues.get(key) ?? this.store.setting<Delivery>(key);
     if (!value && options.notificationId?.startsWith('telegram:dialog:'))
       value = this.migrateByNotification(
         key,
