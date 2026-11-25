@@ -108,6 +108,53 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it('recovers the recorded in-progress merge when an earlier service repinned a timed-out repair', async () => {
+    const f = await setup();
+    try {
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      f.setRemote({ mergeConflict: true, mergeable: false });
+      await f.poll();
+      const job = f.store.claim()!;
+      const task = f.store.getTask(job.taskId);
+      const original = task.revision!;
+      f.store.saveJob({ ...job, status: 'failed', errorCode: 'run_timeout', error: 'timeout' });
+      Object.assign(task, {
+        state: 'needs_input',
+        resumeState: 'fixing',
+        reason: 'timeout',
+        authorWorktree: f.dir,
+      });
+      f.store.saveTask(task);
+      const base = '9'.repeat(40);
+      f.setRemote({ base, start: base });
+      await f.engine.review(task.id, true);
+      expect(f.store.getTask(task.id).revision).toEqual(original);
+      task.generation++;
+      task.revision = { ...original, base, start: base };
+      task.reason = 'different merge';
+      f.store.saveTask(task);
+      const failure = f.store.enqueue(task, 'author', 'fix', 'Resolve the conflict');
+      f.store.saveJob({
+        ...failure,
+        status: 'failed',
+        errorCode: 'workspace_diverged',
+        error: task.reason,
+      });
+      const compare = vi.fn().mockResolvedValue(false);
+      Object.assign(f.provider, { targetAdvanced: compare });
+      await f.engine.restorePendingConflict(task.id, async () => original.base);
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      compare.mockResolvedValue(true);
+      await f.engine.restorePendingConflict(task.id, async () => '8'.repeat(40));
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      await f.engine.restorePendingConflict(task.id, async () => original.base);
+      expect(f.store.getTask(task.id)).toMatchObject({ state: 'fixing', revision: original });
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix', timeoutRetry: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('honors session inheritance, both overrides, and a disabled default', async () => {
     const f = await setup();
     try {

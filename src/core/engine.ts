@@ -22,6 +22,7 @@ import {
   isTicket,
   type AgentProfiles,
   type AgentProfile,
+  type Revision,
   type ReviewGroup,
   type ReviewHandle,
   type ReviewSnapshot,
@@ -2489,6 +2490,74 @@ export class Engine {
       this.store.event(id, source, { reason });
     });
   }
+  async restorePendingConflict(
+    id: string,
+    pendingBase: (task: Task) => Promise<string | undefined>,
+  ) {
+    return this.lock(id, async () => {
+      const task = this.store.getTask(id);
+      if (
+        task.state !== 'needs_input' ||
+        task.resumeState !== 'fixing' ||
+        !task.fixingMergeConflict ||
+        task.inputRequest ||
+        task.pendingFix ||
+        task.review ||
+        !task.revision ||
+        !autoMergeEnabled(this.store, task) ||
+        this.store.busy(id)
+      )
+        return;
+      const last = this.store.jobs(id).at(-1);
+      if (
+        last?.kind !== 'fix' ||
+        last.status !== 'failed' ||
+        last.generation !== task.generation ||
+        last.error !== task.reason ||
+        last.errorCode !== 'workspace_diverged'
+      )
+        return;
+      const base = await pendingBase(task);
+      if (!base || base === task.revision.base) return;
+      // Older versions could start a fresh review after a timeout and repin the task
+      // while the original merge was still open. Only restore a recorded repair revision.
+      const row = this.store.db
+        .prepare(
+          `
+        SELECT json_extract(r.data,'$.revision') revision FROM events r
+        JOIN jobs j ON j.task_id=r.task_id AND json_extract(j.data,'$.generation')=json_extract(r.data,'$.generation')
+        WHERE r.task_id=? AND r.type='revision.changed' AND json_extract(r.data,'$.revision.head')=?
+          AND json_extract(r.data,'$.revision.base')=? AND j.status='failed'
+          AND json_extract(j.data,'$.kind')='fix' AND json_extract(j.data,'$.errorCode')='run_timeout'
+          AND EXISTS (SELECT 1 FROM events e WHERE e.task_id=r.task_id AND e.type='task.state'
+            AND json_extract(e.data,'$.generation')=json_extract(r.data,'$.generation')
+            AND json_extract(e.data,'$.reason')='Worker assigned to resolve the GitHub merge conflict')
+        ORDER BY r.id DESC LIMIT 1`,
+        )
+        .get(id, task.revision.head, base);
+      if (typeof row?.revision !== 'string') return;
+      const pinned = JSON.parse(row.revision) as Revision;
+      const provider = this.provider(prRef(task)),
+        pr = await provider.getPR(prRef(task));
+      if (
+        !sameOpenTarget(task.pr, pr) ||
+        pr.draft !== false ||
+        pr.head !== pinned.head ||
+        !(await provider.targetAdvanced?.(prRef(task), pinned.base, pr.base)) ||
+        !autoMergeEnabled(this.store, task)
+      )
+        return;
+      this.store.transaction(() => {
+        task.revision = pinned;
+        task.generation++;
+        this.store.event(task.id, 'revision.changed', {
+          revision: pinned,
+          generation: task.generation,
+        });
+        this.enqueueConflictContinuation(task, last);
+      });
+    });
+  }
   private queueConflictContinuation(task: Task, job: Job) {
     if (
       job.kind !== 'fix' ||
@@ -2501,30 +2570,31 @@ export class Engine {
       !autoMergeEnabled(this.store, task)
     )
       return false;
-    this.store.transaction(() => {
-      this.store.saveJob(job);
-      this.state(
-        task,
-        'fixing',
-        'Continuing conflict resolution in the saved worker copy after a timeout',
-      );
-      const retry = this.store.enqueue(
-        task,
-        'author',
-        'fix',
-        'Continue the interrupted conflict repair in the same working copy. Inspect the partial resolution, finish the remaining files and run the checks.',
-      );
-      retry.timeoutRetry = true;
-      retry.notBefore = new Date(Date.now() + (job.timeoutRetry ? 300000 : 30000)).toISOString();
-      this.store.saveJob(retry);
-      this.store.event(
-        task.id,
-        'conflict.timeout_retry',
-        { previousRun: job.id, notBefore: retry.notBefore },
-        retry.id,
-      );
-    });
+    this.store.transaction(() => this.enqueueConflictContinuation(task, job));
     return true;
+  }
+  private enqueueConflictContinuation(task: Task, job: Job) {
+    this.store.saveJob(job);
+    this.state(
+      task,
+      'fixing',
+      'Continuing conflict resolution in the saved worker copy after a timeout',
+    );
+    const retry = this.store.enqueue(
+      task,
+      'author',
+      'fix',
+      'Continue the interrupted conflict repair in the same working copy. Inspect the partial resolution, finish the remaining files and run the checks.',
+    );
+    retry.timeoutRetry = true;
+    retry.notBefore = new Date(Date.now() + (job.timeoutRetry ? 300000 : 30000)).toISOString();
+    this.store.saveJob(retry);
+    this.store.event(
+      task.id,
+      'conflict.timeout_retry',
+      { previousRun: job.id, notBefore: retry.notBefore },
+      retry.id,
+    );
   }
   failJob(job: Job, error: unknown) {
     const task = this.store.getTask(job.taskId);

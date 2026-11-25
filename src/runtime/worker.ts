@@ -230,6 +230,20 @@ export class Worker {
           }
           if (
             task.state === 'needs_input' &&
+            task.fixingMergeConflict &&
+            task.resumeState === 'fixing'
+          ) {
+            try {
+              await this.engine.restorePendingConflict(task.id, (t) =>
+                this.workspaces.pendingConflictBase(t),
+              );
+            } catch (error) {
+              store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          }
+          if (
+            task.state === 'needs_input' &&
             (task.resumeState === 'fixing' || task.resumeState === 'needs_input') &&
             !task.fixingMergeConflict &&
             task.ref.provider === 'github'
