@@ -178,7 +178,7 @@ export class TelegramWorkspace {
           this.pending = this.pending.then(async () => {
             await this.api.delivery?.finishRecovery();
           });
-        }
+        } else this.api.delivery?.discardGroup(retry.groupId);
       }
     }, 1000);
     this.retryTimer.unref();
@@ -2138,7 +2138,10 @@ export class TelegramWorkspace {
         if (this.eventDeferred(event)) return;
         const pair = this.pair();
         if (this.stopped || !pair) return;
-        if (this.store.getGroup(event.taskId).deletedAt) return;
+        if (this.store.getGroup(event.taskId).deletedAt) {
+          this.api.delivery?.discardGroup(event.taskId);
+          return;
+        }
         const group = this.daddy.group(event.taskId);
         const { taskId, request, messageId, reminder } = event.data as {
           reminder?: boolean;
@@ -2174,6 +2177,9 @@ export class TelegramWorkspace {
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
           : { chatId: pair.chatId };
+        const messageNotificationId = message
+          ? `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`
+          : undefined;
         if (
           message?.origin?.channel === 'telegram' &&
           message.origin.chatId === destination.chatId &&
@@ -2186,10 +2192,18 @@ export class TelegramWorkspace {
             : undefined;
           const prefs = notificationPreferences(this.store);
           if (job?.trigger !== 'user') {
-            if (!prefs.enabled) return;
+            if (!prefs.enabled) {
+              if (messageNotificationId)
+                this.api.delivery?.discardDeferred(destination, messageNotificationId);
+              return;
+            }
             if (prefs.mode === 'attention' && group.daddyState !== 'needs_input') {
               const tasks = this.store.tasks().filter((task) => task.groupId === group.id);
-              if (!tasks.length || tasks.some((task) => task.state !== 'complete')) return;
+              if (!tasks.length || tasks.some((task) => task.state !== 'complete')) {
+                if (messageNotificationId)
+                  this.api.delivery?.discardDeferred(destination, messageNotificationId);
+                return;
+              }
             }
           }
         }

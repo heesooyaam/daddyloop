@@ -347,6 +347,46 @@ it('sends one fresh owner mention after a progress message becomes a question', 
   }
 });
 
+it('does not edit acknowledged progress chunks into the first owner mention', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  let sending: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: 7 };
+    const progress = 'A'.repeat(5000);
+    f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
+    await f.queue.send(destination, text(progress), {
+      groupId: 'group',
+      key: 'message:message-id',
+      replace: true,
+      final: false,
+      notificationId: 'telegram:dialog:7:0:message-id:progress',
+    });
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.stop();
+    const notificationId = 'telegram:dialog:7:0:message-id:final';
+    await restored.send(destination, text('@Owner · Choose a branch?'), {
+      groupId: 'group',
+      key: notificationId,
+      replace: false,
+      replacePending: true,
+      final: true,
+      notificationId,
+    });
+    sending = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await sending.flush(10);
+    const mentions = f.call.mock.calls.filter(([, body]) => body.text?.includes('@Owner'));
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0][0]).toBe('sendMessage');
+  } finally {
+    await sending?.stop();
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('looks up a sent phase receipt without scanning unrelated delivery texts', async () => {
   const f = fixture();
   try {
