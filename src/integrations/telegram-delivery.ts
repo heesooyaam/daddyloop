@@ -11,6 +11,7 @@ export interface DeliveryOptions {
   pin?: boolean;
   key?: string;
   replace?: boolean;
+  replacePending?: boolean;
   preserveNavigation?: boolean;
   order?: string;
   final?: boolean;
@@ -52,6 +53,7 @@ export class TelegramDelivery {
   // Older releases used one turn:<runId> delivery for every agent message in a turn.
   // Keep a one-time lookup so replay can move that durable state to message:<messageId>.
   private legacyByNotification = new Map<string, { key: string; value: Delivery }>();
+  private pendingByNotification = new Map<string, { key: string; value: Delivery }>();
   private redirectedKeys = new Map<string, string>();
   private running?: Promise<void>;
   private controller?: AbortController;
@@ -85,6 +87,14 @@ export class TelegramDelivery {
           digest([value.destination, notificationIdentity(value.options.notificationId)]),
           { key, value },
         );
+      if (
+        ['queued', 'sending'].includes(value.status) &&
+        value.options.notificationId?.startsWith('telegram:dialog:')
+      )
+        this.pendingByNotification.set(
+          digest([value.destination, notificationIdentity(value.options.notificationId)]),
+          { key, value },
+        );
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -107,8 +117,29 @@ export class TelegramDelivery {
     this.remember(key, value);
   }
   private remember(key: string, value: Delivery) {
+    for (const [identity, row] of this.pendingByNotification)
+      if (row.key === key) this.pendingByNotification.delete(identity);
+    for (const [identity, row] of this.legacyByNotification)
+      if (row.key === key) this.legacyByNotification.delete(identity);
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
+    if (
+      ['queued', 'sending'].includes(value.status) &&
+      value.options.notificationId?.startsWith('telegram:dialog:')
+    )
+      this.pendingByNotification.set(
+        digest([value.destination, notificationIdentity(value.options.notificationId)]),
+        { key, value },
+      );
+    if (
+      value.status !== 'cancelled' &&
+      value.options.key?.startsWith('turn:') &&
+      value.options.notificationId
+    )
+      this.legacyByNotification.set(
+        digest([value.destination, notificationIdentity(value.options.notificationId)]),
+        { key, value },
+      );
   }
   private createdAt() {
     this.lastCreatedAt = Math.max(this.clock(), this.lastCreatedAt + 1);
@@ -124,6 +155,33 @@ export class TelegramDelivery {
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
   }
+  private messageBody(
+    destination: TelegramDestination,
+    content: Delivery['content'],
+    chunks: ReturnType<typeof splitTelegramText>,
+    index: number,
+  ) {
+    const chunk = chunks[index];
+    return {
+      chat_id: destination.chatId,
+      text: chunk.text,
+      entities: chunk.entities,
+      link_preview_options: { is_disabled: true },
+      reply_markup: {
+        inline_keyboard:
+          index === chunks.length - 1 ? ((content as TelegramCard).buttons ?? []) : [],
+      },
+    };
+  }
+  private acknowledgedPartsMatch(value: Delivery) {
+    const chunks = splitTelegramText(value.content);
+    return value.messages.every(
+      (message, index) =>
+        !!chunks[index] &&
+        message.fingerprint ===
+          digest(this.messageBody(value.destination, value.content, chunks, index)),
+    );
+  }
   private migrateByNotification(
     key: string,
     destination: TelegramDestination,
@@ -131,15 +189,19 @@ export class TelegramDelivery {
     deliveryKey?: string,
   ) {
     const legacyKey = digest([destination, notificationIdentity(notificationId)]);
-    const row = this.legacyByNotification.get(legacyKey);
+    const row =
+      this.pendingByNotification.get(legacyKey) ?? this.legacyByNotification.get(legacyKey);
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';
+    if (row.value.options.key?.startsWith('turn:') && !this.acknowledgedPartsMatch(row.value))
+      row.value.messages = [];
     row.value.options.key = deliveryKey;
     this.store.transaction(() => {
       this.store.setSetting(key, row.value);
       this.store.db.prepare('DELETE FROM settings WHERE key=?').run(row.key);
     });
     this.pending.delete(row.key);
+    this.pendingByNotification.delete(legacyKey);
     this.legacyByNotification.delete(legacyKey);
     this.redirectedKeys.set(row.key, key);
     this.remember(key, row.value);
@@ -203,7 +265,7 @@ export class TelegramDelivery {
     };
     const key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
     let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
-    if (!value && options.notificationId && options.key?.startsWith('message:'))
+    if (!value && options.notificationId?.startsWith('telegram:dialog:'))
       value = this.migrateByNotification(key, destination, options.notificationId, options.key);
     if (value) {
       if (
@@ -211,7 +273,7 @@ export class TelegramDelivery {
         (options.order && value.options.order && options.order < value.options.order)
       )
         return { status: 'superseded', deliveryId: value.id };
-      if (!options.replace)
+      if (!options.replace && !(options.replacePending && value.status !== 'sent'))
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
         digest([value.content, value.options.final, value.options.pin]) ===
@@ -373,17 +435,7 @@ export class TelegramDelivery {
       const chunks = splitTelegramText(content);
       for (let i = 0; i < chunks.length; i++) {
         if (value.revision !== revision || !this.valid(value)) break;
-        const chunk = chunks[i];
-        const body = {
-          chat_id: value.destination.chatId,
-          text: chunk.text,
-          entities: chunk.entities,
-          link_preview_options: { is_disabled: true },
-          reply_markup: {
-            inline_keyboard:
-              i === chunks.length - 1 ? ((content as TelegramCard).buttons ?? []) : [],
-          },
-        };
+        const body = this.messageBody(value.destination, content, chunks, i);
         const fingerprint = digest(body);
         let existing: Delivery['messages'][number] | undefined = value.messages[i];
         if (existing?.fingerprint === fingerprint) continue;

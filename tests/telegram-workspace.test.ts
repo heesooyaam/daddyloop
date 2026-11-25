@@ -611,6 +611,61 @@ it('migrates a queued legacy progress delivery when the same message becomes fin
   }
 });
 
+it('does not append legacy progress after the final reply was already delivered', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 200;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    return Response.json({
+      ok: true,
+      result:
+        method === 'createForumTopic'
+          ? { message_thread_id: 31 }
+          : method === 'sendMessage'
+            ? { message_id: ++nextMessageId }
+            : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Legacy history' });
+  const setup = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  const topic = await setup.ensureTopic(group);
+  await setup.stop();
+  f.store.daddyMessage(group.id, 'agent', 'Earlier progress.', 'legacy-run', undefined, {
+    phase: 'progress',
+  });
+  const final = f.store.daddyMessage(
+    group.id,
+    'agent',
+    'Delivered final.',
+    'legacy-run',
+    undefined,
+    { phase: 'final' },
+  );
+  f.store.db
+    .prepare('INSERT INTO notifications VALUES(?,?,?)')
+    .run(`telegram:dialog:-10042:${topic!.threadId}:${final.id}:final`, 'sent', final.at);
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    workspace.replay();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(
+      calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.startsWith('👨‍💻 [daddy]'),
+      ),
+    ).toHaveLength(0);
+  } finally {
+    await workspace.stop();
+    await api.delivery.stop();
+    await f.close();
+  }
+});
+
 it('replays every saved agent message into the topic in order and only once', async () => {
   const f = daddyFixture();
   const calls: { method: string; body: Record<string, any>; messageId?: number }[] = [];

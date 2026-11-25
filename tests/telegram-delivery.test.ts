@@ -265,6 +265,85 @@ it('redirects an in-flight legacy attempt to the migrated delivery', async () =>
   }
 });
 
+it.each([
+  ['answered elsewhere', true, false],
+  ['notifications enabled', false, true],
+  ['notifications disabled', true, false],
+])(
+  'reuses one pending question when %s changes its owner mention',
+  async (_name, before, after) => {
+    const f = fixture();
+    let restored: TelegramDelivery | undefined;
+    try {
+      const destination = { chatId: -10042, threadId: 4 };
+      const notificationId = 'telegram:dialog:-10042:4:question-id:final';
+      const content = (mention: boolean) => text((mention ? '@Owner · ' : '') + 'Choose a branch?');
+      const options = (mention: boolean) => ({
+        key: mention ? notificationId : 'message:question-id',
+        replace: !mention,
+        replacePending: true,
+        final: true,
+        notificationId,
+      });
+      await f.queue.stop();
+      await f.queue.send(destination, content(before), options(before));
+      restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restored.send(destination, content(after), options(after));
+      await restored.flush();
+      expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+        ['sendMessage', (after ? '@Owner · ' : '') + 'Choose a branch?'],
+      ]);
+      const saved = f.store.db
+        .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+        .all()
+        .map((row) => JSON.parse(String(row.value)))
+        .filter((value) => value.options.notificationId === notificationId);
+      expect(saved).toHaveLength(1);
+    } finally {
+      await restored?.stop();
+      await f.close();
+    }
+  },
+);
+
+it('does not reuse a previous reply message ID for different legacy turn content', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    await f.queue.send(destination, text('First reply'), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: false,
+      notificationId: 'telegram:dialog:-10042:4:first-id:progress',
+    });
+    await f.queue.stop();
+    await f.queue.send(destination, text('Second reply'), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId: 'telegram:dialog:-10042:4:second-id:final',
+    });
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text('Second reply'), {
+      key: 'message:second-id',
+      replace: true,
+      final: true,
+      notificationId: 'telegram:dialog:-10042:4:second-id:final',
+    });
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text, body.message_id])).toEqual(
+      [
+        ['sendMessage', 'First reply', undefined],
+        ['sendMessage', 'Second reply', undefined],
+      ],
+    );
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('wakes buffered delivery on a new reply and keeps messages in conversation order', async () => {
   const f = fixture();
   try {

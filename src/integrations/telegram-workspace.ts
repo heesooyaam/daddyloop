@@ -2197,6 +2197,7 @@ export class TelegramWorkspace {
         const result = await this.api.send(destination, card, undefined, {
           key: replaceMessage ? `message:${message!.id}` : id,
           replace: replaceMessage,
+          replacePending: message?.sender === 'agent',
           order: message?.at ?? event.at,
           final: message?.phase !== 'progress',
           notificationId: id,
@@ -2230,7 +2231,23 @@ export class TelegramWorkspace {
         data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
-    for (const message of messages.filter((message) => ['user', 'agent'].includes(message.sender)))
+    const deliveredFinalRuns = new Set(
+      messages
+        .filter(
+          (message) =>
+            message.phase === 'final' &&
+            message.runId &&
+            this.store.db
+              .prepare("SELECT 1 FROM notifications WHERE status='sent' AND id LIKE ? LIMIT 1")
+              .get(`telegram:dialog:%:${message.id}:final`),
+        )
+        .map((message) => message.runId),
+    );
+    for (const message of messages.filter(
+      (message) =>
+        ['user', 'agent'].includes(message.sender) &&
+        !(message.phase === 'progress' && deliveredFinalRuns.has(message.runId)),
+    ))
       this.onEvent({
         id: retry ? -1 : 0,
         taskId: group.id,
