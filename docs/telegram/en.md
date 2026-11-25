@@ -8,6 +8,8 @@ In session settings, the All workers profile applies to every slot, including sl
 
 Replying in a topic sends the original message and the selected quotation to daddy with your question. You can reply to an older worker question after the conversation has moved on. A voice reply keeps the same context during transcription.
 
+While an owner decision remains open, the bot repeats the mention 30 minutes after the previous delivery. Resolution, pausing and disabled notifications stop reminders. After downtime only one overdue reminder is sent.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.
