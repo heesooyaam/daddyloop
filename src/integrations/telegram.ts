@@ -606,7 +606,10 @@ export class Telegram {
   async handle(update: Update) {
     const store = this.engine.store;
     const message = update.message;
-    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) {
+      await this.workspace?.recoverRegistrationReply(update.update_id);
+      return;
+    }
     const sender = update.callback_query?.from ?? message?.from;
     const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
     const paired = this.paired();

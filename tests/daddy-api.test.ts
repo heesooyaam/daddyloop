@@ -659,6 +659,76 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       ).toEqual([presetB.id, presetA.id, presetD.id, presetC.id]);
     }
 
+    for (const { base, firstOrder, secondOrder, addition } of [
+      {
+        base: [presetA, presetB, presetC],
+        firstOrder: [presetA.id, presetC.id, presetB.id],
+        secondOrder: [presetB.id, presetA.id, presetC.id],
+      },
+      {
+        base: [presetA, presetB, presetC],
+        firstOrder: [presetC.id, presetA.id, presetB.id],
+        secondOrder: [presetA.id, presetC.id, presetB.id],
+      },
+      {
+        base: [presetA, presetB, presetC, presetD],
+        firstOrder: [presetA.id, presetB.id, presetD.id, presetC.id],
+        secondOrder: [presetA.id, presetC.id, presetB.id, presetD.id],
+      },
+      {
+        base: [presetA, presetB],
+        firstOrder: [presetB.id, presetA.id],
+        secondOrder: [presetA.id, presetC.id, presetB.id],
+        addition: presetC,
+      },
+      {
+        base: [presetA, presetB, presetC],
+        firstOrder: [presetA.id, presetC.id, presetB.id],
+        secondOrder: [presetA.id, presetB.id, presetD.id, presetC.id],
+        addition: presetD,
+      },
+    ]) {
+      const baseOrder = base.map((preset) => preset.id);
+      for (const reverse of [false, true]) {
+        const conflict = f.daddy.create({
+            workspaceId: f.workspace.id,
+            instructions: {
+              daddy: {},
+              worker: { prompt: 'Keep neighboring prompt' },
+              presets: base.map((preset) => selected(preset)),
+            },
+          }),
+          first = reverse ? secondOrder : firstOrder,
+          second = reverse ? firstOrder : secondOrder,
+          firstChanges = [
+            ...(addition && first.includes(addition.id)
+              ? [{ target: 'preset', id: addition.id, before: null, after: state(addition) }]
+              : []),
+            { target: 'preset-order', before: baseOrder, after: first },
+          ],
+          secondChanges = [
+            { target: 'worker.prompt', before: 'Keep neighboring prompt', after: 'Do not save' },
+            ...(addition && second.includes(addition.id)
+              ? [{ target: 'preset', id: addition.id, before: null, after: state(addition) }]
+              : []),
+            { target: 'preset-order', before: baseOrder, after: second },
+          ];
+        const saved = await patchInstructions(conflict.id, firstChanges);
+        expect(saved.statusCode, saved.body).toBe(200);
+        const rejected = await patchInstructions(conflict.id, secondChanges);
+        expect(
+          rejected.statusCode,
+          JSON.stringify({ base: baseOrder, first, second, reverse }) + '\n' + rejected.body,
+        ).toBe(409);
+        expect(f.daddy.group(conflict.id).instructions?.worker.prompt).toBe(
+          'Keep neighboring prompt',
+        );
+        expect(
+          f.daddy.group(conflict.id).instructions?.presets?.map((entry) => entry.preset.id),
+        ).toEqual(first);
+      }
+    }
+
     const first = await app.inject({
       method: 'POST',
       url: `/api/daddy/sessions/${group.id}/instructions-patch`,

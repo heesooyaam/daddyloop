@@ -204,6 +204,71 @@ test('merges a stale preset addition without undoing the order saved in another 
     `Concurrent B ${suffix}`,
     `Concurrent D ${suffix}`,
   ]);
+
+  const conflictResponse = await page.request.post('/api/daddy/sessions', {
+    headers,
+    data: {
+      workspaceId: workspaces[0].id,
+      title: `Conflicting preset order ${suffix}`,
+      instructions: {
+        daddy: {},
+        worker: {},
+        presets: presets.slice(0, 3).map((preset) => ({ preset, enabled: true, omit: [] })),
+      },
+    },
+  });
+  expect(conflictResponse.status()).toBe(201);
+  const conflict = (await conflictResponse.json()).group;
+  await page.goto(`/#session/${conflict.id}`);
+  await other.goto(`/#session/${conflict.id}`);
+  await expect(page.getByRole('heading', { name: conflict.title })).toBeVisible();
+  await expect(other.getByRole('heading', { name: conflict.title })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const firstConflict = page.getByRole('dialog', { name: 'Session settings' });
+  await firstConflict.getByText('Style and skills for this session', { exact: true }).click();
+  await firstConflict.getByRole('button', { name: 'Add presets', exact: true }).click();
+  await firstConflict
+    .getByRole('button', {
+      name: `Remove preset Concurrent B ${suffix} from this session`,
+      exact: true,
+    })
+    .click();
+  await firstConflict
+    .getByRole('checkbox', { name: `Use preset Concurrent B ${suffix}`, exact: true })
+    .check();
+
+  await other.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const secondConflict = other.getByRole('dialog', { name: 'Session settings' });
+  await secondConflict.getByText('Style and skills for this session', { exact: true }).click();
+  const prompt = secondConflict.getByLabel('Your instructions for daddy');
+  await prompt.fill('Keep this conflicting draft');
+  await secondConflict.getByRole('button', { name: 'Add presets', exact: true }).click();
+  for (const name of ['A', 'C'])
+    await secondConflict
+      .getByRole('button', {
+        name: `Remove preset Concurrent ${name} ${suffix} from this session`,
+        exact: true,
+      })
+      .click();
+  for (const name of ['A', 'C'])
+    await secondConflict
+      .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
+      .check();
+
+  await firstConflict.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(firstConflict).toHaveCount(0);
+  await secondConflict.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(secondConflict).toBeVisible();
+  await expect(secondConflict.getByRole('alert')).toContainText('changed in another client');
+  await expect(prompt).toHaveValue('Keep this conflicting draft');
+  const conflictBoard = await (await page.request.get(`/api/daddy/sessions/${conflict.id}`)).json();
+  expect(conflictBoard.group.instructions.daddy.prompt).toBeUndefined();
+  expect(conflictBoard.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
+    `Concurrent A ${suffix}`,
+    `Concurrent C ${suffix}`,
+    `Concurrent B ${suffix}`,
+  ]);
   await other.close();
 });
 test('selects a local folder, uploads only checked Markdown files, and keeps their relative paths', async ({

@@ -86,7 +86,7 @@ export function workspacePicker(locale: Locale, workspaces: Workspace[], page = 
         { text: workspace.name, callback_data: `dad:new:${workspace.id}` },
       ]),
       ...(navigation.length ? [navigation] : []),
-      [{ text: '＋ ' + t('Add repository'), callback_data: 'dad:add-workspace' }],
+      [{ text: '＋ ' + t('Add repository'), callback_data: 'dad:add-workspace:new' }],
       [{ text: t('Find on server'), callback_data: 'dad:discover' }],
       [{ text: t('Back'), callback_data: 'dad:home' }],
     ],

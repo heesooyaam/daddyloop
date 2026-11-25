@@ -99,6 +99,21 @@ it('ignores unknown chats and binds a one-use pairing to one private user', asyn
   expect(t.sent).toHaveLength(after);
   f.store.close();
 });
+it('asks the workspace to recover a durable reply for a repeated update receipt', async () => {
+  const f = await fixture(),
+    t = transport(),
+    bot = new Telegram(f.engine, t.api, 'test_bot'),
+    recoverRegistrationReply = vi.fn(async () => true);
+  try {
+    (bot as any).workspace = { recoverRegistrationReply };
+    f.store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(77, new Date().toISOString());
+    await bot.handle(update(77, 'Repeated registration input'));
+    expect(recoverRegistrationReply).toHaveBeenCalledWith(77);
+    expect(t.sent).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});
 it('serves formatted navigation and preference buttons only to the paired private user', async () => {
   const f = await fixture(),
     t = transport(),

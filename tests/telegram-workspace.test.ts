@@ -11,11 +11,15 @@ import { randomUUID } from 'node:crypto';
 import { rememberSecret } from '../src/core/security.js';
 afterEach(() => vi.restoreAllMocks());
 it('changes only the selected session role from a private chat or topic and ignores other senders', async () => {
-  const f = daddyFixture();
+  const f = daddyFixture(),
+    sent: any[] = [];
   let topic = 30;
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
-    send: vi.fn(async () => ({ message_id: 1 })),
+    send: vi.fn(async (_destination, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
     call: vi.fn(async () => ({ message_thread_id: ++topic })),
   } as unknown as TelegramApi;
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
@@ -76,6 +80,15 @@ it('changes only the selected session role from a private chat or topic and igno
     expect(effectiveInstructions(f.daddy.group(second.id).instructions, 'daddy')?.prompt).toBe(
       'Preset daddy style',
     );
+    const secret = rememberSecret('PRIVATE_PRESET_NAME_12345');
+    new InstructionPresets(f.store).save({
+      name: `Protected ${secret}`,
+      instructions: { daddy: { prompt: 'Protected prompt' }, worker: {} },
+    });
+    await workspace.handle(
+      message(`/preset Protected ${secret}`, 7, -10042, destination!.threadId),
+    );
+    expect(JSON.stringify(sent.at(-1))).not.toContain(secret);
   } finally {
     await workspace.stop();
     await f.close();
@@ -1117,7 +1130,7 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
       sent
         .at(-1)
         .buttons.flat()
-        .some((button: any) => button.callback_data === 'dad:workspace-module:gitlab'),
+        .some((button: any) => button.callback_data === 'dad:workspace-module:standalone:gitlab'),
     ).toBe(true);
     await bot.handle(click('dad:workspace-module:gitlab', 7, 12));
     const privateUrl = sent.at(-1).buttons[0][0].url as string;
@@ -1182,8 +1195,8 @@ it('expires private repository registration without routing its input into a ses
     },
   });
   const openPrivateRegistration = async () => {
-    await bot.handle(click('dad:add-workspace', 12));
-    await bot.handle(click('dad:workspace-module:github', 12));
+    await bot.handle(click('dad:add-workspace:standalone', 12));
+    await bot.handle(click('dad:workspace-module:standalone:github', 12));
     const privateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
   };
@@ -1234,8 +1247,8 @@ it('expires private repository registration without routing its input into a ses
     ).toHaveLength(1);
     expect(f.store.messages(current.id)).toHaveLength(0);
 
-    await bot.handle(click('dad:add-workspace', 12));
-    await bot.handle(click('dad:workspace-module:github', 12));
+    await bot.handle(click('dad:add-workspace:standalone', 12));
+    await bot.handle(click('dad:workspace-module:standalone:github', 12));
     const expiredLink = sent.at(-1)!.card.buttons[0][0].url as string,
       expiredKey = `telegram.workspacePrivate:${new URL(expiredLink).searchParams
         .get('start')!
@@ -1258,6 +1271,83 @@ it('expires private repository registration without routing its input into a ses
         .prepare("SELECT key FROM settings WHERE key LIKE 'telegram.workspacePrivate:%'")
         .all(),
     ).toEqual([]);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('recovers the expected private registration reply after its delivery record fails', async () => {
+  const f = daddyFixture(),
+    sent: { destination: any; card: any; options?: any }[] = [];
+  let failure: 'name' | 'continue' | undefined;
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (destination, card, _buttons, options) => {
+      const name = String(card?.text ?? card).includes('Workspace name'),
+        continuation = card?.buttons
+          ?.flat()
+          .some((button: any) => String(button.text).includes('Continue new session'));
+      if ((failure === 'name' && name) || (failure === 'continue' && continuation)) {
+        failure = undefined;
+        throw Object.assign(new Error('fixture delivery insert failed'), {
+          code: 'ERR_SQLITE_ERROR',
+        });
+      }
+      sent.push({ destination, card, options });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  let bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  let id = 970;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(message('/new Keep the recovered reply'));
+    await bot.handle(click('dad:add-workspace:new'));
+    await bot.handle(click('dad:workspace-module:new:github'));
+    const address = message('https://example.test/recovered/reply');
+    failure = 'name';
+    await expect(bot.handle(address)).rejects.toThrow('fixture delivery insert failed');
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    await bot.handle(address);
+    expect(sent.filter((item) => String(item.card?.text).includes('Workspace name'))).toHaveLength(
+      1,
+    );
+    expect(sent.at(-1)!.options.key).toBe(`registration:${address.update_id}:0`);
+
+    const name = message('Recovered reply repository');
+    failure = 'continue';
+    await expect(bot.handle(name)).rejects.toThrow('fixture delivery insert failed');
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    await bot.handle(name);
+    const continuations = sent.filter((item) =>
+      item.card?.buttons
+        ?.flat()
+        .some((button: any) => String(button.text).includes('Continue new session')),
+    );
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]!.options.key).toBe(`registration:${name.update_id}:0`);
   } finally {
     await bot.stop();
     await f.close();
@@ -1304,8 +1394,8 @@ it('continues repository registration only for its exact new-session draft', asy
   });
   try {
     await bot.handle(message('/new Preserve this instruction', 12));
-    await bot.handle(click('dad:add-workspace', 12));
-    await bot.handle(click('dad:workspace-module:github', 12));
+    await bot.handle(click('dad:add-workspace:new', 12));
+    await bot.handle(click('dad:workspace-module:new:github', 12));
     const privateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(privateUrl).searchParams.get('start')}`));
     await bot.handle(message('https://example.test/new/session'));
@@ -1322,8 +1412,8 @@ it('continues repository registration only for its exact new-session draft', asy
     );
 
     await bot.handle(message('/new Keep the valid instruction', 12));
-    await bot.handle(click('dad:add-workspace', 12));
-    await bot.handle(click('dad:workspace-module:github', 12));
+    await bot.handle(click('dad:add-workspace:new', 12));
+    await bot.handle(click('dad:workspace-module:new:github', 12));
     const validPrivateUrl = sent.at(-1)!.card.buttons[0][0].url as string;
     await bot.handle(message(`/start ${new URL(validPrivateUrl).searchParams.get('start')}`));
     await bot.handle(message('https://example.test/new/valid-session'));
@@ -1347,8 +1437,8 @@ it('continues repository registration only for its exact new-session draft', asy
     expect(f.store.messages(f.daddy.sessions()[0]!.id)[0].text).toBe('Keep the valid instruction');
 
     await bot.handle(message('/new Private original instruction'));
-    await bot.handle(click('dad:add-workspace'));
-    await bot.handle(click('dad:workspace-module:github'));
+    await bot.handle(click('dad:add-workspace:new'));
+    await bot.handle(click('dad:workspace-module:new:github'));
     await bot.handle(message('https://example.test/new/private-stale'));
     await bot.handle(message('Private stale repository'));
     const privateStale = sent.at(-1)!.card.buttons[0][0].callback_data as string;
@@ -1360,8 +1450,8 @@ it('continues repository registration only for its exact new-session draft', asy
     );
 
     await bot.handle(message('/new Private valid instruction'));
-    await bot.handle(click('dad:add-workspace'));
-    await bot.handle(click('dad:workspace-module:github'));
+    await bot.handle(click('dad:add-workspace:new'));
+    await bot.handle(click('dad:workspace-module:new:github'));
     await bot.handle(message('https://example.test/new/private-valid'));
     await bot.handle(message('Private valid repository'));
     const privateValid = sent.at(-1)!.card.buttons[0][0].callback_data as string;
@@ -1373,6 +1463,51 @@ it('continues repository registration only for its exact new-session draft', asy
         f.store.messages(session.id).some((entry) => entry.text === 'Private valid instruction'),
       );
     expect(privateSession).toBeTruthy();
+
+    await bot.handle(message('/new Expired standalone draft'));
+    const privateDraftKey = 'telegram.newSession:7:7:0',
+      expiredDraft = f.store.setting<Record<string, unknown>>(privateDraftKey)!;
+    f.store.setSetting(privateDraftKey, {
+      ...expiredDraft,
+      expiresAt: '2000-01-01T00:00:00.000Z',
+    });
+    await bot.handle(click('dad:add-workspace:standalone'));
+    await bot.handle(click('dad:workspace-module:standalone:github'));
+    await bot.handle(message('https://example.test/new/standalone'));
+    await bot.handle(message('Standalone repository'));
+    expect(
+      f.workspaces.list().some((workspace) => workspace.name === 'Standalone repository'),
+    ).toBe(true);
+
+    const upgradedExpires = new Date(Date.now() + 60_000).toISOString();
+    f.store.setSetting('telegram.newSession:7:-10042:13', {
+      id: 'upgraded-draft',
+      text: 'Upgraded instruction',
+      expiresAt: upgradedExpires,
+    });
+    f.store.setSetting('telegram.workspacePrivate:abcdefghijklmnop', {
+      provider: 'github',
+      origin: { chatId: -10042, threadId: 13 },
+      creationId: 'upgraded-draft',
+      creationText: 'Upgraded instruction',
+      creationExpiresAt: upgradedExpires,
+      ownerId: 7,
+      expiresAt: upgradedExpires,
+    });
+    await bot.handle(message('/start workspace_abcdefghijklmnop'));
+    await bot.handle(message('https://example.test/new/upgraded'));
+    await bot.handle(message('Upgraded repository'));
+    const upgradedContinuation = sent
+      .filter((item) => item.destination.chatId === -10042 && item.destination.threadId === 13)
+      .at(-1)!.card.buttons[0][0].callback_data as string;
+    await bot.handle(click(upgradedContinuation, 13));
+    expect(
+      f.daddy
+        .sessions()
+        .some((session) =>
+          f.store.messages(session.id).some((entry) => entry.text === 'Upgraded instruction'),
+        ),
+    ).toBe(true);
 
     f.store.setSetting('telegram.newSession:7:-10042:13', {
       id: 'legacy-draft',
@@ -1386,8 +1521,19 @@ it('continues repository registration only for its exact new-session draft', asy
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     await bot.handle(message('Legacy repository'));
-    expect(f.daddy.sessions()).toHaveLength(2);
-    expect(sent.at(-1)!.card).toContain('original new-session draft expired');
+    expect(f.daddy.sessions()).toHaveLength(3);
+    expect(sent.at(-1)!.card).toContain('selection expired');
+
+    f.store.setSetting('telegram.addWorkspace:7:-10042:14', {
+      provider: 'github',
+      path: 'https://example.test/new/group-legacy',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await bot.handle(message('Group legacy repository', 14));
+    expect(
+      f.workspaces.list().some((workspace) => workspace.name === 'Group legacy repository'),
+    ).toBe(false);
+    expect(JSON.stringify(sent.at(-1)!.card)).toContain('paired private chat');
   } finally {
     await bot.stop();
     await f.close();
