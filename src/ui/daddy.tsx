@@ -1,5 +1,7 @@
+import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { KeyboardEvent } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -14,6 +16,10 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Plus,
@@ -49,6 +55,7 @@ import { profileText, taskReference, taskStatus } from '../core/task-activity.js
 
 const stamp = (value: string) =>
   new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const sidebarMedia = '(max-width: 850px)';
 function safeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -91,6 +98,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [repositoryEditing, setRepositoryEditing] = useState(false);
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [returnToNew, setReturnToNew] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [tasksCollapsed, setTasksCollapsed] = useState(false);
   const [model] = useState(
     () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
   );
@@ -112,8 +121,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const firstMenuItem = useRef<HTMLButtonElement>(null);
+  const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
     chatScroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const media = matchMedia(sidebarMedia);
+    const resize = () => {
+      setNarrowLayout(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    resize();
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+  useLayoutEffect(() => {
+    if (menu) firstMenuItem.current?.focus();
+    else if (wasMenuOpen.current) menuButton.current?.focus();
+    wasMenuOpen.current = menu;
+  }, [menu]);
   useEffect(() => {
     model.start();
     return () => model.stop();
@@ -132,6 +160,28 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     const chat = chatScroll.current;
     if (chat) chat.scrollTo({ top: chat.scrollHeight });
   }, [board?.messages.length, state.selected]);
+  const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!menu || !event.currentTarget.contains(event.target as Node)) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setMenu(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length,
+    );
+    const from = event.shiftKey ? items[0] : items.at(-1);
+    const to = event.shiftKey ? items.at(-1) : items[0];
+    if (event.target === from) {
+      event.preventDefault();
+      to?.focus();
+    }
+  };
   const choose = (id: string) => {
     void model.select(id);
     setMenu(false);
@@ -155,6 +205,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const draft = state.drafts[state.selected] ?? '';
   const messageDisabled = paused || !!deletion;
   const canSend = !messageDisabled && !repositoryEditing && !state.busy && !!draft.trim();
+  const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
+  const tasksToggleLabel = t(
+    tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
+  );
   const positions = new Map(board?.taskQueue.map((id, index) => [id, index] as const));
   const workItems = board?.tasks.toSorted(
     (a, b) =>
@@ -163,7 +217,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   );
   return (
     <div className="daddy-app">
-      <aside className={'daddy-sidebar' + (menu ? ' open' : '')}>
+      <aside
+        id="daddy-sidebar"
+        className={'daddy-sidebar' + (menu ? ' open' : '')}
+        inert={narrowLayout && !menu}
+        onKeyDown={onMenuKeyDown}
+      >
         <div className="daddy-brand">
           <span className="daddy-mark">d.</span>
           <span>
@@ -171,7 +230,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           </span>
         </div>
         <p className="daddy-kicker">{t('daddy will handle it.')}</p>
-        <button className="daddy-button primary new-session" onClick={() => setModal('new')}>
+        <button
+          ref={firstMenuItem}
+          className="daddy-button primary new-session"
+          onClick={() => setModal('new')}
+        >
           <Plus size={17} />
           {t('New session')}
         </button>
@@ -247,6 +310,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             {t('Limits')}
             {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
           </button>
+          <ThemeButton showLabel />
           <div className="daddy-language">
             <select
               aria-label={t('Language')}
@@ -268,17 +332,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         <button
           className="daddy-shade"
           aria-label={t('Close menu')}
+          tabIndex={-1}
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main">
+      <main className="daddy-main" inert={menu}>
         <header className="daddy-topbar">
           <button
+            ref={menuButton}
             className="daddy-icon mobile-menu"
             aria-label={t('Sessions')}
+            aria-controls="daddy-sidebar"
+            aria-expanded={menu}
             onClick={() => setMenu(!menu)}
           >
             <Menu size={20} />
+          </button>
+          <button
+            className="daddy-icon daddy-sessions-toggle"
+            aria-label={sessionsToggleLabel}
+            title={sessionsToggleLabel}
+            aria-controls="daddy-sidebar"
+            aria-expanded={!sessionsCollapsed}
+            onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
+          >
+            {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
           <div className="daddy-title">
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
@@ -286,7 +364,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </span>
             <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
           </div>
-          <ThemeButton />
           {board && (
             <div className="daddy-header-actions">
               <button
@@ -319,56 +396,75 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               )}
             </div>
           )}
+          {board && (
+            <button
+              className="daddy-icon daddy-tasks-toggle"
+              aria-label={tasksToggleLabel}
+              title={tasksToggleLabel}
+              aria-controls="daddy-tasks-panel"
+              aria-expanded={!tasksCollapsed}
+              onClick={() => setTasksCollapsed((collapsed) => !collapsed)}
+            >
+              {tasksCollapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
+            </button>
+          )}
         </header>
-        {state.error && (modal !== 'workers' || !board) && (
-          <div className="daddy-error" role="alert">
-            {t(state.error)}
-            <button onClick={() => void model.refresh()}>{t('Retry')}</button>
-          </div>
-        )}
-        {preparation?.state === 'error' && (
-          <SessionMaintenanceError
-            title="Could not prepare the session copy"
-            reason={preparation.error}
-            retryLabel="Retry"
-            onRetry={() => void model.action('resume')}
-          />
-        )}
-        {deletion?.state === 'error' && (
-          <SessionMaintenanceError
-            title="Session deletion stopped; working copies were preserved"
-            reason={deletion.error}
-            retryLabel="Retry deletion"
-            onRetry={() => setModal('delete')}
-          />
-        )}
-        {resourceWait && (
-          <div className="daddy-error daddy-resource-wait" role="status">
-            <div>
-              <strong>{t('Waiting for server resources')}</strong>
-              {resourceWait.reasons.length > 0 && (
-                <>
-                  {' · '}
-                  <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
-                </>
+        <div
+          className="daddy-session-notices"
+          role="region"
+          aria-label={t('Session status')}
+          tabIndex={0}
+        >
+          {state.error && (modal !== 'workers' || !board) && (
+            <div className="daddy-error" role="alert">
+              {t(state.error)}
+              <button onClick={() => void model.refresh()}>{t('Retry')}</button>
+            </div>
+          )}
+          {preparation?.state === 'error' && (
+            <SessionMaintenanceError
+              title="Could not prepare the session copy"
+              reason={preparation.error}
+              retryLabel="Retry"
+              onRetry={() => void model.action('resume')}
+            />
+          )}
+          {deletion?.state === 'error' && (
+            <SessionMaintenanceError
+              title="Session deletion stopped; working copies were preserved"
+              reason={deletion.error}
+              retryLabel="Retry deletion"
+              onRetry={() => setModal('delete')}
+            />
+          )}
+          {resourceWait && (
+            <div className="daddy-error daddy-resource-wait" role="status">
+              <div>
+                <strong>{t('Waiting for server resources')}</strong>
+                {resourceWait.reasons.length > 0 && (
+                  <>
+                    {' · '}
+                    <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
+                  </>
+                )}
+              </div>
+              <span>
+                {t(
+                  'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
+                )}
+              </span>
+            </div>
+          )}
+          {(preparing || deleting) && (
+            <div className="daddy-session-progress" role="status">
+              {t(
+                deleting
+                  ? 'Saving results and removing session copies'
+                  : 'Preparing the session copy',
               )}
             </div>
-            <span>
-              {t(
-                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-              )}
-            </span>
-          </div>
-        )}
-        {(preparing || deleting) && (
-          <div className="daddy-session-progress" role="status">
-            {t(
-              deleting
-                ? 'Saving results and removing session copies'
-                : 'Preparing the session copy',
-            )}
-          </div>
-        )}
+          )}
+        </div>
         <section className="daddy-session-overview" aria-label={t('Session overview')} tabIndex={0}>
           <UsageStrip
             usage={state.usage}
@@ -389,11 +485,21 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
-              <button className={pane === 'chat' ? 'active' : ''} onClick={() => setPane('chat')}>
+              <button
+                className={pane === 'chat' ? 'active' : ''}
+                aria-controls="daddy-chat-panel"
+                aria-pressed={pane === 'chat'}
+                onClick={() => setPane('chat')}
+              >
                 <MessageSquare size={15} />
                 daddy
               </button>
-              <button className={pane === 'tasks' ? 'active' : ''} onClick={() => setPane('tasks')}>
+              <button
+                className={pane === 'tasks' ? 'active' : ''}
+                aria-controls="daddy-tasks-panel"
+                aria-pressed={pane === 'tasks'}
+                onClick={() => setPane('tasks')}
+              >
                 <Users size={15} />
                 {t('Tasks')}
                 <span>{board.tasks.length}</span>
@@ -401,6 +507,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             </div>
             <div className="daddy-workspace" data-pane={pane}>
               <section
+                id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
                 aria-label={t('Conversation with daddy')}
               >
@@ -518,7 +625,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 )}
               </section>
               <aside
-                className={'daddy-board' + (pane === 'chat' ? ' mobile-hidden' : '')}
+                id="daddy-tasks-panel"
+                className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
                 aria-labelledby="daddy-task-heading"
               >
                 <div className="daddy-board-controls">
@@ -694,8 +802,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <SessionSettings
             api={api}
             board={board}
-            onSave={async (profiles, instructions, autoMerge) => {
-              await model.action('settings', { profiles, instructions, autoMerge });
+            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
+              await model.action('settings', {
+                profiles,
+                instructions,
+                autoMerge,
+                forceDaddy,
+                applyWorkers,
+              });
               if (!model.snapshot().error) setModal(null);
             }}
           />
@@ -1232,15 +1346,17 @@ function SessionSettings({
   api: DaddyApi;
   board: DaddyBoard;
   onSave: (
-    profiles?: AgentProfiles,
+    profiles?: Partial<AgentProfiles>,
     instructions?: SessionInstructions,
     autoMerge?: boolean,
+    forceDaddy?: boolean,
+    applyWorkers?: boolean,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
     [profiles, setProfiles] = useState<AgentProfiles>({
       daddy: board.group.daddy,
-      worker: board.group.worker ?? board.group.daddy,
+      worker: board.workerDefault,
     }),
     [instructions, setInstructions] = useState<SessionInstructions | undefined>(
       board.group.instructions,
@@ -1251,6 +1367,11 @@ function SessionSettings({
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const [forceDaddy, setForceDaddy] = useState(false),
+    [applyWorkers, setApplyWorkers] = useState(false);
+  const overrides = board.workers.slots.filter(
+    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  );
   const { catalogue, load } = useAgentCatalogue(api);
   return (
     <form
@@ -1259,12 +1380,23 @@ function SessionSettings({
         event.preventDefault();
         if (importingInstructions) return;
         setBusy(true);
+        const changed: Partial<AgentProfiles> = {};
+        if (
+          forceDaddy ||
+          JSON.stringify(profiles.daddy) !== JSON.stringify(originalProfiles.current.daddy)
+        )
+          changed.daddy = profiles.daddy;
+        if (
+          applyWorkers ||
+          JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
+        )
+          changed.worker = profiles.worker;
         void onSave(
-          JSON.stringify(profiles) === JSON.stringify(originalProfiles.current)
-            ? undefined
-            : profiles,
+          Object.keys(changed).length ? changed : undefined,
           instructions,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          forceDaddy || undefined,
+          applyWorkers || undefined,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1288,7 +1420,7 @@ function SessionSettings({
         </label>
       )}
       {(['daddy', 'worker'] as const).map((role) => {
-        const label = role === 'daddy' ? 'daddy' : t('New workers');
+        const label = role === 'daddy' ? 'daddy' : t('All workers');
         return (
           <fieldset key={role}>
             <legend>{label}</legend>
@@ -1299,6 +1431,39 @@ function SessionSettings({
               onChange={(profile) => setProfiles((value) => ({ ...value, [role]: profile }))}
               selectDefaultEffort
             />
+            {role === 'worker' &&
+              overrides.map((slot) => (
+                <small key={slot.number} className="daddy-muted">
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                </small>
+              ))}
+            {role === 'daddy' ? (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={forceDaddy}
+                  onChange={(e) => setForceDaddy(e.target.checked)}
+                />
+                {t('Apply now and restart the active daddy turn or review')}
+              </label>
+            ) : (
+              <label className="daddy-toggle">
+                <input
+                  type="checkbox"
+                  checked={
+                    applyWorkers ||
+                    JSON.stringify(profiles.worker) !==
+                      JSON.stringify(originalProfiles.current.worker)
+                  }
+                  onChange={(e) => setApplyWorkers(e.target.checked)}
+                  disabled={
+                    JSON.stringify(profiles.worker) !==
+                    JSON.stringify(originalProfiles.current.worker)
+                  }
+                />
+                {t('Apply this profile to all worker slots')}
+              </label>
+            )}
           </fieldset>
         );
       })}

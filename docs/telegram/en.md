@@ -2,6 +2,10 @@
 
 # Telegram: private chat and forum topics
 
+When daddy or a worker asks for a decision, the bot sends a new message with a mention of the paired owner and the question. It uses the session topic or the paired private chat. A plan awaiting approval also alerts the owner. Attention and All notifications include these mentions. Ordinary progress updates stay silent. A private draft that requires the owner’s inspection includes a link to its PR. On restart, outstanding worker questions are recovered from the saved agent result when it still matches the current task.
+
+In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.
@@ -39,6 +43,8 @@ Each daddy session gets a topic. Send goals and tickets there. Workers report to
 - `/worker 2 MODEL EFFORT` sets worker 2’s profile for its next task. Add `--force` to resume an active author run with the new profile in the same working copy. A run that is already saving a result finishes that step first. Add `--engine ENGINE` with a model when switching agent engines. Use `/models` to find available models and reasoning levels.
 
 ## Commands
+
+Send `/help` in the private chat or a group topic to see available commands and descriptions. Use `/help task` or `/help /worker` for syntax and options. In groups, `/help@your_bot task` also works. Telegram suggests commands for the current chat type when you type `/`. Russian Telegram clients receive Russian menu descriptions. Use `/language` to select the language for bot replies.
 
 | Where                                     | Commands                                                                                                                                                                                                                                                          |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

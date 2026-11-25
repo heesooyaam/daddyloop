@@ -4,7 +4,7 @@ import { checkedModules } from '../modules/catalogue.js';
 import type { Command } from 'commander';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
@@ -28,6 +28,7 @@ import { TelegramApi } from '../integrations/telegram.js';
 import { setupTailscale } from './network.js';
 import { openWebTunnel, webConnectionText } from './web.js';
 import { ArcBridge, leaseHelper } from '../integrations/arcadia.js';
+import { AppError } from '../core/types.js';
 
 export async function promptSecret(label: string): Promise<string> {
   if (!process.stdin.isTTY) throw new Error('Use --token-file for non-interactive setup');
@@ -514,12 +515,53 @@ export function registerOperations(program: Command) {
     .action(async (options) => {
       const config = loadConfig();
       requireModule('arcadia');
-      if (options.leaseHelper) config.arcadia.leaseHelper = resolve(options.leaseHelper);
-      saveConfig(config);
-      const identity = await new ArcBridge().doctor(options.workspace);
-      config.arcadia.enabled = true;
-      config.arcadia.leaseHelper = leaseHelper();
-      saveConfig(config);
+      if (!config.dataDir || !isAbsolute(config.dataDir))
+        throw new AppError(
+          'service_data_dir_unknown',
+          'Run daddy init with an absolute data directory before configuring Arcadia',
+          422,
+        );
+      const serviceDataDir = resolve(config.dataDir);
+      if (dir() !== serviceDataDir)
+        throw new AppError(
+          'service_data_dir_mismatch',
+          'Run Arcadia setup with the data directory configured for this daddyloop service',
+          422,
+        );
+      const validationInputs = JSON.stringify({
+        dataDir: serviceDataDir,
+        resources: config.resources,
+        arcadia: config.arcadia,
+        moduleEnabled: config.modules.includes('arcadia'),
+      });
+      const selectedHelper = options.leaseHelper ? resolve(options.leaseHelper) : leaseHelper();
+      const identity = await new ArcBridge(serviceDataDir, selectedHelper).doctor(
+        options.workspace,
+      );
+      await new ArcBridge(serviceDataDir, selectedHelper).withValidatedJournals(async () => {
+        const current = loadConfig();
+        if (!current.dataDir || !isAbsolute(current.dataDir))
+          throw new AppError(
+            'arcadia_setup_changed',
+            'Arcadia setup inputs changed during validation; retry with the current configuration',
+            409,
+          );
+        const currentInputs = JSON.stringify({
+          dataDir: resolve(current.dataDir),
+          resources: current.resources,
+          arcadia: current.arcadia,
+          moduleEnabled: current.modules.includes('arcadia'),
+        });
+        if (currentInputs !== validationInputs)
+          throw new AppError(
+            'arcadia_setup_changed',
+            'Arcadia setup inputs changed during validation; retry with the current configuration',
+            409,
+          );
+        current.arcadia.enabled = true;
+        current.arcadia.leaseHelper = selectedHelper;
+        saveConfig(current);
+      });
       output({
         connected: true,
         user: identity.user_login,

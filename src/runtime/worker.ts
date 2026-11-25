@@ -3,7 +3,7 @@ import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, staleConflictPreparation, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
-import { redact } from '../core/security.js';
+import { redact, redactEvent } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
@@ -38,6 +38,10 @@ export class Worker {
   private lastCleanup = 0;
   private lastArcRelease = 0;
   private reservedGroups = new Set<string>();
+  updateAuthorGroupGeneration(groupId: string, generation: number) {
+    for (const job of this.runningJobs.values())
+      if (job.groupId === groupId && job.role === 'author') job.groupGeneration = generation;
+  }
   reserveGroup(id: string) {
     if (
       this.reservedGroups.has(id) ||
@@ -84,6 +88,7 @@ export class Worker {
     }
   }
   autoCleanup?: () => Promise<unknown>;
+  refreshIssueSource?: (id: string) => Promise<void>;
   autoSubmit?: (id: string) => Promise<unknown>;
   constructor(
     readonly engine: Engine,
@@ -208,6 +213,35 @@ export class Worker {
         for (const task of tasks) {
           if (githubWait(store, task.ref)) continue;
           if (
+            this.refreshIssueSource &&
+            task.ref.provider === 'github' &&
+            !isTicket(task) &&
+            task.source?.kind === 'local'
+          ) {
+            try {
+              await this.refreshIssueSource(task.id);
+            } catch (error) {
+              store.event(task.id, 'ticket.source_refresh_failed', {
+                error: redact(String(error)),
+              });
+            }
+          }
+          if (
+            task.state === 'needs_input' &&
+            task.resumeState === 'fixing' &&
+            !task.fixingMergeConflict &&
+            task.ref.provider === 'github'
+          ) {
+            try {
+              await this.engine.recoverInterruptedFix(task.id, (t) =>
+                this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
+              );
+            } catch (error) {
+              store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
+            }
+            if (this.stopped) return;
+          }
+          if (
             task.state === 'needs_input' &&
             !staleConflictPreparation(task) &&
             (task.resumeState === 'reviewing' || task.resumeState === 'awaiting_push') &&
@@ -304,6 +338,7 @@ export class Worker {
       for (const task of store.tasks())
         if (
           task.state === 'awaiting_publication' &&
+          !(task.partialReview?.retryAt && task.partialReview.retryAt > Date.now()) &&
           !store.busy(task.id) &&
           !githubWait(store, task.ref)
         ) {
@@ -314,6 +349,24 @@ export class Worker {
             if (error instanceof GitHubQuotaError) continue;
             const current = store.getTask(task.id);
             if (current.generation === task.generation && current.state !== 'paused') {
+              if (
+                current.partialReview &&
+                error instanceof AppError &&
+                [
+                  'draft_unconfirmed',
+                  'publication_unconfirmed',
+                  'provider_unreachable',
+                  'provider_500',
+                  'provider_502',
+                  'provider_503',
+                  'provider_504',
+                ].includes(error.code)
+              ) {
+                current.partialReview.retryAt = Date.now() + this.pollMs;
+                store.saveTask(current);
+                store.event(task.id, 'publication.deferred', { errorCode: error.code });
+                continue;
+              }
               current.state = 'needs_input';
               current.reason = redact(String(error));
               store.saveTask(current);
@@ -322,6 +375,9 @@ export class Worker {
             }
           }
         }
+      for (const task of store.tasks())
+        if (task.deferredWorkerInstructions?.length && !store.busy(task.id))
+          await this.engine.deliverWorkerInstruction(task.id);
       // Authors may be independent; each shared reviewer thread has one worker.
       reconcileWorkerPools(store);
       const limit = Math.max(
@@ -455,7 +511,20 @@ export class Worker {
       delete job.finishedAt;
       store.saveJob(job);
       if (job.deferredResult) {
-        await this.engine.completeJob(job, job.deferredResult);
+        await this.engine.completeJob(
+          job,
+          job.deferredResult,
+          job.kind === 'fix' &&
+            job.deferredResult.status === 'incomplete' &&
+            !task.fixingMergeConflict
+            ? (t) =>
+                this.workspaces.commitFix(
+                  t,
+                  'Preserve review fixes before conflict resolution',
+                  abort.signal,
+                )
+            : undefined,
+        );
         delete job.deferredResult;
         job.status = 'completed';
         return;
@@ -463,11 +532,27 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (startingPR && !sameRevision(startingPR, task.revision))
+      if (
+        startingPR &&
+        !sameRevision(startingPR, task.revision) &&
+        !(job.kind === 'fix' && (await this.engine.publishedFixBaseAdvanced(task, startingPR)))
+      ) {
+        if (
+          job.kind === 'review' &&
+          task.ref.provider === 'github' &&
+          startingPR.head === task.revision?.head
+        ) {
+          const updated = await this.engine.reconcile(task.id);
+          if (updated.generation !== job.generation) {
+            job.status = 'cancelled';
+            return;
+          }
+        }
         throw new AppError(
           'stale_revision',
           'The PR changed before the queued job started. Reconcile and review the new revision.',
         );
+      }
       if (
         job.kind === 'verify_merge' &&
         (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
@@ -547,8 +632,9 @@ export class Worker {
       if (isTicket(task)) task.revision = prepared.revision;
       if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
+      let preservedCopy: string | undefined;
       if (repairingConflict) {
-        await this.workspaces.prepareConflict(task, abort.signal);
+        preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
       } else if (job.kind === 'fix') {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
@@ -573,8 +659,22 @@ export class Worker {
         task,
         job,
         cwd: agentCwd,
-        readPaths: demo ? [] : this.workspaces.readPaths?.(task),
-        prompt: buildContext(store, task, job),
+        readPaths: demo
+          ? []
+          : [
+              ...(this.workspaces.readPaths?.(task) ?? []),
+              ...(preservedCopy ? [preservedCopy] : []),
+            ],
+        prompt: [
+          buildContext(store, task, job),
+          preservedCopy &&
+            `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
+          job.kind === 'review' &&
+            task.draftRecheck &&
+            `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
         signal: abort.signal,
         tools: isolatedReview ? [] : undefined,
         onSession: (threadId, turnId) => {
@@ -590,6 +690,12 @@ export class Worker {
               store.saveGroup(shared);
             }
           }
+          if (
+            job.role === 'author' &&
+            current.agents?.worker &&
+            current.agents.worker.engine !== job.profile?.engine
+          )
+            return;
           if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);
@@ -603,13 +709,7 @@ export class Worker {
             job.id,
           );
         },
-        onEvent: (type, data) =>
-          store.event(
-            job.taskId,
-            type,
-            typeof data === 'string' ? redact(data) : JSON.parse(redact(JSON.stringify(data))),
-            job.id,
-          ),
+        onEvent: (type, data) => store.event(job.taskId, type, redactEvent(data), job.id),
         onTool: async (name, args, callId) => {
           try {
             return await this.engine.broker.call(job, name, args, callId);

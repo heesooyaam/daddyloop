@@ -12,10 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { ManagedArcMounts, type NativeArcMount } from '../src/integrations/arc-managed.js';
 import type { command } from '../src/ops/process.js';
 
-export function managedFixture() {
+export function managedFixture(lockTimeoutMs = 120000) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'daddy-arc-managed-')));
   const shared = join(dir, 'shared'),
     leaseRoot = join(dir, 'leases');
@@ -49,6 +51,8 @@ export function managedFixture() {
       }
       throw new Error('Unexpected Arc command: ' + args.join(' '));
     }
+    expect(executable).toBe('bash');
+    expect(args[0]).toBe('/fake/arcadia-mount-lease');
     if (args.includes('config'))
       return json({
         status: 'success',
@@ -94,7 +98,13 @@ export function managedFixture() {
     throw new Error('Unexpected helper command');
   });
   const resources = vi.fn();
-  const manager = new ManagedArcMounts(dir, run, resources, () => '/fake/arcadia-mount-lease');
+  const manager = new ManagedArcMounts(
+    dir,
+    run,
+    resources,
+    () => '/fake/arcadia-mount-lease',
+    lockTimeoutMs,
+  );
   return {
     dir,
     shared,
@@ -199,8 +209,118 @@ it('keeps an ownership journal when mounting fails so the same operation can rec
     await expect(f.manager.ensure(group, task, 'reviewer')).rejects.toThrow('mount interrupted');
     const record = f.manager.records(group)[0];
     expect(record.state).toBe('creating');
+    const interrupted = f.run.getMockImplementation()!;
+    f.run.mockImplementation(async (command, args, options) => {
+      const result = await interrupted(command, args, options);
+      if (command === 'bash' && args.includes('config')) {
+        const value = JSON.parse(result.stdout);
+        value.data.object_store = join(f.dir, 'another-shared-store');
+        return { ...result, stdout: JSON.stringify(value) };
+      }
+      return result;
+    });
+    await expect(f.manager.status()).rejects.toThrow('shared store or lease root changed');
+    f.run.mockImplementation(interrupted);
     expect((await f.manager.ensure(group, task, 'reviewer')).lease.ownerId).toBe(record.ownerId);
   } finally {
     f.close();
   }
 });
+it('serializes setup validation with session journal creation', async () => {
+  const f = managedFixture();
+  try {
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const validation = f.manager.withJournalLock(async () => {
+      enter();
+      await gate;
+    });
+    await entered;
+    const controller = new AbortController();
+    const cancelled = f.manager.ensure(randomUUID(), randomUUID(), 'reviewer', controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    const creation = f.manager.ensure(randomUUID(), randomUUID(), 'author');
+    await Promise.resolve();
+    expect(f.run.mock.calls.some(([, args]) => args[0] === 'mount')).toBe(false);
+    release();
+    await validation;
+    await expect(creation).resolves.toHaveProperty('lease.mount');
+  } finally {
+    f.close();
+  }
+});
+it('starts each flock timeout after its local queue turn', async () => {
+  const f = managedFixture(150);
+  try {
+    const order: string[] = [];
+    await Promise.all(
+      [1, 2, 3].map((id) =>
+        f.manager.withJournalLock(async () => {
+          order.push(`start-${id}`);
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          order.push(`end-${id}`);
+        }),
+      ),
+    );
+    expect(order).toEqual(['start-1', 'end-1', 'start-2', 'end-2', 'start-3', 'end-3']);
+  } finally {
+    f.close();
+  }
+});
+it.skipIf(!existsSync('/usr/bin/flock'))(
+  'shares the session journal lock across processes',
+  async () => {
+    const f = managedFixture();
+    const lock = join(f.dir, 'arcadia-session-journals.lock');
+    const child = spawn(
+      '/usr/bin/flock',
+      ['--exclusive', lock, 'sh', '-c', 'printf locked; read value'],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once('data', () => resolve());
+        child.once('error', reject);
+        child.once('exit', () => reject(new Error(stderr || 'flock exited before ready')));
+      });
+      await expect(
+        f.manager.ensure(randomUUID(), randomUUID(), 'author', AbortSignal.abort()),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+
+      const controller = new AbortController();
+      const pending = f.manager.ensure(randomUUID(), randomUUID(), 'reviewer', controller.signal);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      controller.abort();
+      let timer!: NodeJS.Timeout;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Cancellation did not stop flock')), 1000);
+        timer.unref();
+      });
+      await expect(Promise.race([pending, deadline])).rejects.toMatchObject({ name: 'AbortError' });
+      clearTimeout(timer);
+      expect(f.manager.records()).toEqual([]);
+      expect(child.exitCode).toBeNull();
+
+      child.stdin.write('\n');
+      await once(child, 'exit');
+      await expect(f.manager.ensure(randomUUID(), randomUUID(), 'author')).resolves.toHaveProperty(
+        'lease.mount',
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      f.close();
+    }
+  },
+);

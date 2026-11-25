@@ -6,6 +6,88 @@ import { profiles, ticketInput } from './planning-fixture.js';
 import { taskCard } from '../src/integrations/telegram-tasks.js';
 afterEach(() => vi.restoreAllMocks());
 
+it('imports the declared sub-issue and keeps unrelated links as references', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  try {
+    const child = ticketInput(57);
+    vi.spyOn(f.tickets.reader, 'read').mockResolvedValue({ ref: child.ref, source: child.source });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: `Child task\nТикет GitHub — ${child.source.url}\nSee https://github.com/test/repo/issues/51 for background`,
+      requestId: 'subissue-57',
+    });
+    expect(task.source).toMatchObject({ kind: 'github_issue', url: child.source.url });
+    expect(task.state).toBe('implementing');
+    expect(
+      (
+        await f.daddy.createTask(group.id, {
+          requirements: child.source.url,
+          requestId: 'same-issue',
+        })
+      ).id,
+    ).toBe(task.id);
+    const local = await f.daddy.createTask(group.id, {
+      requirements: `Look at ${child.source.url} as an example`,
+      requestId: 'reference',
+    });
+    expect(local.source?.kind).toBe('local');
+  } finally {
+    await f.close();
+  }
+});
+it('keeps other tasks active while a worker question awaits a reply', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const first = await f.daddy.createTask(group.id, {
+      requirements: 'First task',
+      requestId: 'first',
+    });
+    const other = await f.daddy.createTask(group.id, {
+      requirements: 'Other task',
+      requestId: 'other',
+    });
+    f.daddy.start();
+    const question = 'Which layout should the first task use?';
+    f.runtime.runSession.mockResolvedValueOnce({
+      status: 'needs_input',
+      summary: question,
+      question,
+      checkedHead: '',
+    });
+    f.store.saveTask({ ...first, state: 'needs_input', reason: question });
+    f.store.event(first.id, 'job.completed', {});
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).at(-1)?.waitingTaskId).toBe(first.id),
+    );
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id).at(-1)?.status).toBe('completed'));
+    expect(f.store.getGroup(group.id).daddyState).toBe('active');
+    expect(f.store.getTask(first.id).state).toBe('needs_input');
+    expect(f.store.messages(group.id).at(-1)?.text).toBe(question);
+    f.store.saveTask({ ...other, state: 'complete' });
+    f.store.event(other.id, 'task.state', { state: 'complete' });
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).at(-1)).toMatchObject({
+        status: 'queued',
+        input: expect.stringContaining(other.id),
+      }),
+    );
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.daddyJobs(group.id).at(-1)?.status).toBe('completed'));
+    f.daddy.chat(group.id, 'Set the goal for the whole session');
+    f.runtime.runSession.mockResolvedValueOnce({
+      status: 'needs_input',
+      summary: 'Which goal?',
+      checkedHead: '',
+    });
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.store.getGroup(group.id).daddyState).toBe('needs_input'));
+  } finally {
+    await f.close();
+  }
+});
+
 it('reviews a report without code changes before daddy dispatches follow-up work', async () => {
   const f = daddyFixture();
   const subIssue = ticketInput(56);
@@ -430,7 +512,7 @@ it('allows worker defaults to change while daddy works, but preserves his active
     expect(f.store.getGroup(group.id).generation).toBe(group.generation);
     await expect(
       f.daddy.settings(group.id, { profiles: { ...profiles, daddy: profiles.worker } }),
-    ).rejects.toThrow('idle');
+    ).rejects.toMatchObject({ code: 'daddy_busy' });
     expect(f.store.getGroup(group.id).daddy).toEqual(profiles.daddy);
   } finally {
     done?.();

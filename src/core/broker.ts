@@ -8,6 +8,7 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
 import { Outbox } from './outbox.js';
@@ -90,6 +91,77 @@ export class Broker {
     );
     task.review = review;
     return review;
+  }
+  reconcileDraftEdits(task: Task, draft: ReviewSnapshot) {
+    const review = task.review!;
+    if (
+      task.ref.provider !== 'github' ||
+      !review.authorId ||
+      draft.authorId !== review.authorId ||
+      draft.status !== 'draft' ||
+      draft.revision.head !== review.revision.head
+    )
+      return;
+    const rows = this.store.pendingReviewWrites(task.id, review.marker).filter(
+      (row) =>
+        String(row.id)
+          .slice(review.marker.length + 1)
+          .split(':')[1] === 'edit_comment',
+    );
+    if (!rows.length) return;
+    const original = this.store.db.prepare(
+      "SELECT 1 FROM operations WHERE task_id=? AND status='done' AND (id GLOB ? OR id GLOB ?) AND json_extract(result,'$.id')=? AND json_extract(result,'$.body')=?",
+    );
+    // Legacy REST refusals have a durable event naming both the exact operation and native comment.
+    const failure = this.store.db.prepare(
+      "SELECT json_extract(data,'$.error') AS error FROM events WHERE task_id=? AND type='operation.uncertain' AND json_extract(data,'$.operationId')=? ORDER BY id DESC LIMIT 1",
+    );
+    this.store.transaction(() => {
+      for (const row of rows) {
+        const key = String(row.id);
+        if (this.outbox.isActive(key)) continue;
+        const error = failure.get(task.id, key)?.error;
+        for (const comment of draft.comments) {
+          const marker = comment.body.match(/\n\n<!-- daddyloop:[^>]+ -->$/)?.[0] ?? '';
+          const body = marker ? comment.body.slice(0, -marker.length) : comment.body;
+          const digest = createHash('sha256')
+            .update(JSON.stringify({ id: comment.id, body }))
+            .digest('hex');
+          if (digest === row.request) {
+            this.store.db
+              .prepare(
+                "UPDATE operations SET status='done',result=? WHERE id=? AND status='pending'",
+              )
+              .run(JSON.stringify(comment), key);
+            this.store.event(task.id, 'operation.recovered', { operationId: key });
+            break;
+          }
+          if (
+            typeof error === 'string' &&
+            error.startsWith(
+              `AppError: PATCH /repos/${task.ref.repo}/pulls/comments/${comment.id}: HTTP 404 `,
+            ) &&
+            original.get(
+              task.id,
+              review.marker + ':comment:*',
+              review.marker + ':*:edit_comment:*',
+              comment.id,
+              comment.body,
+            )
+          ) {
+            this.store.db
+              .prepare("DELETE FROM operations WHERE id=? AND status='pending'")
+              .run(key);
+            this.store.event(task.id, 'operation.refused', {
+              operationId: key,
+              error:
+                'Legacy comment edit returned HTTP 404; the confirmed draft text was preserved.',
+            });
+            break;
+          }
+        }
+      }
+    });
   }
   async call(
     job: Job,
@@ -187,7 +259,10 @@ export class Broker {
         task.id,
         key,
         data,
-        () => provider.updateComment(prRef(task), task.review!, data.id, next),
+        async () =>
+          old.body === next
+            ? old
+            : provider.updateComment(prRef(task), task.review!, data.id, next, old),
         async () => {
           const found = (await refresh()).comments.find((c) => c.id === data.id && c.body === next);
           return found ? { found: true, value: found } : { found: false };
@@ -196,14 +271,15 @@ export class Broker {
     }
     if (tool === 'remove_comment') {
       const data = schemas.remove_comment.parse(input);
-      if (!snapshot.comments.some((c) => c.id === data.id))
+      const old = snapshot.comments.find((c) => c.id === data.id);
+      if (!old)
         throw new AppError('comment_not_owned', 'Comment is not part of this draft review', 404);
       await this.outbox.perform(
         task.id,
         key,
         data,
         async () => {
-          await provider.deleteComment(prRef(task), task.review!, data.id);
+          await provider.deleteComment(prRef(task), task.review!, data.id, old);
           return null;
         },
         async () => ({
@@ -236,16 +312,24 @@ export class Broker {
     );
     return { summaryUpdated: true };
   }
-  async publish(task: Task): Promise<ReviewSnapshot> {
+  async publish(
+    task: Task,
+    verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
+  ): Promise<ReviewSnapshot> {
     const provider = this.provider(prRef(task));
     if (!task.review) throw new AppError('review_missing', 'No review to publish');
     const pr = await provider.getPR(prRef(task));
-    if (pr.state !== 'open' || !sameRevision(pr, task.review.revision))
+    if (
+      pr.state !== 'open' ||
+      pr.head !== task.review.revision.head ||
+      (!verifyFindings && !sameRevision(pr, task.review.revision))
+    )
       throw new AppError(
         'stale_revision',
         'PR revision changed. This review cannot release feedback for the new revision.',
       );
     const snapshot = await provider.getReview(prRef(task), task.review);
+    if (verifyFindings) await verifyFindings(pr, snapshot);
     if (snapshot.status === 'published') return snapshot;
     assertDraft(snapshot);
     await this.outbox.perform(

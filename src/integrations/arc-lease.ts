@@ -16,7 +16,7 @@ export function leaseHelper() {
   if (!path)
     throw new AppError(
       'arcadia_lease_helper_missing',
-      'Configure the company arcadia-mount-lease helper with daddy arcadia setup --lease-helper <path>',
+      'Install the company arcadia-mounts skill or configure its helper with daddy arcadia setup --lease-helper <path>',
       422,
     );
   return path;

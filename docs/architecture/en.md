@@ -84,7 +84,7 @@ sequenceDiagram
 
 For a Git URL, the hosting module validates the address and supplies authentication through `GitRepositoryTransport`. `Workspaces` asks Git for the default branch and commit, fetches that commit into a task-owned Git database, then creates a worktree. The next task gets a separate database and branch; retries reuse the existing copy. A local Git source is read without fetching into it. [The source-to-copy diagram](../workspaces/en.md#one-source-separate-workers) shows the separation.
 
-**Settings.** The agent profile and instructions are saved with the queued run. The first dispatch in a session applies any explicit task or worker profile and saves the selected profile with the run. Changing the session default leaves saved profiles intact. `AgentRegistry` selects the adapter by `profile.engine`.
+**Settings.** The agent profile and instructions are saved with the queued run. The first dispatch in a session applies any explicit task or worker profile and saves the selected profile with the run. A session-wide worker profile replaces slot overrides and applies to queued author turns. An active worker turn finishes on its current profile. `AgentRegistry` selects the adapter by `profile.engine`.
 
 **Result.** The agent returns a status, report and the commit it worked against. `Engine` checks these against the task and repository. A “done” message is insufficient: an unfinished review, for example, leaves the task open.
 
@@ -170,9 +170,11 @@ flowchart TB
     C -->|"Passed"| E["Task complete"]
 ```
 
-**From review to fixes.** `Engine.review()` queues a review. The reviewer reads the code and leaves draft comments. The service publishes only after the review finishes successfully. If it contains findings, `Engine.reconcile()` creates a fix run. The worker receives the published snapshot; the private draft is unavailable to it.
+**From review to fixes.** The reviewer prepares native comments during a turn. When a GitHub review is incomplete, daddy can publish its confirmed findings on the original PR commit and assign the worker to address them. With auto-merge enabled, a confirmed merge conflict goes to the assigned worker first. The next commit still requires a full independent review. The coordinator can read the actual question using read_task.
 
 **From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
+
+A request to message the worker during submission is stored with the task. After the saved commit is confirmed and its review is published, the scheduler delivers the instruction on the current revision. When a worker reports an incomplete fix without a human question and GitHub confirms a conflict, the service checkpoints the local edits, assigns conflict resolution to the same worker, and requires independent review of the resulting commit.
 
 **Finishing.** The reviewer must account for earlier findings: verify the fix or record a decision to withdraw, defer or reject a finding. Completion then needs an empty published review and the task's required checks: CI and, for a plan, approval. For opted-in GitHub tasks the scheduler rechecks the published review, CI and PR revision before sending a merge request with the reviewed head SHA. An uncertain write is reconciled through the outbox. A confirmed merge conflict on an opted-in task queues an author run on the pinned PR and target commits. The service pushes the resulting two-parent commit to the same PR and queues independent review of the new revision.
 
@@ -216,6 +218,8 @@ Workers keep their numbers while tasks occupy them. A request for a specific wor
 
 ## 6. How cancellation blocks old results
 
+Pausing a session records which tasks and queued turns it stopped. Resume restores their previous states and queue order, including after a service restart. Tasks paused individually keep their pause. A worker resumes in its existing working copy, and an unfinished review still needs a completed reviewer result.
+
 Cancellation can arrive while an agent is already sending its answer. Sending “stop” is therefore insufficient: the service must also check whether that old run may still change the task.
 
 ```mermaid
@@ -232,6 +236,16 @@ sequenceDiagram
 ```
 
 **An old result cannot advance the task.** The generation is a cancellation counter saved with each run. After a pause, the numbers differ. `Engine.completeJob()` ignores that result, and `Broker.call()` prevents that run from changing comments. Files and history are preserved.
+
+If the target branch advances before or during a GitHub review, daddy can keep its draft on the same PR commit and immediately schedule a fresh review, including when auto-merge is off. The old result cannot release feedback. For a draft with findings it verifies the author, the recorded summary and each comment against confirmed review operations. The reviewer must check the complete change, update or withdraw the remaining findings and write a new summary before publication. Unrecognized edits stay in the draft for inspection.
+
+A worker can continue fixing published findings on its pinned PR commit when GitHub confirms a fast-forward of the same target branch. Before pushing, daddy checks the source and target again. The new commit gets an independent review. A coordinator question about an already blocked task stays in the session history and other tasks can still wake the coordinator.
+
+GitHub draft comments are edited and removed by their node IDs in the pending review. After a lost response, the service compares the requested text with the current comment. A legacy REST edit refused with HTTP 404 can be retired when the comment still matches its confirmed receipt. A technical wait does not trigger an owner mention in Telegram.
+
+After a service restart, daddy checks an interrupted GitHub review against the native draft and its confirmed writes before scheduling another review. For an interrupted author fix it checks the published review, PR head, target and outstanding operations before returning the existing working copy to its worker.
+
+When a conflict repair starts in a dirty, unscoped GitHub worker checkout, the service preserves the entire checkout alongside a clean copy at the expected commit. The same worker can read its staged and untracked files while resolving the merge. The preserved files remain available after a retry.
 
 Code-version checks solve a related problem: reviewing H1 does not verify a fix in H2. The service compares the full code and comparison-base identity (`head`, `base`, `start`, `revisionId`). Changed code invalidates the old review, plan approval and human CI waiver. A leftover stale draft requires inspection.
 

@@ -250,6 +250,7 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow-y: auto;
 }
 .daddy-topbar {
   display: flex;
@@ -303,12 +304,26 @@
 .daddy-icon:hover {
   background: var(--accent);
 }
+.daddy-session-notices,
 .daddy-session-overview {
   min-block-size: 0;
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scrollbar-width: thin;
 }
+.daddy-session-notices:empty {
+  display: none;
+}
+.daddy-session-notices:not(:empty) {
+  min-block-size: 2rem;
+}
+.daddy-session-overview {
+  /* Give notices and the workspace room first, but keep provider links reachable. */
+  flex: 1000 0 0;
+  min-block-size: 2.5rem;
+  max-block-size: max-content;
+}
+.daddy-session-notices:focus-visible,
 .daddy-session-overview:focus-visible,
 .daddy-session-error-reason:focus-visible {
   outline: 2px solid var(--focus);
@@ -798,9 +813,6 @@
   border-bottom: 1px solid var(--danger);
   overflow-wrap: anywhere;
 }
-.daddy-main > .daddy-error {
-  flex-shrink: 0;
-}
 .daddy-session-error-reason {
   /* Long diagnostics can scroll without pushing the action or a task card out of view. */
   max-block-size: 4.5em;
@@ -1089,6 +1101,21 @@
 .daddy-shade {
   display: none;
 }
+@media (width > 850px) {
+  .daddy-app:has(.daddy-sessions-toggle[aria-expanded='false']) > .daddy-sidebar {
+    display: none;
+  }
+}
+@media (width > 650px) {
+  .daddy-board.collapsed {
+    display: none;
+  }
+}
+@media (width <= 650px) {
+  .daddy-tasks-toggle {
+    display: none;
+  }
+}
 @media (min-width: 1450px) {
   .daddy-conversation {
     padding-left: 55px;
@@ -1131,6 +1158,9 @@
   }
 }
 @media (max-width: 850px) {
+  .daddy-sessions-toggle {
+    display: none;
+  }
   .daddy-sidebar {
     position: fixed;
     top: 0;
@@ -1138,11 +1168,16 @@
     left: 0;
     z-index: 40;
     width: 260px;
+    visibility: hidden;
     transform: translateX(-100%);
-    transition: transform 0.16s;
+    transition:
+      transform 0.16s,
+      visibility 0.16s;
   }
   .daddy-sidebar.open {
+    visibility: visible;
     transform: translateX(0);
+    transition-property: transform;
   }
   .daddy-shade {
     display: block;
@@ -1708,9 +1743,6 @@ body {
 .daddy-button.primary:hover,
 .daddy-send:hover {
   background: var(--primary-hover);
-}
-.daddy-theme-toggle {
-  flex-shrink: 0;
 }
 .login-page > .daddy-theme-toggle {
   position: absolute;
@@ -2337,8 +2369,7 @@ body {
   flex-wrap: wrap;
   align-items: center;
 }
-.daddy-main > .daddy-session-progress {
-  flex-shrink: 0;
+.daddy-session-notices > .daddy-session-progress {
   margin-block: 6px;
   padding-block: 6px;
 }
@@ -2374,4 +2405,46 @@ body {
   display: grid;
   gap: 6px;
   overflow-wrap: anywhere;
+}
+
+@media (width <= 360px) {
+  .daddy-workspace[data-pane='tasks'] {
+    min-block-size: 16rem;
+  }
+}
+
+@media (width > 650px) and (height <= 420px) {
+  .daddy-topbar {
+    min-block-size: 3.5rem;
+    padding-block: 6px;
+  }
+  .daddy-workspace:has(.daddy-board:not(.collapsed)) {
+    min-block-size: 15rem;
+  }
+}
+
+@media (width <= 650px) and (height <= 600px) {
+  .daddy-workspace[data-pane='chat'] {
+    min-block-size: 45dvh;
+  }
+}
+
+@media (width > 650px) and (420px < height <= 600px) {
+  .daddy-workspace {
+    min-block-size: 16rem;
+  }
+}
+
+@media (width > 650px) and (height <= 600px) {
+  .daddy-board {
+    padding-inline: 12px;
+  }
+  .daddy-board-controls {
+    flex-wrap: nowrap;
+  }
+  .daddy-board-controls > .daddy-button {
+    min-inline-size: 0;
+    flex: 1 1 0;
+    padding-inline: 4px;
+  }
 }

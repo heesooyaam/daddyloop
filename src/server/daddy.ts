@@ -110,7 +110,9 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         z
           .object({
             workerLimit: workerNumber.optional(),
-            profiles: profilesSchema.optional(),
+            profiles: profilesSchema.partial().optional(),
+            forceDaddy: z.boolean().optional(),
+            applyWorkers: z.boolean().optional(),
             autoMerge: z.boolean().optional(),
             instructions: sessionInstructionsSchema.optional(),
           })

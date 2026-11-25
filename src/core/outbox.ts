@@ -8,6 +8,9 @@ import { redact } from './security.js';
 export class Outbox {
   private active = new Set<string>();
   constructor(private store: Store) {}
+  isActive(id: string) {
+    return this.active.has(id);
+  }
   async perform<T>(
     taskId: string,
     id: string,
