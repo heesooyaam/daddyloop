@@ -2231,15 +2231,27 @@ export class TelegramWorkspace {
         data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
+    const pair = this.pair();
+    const room = this.room();
+    const topic = room ? this.topic(room, group.id) : undefined;
+    const destination = topic
+      ? { chatId: topic.chatId, threadId: topic.threadId }
+      : !room && pair && this.store.setting('telegram.currentDaddy') === group.id
+        ? { chatId: pair.chatId }
+        : undefined;
     const deliveredFinalRuns = new Set(
       messages
         .filter(
           (message) =>
             message.phase === 'final' &&
             message.runId &&
+            destination &&
             this.store.db
-              .prepare("SELECT 1 FROM notifications WHERE status='sent' AND id LIKE ? LIMIT 1")
-              .get(`telegram:dialog:%:${message.id}:final`),
+              .prepare('SELECT 1 FROM notifications WHERE status=? AND id=?')
+              .get(
+                'sent',
+                `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:final`,
+              ),
         )
         .map((message) => message.runId),
     );

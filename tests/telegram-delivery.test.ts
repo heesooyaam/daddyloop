@@ -306,36 +306,88 @@ it.each([
   },
 );
 
-it('does not reuse a previous reply message ID for different legacy turn content', async () => {
+it('keeps one canonical delivery across repeated owner-mention changes', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
   try {
     const destination = { chatId: -10042, threadId: 4 };
+    const notificationId = 'telegram:dialog:-10042:4:question-id:final';
+    const options = (mention: boolean) => ({
+      key: mention ? notificationId : 'message:question-id',
+      replace: !mention,
+      replacePending: true,
+      final: true,
+      notificationId,
+    });
+    await f.queue.stop();
+    await f.queue.send(destination, text('@Owner · Choose?'), options(true));
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.stop();
+    await restored.send(destination, text('Choose?'), options(false));
+    await restored.send(destination, text('@Owner · Choose?'), options(true));
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
+      ['sendMessage', '@Owner · Choose?'],
+    ]);
+    const saved = f.store.db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .all()
+      .map((row) => JSON.parse(String(row.value)))
+      .filter((value) => value.options.notificationId === notificationId);
+    expect(saved).toHaveLength(1);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it.each([
+  ['different text', 'Second reply'],
+  ['the same text', 'First reply'],
+])('does not reuse a previous reply message ID for %s', async (_case, secondReply) => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const first = f.store.daddyMessage('group', 'agent', 'First reply', 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const second = f.store.daddyMessage('group', 'agent', secondReply, 'legacy-run', undefined, {
+      phase: 'final',
+    });
+    const firstNotification = `telegram:dialog:-10042:4:${first.id}:progress`;
+    const secondNotification = `telegram:dialog:-10042:4:${second.id}:final`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(firstNotification, 'pending', first.at);
     await f.queue.send(destination, text('First reply'), {
       key: 'turn:legacy-run',
       replace: true,
       final: false,
-      notificationId: 'telegram:dialog:-10042:4:first-id:progress',
+      notificationId: firstNotification,
     });
     await f.queue.stop();
-    await f.queue.send(destination, text('Second reply'), {
+    await f.queue.send(destination, text(secondReply), {
       key: 'turn:legacy-run',
       replace: true,
       final: true,
-      notificationId: 'telegram:dialog:-10042:4:second-id:final',
+      notificationId: secondNotification,
     });
     restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
-    await restored.send(destination, text('Second reply'), {
-      key: 'message:second-id',
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(1);
+    await restored.send(destination, text(secondReply), {
+      key: `message:${second.id}`,
       replace: true,
       final: true,
-      notificationId: 'telegram:dialog:-10042:4:second-id:final',
+      notificationId: secondNotification,
     });
     await restored.flush();
     expect(f.call.mock.calls.map(([method, body]) => [method, body.text, body.message_id])).toEqual(
       [
         ['sendMessage', 'First reply', undefined],
-        ['sendMessage', 'Second reply', undefined],
+        ['sendMessage', secondReply, undefined],
       ],
     );
   } finally {
