@@ -83,6 +83,7 @@ program
       const { app } = await buildApp({
         dataDir: dir,
         demo: options.demo,
+        hostCleanupUnits: process.env.DADDYLOOP_CLEANUP_UNITS,
         minDiskGiB: Number(options.minDiskGib),
         maxDiskPercent: Number(options.maxDiskPercent),
         minMemoryGiB: Number(options.minMemoryGib),

@@ -225,15 +225,34 @@ export class GitHubProvider implements ReviewProvider {
     }
     throw new AppError('pagination_limit', 'Too many check runs', 502);
   }
-  async findReview(ref: PRRef, marker: string) {
+  private async ownReviews(ref: PRRef) {
     const [list, user] = await Promise.all([
       this.http.pages<GHReview>(`${path(ref)}/reviews`),
       this.http.request<{ id: number }>('GET', '/user'),
     ]);
-    const review = list.find((r) => r.user.id === user.id && (r.body ?? '').includes(tag(marker)));
+    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
+      throw new AppError(
+        'draft_create_unconfirmed',
+        'GitHub did not confirm the authenticated review account.',
+      );
+    if (list.some((r) => !r?.user || !Number.isSafeInteger(r.user.id) || r.user.id <= 0))
+      throw new AppError(
+        'draft_create_unconfirmed',
+        'GitHub did not confirm the owner of a review in the list.',
+      );
+    return { owner: user.id, reviews: list.filter((r) => r.user.id === user.id) };
+  }
+  async findReview(ref: PRRef, marker: string) {
+    const { reviews } = await this.ownReviews(ref);
+    const matches = reviews.filter((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
+    if (matches.length > 1)
+      throw new AppError('draft_changed', 'Several GitHub reviews have this task marker.');
+    const review = matches[0];
     return review ? this.handle(review, marker) : undefined;
   }
   private handle(review: GHReview, marker: string, revision?: Revision): ReviewHandle {
+    if (!Number.isSafeInteger(review.id) || review.id <= 0)
+      throw new AppError('draft_create_unconfirmed', 'GitHub did not return a valid review ID.');
     return {
       id: String(review.id),
       nodeId: review.node_id,
@@ -242,51 +261,85 @@ export class GitHubProvider implements ReviewProvider {
       authorId: String(review.user.id),
     };
   }
-  async createReview(ref: PRRef, revision: Revision, marker: string) {
-    const prepared = await this.prepareDraftReview(ref, revision, marker).catch((error) => {
-      // This lookup happens before the create request.
-      if (error instanceof GitHubRetryError) throw error.beforeWrite();
-      throw error;
-    });
+  async createReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    confirmOwner?: (owner: string) => Promise<void>,
+  ) {
+    const prepared = await this.prepareDraftReview(ref, revision, marker);
+    await confirmOwner?.(prepared.authorId);
     return prepared.existing ?? prepared.create();
   }
   async prepareDraftReview(ref: PRRef, revision: Revision, marker: string, authorId?: string) {
-    const [list, user] = await Promise.all([
-      this.http.pages<GHReview>(`${path(ref)}/reviews`),
-      this.http.request<{ id: number }>('GET', '/user'),
-    ]);
-    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
-      throw new AppError('provider_shape', 'GitHub returned no review account identity', 502);
-    if (authorId && String(user.id) !== authorId)
-      throw new AppError('draft_account_changed', 'The GitHub account for this draft changed.');
-    const matches = list.filter(
-      (r) => r.user?.id === user.id && (r.body ?? '').includes(tag(marker)),
-    );
-    const valid = (r: GHReview) =>
-      r.state === 'PENDING' &&
-      r.commit_id === revision.head &&
-      Number.isSafeInteger(r.id) &&
-      r.id > 0 &&
-      r.user?.id === user.id &&
-      (r.body ?? '').trimEnd().endsWith(tag(marker));
-    if (matches.length > 1 || (matches[0] && !valid(matches[0])))
+    const { owner, reviews } = await this.ownReviews(ref).catch((error) => {
+      if (error instanceof GitHubRetryError) throw error.beforeWrite();
+      throw error;
+    });
+    if (authorId && authorId !== String(owner))
       throw new AppError(
-        'draft_changed',
-        'The matching GitHub review is no longer the expected draft.',
+        'draft_owner_changed',
+        'The GitHub account changed during draft recovery.',
+      );
+    const matches = reviews.filter((r) => (r.body ?? '').includes(tag(marker)));
+    const existing = matches[0];
+    if (existing) {
+      if (
+        matches.length !== 1 ||
+        existing.commit_id !== revision.head ||
+        existing.state !== 'PENDING'
+      )
+        throw new AppError(
+          'draft_changed',
+          'The marked review was submitted or its revision changed. Inspect it before continuing.',
+        );
+      const handle = this.handle(existing, marker, revision);
+      const comments = await this.http.pages<GHComment>(
+        `${path(ref)}/reviews/${handle.id}/comments`,
+      );
+      if (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
+        throw new AppError(
+          'draft_changed',
+          'The recovered draft has been edited. Its contents have been preserved.',
+        );
+      return { authorId: String(owner), existing: handle, create: async () => handle };
+    }
+    if (reviews.some((r) => r.state === 'PENDING'))
+      throw new AppError(
+        'draft_occupied',
+        'A different pending GitHub review belongs to this account. Its contents have been preserved.',
       );
     return {
-      authorId: String(user.id),
-      existing: matches[0] ? this.handle(matches[0], marker, revision) : undefined,
+      authorId: String(owner),
       create: async () => {
-        const review = await this.http.request<GHReview>('POST', `${path(ref)}/reviews`, {
-          commit_id: revision.head,
-          body: `Review in progress.\n\n${tag(marker)}`,
-        });
-        if (!review || !valid(review))
+        // This POST creates only a draft. GitHub enforces one pending review per account and PR.
+        let review: GHReview;
+        try {
+          review = await this.http.request<GHReview>('POST', `${path(ref)}/reviews`, {
+            commit_id: revision.head,
+            body: `Review in progress.\n\n${tag(marker)}`,
+          });
+        } catch (error) {
+          if (
+            error instanceof AppError &&
+            error.code === 'provider_422' &&
+            /one pending review/i.test(error.message)
+          )
+            throw new AppError(
+              'draft_creation_race',
+              'GitHub has a pending review that is not visible in the review list yet.',
+            );
+          throw error;
+        }
+        if (
+          review.user?.id !== owner ||
+          review.state !== 'PENDING' ||
+          review.commit_id !== revision.head ||
+          !(review.body ?? '').trimEnd().endsWith(tag(marker))
+        )
           throw new AppError(
-            'draft_unconfirmed',
-            'GitHub did not confirm the expected draft.',
-            502,
+            'draft_create_unconfirmed',
+            'GitHub did not confirm the requested draft.',
           );
         return this.handle(review, marker, revision);
       },

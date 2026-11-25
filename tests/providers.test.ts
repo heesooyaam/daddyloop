@@ -40,6 +40,33 @@ describe('GitHub draft review contract', () => {
       await new GitHubProvider('github.com', 'fake', http).findReview(ref, 'daddyloop:t:1'),
     ).toBeUndefined();
   });
+  it('requires numeric account and draft identities before binding a review after an ambiguous create', async () => {
+    let validAccount = false;
+    const writes = vi.fn(() => ({
+      commit_id: revision.head,
+      user: { id: 7 },
+      state: 'PENDING',
+      body: 'Review in progress.\n\n' + tag('m'),
+    }));
+    const provider = new GitHubProvider(
+      'github.com',
+      'fake',
+      transport((path, method) => {
+        if (path === '/user') return validAccount ? { id: 7 } : {};
+        if (method === 'GET') return [];
+        return writes();
+      }),
+    );
+    await expect(provider.createReview(ref, revision, 'm')).rejects.toMatchObject({
+      code: 'draft_create_unconfirmed',
+    });
+    expect(writes).not.toHaveBeenCalled();
+    validAccount = true;
+    await expect(provider.createReview(ref, revision, 'm')).rejects.toMatchObject({
+      code: 'draft_create_unconfirmed',
+    });
+    expect(writes).toHaveBeenCalledOnce();
+  });
   it('creates a pending review on an explicit revision and publishes as COMMENT', async () => {
     const calls: { method: string; body: Record<string, unknown> }[] = [];
     const http = transport((path, method, body) => {

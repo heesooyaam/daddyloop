@@ -23,6 +23,7 @@ async function fixture() {
     title: 'Draft recovery',
     body: '',
     state: 'open' as const,
+    draft: false,
     branch: 'feature',
     targetBranch: 'main',
     cloneUrl: 'https://github.com/acme/service.git',
@@ -36,10 +37,13 @@ async function fixture() {
     createStatus: 502,
     account: 7,
     paginate: false,
+    rejectOccupiedSlot: false,
   };
   const transport = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const { pathname: path, searchParams } = new URL(String(url));
     if (path === '/user') return Response.json({ id: gitHub.account });
+    if (path.endsWith('/reviews/6060947228/comments')) return Response.json([]);
+    if (path.endsWith('/reviews/6060947228')) return Response.json(gitHub.draft);
     expect(path).toBe('/repos/acme/service/pulls/38/reviews');
     if (init?.method === 'GET') {
       const reviews =
@@ -50,6 +54,11 @@ async function fixture() {
     }
     expect(init?.method).toBe('POST');
     const body = JSON.parse(String(init?.body));
+    if (gitHub.rejectOccupiedSlot && gitHub.draft)
+      return Response.json(
+        { message: 'User can only have one pending review per pull request' },
+        { status: 422 },
+      );
     gitHub.draft = {
       id: 6060947228,
       node_id: 'draft',
@@ -65,6 +74,7 @@ async function fixture() {
   const connect = () => {
     const provider = new GitHubProvider(ref.host, 'offline', transport, store);
     vi.spyOn(provider, 'getPR').mockImplementation(async () => ({ ...pr }));
+    vi.spyOn(provider, 'targetAdvanced').mockResolvedValue(false);
     return new Engine(store, () => provider);
   };
   let engine = connect();
@@ -88,8 +98,9 @@ async function fixture() {
     },
     ready() {
       const saved = store.getTask(task.id);
-      saved.reviewPreparation!.notBefore = 0;
+      saved.draftStart!.retryAt = 0;
       store.saveTask(saved);
+      store.setSetting('github.read-backoff:' + ref.host, null);
       store.setSetting('github.quota:' + ref.host, { until: 0, delay: 0 });
       store.setSetting('github.read-backoff:' + ref.host, { until: 0, delay: 0 });
     },
@@ -151,11 +162,11 @@ it('resumes the original draft after a 502, a restart, a failed read and an empt
     expect(recovered.state).toBe('reviewing');
     expect(recovered.review).toMatchObject({
       id: '6060947228',
-      marker: initial.reviewPreparation!.marker,
+      marker: initial.draftStart!.marker,
       revision,
       authorId: '7',
     });
-    expect(recovered.reviewPreparation).toBeUndefined();
+    expect(recovered.draftStart).toBeUndefined();
     expect(recovered.round).toBe(initial.round);
     expect(f.posts()).toBe(1);
     expect(f.store.jobs(id)).toHaveLength(1);
@@ -179,7 +190,7 @@ it('rechecks an empty list and retries when GitHub explicitly refused the previo
       f.engine.review(f.task.id),
     ]);
     expect(starts[0].status).toBe('fulfilled');
-    expect(f.store.getTask(f.task.id).review?.marker).toBe(first.reviewPreparation!.marker);
+    expect(f.store.getTask(f.task.id).review?.marker).toBe(first.draftStart!.marker);
     expect(f.posts()).toBe(2);
     expect(f.store.jobs(f.task.id)).toHaveLength(1);
   } finally {
@@ -201,10 +212,15 @@ it.each(['revision', 'account', 'draft state', 'draft commit'])(
         Object.assign(f.gitHub.draft as object, { state: 'COMMENTED' });
       if (changed === 'draft commit')
         Object.assign(f.gitHub.draft as object, { commit_id: 'e'.repeat(40) });
-      const blocked = await f.engine.review(f.task.id);
+      if (changed === 'revision') await f.engine.review(f.task.id);
+      else
+        await expect(f.engine.review(f.task.id)).rejects.toMatchObject({
+          code: changed === 'account' ? 'draft_owner_changed' : 'draft_changed',
+        });
+      const blocked = f.store.getTask(f.task.id);
       expect(blocked.state).toBe('needs_input');
       expect(blocked.review).toBeUndefined();
-      expect(blocked.reviewPreparation?.marker).toBe(first.reviewPreparation?.marker);
+      expect(blocked.draftStart?.marker).toBe(first.draftStart?.marker);
       expect(f.store.jobs(f.task.id)).toHaveLength(0);
       expect(f.posts()).toBe(1);
     } finally {
@@ -212,3 +228,33 @@ it.each(['revision', 'account', 'draft state', 'draft commit'])(
     }
   },
 );
+
+it('reconciles the same draft if GitHub rejects a guarded retry before the original becomes visible', async () => {
+  const f = await fixture();
+  try {
+    const id = f.task.id,
+      first = await f.engine.review(id);
+    f.gitHub.rejectOccupiedSlot = true;
+    f.ready();
+    await f.engine.review(id);
+    expect(f.posts()).toBe(1);
+    f.ready();
+    await f.engine.review(id);
+    expect(f.posts()).toBe(2);
+    expect(f.store.getTask(id).state).toBe('queued');
+    expect(f.store.activeJobs(id)).toHaveLength(0);
+    f.gitHub.reviews = [f.gitHub.draft];
+    f.gitHub.paginate = true;
+    f.ready();
+    const recovered = await f.engine.review(id);
+    expect(recovered.review).toMatchObject({
+      marker: first.draftStart!.marker,
+      id: '6060947228',
+      revision,
+    });
+    expect(f.posts()).toBe(2);
+    expect(f.store.activeJobs(id)).toHaveLength(1);
+  } finally {
+    f.close();
+  }
+});

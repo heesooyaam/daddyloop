@@ -5,8 +5,14 @@ import { join } from 'node:path';
 import { git } from '../src/runtime/git.js';
 import { describe, expect, it, vi } from 'vitest';
 import { reconcileWorkerPools, workerSlots, saveWorkerSlots } from '../src/core/worker-pool.js';
-import { pollAutoMerge } from '../src/core/auto-merge.js';
+import { autoMergeSettings, githubActivityStatus, pollAutoMerge } from '../src/core/auto-merge.js';
+import { taskActivity } from '../src/core/task-activity.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
+import { queueCard, taskCard } from '../src/integrations/telegram-tasks.js';
+import { TelegramProgress } from '../src/integrations/telegram-progress.js';
+import { TelegramApi } from '../src/integrations/telegram.js';
+import { translate } from '../src/i18n/index.js';
+import { githubBackoff } from '../src/providers/github-quota.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import { daddyFixture } from './daddy-fixture.js';
 
@@ -70,6 +76,174 @@ async function setup(f = daddyFixture(), initial: Partial<PullRequest> = {}, rep
 }
 
 describe('opt-in GitHub merging', () => {
+  function expectStatus(
+    f: Awaited<ReturnType<typeof setup>>,
+    label: string,
+    publishedReason?: string,
+    russian?: string,
+  ) {
+    const task = f.store.getTask(f.task.id);
+    const group = f.store.getGroup(f.group.id);
+    const [item] = taskActivity(
+      [task],
+      f.store.activeJobs(task.id),
+      (task, job) =>
+        githubActivityStatus(
+          task,
+          autoMergeSettings(f.store, group, task),
+          githubBackoff(f.store, task.ref),
+          job,
+        ),
+      workerSlots(f.store, group),
+    );
+    const boardTask = f.daddy.board(group.id).tasks.find((row) => row.id === task.id)!;
+    expect(boardTask.statusLabel).toBe(label);
+    if (publishedReason) expect(boardTask.reason).toBe(publishedReason);
+    for (const locale of ['en', 'ru'] as const) {
+      const expected = locale === 'ru' && russian ? russian : translate(locale, label);
+      expect(translate(locale, boardTask.statusLabel)).toBe(expected);
+      expect(queueCard(locale, group.id, [item!]).text).toContain(expected);
+      const details = taskCard(locale, item!).text;
+      expect(details).toContain(expected);
+      if (publishedReason) {
+        expect(details).toContain(translate(locale, publishedReason));
+        expect(details).not.toContain(translate(locale, task.reason));
+        const progress = new TelegramProgress(
+          f.store,
+          new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async () => {
+            throw new Error('Rendering the status card must stay offline');
+          }),
+          'fixture:',
+          () => locale,
+          () => undefined,
+        ).card(group).text;
+        expect(progress.split('\n')[1]).toBe(expected);
+        expect(progress).toContain(`${task.title} · ${expected}`);
+      }
+    }
+  }
+
+  it.each([
+    ['completed', false],
+    ['completed', true],
+    ['incomplete', true],
+    ['needs_input', true],
+  ] as const)(
+    'shows GitHub mergeability after publishing a %s review (findings: %s)',
+    async (status, findings) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const task = f.store.getTask(f.task.id);
+        const handle = { ...task.review!, authorId: 'owner' };
+        f.store.saveTask({ ...task, review: handle });
+        f.store.setSetting('demo-review:' + handle.id, {
+          ...(await f.provider.getReview(prRef(task), handle)),
+          authorId: 'owner',
+        });
+        const job = f.store.claim()!;
+        if (findings)
+          await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Published finding' });
+        await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
+        await f.engine.completeJob(job, {
+          status,
+          summary: 'Report',
+          question: status === 'needs_input' ? 'Which behavior is intended?' : undefined,
+          checkedHead: task.revision!.head,
+        });
+        f.store.saveJob({ ...job, status: 'completed' });
+        expectStatus(f, 'Publishing review');
+
+        f.setRemote({ mergeable: null });
+        await f.engine.publish(task.id);
+        const waiting = f.store.getTask(task.id);
+        expect(waiting).toMatchObject({
+          state: 'awaiting_publication',
+          snapshot: { status: 'published' },
+        });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        const reason = 'The review is published. Waiting for GitHub to determine mergeability.';
+        let mergeability = 'GitHub is calculating mergeability';
+        if (waiting.partialReview) {
+          const until = waiting.partialReview.retryAt!;
+          const time = new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
+          mergeability = `GitHub mergeability check · retry at ${time} UTC · PR #12`;
+        }
+        expectStatus(f, mergeability, reason);
+        const key = `github.read-backoff:${task.ref.host}`;
+        const until = Math.ceil(Date.now() / 1000) * 1000 + 60_000;
+        const time = new Date(until).toISOString().slice(11, 19);
+        for (const http of [undefined, 408, 500, 502, 503, 504]) {
+          f.store.setSetting(key, { status: http, until, delay: 60_000 });
+          const failure = http ? `HTTP ${http}` : 'offline';
+          expectStatus(
+            f,
+            `GitHub is calculating mergeability · PR #12 · GitHub ${failure} · retry at ${time} UTC`,
+            reason,
+            `GitHub проверяет возможность слияния · PR #12 · GitHub ${failure} · повтор в ${time} UTC`,
+          );
+        }
+        f.store.setSetting(key, null);
+        expectStatus(f, mergeability, reason);
+
+        f.setRemote({ mergeable: true });
+        await f.engine.publish(task.id);
+        expect(f.store.getTask(task.id).state).toBe(findings ? 'fixing' : 'awaiting_merge');
+        expectStatus(f, findings ? 'Waiting for a worker' : 'Checking GitHub auto-merge');
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'shows deferred author discussion after clean publication (auto-merge: %s)',
+    async (autoMerge) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge });
+        await f.engine.review(f.task.id, true);
+        const review = f.store.claim()!;
+        await f.engine.chat(f.task.id, 'author', 'Explain the decision', 'deferred-chat', true);
+        await f.engine.completeJob(review, {
+          status: 'completed',
+          summary: 'Verified',
+          checkedHead: f.task.revision!.head,
+        });
+        f.store.saveJob({ ...review, status: 'completed' });
+        await f.engine.publish(f.task.id);
+        expect(f.store.getTask(f.task.id).state).toBe(autoMerge ? 'awaiting_merge' : 'complete');
+        await f.engine.deliverWorkerInstruction(f.task.id);
+        expect(f.daddy.board(f.group.id).taskQueue).toEqual([f.task.id]);
+        expectStatus(f, 'Waiting for task discussion');
+
+        saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: f.task.id }]);
+        const chat = f.store.claim()!;
+        expect(chat.kind).toBe('chat');
+        expectStatus(f, 'Task discussion in progress');
+        const task = f.store.getTask(f.task.id);
+        expect(
+          queueCard('en', f.group.id, [{ task, job: chat, assignedWorker: 1 }]).text,
+        ).toContain('Worker 1 · <1 min elapsed');
+        await f.engine.completeJob(chat, {
+          status: 'completed',
+          summary: 'Explained',
+          checkedHead: f.task.revision!.head,
+        });
+        f.store.saveJob({ ...chat, status: 'completed' });
+        expect(f.daddy.board(f.group.id).taskQueue).toEqual([]);
+        if (autoMerge) expectStatus(f, 'Checking GitHub auto-merge');
+        else
+          expect(
+            queueCard('en', f.group.id, [{ task: f.store.getTask(f.task.id) }]).text,
+          ).toContain('No unfinished tasks.');
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   it('restores a legacy timed-out conflict once, only with the original task generation and an active merge policy', async () => {
     const f = await setup();
     try {
@@ -633,6 +807,269 @@ describe('opt-in GitHub merging', () => {
       await f.close();
     }
   });
+
+  it.each([
+    {
+      scenario: 'empty draft, reconcile before resource resume',
+      legacy: false,
+      ownerPaused: false,
+    },
+    { scenario: 'findings after multiple legacy base changes', legacy: true },
+    { scenario: 'empty draft persisted with a stale resource marker', legacyPause: true },
+    {
+      scenario: 'findings persisted with a stale resource marker',
+      legacy: true,
+      legacyPause: true,
+    },
+    { scenario: 'owner pause with a stale resource marker', legacyPause: true, ownerPaused: true },
+  ])(
+    'handles a target-branch advance with a resource-paused GitHub review ($scenario)',
+    async ({ legacy, legacyPause, ownerPaused }) => {
+      const previousBase = 'b9fd4147112ca77d3d76a9cf5924ae2bce5a0590';
+      const f = await setup(daddyFixture(), {
+        head: legacy
+          ? 'f9b309ee72b7d5d1490c2d21c5653ea942c2747f'
+          : '743ed0b7404411a04341e85a4cd7291e523c1c4b',
+        base: previousBase,
+        start: previousBase,
+      });
+      try {
+        const generation = legacy ? 69 : 29;
+        f.store.saveTask({ ...f.store.getTask(f.task.id), generation: generation - 1 });
+        await f.engine.review(f.task.id, true);
+        const old = f.store.getTask(f.task.id);
+        const handle = { ...old.review!, authorId: 'reviewer' };
+        const key = 'demo-review:' + handle.id;
+        f.store.saveTask({ ...old, review: handle });
+        f.store.setSetting(key, {
+          ...(await f.provider.getReview(prRef(old), handle)),
+          authorId: handle.authorId,
+          body: `Review in progress.
+
+<!-- ${handle.marker} -->`,
+        });
+        const job = f.store.claim()!;
+        const finding = legacy
+          ? ((await f.engine.broker.call(job, 'add_comment', {
+              key: 'finding',
+              body: 'Check layout',
+            })) as { id: string })
+          : undefined;
+        const earlier = await f.provider.getReview(prRef(old), handle);
+        let restoredDeletion = earlier.comments;
+        if (finding) {
+          await f.engine.broker.call(job, 'set_summary', { body: 'Earlier summary' });
+          earlier.body = (await f.provider.getReview(prRef(old), handle)).body;
+          await f.engine.broker.call(job, 'edit_comment', {
+            id: finding.id,
+            body: 'Check spacing',
+          });
+          if (legacyPause) {
+            for (let version = 0; version < 98; version++)
+              await f.engine.broker.call(job, 'set_summary', { body: `Intermediate ${version}` });
+            f.store.db
+              .prepare(
+                `WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n<50000)
+                 INSERT INTO events(task_id,type,data,at)
+                 SELECT ?, 'runtime.item', '{}', ? FROM history`,
+              )
+              .run(old.id, new Date().toISOString());
+          }
+          await f.engine.broker.call(job, 'set_summary', { body: 'Current summary' });
+          const removed = (await f.engine.broker.call(job, 'add_comment', {
+            key: 'removed',
+            body: 'Resolved finding',
+          })) as { id: string };
+          restoredDeletion = (await f.provider.getReview(prRef(old), handle)).comments;
+          await f.engine.broker.call(job, 'remove_comment', {
+            id: removed.id,
+            reason: 'Already resolved',
+            outcome: 'withdrawn',
+          });
+        }
+        const draft = await f.provider.getReview(prRef(old), handle);
+        await f.engine.chat(old.id, legacy ? 'reviewer' : 'author', 'Queued during review');
+        await f.engine.interruptTask(old.id, 'Disk threshold', 'resource.pause');
+        expect(f.store.jobs(old.id).at(-1)).toMatchObject({ kind: 'chat', status: 'cancelled' });
+        expect(f.store.jobs(old.id).find(({ id }) => id === job.id)?.status).toBe('cancelled');
+        const base = '9bf00a4f8ca1bb3ae882ed58da1a0186aaac73e7';
+        const targetAdvanced = vi.fn(async () => false);
+        Object.assign(f.provider, { targetAdvanced });
+        if (!legacy || legacyPause) {
+          f.setRemote({ base, start: base });
+          if (legacyPause) {
+            // Older reconciliation had no resource-pause guard and saved the new pin first.
+            const waiting = vi
+              .spyOn(
+                f.engine as unknown as { reviewWaitingForResources(): boolean },
+                'reviewWaitingForResources',
+              )
+              .mockReturnValue(false);
+            try {
+              await f.engine.reconcile(old.id);
+            } finally {
+              waiting.mockRestore();
+            }
+            expect(f.store.getTask(old.id)).toMatchObject({
+              generation: generation + 2,
+              revision: { base },
+              review: { revision: old.revision },
+              resourcePause: { generation: generation + 1 },
+            });
+          }
+          await f.engine.reconcile(old.id);
+          await f.engine.retryInterruptedStep(old.id);
+          await f.engine.review(old.id, true);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            revision: { base: legacyPause ? base : previousBase },
+            resourcePause: { generation: generation + 1 },
+          });
+        }
+        if (ownerPaused) {
+          await f.engine.action(old.id, 'pause');
+          f.daddy.tick();
+          await f.engine.reconcile(old.id);
+          await f.engine.retryInterruptedStep(old.id);
+          await expect(f.engine.review(old.id, true)).rejects.toMatchObject({
+            code: 'task_paused',
+          });
+          expect(f.store.getTask(old.id).state).toBe('paused');
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          return;
+        }
+        f.daddy.tick();
+        await vi.waitFor(() => expect(f.store.getTask(old.id).resourcePause).toBeUndefined());
+        expect(f.store.getTask(old.id)).toMatchObject({
+          state: 'needs_input',
+          generation: generation + (legacyPause ? 2 : 1),
+        });
+        f.setRemote({ base, start: base });
+        const currentBase = legacy && !legacyPause ? 'd'.repeat(40) : base;
+        if (legacy && !legacyPause) {
+          // Reach the persisted stale-draft state while the native draft cannot be carried.
+          f.store.setSetting(key, { ...draft, body: 'Unrecognized native edit' });
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            state: 'needs_input',
+            generation: generation + 2,
+            revision: { base },
+            review: { revision: old.revision },
+          });
+          await f.engine.action(old.id, 'resume');
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id).reason).toBe('Review points to a different revision');
+          f.setRemote({ base: currentBase, start: currentBase });
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            generation: generation + 3,
+            revision: { base: currentBase },
+          });
+          await f.engine.action(old.id, 'resume');
+          f.store.setSetting(key, draft);
+          await f.engine.reconcile(old.id);
+        }
+        await f.engine.retryInterruptedStep(old.id);
+        expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        targetAdvanced.mockResolvedValue(true);
+        for (const patch of [
+          { state: 'closed' as const },
+          { draft: true },
+          { branch: 'another-source' },
+          { targetBranch: 'another-target' },
+          { head: 'e'.repeat(40) },
+        ]) {
+          f.setRemote(patch);
+          await f.engine.retryInterruptedStep(old.id);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          f.setRemote({ ...old.pr!, base: currentBase, start: currentBase });
+        }
+        for (const patch of [
+          { authorId: 'another-reviewer' },
+          { body: 'Unrecognized native edit' },
+          ...(finding
+            ? [
+                { comments: [] },
+                { comments: earlier.comments },
+                { comments: restoredDeletion },
+                { body: earlier.body },
+                {
+                  body: `Review in progress.
+
+<!-- ${handle.marker} -->`,
+                },
+              ]
+            : []),
+        ]) {
+          f.store.setSetting(key, { ...draft, ...patch });
+          await f.engine.retryInterruptedStep(old.id);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        }
+        f.store.setSetting(key, draft);
+        const pending = handle.marker + ':' + job.id + ':set_summary:lost-response';
+        f.store.db
+          .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+          .run(pending, old.id, 'pending', 'unconfirmed-summary');
+        await f.engine.retryInterruptedStep(old.id);
+        expect(f.store.activeJobs(old.id)).toHaveLength(0);
+        f.store.db.prepare('DELETE FROM operations WHERE id=?').run(pending);
+
+        if (legacy) {
+          // Confirm that older removal receipts are still useful when their decision was saved.
+          f.store.db
+            .prepare("UPDATE operations SET result='null' WHERE task_id=? AND id GLOB ?")
+            .run(old.id, handle.marker + ':*:remove_comment:*');
+          if (legacyPause) await f.engine.retryInterruptedStep(old.id);
+          else {
+            await f.engine.review(old.id, true);
+            expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), base, currentBase);
+          }
+        } else await f.engine.retryInterruptedStep(old.id);
+        await f.engine.retryInterruptedStep(old.id);
+        expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), previousBase, base);
+        const recovered = f.store.getTask(old.id);
+        expect(recovered).toMatchObject({
+          state: 'reviewing',
+          review: { id: handle.id, marker: handle.marker, revision: { base: currentBase } },
+          reviewFinished: false,
+        });
+        expect(recovered.draftRecheck).toEqual(finding ? { commentIds: [finding.id] } : undefined);
+        expect(f.store.activeJobs(old.id)).toMatchObject([
+          { kind: 'review', generation: recovered.generation },
+        ]);
+        const result = {
+          status: 'completed' as const,
+          summary: 'Reviewed',
+          checkedHead: old.revision!.head,
+        };
+        await f.engine.completeJob(job, result);
+        await expect(
+          f.engine.broker.call(job, 'set_summary', { body: 'Late summary' }),
+        ).rejects.toMatchObject({ code: 'stale_run' });
+        expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+        expect(await f.provider.getReview(prRef(old), handle)).toEqual(draft);
+        if (finding) {
+          const unchecked = f.store.claim()!;
+          await f.engine.completeJob(unchecked, result);
+          expect(f.store.getTask(old.id).reviewFinished).toBe(false);
+          f.store.saveJob({ ...unchecked, status: 'completed' });
+          const checked = f.store.claim()!;
+          await f.engine.broker.call(checked, 'edit_comment', {
+            id: finding.id,
+            body: 'Verified against the new base',
+          });
+          await f.engine.broker.call(checked, 'set_summary', { body: 'Rechecked' });
+          await f.engine.completeJob(checked, result);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            state: 'awaiting_publication',
+            reviewFinished: true,
+          });
+        }
+      } finally {
+        await f.close();
+      }
+    },
+  );
 
   it('retains recorded draft findings across a target advance and requires a new check before publication', async () => {
     const f = await setup();

@@ -898,8 +898,6 @@ Object.assign(ru, {
 });
 Object.assign(ru, {
   'Ready for independent review': 'Готово к независимому ревью',
-  'Preparing the GitHub draft review': 'Подготавливаем черновик ревью на GitHub',
-  'Waiting to confirm the GitHub draft review': 'Ждём подтверждения черновика ревью на GitHub',
   'Review round limit reached': 'Достигнут лимит раундов ревью',
   'Independent review, round {v0}': 'Независимое ревью, раунд {v0}',
   'PR is {v0}; automatic work stopped': 'PR имеет статус {v0}; автоматическая работа остановлена',
@@ -1018,6 +1016,30 @@ Object.assign(ru, {
   'Not enough available RAM': 'Недостаточно свободной RAM',
   'Disk-space threshold reached': 'Достигнут порог заполнения диска',
   'Scheduled cache cleanup': 'Плановая уборка кэшей',
+  'Disk usage {before}% → {after}%. Free space decreased by {gain} GiB.':
+    'Диск {before}% → {after}%. Свободного места стало меньше на {gain} ГиБ.',
+  'Disk usage {before}% → {after}%. Free space was unchanged.':
+    'Диск {before}% → {after}%. Объём свободного места не изменился.',
+  'Review copies and downloads checked: {checked}, eligible: {eligible}, removed: {removed}.':
+    'Копии ревью и временные загрузки: проверено {checked}, подходят для удаления {eligible}, удалено {removed}.',
+  'Younger than the retention period: {count}.': 'Ещё не достигли срока хранения: {count}.',
+  'Host cleanup services': 'Службы уборки хоста',
+  'Host cleanup {unit} was skipped by a systemd condition.':
+    'Служба {unit} пропущена по условию запуска systemd.',
+  'Host cleanup {unit} was skipped because disk usage fell below the threshold.':
+    'Служба {unit} пропущена: заполнение диска уже в пределах порога.',
+  'Host cleanup {unit} was skipped because the cache was busy.':
+    'Служба {unit} пропустила занятый кеш.',
+  'The old report did not record whether {unit} ran.':
+    'В старом отчёте нет подтверждения запуска {unit}.',
+  'Free space on the volume during this operation: {change} GiB.':
+    'Изменение свободного места на разделе за время операции: {change} ГиБ.',
+  'Error: systemd did not retain a confirmed execution result for this cleanup.':
+    'systemd не подтвердил выполнение процесса уборки.',
+  'Host cleanup {unit} was skipped.': 'Обслуживание хоста {unit} пропущено.',
+  'Host cleanup {unit} completed.': 'Обслуживание хоста {unit} завершено.',
+  'Scheduled cleanup ended with an error.': 'Уборка завершилась с ошибкой.',
+  'Error: Cache maintenance is already running': 'Другая уборка уже выполнялась.',
   'Disk usage {before}% → {after}%. Free space gained {gain} GiB.':
     'Диск {before}% → {after}%. Свободного места прибавилось на {gain} ГиБ.',
   'Disk usage is now within the cleanup threshold.': 'Заполнение диска в пределах порога уборки.',

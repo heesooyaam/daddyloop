@@ -240,14 +240,6 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
-  reviewPreparation?: {
-    marker: string;
-    revision: Revision;
-    authorId?: string;
-    retry?: boolean;
-    clarification?: string;
-    notBefore?: number;
-  };
   latestClarification?: { text: string; question?: string };
   openReviewQuestion?: { head: string; text: string };
   partialReview?: {
@@ -268,6 +260,17 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  publicationRetry?: { retryAt: number; delay: number };
+  draftStart?: {
+    emptyScanSeen?: boolean;
+    marker: string;
+    owner?: string;
+    revision: Revision;
+    retry: boolean;
+    clarification?: string;
+    retryAt?: number;
+    delay?: number;
+  };
   prLink?: {
     ref?: PRRef;
     head: string;
@@ -377,6 +380,7 @@ export interface Job {
   turnId?: string;
   error?: string;
   startedAt?: string;
+  firstStartedAt?: string;
   finishedAt?: string;
   createdAt: string;
   actionId?: string;

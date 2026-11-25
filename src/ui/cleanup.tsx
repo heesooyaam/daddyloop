@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { CleanupScheduleStatus } from '../ops/cleanup-controls.js';
-import { cleanupOutcomes } from '../core/cleanup-outcomes.js';
+import { cleanupReportLines } from '../core/cleanup-outcomes.js';
 import { useLocale } from './i18n.js';
 
 export function CleanupPanel({ api }: { api: DaddyApi }) {
@@ -122,6 +122,11 @@ export function CleanupPanel({ api }: { api: DaddyApi }) {
               <span>{t('Remove cleanup skill')}</span>
             </label>
           )}
+          {!!status.hostUnits?.length && (
+            <p>
+              {t('Host cleanup services')} · {status.hostUnits.join(', ')}
+            </p>
+          )}
           {status.running && <p>{t('Cleanup in progress')}</p>}
           {status.lastCheckedAt && (
             <p>
@@ -134,11 +139,12 @@ export function CleanupPanel({ api }: { api: DaddyApi }) {
             </p>
           )}
           {status.lastReport && (
-            <p>
-              {t('Last cleanup')} · {status.lastReport.before.diskUsedPercent.toFixed(1)}% →{' '}
-              {status.lastReport.after.diskUsedPercent.toFixed(1)}% ·{' '}
-              {t(cleanupOutcomes[status.lastReport.status])}
-            </p>
+            <div>
+              <p>{t('Last cleanup')}</p>
+              {cleanupReportLines(locale, status.lastReport).map((line, i) => (
+                <p key={i}>{line}</p>
+              ))}
+            </div>
           )}
           <button className="daddy-button primary" disabled={busy}>
             {t('Save settings')}

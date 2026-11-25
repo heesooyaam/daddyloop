@@ -1,5 +1,6 @@
 import { ru } from './ru.js';
 import { daddyRu } from './daddy-ru.js';
+import { mergeabilityStatus } from '../core/task-activity.js';
 export type Locale = 'en' | 'ru';
 export const locales: Locale[] = ['en', 'ru'];
 export const localeNames = { en: 'English', ru: 'Русский' };
@@ -48,6 +49,15 @@ export function translate(locale: Locale, source: string, values: Values = {}): 
   if (dictionary[canonical] !== undefined)
     return (
       match[1] + format(locale === 'ru' ? dictionary[canonical] : canonical, values) + match[3]
+    );
+  const mergeabilityPrefix = mergeabilityStatus + ' · ';
+  if (key.startsWith(mergeabilityPrefix))
+    return (
+      match[1] +
+      translate(locale, mergeabilityStatus) +
+      ' · ' +
+      translate(locale, key.slice(mergeabilityPrefix.length), values) +
+      match[3]
     );
   // Resolve positional template aliases before interpolation, keeping inserted
   // task names and other data out of the translation lookup.
