@@ -1,3 +1,4 @@
+import { VoiceInput, appendDictation } from './voice-input.js';
 import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -124,6 +125,7 @@ function SessionMaintenanceError({
 }
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const [usageEngine, setUsageEngine] = useState<string>();
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [previewingRepository, setPreviewingRepository] = useState(false);
@@ -242,7 +244,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const draft = state.drafts[state.selected] ?? '';
   const messageDisabled = paused || !!deletion;
   const repository = state.overrides[state.selected];
-  const canSend = !messageDisabled && modal !== 'settings' && !state.busy && !!draft.trim();
+  const canSend =
+    !messageDisabled && !voiceBusy && modal !== 'settings' && !state.busy && !!draft.trim();
   const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
   const tasksToggleLabel = t(
     tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
@@ -747,6 +750,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           : t('You set the goal. daddy handles the headaches.')}
                       </span>
                     )}
+                    <VoiceInput
+                      key={board.group.id}
+                      onBusy={setVoiceBusy}
+                      disabled={messageDisabled}
+                      onText={(text) => {
+                        const current = model.snapshot();
+                        if (current.selected === board.group.id)
+                          model.draft(
+                            appendDictation(current.drafts[current.selected] ?? '', text),
+                          );
+                      }}
+                    />
                     <button
                       type="submit"
                       className="daddy-send"

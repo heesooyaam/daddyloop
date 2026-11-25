@@ -503,6 +503,20 @@ export const daddyRu: Record<string, string> = {
   'Apply now · {effort}': 'Применить сейчас · {effort}',
   'The session is busy. Choose Apply now to switch the active daddy turn or review.':
     'Сессия занята. Выбери «Применить сейчас», чтобы переключить текущий ход daddy или ревью.',
+  'Dictate message': 'Продиктовать текст',
+  'Stop recording and transcribe': 'Остановить запись и распознать',
+  'Transcribing voice…': 'Распознаю речь…',
+  'Recording…': 'Идёт запись…',
+  'Waiting for microphone permission': 'Жду разрешения на микрофон',
+  'Cancel voice input': 'Отменить голосовой ввод',
+  'Allow microphone access in your browser.': 'Разреши доступ к микрофону в браузере.',
+  'Could not record from the microphone.': 'Не удалось записать звук с микрофона.',
+  'Open daddy over HTTPS or localhost in a browser that supports microphone recording.':
+    'Открой daddy по HTTPS или через localhost в браузере с поддержкой микрофона.',
+  'The transcript would exceed the 20,000 character limit.':
+    'Текст с расшифровкой будет длиннее 20 000 символов.',
+  'Voice recognition is busy. Try again shortly.':
+    'Распознаватель занят. Попробуй ещё раз чуть позже.',
   'Session owner': 'Владелец сессии',
   'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':
