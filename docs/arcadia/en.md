@@ -31,21 +31,22 @@ After enabling the module, first check the helper selection in the same environm
 daddy arcadia mounts
 ```
 
-A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. If the entry whose `mount` is `$HOME/arcadia2` has `status` set to `mounted`, assign the selected value from the configuration, environment variable or `PATH` to `helper`. Resolve a bare name without `/` through `command -v` first; a path containing a directory can go directly to `realpath`:
+A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. If the entry whose `mount` is `$HOME/arcadia2` has `status` set to `mounted`, assign the selected value from the configuration, environment variable or `PATH` to `helper`. Check for a file with that name in the current directory first. Only use `command -v` for a bare name when no such file exists:
 
 ```bash
-: "${helper:?set helper to the discovered value}"
-case "$helper" in
-  */*) ;;
-  *) helper="$(command -v "$helper")" ;;
-esac
-helper="$(realpath "$helper")"
-test -f "$helper"
-daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
-(cd /tmp && bash "$helper" --json status)
+: "${helper:?set helper to the discovered value}" &&
+if [ -f "$helper" ]; then
+  helper="$(realpath "$helper")"
+else
+  helper="$(command -v "$helper")" &&
+    helper="$(realpath "$helper")"
+fi &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
 ```
 
-Do not run `setup` without an explicit path at this step: the option saves an absolute name, and the final command checks the same helper after the working directory changes.
+Do not run `setup` without an explicit path at this step: the option saves an absolute name. The final `mounts` must return the original inventory after the working directory changes; it is skipped when `setup` fails.
 
 If `daddy arcadia mounts` fails, check the saved `arcadia.leaseHelper`, then `DADDYLOOP_ARCADIA_LEASE_HELPER`, `command -v arcadia-mount-lease`, the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
 
@@ -62,12 +63,12 @@ A successful `status` confirms that the helper works. If a discovered helper fai
 The source does not have to appear in the helper lease inventory. If the helper was found manually and the source Arcadia is mounted, connect it directly:
 
 ```bash
-source="$HOME/arcadia2"
-helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
-helper="$(realpath "$helper")"
-test -f "$helper"
-daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
-(cd /tmp && bash "$helper" --json status)
+source="$HOME/arcadia2" &&
+  helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease" &&
+  helper="$(realpath "$helper")" &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
 ```
 
 Only if the service has not selected a helper and none was found through those locations, install the corporate `arcadia-mounts` skill. Complete the required bootstrap and `--agent-check` from the [SkillStore instructions](https://skillstore.yandex-team.ru/install/instruction.md) first. Then choose one skill directory and use it for both Store and `arcadia-mounts`:
@@ -85,11 +86,11 @@ If the helper works but the source has no `status: mounted`, SkillStore cannot f
 After installing the skill, save its absolute path as well. Do not change the selected `SKILLS_DIR`; in a new shell, restore the same value used for `--download-only` first:
 
 ```bash
-: "${SKILLS_DIR:?restore the previous SKILLS_DIR}"
-helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")"
-test -f "$helper"
-daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
-(cd /tmp && bash "$helper" --json status)
+: "${SKILLS_DIR:?restore the previous SKILLS_DIR}" &&
+  helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")" &&
+  test -f "$helper" &&
+  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+  (cd /tmp && daddy arcadia mounts)
 ```
 
 daddyloop invokes the helper through Bash, so it does not need an executable bit.
