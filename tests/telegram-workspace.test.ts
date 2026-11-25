@@ -888,6 +888,102 @@ it.each(['private', 'topic'])(
   },
 );
 
+it('repeats only an open owner question after 30 minutes, once across replays and restarts', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_to, card, _unused, options) => {
+      sent.push({ card, options });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(),
+  } as unknown as TelegramApi;
+  let bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7, ownerLabel: 'Owner' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const t = await f.daddy.createTask(group.id, { requirements: 'Layout', requestId: 'test' });
+  f.store.saveTask({
+    ...t,
+    state: 'needs_input',
+    reason: 'Which layout?',
+    inputRequest: { role: 'author', runId: 'run', generation: t.generation },
+  });
+  const pings = () =>
+    sent.filter((x) => x.card.entities?.some((e: any) => e.url === 'tg://user?id=7'));
+  try {
+    bot.replay();
+    await vi.waitFor(() => expect(pings()).toHaveLength(1));
+    const id = pings()[0].options.notificationId;
+    const age = (minutes: number, key = id) =>
+      f.store.db
+        .prepare('UPDATE notifications SET at=? WHERE id=?')
+        .run(new Date(Date.now() - minutes * 60000).toISOString(), key);
+    age(29);
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(1);
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    age(95);
+    bot.remindOwners();
+    bot.remindOwners();
+    await vi.waitFor(() => expect(pings()).toHaveLength(2));
+    const reminder = pings()[1];
+    expect(reminder.options.replace).toBe(false);
+    expect(reminder.card.text).toContain('Which layout?');
+    bot.replay();
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(2);
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    age(31, reminder.options.notificationId);
+    f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
+    bot.remindOwners();
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'attention' });
+    f.store.saveTask({ ...t, state: 'fixing' });
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(2);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('stops reminders for a coordinator question after an owner answer', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_to, card, _unused, options) => {
+      sent.push({ card, options });
+      return { message_id: sent.length };
+    }),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7, ownerLabel: 'Owner' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    f.store.finishDaddyReply(group.id, 'Which branch?', 'test-turn', true);
+    bot.replay();
+    await vi.waitFor(() => expect(sent.length).toBe(1));
+    f.store.db
+      .prepare('UPDATE notifications SET at=? WHERE id=?')
+      .run('2000-01-01T00:00:00.000Z', sent[0].options.notificationId);
+    bot.remindOwners();
+    await vi.waitFor(() => expect(sent.length).toBe(2));
+    f.store.db
+      .prepare('UPDATE notifications SET at=? WHERE id=?')
+      .run('2000-01-02T00:00:00.000Z', sent[1].options.notificationId);
+    f.daddy.chat(group.id, 'Use main.');
+    bot.remindOwners();
+    await bot.stop();
+    expect(sent.length).toBe(2);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('offers an immediate model switch from the daddy effort picker', async () => {
   const f = daddyFixture();
   const sent: any[] = [];

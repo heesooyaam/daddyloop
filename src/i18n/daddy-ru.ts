@@ -518,6 +518,7 @@ export const daddyRu: Record<string, string> = {
   'Voice recognition is busy. Try again shortly.':
     'Распознаватель занят. Попробуй ещё раз чуть позже.',
   'Session owner': 'Владелец сессии',
+  'Reminder: your reply is still needed': 'Напоминание: всё ещё нужен твой ответ',
   'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':
     'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',

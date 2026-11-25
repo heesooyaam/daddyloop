@@ -1,3 +1,9 @@
+import {
+  taskRequestKey,
+  reminderOpen,
+  nextReminderId,
+  type OwnerQuestion,
+} from './telegram-reminders.js';
 import { commandHelp } from './telegram-commands.js';
 import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
@@ -44,7 +50,7 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
-import { draftInspectionRequired, taskReference } from '../core/task-activity.js';
+import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -98,6 +104,7 @@ export class TelegramWorkspace {
   private stopped = false;
   private topics = new Map<string, Promise<Topic>>();
   private voice?: VoiceInbox;
+  private reminderTimer?: NodeJS.Timeout;
   private retryTimer?: NodeJS.Timeout;
   private progress: TelegramProgress;
   constructor(
@@ -153,6 +160,9 @@ export class TelegramWorkspace {
   start() {
     this.voice?.start();
     this.replay();
+    this.remindOwners();
+    this.reminderTimer = setInterval(() => this.remindOwners(), 60000);
+    this.reminderTimer.unref();
     this.progress.start();
     this.retryTimer = setInterval(() => {
       for (const row of this.store.db
@@ -1953,21 +1963,8 @@ export class TelegramWorkspace {
       url: `tg://user?id=${pair.userId}`,
     });
   }
-  private taskRequestKey(task: Task) {
-    if (task.state === 'awaiting_plan_approval')
-      return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
-    if (
-      task.state === 'needs_input' &&
-      task.reason === draftInspectionRequired &&
-      task.review &&
-      !this.store.pendingReviewWrites(task.id, task.review.marker).length
-    )
-      return 'inspect-draft:' + task.review.id;
-    if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
-      return task.inputRequest.runId;
-  }
   private queueTaskRequest(task: Task, event: Event) {
-    const request = this.taskRequestKey(task);
+    const request = taskRequestKey(this.store, task);
     if (!request || !task.groupId) return;
     this.onEvent({
       ...event,
@@ -2133,7 +2130,8 @@ export class TelegramWorkspace {
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
         const group = this.daddy.group(event.taskId);
-        const { taskId, request, messageId } = event.data as {
+        const { taskId, request, messageId, reminder } = event.data as {
+          reminder?: boolean;
           taskId?: string;
           request?: string;
           messageId?: string;
@@ -2142,7 +2140,7 @@ export class TelegramWorkspace {
         const message = messageId ? this.store.messageById(group.id, messageId) : undefined;
         if (
           task &&
-          (task.groupId !== group.id || !request || this.taskRequestKey(task) !== request)
+          (task.groupId !== group.id || !request || taskRequestKey(this.store, task) !== request)
         )
           return;
         if (!task && (!message || !['user', 'agent'].includes(message.sender))) return;
@@ -2154,6 +2152,14 @@ export class TelegramWorkspace {
             .some((entry) => entry.sender === 'user' && entry.at > message.at);
         const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
         if (task && !ping) return;
+        const question: OwnerQuestion | undefined = reminder
+          ? task && request
+            ? { groupId: group.id, taskId: task.id, request }
+            : message
+              ? { groupId: group.id, messageId: message.id }
+              : undefined
+          : undefined;
+        if (reminder && (!ping || !question || !reminderOpen(this.store, question))) return;
         const topic = await this.ensureTopic(group);
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
@@ -2177,9 +2183,11 @@ export class TelegramWorkspace {
             }
           }
         }
-        const id = task
+        const originalId = task
           ? `telegram:question:${pair.userId}:${task.id}:${request}`
           : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;
+        const id = reminder ? nextReminderId(this.store, originalId, Date.now()) : originalId;
+        if (!id) return;
         if (
           ['sent', 'superseded'].includes(
             String(
@@ -2195,15 +2203,20 @@ export class TelegramWorkspace {
         if (ping)
           text
             .append(await this.ownerMention(pair))
-            .add(' · ' + this.t('Your reply is needed') + '\n\n');
+            .add(
+              ' · ' +
+                this.t(reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed') +
+                '\n\n',
+            );
         if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
           return;
         if (
           task &&
-          (this.taskRequestKey(this.store.getTask(task.id)) !== request ||
+          (taskRequestKey(this.store, this.store.getTask(task.id)) !== request ||
             !notificationPreferences(this.store).enabled)
         )
           return;
+        if (question && !reminderOpen(this.store, question)) return;
         if (task) {
           const worker = task.inputRequest?.role === 'author';
           text
@@ -2238,6 +2251,7 @@ export class TelegramWorkspace {
           order: message?.at ?? event.at,
           final: message?.phase !== 'progress',
           notificationId: id,
+          reminder: question,
         });
         this.store.db
           .prepare('UPDATE notifications SET status=? WHERE id=?')
@@ -2246,6 +2260,33 @@ export class TelegramWorkspace {
       })
       .catch((error) => this.deferEvent(event, error));
     return true;
+  }
+  remindOwners() {
+    if (this.stopped || !this.pair() || !notificationPreferences(this.store).enabled) return;
+    for (const group of this.daddy.sessions()) {
+      if (
+        group.deletion ||
+        group.deletedAt ||
+        group.daddyState === 'paused' ||
+        group.daddyState === 'archived'
+      )
+        continue;
+      const event = {
+        id: 0,
+        at: now(),
+        type: 'daddy.message',
+        taskId: group.id,
+        data: { reminder: true },
+      };
+      for (const task of this.store.tasks(group.id)) this.queueTaskRequest(task, event);
+      const row = this.store.db
+        .prepare(
+          "SELECT id FROM messages WHERE task_id=? AND json_extract(data,'$.sender')='agent' AND json_extract(data,'$.phase')='final' ORDER BY rowid DESC LIMIT 1",
+        )
+        .get(group.id);
+      if (typeof row?.id === 'string' && this.store.messageById(group.id, row.id)?.needsReply)
+        this.onEvent({ ...event, data: { messageId: row.id, reminder: true } });
+    }
   }
   private replayGroup(group: ReviewGroup, retry = false) {
     const retryAttempt = retry
@@ -2290,6 +2331,7 @@ export class TelegramWorkspace {
   async stop() {
     this.stopped = true;
     clearInterval(this.retryTimer);
+    clearInterval(this.reminderTimer);
     await this.progress.stop();
     await this.voice?.stop();
     await this.pending;
