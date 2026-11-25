@@ -229,7 +229,7 @@ export class Worker {
           }
           if (
             task.state === 'needs_input' &&
-            task.resumeState === 'fixing' &&
+            (task.resumeState === 'fixing' || task.resumeState === 'needs_input') &&
             !task.fixingMergeConflict &&
             task.ref.provider === 'github'
           ) {

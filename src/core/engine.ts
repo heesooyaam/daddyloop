@@ -47,6 +47,11 @@ import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
 
+const reviewRetryInstruction =
+  'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.';
+const clarifiedReviewPrefix =
+  reviewRetryInstruction +
+  '\nClarification from the session coordinator; verify it against the task: ';
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
@@ -340,17 +345,16 @@ export class Engine {
       task.reviewFinished = false;
       this.store.transaction(() => {
         task.pendingFix = undefined;
+        if (clarification?.trim()) this.rememberClarification(task, clarification);
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
           'reviewer',
           'review',
           retry
-            ? 'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.' +
-                (clarification?.trim()
-                  ? '\nClarification from the session coordinator; verify it against the task: ' +
-                    clarification.trim()
-                  : '')
+            ? clarification?.trim()
+              ? clarifiedReviewPrefix + clarification.trim()
+              : reviewRetryInstruction
             : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
         );
       });
@@ -1035,13 +1039,61 @@ export class Engine {
       const task = this.store.getTask(id);
       if (
         task.state !== 'needs_input' ||
-        task.resumeState !== 'fixing' ||
+        !(task.resumeState === 'fixing' || task.resumeState === 'needs_input') ||
         task.pendingFix ||
         task.fixingMergeConflict ||
         this.store.busy(id)
       )
         return;
       const job = this.store.jobs(id).at(-1);
+      if (task.resumeState === 'needs_input') {
+        if (
+          job?.kind !== 'chat' ||
+          job.role !== 'author' ||
+          job.status !== 'failed' ||
+          job.errorCode !== 'stale_revision' ||
+          job.generation !== task.generation ||
+          job.error !== task.reason ||
+          !job.actionId?.startsWith('daddy:') ||
+          !task.review ||
+          !hasReleasedReview(task) ||
+          task.snapshot?.status !== 'published'
+        )
+          return;
+        const previous = this.store.jobs(id).at(-2);
+        if (
+          previous?.kind !== 'fix' ||
+          previous.status !== 'completed' ||
+          previous.generation !== task.generation
+        )
+          return;
+        const result = this.recordedAgentResult(id, previous.id);
+        if (
+          !result ||
+          !requestsHumanInput(result) ||
+          !result.question?.trim() ||
+          result.checkedHead !== task.revision?.head
+        )
+          return;
+        const group = task.groupId && this.store.getGroup(task.groupId);
+        if (
+          !group ||
+          group.generation !== job.groupGeneration ||
+          group.deletion ||
+          group.deletedAt ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          return;
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        if (
+          !sameOpenTarget(task.pr, pr) ||
+          (!sameRevision(pr, task.revision) && !(await this.publishedFixBaseAdvanced(task, pr)))
+        )
+          return;
+        this.store.transaction(() => this.queueAnsweredFix(task, job.input, job.actionId));
+        return;
+      }
       if (!job || job.kind !== 'fix') return;
       const restarted = restartInterrupted(task, job);
       if (!restarted && job.generation !== task.generation) return;
@@ -1763,6 +1815,22 @@ export class Engine {
       return this.reconcileLocked(id, publication);
     });
   }
+  private rememberClarification(task: Task, text: string) {
+    task.latestClarification = {
+      text: text.trim(),
+      question:
+        task.openReviewQuestion?.text ??
+        (task.inputRequest?.role === 'author' ? task.reason : undefined),
+    };
+    delete task.openReviewQuestion;
+    if (task.partialReview) delete task.partialReview.question;
+  }
+  private queueAnsweredFix(task: Task, text: string, actionId?: string) {
+    this.rememberClarification(task, text);
+    task.resumeState = 'fixing';
+    this.state(task, 'fixing', 'Continuing the fix with the answer from the session');
+    this.store.enqueue(task, 'author', 'fix', text, actionId);
+  }
   async chat(
     id: string,
     role: 'author' | 'reviewer',
@@ -1803,7 +1871,19 @@ export class Engine {
         );
       this.store.transaction(() => {
         this.store.message(id, role, 'user', text);
-        this.store.enqueue(task, role, 'chat', text, actionId);
+        if (
+          role === 'author' &&
+          task.state === 'needs_input' &&
+          task.resumeState === 'fixing' &&
+          !task.fixingMergeConflict &&
+          task.inputRequest?.role === 'author' &&
+          task.inputRequest.generation === task.generation &&
+          hasReleasedReview(task) &&
+          sameRevision(task.revision, task.snapshot?.revision) &&
+          task.snapshot?.status === 'published'
+        ) {
+          this.queueAnsweredFix(task, text, actionId);
+        } else this.store.enqueue(task, role, 'chat', text, actionId);
       });
       return task;
     });
@@ -2304,6 +2384,16 @@ export class Engine {
   }
   recoverInterruptedJobs() {
     for (const task of this.store.tasks()) {
+      if (!task.latestClarification && task.state !== 'complete') {
+        const review = this.store
+          .jobs(task.id)
+          .findLast((j) => j.kind === 'review' && j.input.startsWith(clarifiedReviewPrefix));
+        if (review) {
+          this.rememberClarification(task, review.input.slice(clarifiedReviewPrefix.length));
+          this.store.saveTask(task);
+        }
+      }
+
       if (task.state !== 'needs_input' || task.inputRequest) continue;
       const job = this.store.jobs(task.id).at(-1);
       if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;

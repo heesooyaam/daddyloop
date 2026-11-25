@@ -628,6 +628,8 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing the fix with the answer from the session':
+    'Воркер продолжает исправление с ответом из сессии',
   'Checking the GitHub draft': 'Сверяет черновик с GitHub',
   'Waiting to confirm the GitHub draft or its target branch before restarting review.':
     'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',

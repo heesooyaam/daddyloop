@@ -240,6 +240,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  latestClarification?: { text: string; question?: string };
   openReviewQuestion?: { head: string; text: string };
   partialReview?: {
     reviewId: string;
