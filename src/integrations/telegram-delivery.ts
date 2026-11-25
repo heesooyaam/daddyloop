@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
-import { splitTelegramText, type TelegramCard, type FormattedText } from './telegram-text.js';
+import {
+  splitTelegramText,
+  TelegramText,
+  type TelegramCard,
+  type FormattedText,
+} from './telegram-text.js';
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
@@ -34,6 +39,7 @@ type Delivery = {
   error?: string;
   messages: { id: number; fingerprint: string }[];
   recoveryOrder?: number;
+  queueOrder?: number;
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -59,7 +65,7 @@ export class TelegramDelivery {
   private redirectedKeys = new Map<string, string>();
   private deferredKeys = new Set<string>();
   private historyDeferredKeys = new Set<string>();
-  private legacyDeliveredSibling = new Set<string>();
+  private deferredValues = new Map<string, Delivery>();
   private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
   private acknowledgedCurrent = new Set<string>();
@@ -81,16 +87,20 @@ export class TelegramDelivery {
       .all()
       .map((row) => ({ key: String(row.key), value: JSON.parse(String(row.value)) as Delivery }))
       .filter(({ value }) => value?.bot === bot);
-    this.loadRecoveryIndex();
-    this.recovering = deliveries.some(
+    const recoveryDeliveries = deliveries.filter(
       ({ value }) =>
         ['queued', 'sending'].includes(value.status) &&
-        value.options.notificationId?.startsWith('telegram:dialog:') &&
-        this.storedMessage(value) !== undefined,
+        value.options.notificationId?.startsWith('telegram:dialog:'),
     );
-    for (const { key, value } of deliveries) {
+    if (recoveryDeliveries.length)
+      this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
+    this.recovering = recoveryDeliveries.some(
+      ({ value }) => this.storedMessage(value) !== undefined,
+    );
+    for (const [queueOrder, { key, value }] of deliveries.entries()) {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       value.recoveryOrder = this.messageOrder(value);
+      value.queueOrder = queueOrder;
       const restoreThroughHistory =
         value.options.notificationId?.startsWith('telegram:dialog:') &&
         this.storedMessage(value) !== undefined;
@@ -98,11 +108,12 @@ export class TelegramDelivery {
         value.status = 'queued';
         if (this.recovering && !isIndependent(value)) {
           this.deferredKeys.add(key);
+          this.deferredValues.set(key, value);
           if (restoreThroughHistory) this.historyDeferredKeys.add(key);
         } else this.pending.set(key, value);
       }
       if (
-        value.status !== 'cancelled' &&
+        ['queued', 'sending'].includes(value.status) &&
         value.options?.key?.startsWith('turn:') &&
         value.options.notificationId
       )
@@ -110,14 +121,11 @@ export class TelegramDelivery {
           digest([value.destination, notificationIdentity(value.options.notificationId)]),
           { key, value },
         );
-      if (value.options?.key?.startsWith('turn:') && this.hasDeliveredSibling(value))
-        this.legacyDeliveredSibling.add(key);
       if (
+        ['queued', 'sending'].includes(value.status) &&
         value.messages.length &&
         this.acknowledgedPartsMatch(value) &&
-        (!value.options.key?.startsWith('turn:') ||
-          !this.hasDeliveredSibling(value) ||
-          value.attempts > 0)
+        !this.inheritedPartsBelongToSibling(value)
       )
         this.acknowledgedCurrent.add(
           digest([value.destination, notificationIdentity(value.options.notificationId ?? '')]),
@@ -144,18 +152,61 @@ export class TelegramDelivery {
   }
   async finishRecovery() {
     if (!this.recovering) return;
-    for (const key of [...this.deferredKeys]) {
-      if (this.historyDeferredKeys.has(key)) continue;
-      const value = this.store.setting<Delivery>(key);
-      if (!value) continue;
-      this.deferredKeys.delete(key);
-      this.remember(key, value);
-    }
     this.recovering = false;
+    for (const value of [...this.deferredValues.values()]) this.releaseUnblocked(value.destination);
     await this.flush();
   }
   needsRecovery() {
     return this.recovering;
+  }
+  private route(destination: TelegramDestination) {
+    return digest(destination);
+  }
+  private compareDeliveries(a: Delivery, b: Delivery) {
+    const aRecovery = a.recoveryOrder;
+    const bRecovery = b.recoveryOrder;
+    if (aRecovery !== undefined && bRecovery !== undefined && aRecovery !== bRecovery)
+      return aRecovery - bRecovery;
+    const aQueue = a.queueOrder;
+    const bQueue = b.queueOrder;
+    if (aQueue !== undefined && bQueue !== undefined && aQueue !== bQueue) return aQueue - bQueue;
+    const aOrder = a.options.order;
+    const bOrder = b.options.order;
+    if (aOrder && bOrder && aOrder !== bOrder) return aOrder.localeCompare(bOrder);
+    return a.createdAt - b.createdAt;
+  }
+  private hasEarlierDeferred(value: Delivery) {
+    const route = this.route(value.destination);
+    for (const key of this.historyDeferredKeys) {
+      const deferred = this.deferredValues.get(key);
+      if (
+        deferred &&
+        this.route(deferred.destination) === route &&
+        this.compareDeliveries(deferred, value) < 0
+      )
+        return true;
+    }
+    return false;
+  }
+  private releaseUnblocked(destination: TelegramDestination) {
+    const route = this.route(destination);
+    for (const key of this.historyDeferredKeys) {
+      const value = this.deferredValues.get(key);
+      if (value && this.route(value.destination) === route) return;
+    }
+    for (const [key, value] of [...this.deferredValues])
+      if (this.route(value.destination) === route) {
+        this.deferredKeys.delete(key);
+        this.deferredValues.delete(key);
+        this.remember(key, value);
+      }
+  }
+  private activateDeferred(key: string, value: Delivery) {
+    const wasHistory = this.historyDeferredKeys.delete(key);
+    this.deferredKeys.delete(key);
+    this.deferredValues.delete(key);
+    this.remember(key, value);
+    if (wasHistory) this.releaseUnblocked(value.destination);
   }
   private resolveKey(key: string) {
     const visited: string[] = [];
@@ -220,16 +271,43 @@ export class TelegramDelivery {
     if (!notificationId?.startsWith('telegram:dialog:')) return;
     return notificationIdentity(notificationId).split(':').at(-1);
   }
-  private loadRecoveryIndex() {
-    let order = 0;
-    for (const row of this.store.db
-      .prepare("SELECT id,json_extract(data,'$.runId') AS runId FROM messages ORDER BY rowid")
-      .all()) {
-      order++;
-      const id = String(row.id);
+  private loadRecoveryIndex(deliveries: Delivery[]) {
+    const needed = new Set(
+      deliveries
+        .map((value) => this.notificationMessageId(value))
+        .filter((id): id is string => !!id),
+    );
+    const groups = new Set(
+      deliveries.map((value) => value.options.groupId).filter((id): id is string => !!id),
+    );
+    const legacyRuns = new Set(
+      deliveries
+        .map((value) => value.options.key)
+        .filter((key): key is string => !!key?.startsWith('turn:'))
+        .map((key) => key.slice(5)),
+    );
+    if (legacyRuns.size)
+      for (const row of this.store.db.prepare('SELECT id,group_id FROM daddy_jobs').all())
+        if (legacyRuns.has(String(row.id)) && typeof row.group_id === 'string')
+          groups.add(row.group_id);
+    const messages = this.store.db
+      .prepare(
+        "SELECT id,task_id,json_extract(data,'$.runId') AS runId FROM messages ORDER BY rowid",
+      )
+      .all()
+      .map((row, index) => ({
+        id: String(row.id),
+        taskId: String(row.task_id),
+        runId: typeof row.runId === 'string' ? row.runId : undefined,
+        order: index + 1,
+      }));
+    for (const message of messages) if (needed.has(message.id)) groups.add(message.taskId);
+    for (const message of messages) {
+      if (!needed.has(message.id) && !groups.has(message.taskId)) continue;
+      const { id, runId, order } = message;
       this.storedMessages.set(id, {
         id,
-        ...(typeof row.runId === 'string' ? { runId: row.runId } : {}),
+        ...(runId ? { runId } : {}),
         order,
       });
     }
@@ -288,6 +366,41 @@ export class TelegramDelivery {
           digest(this.messageBody(value.destination, value.content, chunks, index)),
     );
   }
+  private acknowledgedPartsMatchSibling(value: Delivery) {
+    const message = this.storedMessage(value);
+    if (!message?.runId || !value.messages.length) return false;
+    for (const row of this.store.db
+      .prepare(
+        "SELECT data FROM messages WHERE json_extract(data,'$.runId')=? AND id<>? AND json_extract(data,'$.sender')='agent'",
+      )
+      .all(message.runId, message.id)) {
+      const sibling = JSON.parse(String(row.data)) as { text: string };
+      const contents = [
+        new TelegramText().markdown(sibling.text),
+        new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(sibling.text),
+      ];
+      for (const content of contents) {
+        const chunks = splitTelegramText(content);
+        if (
+          value.messages.every(
+            (part, index) =>
+              !!chunks[index] &&
+              part.fingerprint ===
+                digest(this.messageBody(value.destination, content, chunks, index)),
+          )
+        )
+          return true;
+      }
+    }
+    return false;
+  }
+  private inheritedPartsBelongToSibling(value: Delivery) {
+    if (!value.options.key?.startsWith('turn:') || !this.hasDeliveredSibling(value)) return false;
+    const allPartsAcknowledged = value.messages.length === splitTelegramText(value.content).length;
+    return (
+      this.acknowledgedPartsMatchSibling(value) && (value.attempts > 0 || allPartsAcknowledged)
+    );
+  }
   private receiptFor(messages: Delivery['messages'], value: Delivery) {
     if (!messages.length) return;
     let groupId = value.options.groupId;
@@ -325,7 +438,7 @@ export class TelegramDelivery {
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
     if (row.value.options.key?.startsWith('turn:')) {
       const partsMatch = this.acknowledgedPartsMatch(row.value);
-      if (!partsMatch || (this.legacyDeliveredSibling.has(row.key) && row.value.attempts === 0)) {
+      if (!partsMatch || this.inheritedPartsBelongToSibling(row.value)) {
         receipt = this.receiptFor(row.value.messages, row.value);
         row.value.messages = [];
       }
@@ -339,12 +452,13 @@ export class TelegramDelivery {
     });
     this.pending.delete(row.key);
     this.deferredKeys.delete(row.key);
-    this.historyDeferredKeys.delete(row.key);
-    this.legacyDeliveredSibling.delete(row.key);
+    const wasHistory = this.historyDeferredKeys.delete(row.key);
+    this.deferredValues.delete(row.key);
     this.pendingByNotification.delete(legacyKey);
     this.legacyByNotification.delete(legacyKey);
     this.redirectedKeys.set(row.key, key);
     this.remember(key, row.value);
+    if (wasHistory) this.releaseUnblocked(row.value.destination);
     return row.value;
   }
   replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
@@ -445,9 +559,8 @@ export class TelegramDelivery {
         options.key,
         options.groupId,
       );
-    if (value && this.deferredKeys.delete(key)) {
-      this.historyDeferredKeys.delete(key);
-      this.remember(key, value);
+    if (value && this.deferredKeys.has(key)) {
+      this.activateDeferred(key, value);
     }
     if (value) {
       if (
@@ -536,16 +649,10 @@ export class TelegramDelivery {
             const pinOrder =
               Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin');
             if (pinOrder) return pinOrder;
-            const aRecovery = a[1].recoveryOrder;
-            const bRecovery = b[1].recoveryOrder;
-            if (aRecovery !== undefined && bRecovery !== undefined && aRecovery !== bRecovery)
-              return aRecovery - bRecovery;
-            const aOrder = a[1].options.order;
-            const bOrder = b[1].options.order;
-            if (aOrder && bOrder && aOrder !== bOrder) return aOrder.localeCompare(bOrder);
-            return a[1].createdAt - b[1].createdAt;
+            return this.compareDeliveries(a[1], b[1]);
           })
           .filter(([key, value]) => {
+            if (!isIndependent(value) && this.hasEarlierDeferred(value)) return false;
             const route = isIndependent(value) ? key : digest(value.destination);
             if (seen.has(route)) return false;
             seen.add(route);
