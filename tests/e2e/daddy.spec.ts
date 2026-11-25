@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DaddyBoard } from '../../src/client/daddy.js';
+import { translator } from '../../src/i18n/index.js';
 import { mockTwoProviders } from './usage-helpers.js';
 async function login(page: Page) {
   await page.goto('/');
@@ -449,6 +450,25 @@ test('collapses each side panel independently and keeps the current conversation
   await expect(hideTasks).toHaveAttribute('aria-expanded', 'true');
   await checkConversation();
   expect(await chatWidth()).toBe(initialWidth);
+
+  await page.getByRole('combobox', { name: 'Language' }).selectOption('ru');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'ru');
+  const t = translator('ru');
+  await page.addStyleTag({ content: ':root { font-size: 20px; }' });
+  await page.setViewportSize({ width: 851, height: 480 });
+  await page.getByRole('button', { name: t('Pause'), exact: true }).click();
+  await expect(page.getByRole('button', { name: t('Resume'), exact: true })).toBeInViewport();
+  const title = page.getByRole('heading', { name: 'Panel layout session', exact: true });
+  await expect.poll(() => title.evaluate((element) => element.clientWidth)).toBeGreaterThan(120);
+  await expect(
+    page.getByRole('button', { name: t('Session settings'), exact: true }),
+  ).toBeInViewport();
+  await expect(
+    page.getByRole('button', { name: t('Hide workers and tasks panel') }),
+  ).toBeInViewport();
+  await expect(page.getByRole('button', { name: t('Hide sessions panel') })).toBeInViewport();
+  await page.locator('.daddy-language select').selectOption('en');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
 });
 test('supports the phone task board, pool controls and workspace directory chooser without horizontal overflow', async ({
   page,
@@ -554,6 +574,9 @@ test('shows a full card on short screens and keeps actions available in a dense 
       response,
       json: {
         ...board,
+        workers: copyFailed
+          ? { ...board.workers, active: 7, limit: 8, target: 3, pending: true }
+          : board.workers,
         group: {
           ...board.group,
           ...(deletionFailed ? { deletion: { state: 'error', error: copyFailure } } : {}),
@@ -700,6 +723,11 @@ test('shows a full card on short screens and keeps actions available in a dense 
   await expect(page.getByRole('dialog').getByText(copyFailure)).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Escape');
   for (const viewport of [
+    { width: 480, height: 320 },
+    { width: 500, height: 320 },
+    { width: 390, height: 390 },
+    { width: 320, height: 480 },
+    { width: 650, height: 426 },
     { width: 360, height: 640 },
     { width: 390, height: 626 },
     { width: 375, height: 667 },
@@ -713,6 +741,17 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await expect(failedCopy.getByRole('button', { name: 'Retry', exact: true })).toBeInViewport({
       ratio: 1,
     });
+    if (viewport.width === 480) {
+      await list.hover();
+      await page.mouse.wheel(0, 2200);
+      await expect(cards.last()).toBeInViewport();
+      await cards.last().click();
+      await expect(page.getByRole('dialog', { name: 'Work item' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await queue.click();
+      await expect(page.getByRole('dialog', { name: 'Queue task' })).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
   }
   await notices
     .getByRole('alert')

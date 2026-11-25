@@ -254,9 +254,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   useLayoutEffect(() => {
     const panel = tasksPanel.current;
     const workspace = panel?.parentElement;
+    const main = workspace?.parentElement;
+    const topbar = main?.querySelector<HTMLElement>('.daddy-topbar');
+    const notices = main?.querySelector<HTMLElement>('.daddy-session-notices');
+    const overview = main?.querySelector<HTMLElement>('.daddy-session-overview');
+    const tabs = main?.querySelector<HTMLElement>('.daddy-mobile-tabs');
     const list = panel?.querySelector('.daddy-work-items');
     const first = list?.querySelector('.daddy-work-item');
-    if (!panel || !workspace || !list || !first) return;
+    if (
+      !panel ||
+      !workspace ||
+      !main ||
+      !topbar ||
+      !notices ||
+      !overview ||
+      !tabs ||
+      !list ||
+      !first
+    )
+      return;
 
     const measure = () => {
       const listStyle = getComputedStyle(list);
@@ -271,16 +287,31 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           1
         : 0;
       workspace.style.setProperty('--first-task-space', Math.ceil(height) + 'px');
+      main.style.setProperty(
+        '--session-header-height',
+        Math.ceil(topbar.getBoundingClientRect().height) + 'px',
+      );
+      const room =
+        main.clientHeight - topbar.offsetHeight - notices.offsetHeight - tabs.offsetHeight;
+      main.toggleAttribute(
+        'data-task-first',
+        height > 0 &&
+          getComputedStyle(main).display === 'flex' &&
+          Math.ceil(height) + parseFloat(getComputedStyle(overview).minBlockSize) > room,
+      );
     };
     const observer = new ResizeObserver(measure);
     observer.observe(panel);
     observer.observe(first);
+    for (const element of [main, topbar, notices, tabs]) observer.observe(element);
     for (const header of panel.querySelectorAll('.daddy-board-controls, .daddy-board-heading'))
       observer.observe(header);
     measure();
     return () => {
       observer.disconnect();
       workspace.style.removeProperty('--first-task-space');
+      main.style.removeProperty('--session-header-height');
+      main.removeAttribute('data-task-first');
     };
   }, [firstTaskId, pane, tasksCollapsed]);
   return (
@@ -436,6 +467,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <div className="daddy-header-actions">
               <button
                 className="daddy-button quiet"
+                aria-label={t(paused ? 'Resume' : 'Pause')}
+                title={t(paused ? 'Resume' : 'Pause')}
                 onClick={() => void model.action(paused ? 'resume' : 'pause')}
                 disabled={state.busy || !!board.group.deletion}
               >
