@@ -1,6 +1,6 @@
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { loadConfig } from '../ops/config.js';
 import { command } from '../ops/process.js';
 import { AppError } from '../core/types.js';
@@ -38,10 +38,12 @@ export function runLeaseHelper(
   let executable: string;
   try {
     accessSync(path, constants.X_OK);
-    // Some interpreters normalize their script argument before opening it.
-    executable = path.split('/').includes('..') ? realpathSync.native(path) : path;
+    // Resolve the parent before the interpreter normalizes the path. Keep the launch name.
+    executable = path.split('/').includes('..')
+      ? join(realpathSync.native(dirname(path)), basename(path))
+      : path;
   } catch {
-    return run('bash', [helper, ...args], options);
+    return run('bash', [path, ...args], options);
   }
   return run(executable, args, options);
 }

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { registerOperations } from '../src/ops/commands.js';
 import { loadConfig, saveConfig } from '../src/ops/config.js';
+import { runLeaseHelper } from '../src/integrations/arc-lease.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
 
 function program() {
@@ -208,6 +209,19 @@ it('resolves a symlink before traversing the parent of a lease helper path', asy
     );
     const bridge = new ArcBridge(directory, `${directory}/current/../helper`);
     await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/target-pool' }]);
+
+    const driver = join(target, 'driver');
+    writeFileSync(
+      driver,
+      `#!/bin/sh
+[ "\${0##*/}" = helper-alias ] || exit 7
+printf '%s\\n' '${response}'
+`,
+      { mode: 0o700 },
+    );
+    symlinkSync(driver, join(target, 'helper-alias'));
+    const alias = new ArcBridge(directory, `${directory}/current/../helper-alias`);
+    await expect(alias.mounts()).resolves.toMatchObject([{ path: '/target-pool' }]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -236,6 +250,34 @@ it('skips directories in PATH when looking for a named lease helper', async () =
     ]);
   } finally {
     vi.unstubAllEnvs();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('runs the file selected from PATH even with a same-named directory in the working directory', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+  try {
+    const name = 'fixture-arcadia-mount-lease';
+    const bin = join(directory, 'bin');
+    mkdirSync(join(directory, name));
+    mkdirSync(bin);
+    const path = join(bin, name);
+    const response = { status: 'success', data: { mounts: [{ path: '/path-pool' }] } };
+    writeFileSync(
+      path,
+      `#!/usr/bin/env bash
+[[ "$1" == --json && "$2" == status ]] || exit 7
+printf '%s\\n' '${JSON.stringify(response)}'
+`,
+      { mode: 0o600 },
+    );
+    const options = { cwd: directory, env: { PATH: [bin, process.env.PATH].join(delimiter) } };
+    const bash = await runLeaseHelper(name, ['--json', 'status'], options);
+    chmodSync(path, 0o700);
+    const executable = await runLeaseHelper(name, ['--json', 'status'], options);
+    expect(JSON.parse(bash.stdout)).toEqual(response);
+    expect(executable).toEqual(bash);
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
