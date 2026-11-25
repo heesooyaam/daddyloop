@@ -9,7 +9,10 @@ import { autoMergeSettings, githubActivityStatus, pollAutoMerge } from '../src/c
 import { taskActivity } from '../src/core/task-activity.js';
 import { AppError, prRef, type PullRequest } from '../src/core/types.js';
 import { queueCard, taskCard } from '../src/integrations/telegram-tasks.js';
+import { TelegramProgress } from '../src/integrations/telegram-progress.js';
+import { TelegramApi } from '../src/integrations/telegram.js';
 import { translate } from '../src/i18n/index.js';
+import { githubBackoff } from '../src/providers/github-quota.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import { daddyFixture } from './daddy-fixture.js';
 
@@ -73,23 +76,50 @@ async function setup(f = daddyFixture(), initial: Partial<PullRequest> = {}, rep
 }
 
 describe('opt-in GitHub merging', () => {
-  function expectStatus(f: Awaited<ReturnType<typeof setup>>, label: string) {
+  function expectStatus(
+    f: Awaited<ReturnType<typeof setup>>,
+    label: string,
+    publishedReason?: string,
+    russian?: string,
+  ) {
     const task = f.store.getTask(f.task.id);
     const group = f.store.getGroup(f.group.id);
     const [item] = taskActivity(
       [task],
       f.store.activeJobs(task.id),
       (task, job) =>
-        githubActivityStatus(task, autoMergeSettings(f.store, group, task), undefined, job),
+        githubActivityStatus(
+          task,
+          autoMergeSettings(f.store, group, task),
+          githubBackoff(f.store, task.ref),
+          job,
+        ),
       workerSlots(f.store, group),
     );
-    expect(f.daddy.board(group.id).tasks).toContainEqual(
-      expect.objectContaining({ id: task.id, statusLabel: label }),
-    );
+    const boardTask = f.daddy.board(group.id).tasks.find((row) => row.id === task.id)!;
+    expect(boardTask.statusLabel).toBe(label);
+    if (publishedReason) expect(boardTask.reason).toBe(publishedReason);
     for (const locale of ['en', 'ru'] as const) {
-      const expected = translate(locale, label);
+      const expected = locale === 'ru' && russian ? russian : translate(locale, label);
+      expect(translate(locale, boardTask.statusLabel)).toBe(expected);
       expect(queueCard(locale, group.id, [item!]).text).toContain(expected);
-      expect(taskCard(locale, item!).text).toContain(expected);
+      const details = taskCard(locale, item!).text;
+      expect(details).toContain(expected);
+      if (publishedReason) {
+        expect(details).toContain(translate(locale, publishedReason));
+        expect(details).not.toContain(translate(locale, task.reason));
+        const progress = new TelegramProgress(
+          f.store,
+          new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async () => {
+            throw new Error('Rendering the status card must stay offline');
+          }),
+          'fixture:',
+          () => locale,
+          () => undefined,
+        ).card(group).text;
+        expect(progress.split('\n')[1]).toBe(expected);
+        expect(progress).toContain(`${task.title} · ${expected}`);
+      }
     }
   }
 
@@ -133,13 +163,29 @@ describe('opt-in GitHub merging', () => {
           snapshot: { status: 'published' },
         });
         expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        const reason = 'The review is published. Waiting for GitHub to determine mergeability.';
+        let mergeability = 'GitHub is calculating mergeability';
         if (waiting.partialReview) {
           const until = waiting.partialReview.retryAt!;
           const time = new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
-          expectStatus(f, `GitHub mergeability check · retry at ${time} UTC · PR #12`);
-        } else {
-          expectStatus(f, 'GitHub is calculating mergeability');
+          mergeability = `GitHub mergeability check · retry at ${time} UTC · PR #12`;
         }
+        expectStatus(f, mergeability, reason);
+        const key = `github.read-backoff:${task.ref.host}`;
+        const until = Math.ceil(Date.now() / 1000) * 1000 + 60_000;
+        const time = new Date(until).toISOString().slice(11, 19);
+        for (const http of [undefined, 408, 500, 502, 503, 504]) {
+          f.store.setSetting(key, { status: http, until, delay: 60_000 });
+          const failure = http ? `HTTP ${http}` : 'offline';
+          expectStatus(
+            f,
+            `GitHub is calculating mergeability · PR #12 · GitHub ${failure} · retry at ${time} UTC`,
+            reason,
+            `GitHub проверяет возможность слияния · PR #12 · GitHub ${failure} · повтор в ${time} UTC`,
+          );
+        }
+        f.store.setSetting(key, null);
+        expectStatus(f, mergeability, reason);
 
         f.setRemote({ mergeable: true });
         await f.engine.publish(task.id);

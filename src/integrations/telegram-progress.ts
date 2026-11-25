@@ -16,7 +16,6 @@ import {
   outstandingActivity,
   taskActivity,
   taskReference,
-  taskStatus,
 } from '../core/task-activity.js';
 
 const activeStates = new Set<State>([
@@ -93,7 +92,8 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
   else if (running.length) label = 'Work in progress';
   else if (turns.length) label = 'Request saved. Waiting to start.';
   else if (workers.length) label = 'Waiting for a worker';
-  else if (activeTask) label = taskStatus(activeTask.state, false);
+  else if (activeTask)
+    label = activityStatus(outstanding.find(({ task }) => task.id === activeTask.id)!);
   else if (
     group.daddyState === 'needs_input' &&
     store.daddyJobs(group.id).at(-1)?.status === 'failed'

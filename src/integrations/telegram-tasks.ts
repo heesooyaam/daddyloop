@@ -10,6 +10,9 @@ import {
 } from '../core/types.js';
 import {
   activityStatus,
+  activityReason,
+  mergeabilityStatus,
+  waitingForMergeability,
   outstandingActivity,
   profileText,
   queueDetail,
@@ -94,7 +97,7 @@ function queueStatus(item: TaskActivity) {
   if (label === 'Task discussion in progress') return { label };
   const detail = queueDetail(task);
   if (mergeStatus) {
-    if (label.startsWith('GitHub is calculating mergeability · ')) return { label, detail };
+    if (label.startsWith(mergeabilityStatus + ' · ')) return { label, detail };
     if (label.startsWith('Waiting for GitHub API quota until '))
       return { label: 'Waiting for GitHub quota', detail: label };
     if (label.includes(' · retry at ')) return { label, detail };
@@ -268,12 +271,13 @@ export function taskCard(
   if (run) text.add('\n' + run);
   if (profile) text.add('\n' + profileText(profile));
   const showReason =
+    waitingForMergeability(task) ||
     (job?.status !== 'running' && !item.mergeStatus) ||
     (task.state === 'needs_input' &&
       (queueDetail(task) !== undefined || activityStatus({ task }) !== 'Action needed')) ||
     (task.state === 'fixing' && task.fixingMergeConflict);
   const explanations = new Set(
-    [detail, showReason ? task.reason : undefined].map((value) =>
+    [detail, showReason ? activityReason(task) : undefined].map((value) =>
       value ? t(redact(value)).trim() : '',
     ),
   );

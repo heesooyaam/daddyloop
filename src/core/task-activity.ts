@@ -96,13 +96,21 @@ export function retryTime(until: number) {
   return new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
 }
 
-function waitingForMergeability(task: Task) {
+export const mergeabilityStatus = 'GitHub is calculating mergeability';
+
+export function waitingForMergeability(task: Task) {
   return (
     task.state === 'awaiting_publication' &&
     task.snapshot?.status === 'published' &&
     sameRevision(task.snapshot.revision, task.revision) &&
     sameRevision(task.snapshot.revision, task.review?.revision)
   );
+}
+
+export function activityReason(task: Task) {
+  return waitingForMergeability(task)
+    ? 'The review is published. Waiting for GitHub to determine mergeability.'
+    : task.reason;
 }
 
 export function localRetryStatus(task: Task, job?: Job) {
@@ -144,9 +152,8 @@ export function localRetryStatus(task: Task, job?: Job) {
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
   if (waitingForMergeability(task)) {
-    const label = 'GitHub is calculating mergeability';
-    if (mergeStatus) return `${label} · ${mergeStatus}`;
-    return localRetryStatus(task, job)?.label ?? label;
+    if (mergeStatus) return `${mergeabilityStatus} · ${mergeStatus}`;
+    return localRetryStatus(task, job)?.label ?? mergeabilityStatus;
   }
   if (mergeStatus) return mergeStatus;
   if (
