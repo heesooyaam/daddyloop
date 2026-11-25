@@ -283,3 +283,42 @@ it('finishes the saved result after a throttled verification read without restar
     f.store.close();
   }
 });
+
+it.each(['review', 'publication'] as const)(
+  'keeps a competing %s transition and its queued job',
+  async (step) => {
+    const f = await fixture({ state: 'queued' });
+    const runtime = new DemoRuntime();
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 60000);
+    try {
+      if (step === 'review') {
+        const start = f.engine.review.bind(f.engine);
+        vi.spyOn(f.engine, 'review').mockImplementationOnce(async (id) => {
+          await start(id);
+          return start(id);
+        });
+      } else {
+        await f.engine.review(f.task.id);
+        await f.engine.broker.call(f.job(), 'add_comment', {
+          key: 'needed',
+          body: 'A real regression',
+        });
+        await f.run();
+        const publish = f.engine.publish.bind(f.engine);
+        vi.spyOn(f.engine, 'publish').mockImplementationOnce(async (id) => {
+          await publish(id);
+          return publish(id);
+        });
+      }
+      vi.spyOn(f.store, 'claim').mockReturnValue(undefined);
+      await worker.tick();
+      expect(f.store.getTask(f.task.id).state).toBe(step === 'review' ? 'reviewing' : 'fixing');
+      expect(f.store.activeJobs(f.task.id)).toMatchObject([
+        { kind: step === 'review' ? 'review' : 'fix', status: 'queued' },
+      ]);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);

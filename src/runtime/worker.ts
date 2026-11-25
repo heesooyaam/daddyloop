@@ -345,7 +345,11 @@ export class Worker {
           } catch (error) {
             if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
-            if (current.generation === task.generation && current.state !== 'paused') {
+            if (
+              current.generation === task.generation &&
+              current.state === 'queued' &&
+              !store.busy(current.id)
+            ) {
               current.state = 'needs_input';
               current.reason = redact(String(error));
               store.saveTask(current);
@@ -368,7 +372,11 @@ export class Worker {
           } catch (error) {
             if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
-            if (current.generation === task.generation && current.state !== 'paused') {
+            if (
+              current.generation === task.generation &&
+              current.state === 'awaiting_publication' &&
+              !store.busy(current.id)
+            ) {
               if (
                 current.partialReview &&
                 error instanceof AppError &&
