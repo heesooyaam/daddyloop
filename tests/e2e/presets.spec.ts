@@ -138,7 +138,7 @@ test('merges a stale preset addition without undoing the order saved in another 
   const suffix = Date.now(),
     headers = { 'X-daddyloop-Request': '1' },
     presets: any[] = [];
-  for (const name of ['A', 'B', 'C', 'D']) {
+  for (const name of ['A', 'B', 'C', 'D', 'E']) {
     const response = await page.request.post('/api/instructions/presets', {
       headers,
       data: {
@@ -159,7 +159,7 @@ test('merges a stale preset addition without undoing the order saved in another 
         instructions: {
           daddy: {},
           worker: {},
-          presets: presets.slice(0, 3).map((preset) => ({ preset, enabled: true, omit: [] })),
+          presets: presets.slice(0, 4).map((preset) => ({ preset, enabled: true, omit: [] })),
         },
       },
     });
@@ -191,27 +191,27 @@ test('merges a stale preset addition without undoing the order saved in another 
   const second = other.getByRole('dialog', { name: 'Session settings' });
   await second.getByText('Style and skills for this session', { exact: true }).click();
   await second.getByRole('button', { name: 'Add presets', exact: true }).click();
-  for (const name of ['B', 'C'])
-    await second
-      .getByRole('button', {
-        name: `Remove preset Concurrent ${name} ${suffix} from this session`,
-        exact: true,
-      })
-      .click();
-  for (const name of ['D', 'B', 'C'])
+  await second
+    .getByRole('button', {
+      name: `Remove preset Concurrent D ${suffix} from this session`,
+      exact: true,
+    })
+    .click();
+  for (const name of ['E', 'D'])
     await second
       .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
       .check();
 
-  await first.getByRole('button', { name: 'Save settings', exact: true }).click();
-  await expect(first).toHaveCount(0);
   await second.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(second).toHaveCount(0);
+  await first.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(first).toHaveCount(0);
   const board = await (await page.request.get(`/api/daddy/sessions/${session.id}`)).json();
   expect(board.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
     `Concurrent C ${suffix}`,
-    `Concurrent A ${suffix}`,
+    `Concurrent E ${suffix}`,
     `Concurrent D ${suffix}`,
+    `Concurrent A ${suffix}`,
     `Concurrent B ${suffix}`,
   ]);
 

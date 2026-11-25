@@ -261,6 +261,7 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     presetB = makePreset('Preset B'),
     presetC = makePreset('Preset C'),
     presetD = makePreset('Preset D'),
+    presetE = makePreset('Preset E'),
     selected = (preset: typeof presetA, enabled = true) => ({ preset, enabled, omit: [] }),
     state = (preset: typeof presetA, enabled = true) => ({
       revision: preset.revision,
@@ -693,6 +694,46 @@ it('merges independent instruction elements and rejects an overlapping patch ato
         f.daddy.group(insertion.id).instructions?.presets?.map((entry) => entry.preset.id),
       ).toEqual([presetC.id, presetA.id, presetD.id, presetB.id]);
     }
+
+    for (const moved of [
+      [presetC.id, presetD.id, presetA.id, presetB.id],
+      [presetC.id, presetA.id, presetD.id, presetB.id],
+    ])
+      for (const reverse of [false, true]) {
+        const block = f.daddy.create({
+            workspaceId: f.workspace.id,
+            instructions: {
+              daddy: {},
+              worker: {},
+              presets: [selected(presetA), selected(presetB), selected(presetC), selected(presetD)],
+            },
+          }),
+          moveBlock = [
+            {
+              target: 'preset-order',
+              before: [presetA.id, presetB.id, presetC.id, presetD.id],
+              after: moved,
+            },
+          ],
+          insert = [
+            { target: 'preset', id: presetE.id, before: null, after: state(presetE) },
+            {
+              target: 'preset-order',
+              before: [presetA.id, presetB.id, presetC.id, presetD.id],
+              after: [presetA.id, presetB.id, presetC.id, presetE.id, presetD.id],
+            },
+          ];
+        for (const changes of reverse ? [insert, moveBlock] : [moveBlock, insert]) {
+          const saved = await patchInstructions(block.id, changes);
+          expect(saved.statusCode, saved.body).toBe(200);
+        }
+        const expected = [...moved],
+          at = expected.indexOf(presetD.id);
+        expected.splice(at, 0, presetE.id);
+        expect(
+          f.daddy.group(block.id).instructions?.presets?.map((entry) => entry.preset.id),
+        ).toEqual(expected);
+      }
 
     for (const { base, firstOrder, secondOrder, addition } of [
       {

@@ -619,6 +619,7 @@ export class Telegram {
       this.workspace &&
       (message?.voice ||
         message?.document ||
+        this.workspace.isRegistrationStart(update) ||
         this.workspace.isRegistrationInput(update) ||
         (message?.text &&
           (!message.text.trim().startsWith('/') ||

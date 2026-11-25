@@ -2276,6 +2276,21 @@ export class TelegramWorkspace {
     const text = normalizeTelegramCommand(message.text, this.username);
     return !!text && !/^\/[a-z]+(?:\s|$)/i.test(text);
   }
+  isRegistrationStart(update: Update) {
+    const pair = this.pair(),
+      message = update.message;
+    if (
+      !pair ||
+      !message?.text ||
+      message.from?.id !== pair.userId ||
+      message.chat.type !== 'private' ||
+      message.chat.id !== pair.chatId
+    )
+      return false;
+    return /^\/start\s+workspace_[A-Za-z0-9_-]{16}$/.test(
+      normalizeTelegramCommand(message.text, this.username) ?? '',
+    );
+  }
   private repositoryButton(
     text: string,
     choice: RepoChoice,
@@ -2681,7 +2696,7 @@ export class TelegramWorkspace {
             callback_data: 'dad:add-workspace:standalone',
           },
         ],
-        [{ text: this.t('Find on server'), callback_data: 'dad:discover' }],
+        [{ text: this.t('Find on server'), callback_data: 'dad:discover:standalone' }],
         [{ text: this.t('Back'), callback_data: 'dad:settings' }],
       ],
     });
@@ -2750,7 +2765,13 @@ export class TelegramWorkspace {
     );
     await this.workspaceCard(saved, destination);
   }
-  private async discover(destination: Destination, page = 0) {
+  private async discover(
+    destination: Destination,
+    purpose: 'new' | 'standalone',
+    draftId?: string,
+    page = 0,
+  ) {
+    if (purpose === 'new') this.creationDraft(destination, draftId ?? 'legacy');
     const suggestions = await this.daddy.workspaces.suggestions(),
       pageSize = 10,
       pages = Math.max(1, Math.ceil(suggestions.length / pageSize));
@@ -2762,6 +2783,8 @@ export class TelegramWorkspace {
         id,
         JSON.stringify({
           ...item,
+          purpose,
+          draftId,
           chatId: destination.chatId,
           threadId: destination.threadId,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
@@ -2781,12 +2804,35 @@ export class TelegramWorkspace {
       buttons: [
         ...buttons,
         [
-          ...(page > 0 ? [{ text: '←', callback_data: `dad:discover-page:${page - 1}` }] : []),
+          ...(page > 0
+            ? [
+                {
+                  text: '←',
+                  callback_data:
+                    purpose === 'new'
+                      ? `dad:discover-page:new:${draftId}:${page - 1}`
+                      : `dad:discover-page:standalone:${page - 1}`,
+                },
+              ]
+            : []),
           ...(page + 1 < pages
-            ? [{ text: '→', callback_data: `dad:discover-page:${page + 1}` }]
+            ? [
+                {
+                  text: '→',
+                  callback_data:
+                    purpose === 'new'
+                      ? `dad:discover-page:new:${draftId}:${page + 1}`
+                      : `dad:discover-page:standalone:${page + 1}`,
+                },
+              ]
             : []),
         ],
-        [{ text: this.t('Back'), callback_data: 'dad:workspaces' }],
+        [
+          {
+            text: this.t('Back'),
+            callback_data: purpose === 'new' ? `dad:new-page:${draftId}:0` : 'dad:workspaces',
+          },
+        ],
       ].filter((row) => row.length),
     });
   }
@@ -3120,6 +3166,8 @@ export class TelegramWorkspace {
       const action = JSON.parse(row.data as string) as {
         name: string;
         path: string;
+        purpose?: 'new' | 'standalone';
+        draftId?: string;
         chatId: number;
         threadId?: number;
         expiresAt: string;
@@ -3130,12 +3178,17 @@ export class TelegramWorkspace {
         action.expiresAt <= now()
       )
         throw new Error(this.t('This selection expired. Open Workspaces again.'));
+      if (!action.purpose)
+        throw new Error(this.t('This selection expired. Open Workspaces again.'));
+      if (action.purpose === 'new') this.creationDraft(destination, action.draftId ?? 'legacy');
       const workspace = await this.daddy.workspaces.register({
         name: action.name,
         path: action.path,
       });
       this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(data);
-      await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
+      if (action.purpose === 'new')
+        await this.api.send(destination, this.workspacePickerCard(destination, [workspace]));
+      else await this.workspacesCard(destination);
       return true;
     }
     if (data.startsWith('dad-workspace-new:')) {
@@ -3333,15 +3386,27 @@ export class TelegramWorkspace {
       }
       return true;
     }
-    if (data === 'dad:discover') {
-      await this.discover(destination);
+    const discover = /^dad:discover:(new|standalone)(?::([A-Za-z0-9_-]+))?$/.exec(data);
+    if (discover) {
+      await this.discover(destination, discover[1] as 'new' | 'standalone', discover[2]);
       return true;
     }
-    const discoverPage = /^dad:discover-page:(\d+)$/.exec(data);
+    if (data === 'dad:discover')
+      throw new Error(this.t('This selection expired. Open Workspaces again.'));
+    const discoverPage = /^dad:discover-page:(new|standalone)(?::([A-Za-z0-9_-]+))?:(\d+)$/.exec(
+      data,
+    );
     if (discoverPage) {
-      await this.discover(destination, Number(discoverPage[1]));
+      await this.discover(
+        destination,
+        discoverPage[1] as 'new' | 'standalone',
+        discoverPage[2],
+        Number(discoverPage[3]),
+      );
       return true;
     }
+    if (data.startsWith('dad:discover-page:'))
+      throw new Error(this.t('This selection expired. Open Workspaces again.'));
     if (data === 'dad:workspaces') {
       await this.workspacesCard(destination);
       return true;
@@ -3647,22 +3712,26 @@ export class TelegramWorkspace {
           this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
           throw new Error(this.t('This selection expired. Open repository registration again.'));
         }
-        this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
-        this.store.setSetting(this.registrationKey(destination), {
-          provider: pending.provider,
-          origin: pending.origin,
-          creationBound:
-            pending.creationBound ??
-            (pending.creationId && pending.creationExpiresAt ? true : undefined),
-          creationId: pending.creationId,
-          creationText: pending.creationText,
-          creationExpiresAt: pending.creationExpiresAt,
-          expiresAt: pending.expiresAt,
+        const content = this.t('Send a repository URL or an absolute server path.');
+        this.store.transaction(() => {
+          this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
+          this.store.setSetting(this.registrationKey(destination), {
+            provider: pending.provider,
+            origin: pending.origin,
+            creationBound:
+              pending.creationBound ??
+              (pending.creationId && pending.creationExpiresAt ? true : undefined),
+            creationId: pending.creationId,
+            creationText: pending.creationText,
+            creationExpiresAt: pending.creationExpiresAt,
+            expiresAt: pending.expiresAt,
+          });
+          this.store.db
+            .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+            .run(update.update_id, now());
+          this.saveRegistrationReply(update.update_id, [{ destination, content }]);
         });
-        await this.api.send(
-          destination,
-          this.t('Send a repository URL or an absolute server path.'),
-        );
+        await this.sendRegistrationReply(update.update_id);
         return true;
       }
       if (taskStart) {
@@ -3734,10 +3803,14 @@ export class TelegramWorkspace {
         if (/^\/[a-z]+(?:\s|$)/i.test(text)) {
           this.store.setSetting(registrationKey, null);
           if (text === '/cancel') {
-            await this.api.send(
-              destination,
-              this.workspacePickerCard(destination, this.daddy.workspaces.list()),
-            );
+            if (creationBound) {
+              const target = registration.origin ?? destination;
+              this.creationDraft(target, registration.creationId ?? 'legacy');
+              await this.api.send(
+                target,
+                this.workspacePickerCard(target, this.daddy.workspaces.list()),
+              );
+            } else await this.workspacesCard(destination);
             return true;
           }
         } else if (!registration.path) {

@@ -213,7 +213,8 @@ export function applyInstructionChanges(
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
   let orderMoves = new Set<string>(),
-    orderActual: string[] = [];
+    orderActual: string[] = [],
+    orderTarget: string[] = [];
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
@@ -231,6 +232,7 @@ export function applyInstructionChanges(
       anchors = commonSubsequence(beforeShared, afterShared),
       presentAnchors = anchors.filter((id) => actualOrder.includes(id));
     orderActual = actualOrder;
+    orderTarget = [...order.after];
     orderMoves = new Set(
       order.after.filter((id) => !order.before.includes(id) && !actualOrder.includes(id)),
     );
@@ -250,6 +252,35 @@ export function applyInstructionChanges(
     for (const id of order.before.filter((id) => !order.after.includes(id)))
       if (actualOrder.includes(id) && presetChanges.get(id)?.after !== null)
         throw new Error('instruction_conflict');
+    const base = new Set(order.before),
+      added = new Set(order.after.filter((id) => !base.has(id))),
+      concurrent = (id: string) => !base.has(id) && !added.has(id);
+    for (let start = 0; start < actualOrder.length;) {
+      if (!concurrent(actualOrder[start]!)) {
+        start++;
+        continue;
+      }
+      let end = start;
+      while (end + 1 < actualOrder.length && concurrent(actualOrder[end + 1]!)) end++;
+      const previous = actualOrder
+          .slice(0, start)
+          .reverse()
+          .find((id) => base.has(id)),
+        following = actualOrder.slice(end + 1).find((id) => base.has(id));
+      if (
+        previous &&
+        following &&
+        orderMoves.has(previous) &&
+        orderMoves.has(following) &&
+        order.after.indexOf(previous) < order.after.indexOf(following)
+      ) {
+        const carried = actualOrder.slice(start, end + 1),
+          at = orderTarget.indexOf(following);
+        carried.forEach((id) => orderMoves.add(id));
+        orderTarget.splice(at, 0, ...carried);
+      }
+      start = end + 1;
+    }
   }
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     if (sameValue(value(change), change.after)) continue;
@@ -291,15 +322,15 @@ export function applyInstructionChanges(
     const presets = next.presets ?? [],
       byId = new Map(presets.map((entry) => [entry.preset.id, entry])),
       current = presets.filter((entry) => !orderMoves.has(entry.preset.id));
-    for (const id of order.after.filter((id) => orderMoves.has(id))) {
+    for (const id of orderTarget.filter((id) => orderMoves.has(id))) {
       const entry = byId.get(id);
       if (!entry) continue;
-      const at = order.after.indexOf(id),
-        preceding = order.after
+      const at = orderTarget.indexOf(id),
+        preceding = orderTarget
           .slice(0, at)
           .reverse()
           .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
-        following = order.after
+        following = orderTarget
           .slice(at + 1)
           .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
         precedingIndex = preceding
@@ -311,7 +342,7 @@ export function applyInstructionChanges(
         insertion =
           at === 0
             ? 0
-            : at === order.after.length - 1
+            : at === orderTarget.length - 1
               ? current.length
               : followingIndex >= 0 && (precedingIndex < 0 || precedingIndex < followingIndex)
                 ? followingIndex

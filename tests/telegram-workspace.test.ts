@@ -1152,6 +1152,12 @@ it('registers a named remote workspace from Telegram with owner, topic and cance
     await bot.handle(click('dad:workspace-module:github'));
     await bot.handle(message('/cancel'));
     expect(f.store.setting('telegram.addWorkspace:7:7:0')).toBeNull();
+    expect(
+      sent
+        .at(-1)
+        .buttons.flat()
+        .some((button: any) => String(button.callback_data).startsWith('dad:workspace:')),
+    ).toBe(true);
   } finally {
     await bot.stop();
     await f.close();
@@ -1357,6 +1363,90 @@ it('recovers the expected private registration reply after its delivery record f
     );
     expect(continuations).toHaveLength(1);
     expect(continuations[0]!.options.key).toBe(`registration:${name.update_id}:0`);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('recovers the first private registration step without consuming its handoff early', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  let failDelivery = false;
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_destination, card) => {
+      if (failDelivery && String(card?.text ?? card).includes('repository URL')) {
+        failDelivery = false;
+        throw Object.assign(new Error('fixture delivery insert failed'), {
+          code: 'ERR_SQLITE_ERROR',
+        });
+      }
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  let bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  let updateId = 990;
+  const start = (token: string): Update => ({
+    update_id: updateId++,
+    message: {
+      message_id: updateId,
+      text: `/start workspace_${token}`,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const pending = (token: string) =>
+    f.store.setSetting(`telegram.workspacePrivate:${token}`, {
+      provider: 'github',
+      origin: { chatId: -10042, threadId: 12 },
+      creationBound: false,
+      ownerId: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  try {
+    pending('statefailure1234');
+    const stateStart = start('statefailure1234'),
+      setSetting = f.store.setSetting.bind(f.store);
+    let failState = true;
+    vi.spyOn(f.store, 'setSetting').mockImplementation((key, value) => {
+      if (key === 'telegram.addWorkspace:7:7:0' && failState) {
+        failState = false;
+        throw Object.assign(new Error('fixture state insert failed'), {
+          code: 'ERR_SQLITE_ERROR',
+        });
+      }
+      return setSetting(key, value);
+    });
+    await expect(bot.handle(stateStart)).rejects.toThrow('fixture state insert failed');
+    expect(f.store.setting('telegram.workspacePrivate:statefailure1234')).toBeTruthy();
+    expect(
+      f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(stateStart.update_id),
+    ).toBeUndefined();
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    await bot.handle(stateStart);
+    expect(
+      sent.filter((card) => String(card?.text ?? card).includes('repository URL')),
+    ).toHaveLength(1);
+
+    pending('replyfailure1234');
+    const replyStart = start('replyfailure1234');
+    failDelivery = true;
+    await expect(bot.handle(replyStart)).rejects.toThrow('fixture delivery insert failed');
+    expect(f.store.setting('telegram.workspacePrivate:replyfailure1234')).toBeUndefined();
+    expect(
+      f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(replyStart.update_id),
+    ).toBeTruthy();
+    await bot.stop();
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    await bot.handle(replyStart);
+    expect(
+      sent.filter((card) => String(card?.text ?? card).includes('repository URL')),
+    ).toHaveLength(2);
   } finally {
     await bot.stop();
     await f.close();
@@ -2407,6 +2497,16 @@ it('pages through discovered repositories and server folders without losing the 
     ...workspace,
     repoPath: input?.path ?? workspace.repoPath,
   }));
+  const register = vi.spyOn(f.workspaces, 'register').mockImplementation(async (input) => {
+    const workspace = {
+      ...f.workspace,
+      id: randomUUID(),
+      name: input.name,
+      repoPath: input.path,
+    };
+    f.store.saveWorkspace(workspace);
+    return workspace;
+  });
   let id = 1600;
   const message = (text: string): Update => ({
     update_id: id++,
@@ -2438,6 +2538,31 @@ it('pages through discovered repositories and server folders without losing the 
       .buttons.flat()
       .find((item: any) => item.text === text);
   try {
+    await bot.handle(message('/new Discovery draft A'));
+    await press(button('Find on server').callback_data);
+    const stalePage = exactButton('→').callback_data;
+    await bot.handle(message('/new Discovery draft B'));
+    await press(stalePage);
+    expect(register).not.toHaveBeenCalled();
+
+    await bot.handle(message('/new Discovery result A'));
+    await press(button('Find on server').callback_data);
+    const staleResult = button('Discovered 1').callback_data;
+    await bot.handle(message('/new Discovery result B'));
+    await press(staleResult);
+    expect(register).not.toHaveBeenCalled();
+
+    await bot.handle(message('/workspaces'));
+    await press(button('Find on server').callback_data);
+    await press(button('Discovered 1').callback_data);
+    expect(register).toHaveBeenCalledOnce();
+    expect(
+      sent
+        .at(-1)
+        .buttons.flat()
+        .some((item: any) => String(item.callback_data).startsWith('dad:workspace:')),
+    ).toBe(true);
+
     await bot.handle(message('/new Keep this phone task'));
     await press(button('Find on server').callback_data);
     for (let page = 0; page < 3; page++) await press(exactButton('→').callback_data);

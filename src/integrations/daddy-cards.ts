@@ -104,7 +104,12 @@ export function workspacePicker(
           callback_data: `dad:add-workspace:new:${draftId ?? 'legacy'}`,
         },
       ],
-      [{ text: t('Find on server'), callback_data: 'dad:discover' }],
+      [
+        {
+          text: t('Find on server'),
+          callback_data: `dad:discover:new:${draftId ?? 'legacy'}`,
+        },
+      ],
       [{ text: t('Back'), callback_data: 'dad:home' }],
     ],
   };
