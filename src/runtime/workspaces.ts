@@ -7,7 +7,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { AppError, type Task, type Role, type TicketRef } from '../core/types.js';
+import { AppError, type Task, type Role, type TicketRef, type Revision } from '../core/types.js';
 import { git } from './git.js';
 export { git } from './git.js';
 import { isGitAddress } from '../modules/repositories/git-source.js';
@@ -384,6 +384,27 @@ export class Workspaces {
     ]);
     return run(['rev-parse', 'HEAD']);
   }
+  async inspectSavedFixHead(task: Task, revision: Revision): Promise<string> {
+    if (task.ref.provider === 'arcadia') return this.arc.inspectSavedFixHead({ ...task, revision });
+    if (!/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('Invalid task ID');
+    const root = join(realpathSync(this.dataDir), 'workspaces', task.id);
+    const author = task.authorWorktree ?? join(root, 'author');
+    if (!existsSync(author))
+      throw new AppError('workspace_missing', 'The managed author workspace is missing');
+    const cwd = realpathSync(author);
+    if (cwd !== join(root, 'author') || realpathSync(root) !== root)
+      throw new AppError(
+        'workspace_invalid',
+        'The author workspace is outside the managed task directory',
+      );
+    await this.verifyCopy(author, join(root, 'objects.git'));
+    const head = await git(['rev-parse', 'HEAD'], cwd);
+    await git(['merge-base', '--is-ancestor', revision.head, head], cwd);
+    if (head === revision.head && (await git(['status', '--porcelain'], cwd)))
+      throw new AppError('workspace_dirty', 'The worker copy still contains uncommitted changes');
+    return head;
+  }
+
   async prepareSavedFixPush(task: Task, head: string, signal?: AbortSignal) {
     if (task.ref.provider === 'arcadia') return this.arc.prepareSavedFixPush(task, head, signal);
     if (!/^[A-Za-z0-9_-]+$/.test(task.id)) throw new Error('Invalid task ID');

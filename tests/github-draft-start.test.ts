@@ -437,3 +437,35 @@ it.each([false, true])(
     }
   },
 );
+
+it.each(['deleted', 'edited', 'unchanged'] as const)(
+  'refreshes the published review when starting the new target review (%s)',
+  async (change) => {
+    const f = await reviewFixture();
+    try {
+      f.accept();
+      const engine = f.engine();
+      await engine.review(f.task.id);
+      f.due();
+      f.remote.targetBranch = 'release';
+      expect(await engine.review(f.task.id)).toMatchObject({ state: 'needs_input' });
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 202, body: 'Original finding', html_url: f.task.ref.url });
+      expect(await engine.review(f.task.id, true)).toMatchObject({ state: 'queued' });
+      expect(await engine.review(f.task.id)).toMatchObject({ state: 'reviewing' });
+      if (change === 'deleted') f.comments.splice(0);
+      if (change === 'edited') f.comments[0].body = 'Updated finding';
+      const job = f.store.claim()!;
+      expect(await engine.refreshQueuedReviewFeedback(job)).toBe(true);
+      expect(
+        f.store.getTask(f.task.id).feedback?.comments.map(({ id, body }) => ({ id, body })),
+      ).toEqual(
+        change === 'deleted'
+          ? []
+          : [{ id: '202', body: change === 'edited' ? 'Updated finding' : 'Original finding' }],
+      );
+    } finally {
+      f.store.close();
+    }
+  },
+);

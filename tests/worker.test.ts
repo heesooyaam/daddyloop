@@ -3051,9 +3051,10 @@ it.each(['published', 'draft', 'result after restart'] as const)(
   },
 );
 
-it.each([false, true])(
-  'preserves the returned fix SHA across SQLite contention (exhausted: %s)',
-  async (exhausted) => {
+it.each(['short', 'restart', 'live'] as const)(
+  'preserves the returned fix SHA across SQLite contention (%s)',
+  async (recovery) => {
+    const exhausted = recovery !== 'short';
     const dir = mkdtempSync(join(tmpdir(), 'daddy-first-fix-receipt-'));
     const path = join(dir, 'state.sqlite');
     const f = await fixture({}, path);
@@ -3116,6 +3117,20 @@ it.each([false, true])(
           store.events(task.id).filter(({ type }) => type === 'author.fixes_saved'),
         ).toHaveLength(1);
       }
+      if (recovery === 'live') {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await worker.tick();
+        expect(store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          reason: expect.stringContaining(saved),
+        });
+        await expect(f.engine.review(task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+          message: expect.stringContaining(saved),
+        });
+        expect(store.activeJobs(task.id)).toHaveLength(0);
+        return;
+      }
       await worker.stop();
       store.close();
       store = new Store(path);
@@ -3135,6 +3150,104 @@ it.each([false, true])(
       expect(store.activeJobs(task.id)).toHaveLength(0);
     } finally {
       if (release) clearTimeout(release);
+      if (locked) other.exec('ROLLBACK');
+      await worker.stop();
+      other.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(['SQLite available', 'both writes fail'] as const)(
+  'recovers a fix when the receipt file cannot be written (%s)',
+  async (scenario) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-receipt-file-failure-'));
+    const path = join(dir, 'state.sqlite');
+    const f = await fixture({}, path);
+    let store = f.store;
+    let engine = f.engine;
+    const other = new DatabaseSync(path);
+    const saved = 'f'.repeat(40);
+    const workspaces = new Workspaces(dir);
+    vi.spyOn(workspaces, 'prepare').mockResolvedValue(dir);
+    const inspect = vi.spyOn(workspaces, 'inspectSavedFixHead').mockResolvedValue(saved);
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+    let locked = false;
+    try {
+      // A non-directory at this path reliably refuses the file write, even when run as root.
+      writeFileSync(path + '.saved-fixes', '');
+      store.db.exec('PRAGMA busy_timeout=0');
+      await queueFix(f);
+      const task = store.getTask(f.task.id);
+      store.saveTask({ ...task, ref: { ...prRef(task), provider: 'github' } });
+      vi.spyOn(workspaces, 'commitFix').mockImplementation(async () => {
+        if (scenario === 'both writes fail') {
+          other.exec('BEGIN IMMEDIATE');
+          locked = true;
+        }
+        return saved;
+      });
+      const record = store.event.bind(f.store);
+      let failedWrites = 0;
+      vi.spyOn(f.store, 'event').mockImplementation((...args) => {
+        if (args[1] !== 'author.fixes_saved') return record(...args);
+        try {
+          return record(...args);
+        } catch (error) {
+          if (++failedWrites === 10) {
+            other.exec('ROLLBACK');
+            locked = false;
+          }
+          throw error;
+        }
+      });
+      await worker.tick();
+      if (scenario === 'both writes fail') {
+        await vi.waitFor(() => expect(failedWrites).toBe(10));
+        expect(store.pendingFixSaves(task.id)).toHaveLength(1);
+        // Restore the receipt directory path before opening a new Engine on the same database.
+        rmSync(path + '.saved-fixes');
+        await worker.stop();
+        store.close();
+        store = new Store(path);
+        engine = new Engine(store, () => new DemoProvider(store));
+        const recovery = new Worker(engine, workspaces, runtime, runtime, healthy, 0);
+        try {
+          engine.recoverInterruptedJobs();
+          await expect(engine.review(task.id, true)).rejects.toMatchObject({
+            code: 'fix_pending',
+            message: expect.stringContaining('worker copy must be checked'),
+          });
+          await recovery.tick();
+          expect(inspect).toHaveBeenCalledOnce();
+          expect(store.getTask(task.id)).toMatchObject({
+            state: 'needs_input',
+            reason: expect.stringContaining(saved),
+          });
+        } finally {
+          await recovery.stop();
+        }
+      } else {
+        await vi.waitFor(() =>
+          expect(store.getTask(task.id)).toMatchObject({
+            state: 'awaiting_push',
+            pendingAuthorHead: saved,
+          }),
+        );
+        expect(inspect).not.toHaveBeenCalled();
+      }
+      expect(
+        store.events(task.id).filter(({ type }) => type === 'author.fixes_saved'),
+      ).toHaveLength(1);
+      store.restoreSavedFixReceipts(task.id);
+      await expect(engine.review(task.id, true)).rejects.toMatchObject({
+        code: 'fix_pending',
+        message: expect.stringContaining(saved),
+      });
+      expect(store.activeJobs(task.id)).toHaveLength(0);
+    } finally {
       if (locked) other.exec('ROLLBACK');
       await worker.stop();
       other.close();

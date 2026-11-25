@@ -327,6 +327,15 @@ export class ArcWorkspaces {
     ).hash;
     return head;
   }
+  async inspectSavedFixHead(task: Task) {
+    const author = await this.checkedAuthor(task);
+    if (
+      author.head === task.revision?.head &&
+      (await this.bridge.native(['status', '--short'], author.saved.mount))
+    )
+      throw new Error('The Arc author copy still contains uncommitted changes');
+    return author.head;
+  }
   async prepareSavedFixPush(task: Task, head: string, signal?: AbortSignal) {
     const author = await this.checkedAuthor(task, signal);
     if (author.head !== head)

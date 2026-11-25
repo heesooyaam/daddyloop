@@ -273,6 +273,10 @@ export async function readArchive(file: string, maxBytes: number, reserveGiB: nu
       );
       if (
         !/^data\/(?:daddyloop\.sqlite$|workspaces\/|artifacts\/|voice\/)/.test(entry.path) &&
+        !(
+          entry.blob &&
+          /^data\/daddyloop\.sqlite\.saved-fixes\/[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.path)
+        ) &&
         !/^recovery\/arcadia\//.test(entry.path) &&
         !(sourceFile && sourceIds.has(sourceFile[1]))
       )

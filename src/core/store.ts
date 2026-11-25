@@ -214,7 +214,8 @@ export class Store {
       try {
         unlinkSync(path);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (!['ENOENT', 'EACCES', 'EPERM', 'EROFS'].includes(code ?? '')) throw error;
       }
     }
   }
@@ -225,7 +226,7 @@ export class Store {
     try {
       files = readdirSync(this.savedFixDirectory);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
       throw error;
     }
     const prefix = this.savedFixFilePrefix(taskId);
@@ -315,6 +316,15 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
+  pendingFixSaves(taskId?: string): Job[] {
+    return this.db
+      .prepare(
+        "SELECT data FROM jobs WHERE (? IS NULL OR task_id=?) AND json_type(data,'$.fixSaveRevision')='object'",
+      )
+      .all(taskId ?? null, taskId ?? null)
+      .map((row) => JSON.parse(String(row.data)) as Job);
+  }
+
   activeJobs(taskId?: string): Job[] {
     const active = "SELECT data FROM jobs WHERE status IN ('queued','running')";
     const rows = taskId

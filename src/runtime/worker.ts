@@ -207,6 +207,16 @@ export class Worker {
       const poll = Date.now() - this.lastPoll > this.pollMs;
       if (poll) {
         this.lastPoll = Date.now();
+        for (const job of store.pendingFixSaves()) {
+          if (this.active.has(job.taskId)) continue;
+          try {
+            await this.engine.recoverPendingSavedFix(job, (task, revision) =>
+              this.workspaces.inspectSavedFixHead(task, revision),
+            );
+          } catch (error) {
+            if (!isSqliteBusy(error)) throw error;
+          }
+        }
         const tasks = store.tasks();
         for (const task of tasks.filter(confirmedSupersededDraft)) {
           if (
@@ -552,6 +562,7 @@ export class Worker {
       if (job.deferredResult) {
         await this.engine.completeJob(job, job.deferredResult, undefined, saveCheckpoint);
         delete job.deferredResult;
+        delete job.fixSaveRevision;
         job.status = 'completed';
         return;
       }
@@ -647,6 +658,13 @@ export class Worker {
           'conflict_repair_unavailable',
           'Check the PR branches and auto-merge setting before resuming conflict resolution.',
         );
+      if (job.kind === 'review' && startingPR) {
+        if (!(await this.engine.refreshQueuedReviewFeedback(job))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
+      }
       const demo = task.ref.provider === 'demo';
       const cwd = demo
         ? this.workspaces.dataDir
@@ -837,7 +855,9 @@ export class Worker {
       ) {
         if (demo) await new DemoProvider(store).advance(prRef(task));
         else {
-          // Once saving starts, collect the local SHA even if cancellation arrives mid-commit.
+          // Record the intent before committing so a failed receipt can be checked in the copy.
+          job.fixSaveRevision = task.revision;
+          store.saveJob(job);
           const head = await this.workspaces.commitFix(
             task,
             repairingConflict
@@ -854,14 +874,16 @@ export class Worker {
         if (error instanceof GitHubRetryError) job.deferredResult = result;
         throw error;
       }
+      delete job.fixSaveRevision;
       job.status = abort.signal.aborted ? 'cancelled' : 'completed';
     } catch (error) {
       if (savedFix) {
         try {
           await this.engine.recordSavedFix(job, savedFix);
+          delete job.fixSaveRevision;
         } catch (receiptError) {
           if (!isSqliteBusy(receiptError)) throw receiptError;
-          // The file receipt is durable. Keep the run fenced until startup restores it.
+          // The receipt or the durable save intent remains available to the next poll.
           awaitingReceiptRecovery = true;
           return;
         }

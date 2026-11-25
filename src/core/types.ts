@@ -387,6 +387,7 @@ export interface Job {
   freshContextRetry?: boolean;
   timeoutRetry?: boolean;
   deferredResult?: AgentResult;
+  fixSaveRevision?: Revision;
   errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;

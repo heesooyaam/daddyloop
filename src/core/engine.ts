@@ -352,6 +352,11 @@ export class Engine {
       return pending;
     const lost = pending ? undefined : this.lostFix(task, pr);
     const unsent = pending ?? lost?.head;
+    if (!unsent && this.hasUnconfirmedFixSave(task))
+      throw new AppError(
+        'fix_pending',
+        'The worker copy must be checked for an interrupted fix before review.',
+      );
     if (unsent) {
       const reason = pr && this.savedFixReviewReason(task, unsent, pr);
       const recovery =
@@ -360,6 +365,60 @@ export class Engine {
       throw new AppError('fix_pending', reason ? `${reason} ${recovery}` : recovery);
     }
   }
+  private hasUnconfirmedFixSave(task: Task) {
+    return this.store.pendingFixSaves(task.id).length > 0;
+  }
+
+  async recoverPendingSavedFix(
+    job: Job,
+    inspect: (task: Task, revision: Revision) => Promise<string>,
+  ) {
+    return this.lock(job.taskId, async () => {
+      const current = this.store.jobs(job.taskId).find(({ id }) => id === job.id);
+      const revision = current?.fixSaveRevision;
+      if (!current || !revision) return;
+      const task = this.store.getTask(job.taskId);
+      const recorded = this.savedFixEvent(task);
+      let head: string | undefined;
+      let reason: string;
+      try {
+        if (recorded?.run_id !== job.id && !sameRevision(task.revision, revision))
+          throw new AppError(
+            'stale_revision',
+            'The task revision changed after the worker began saving',
+          );
+        head =
+          recorded?.run_id === job.id && typeof recorded.head === 'string'
+            ? recorded.head
+            : await inspect(task, revision);
+        if (head !== revision.head && recorded?.run_id !== job.id)
+          await this.recordSavedFix(current, { head, revision });
+        reason =
+          head === revision.head
+            ? 'The interrupted worker save did not produce a new commit.'
+            : `The interrupted worker save was recovered. Saved fix ${head} is preserved.`;
+      } catch (error) {
+        if (isSqliteBusy(error)) throw error;
+        reason = `The worker copy needs inspection before review. ${redact(String(error))}`;
+        head = undefined;
+      }
+      this.store.transaction(() => {
+        if (!head && current.status === 'failed' && current.error === reason) return;
+        current.status = current.status === 'cancelled' ? 'cancelled' : 'failed';
+        current.error = reason;
+        current.finishedAt ??= now();
+        if (head) delete current.fixSaveRevision;
+        this.store.saveJob(current);
+        if (task.state !== 'paused') {
+          task.resumeState = head && head !== revision.head ? 'awaiting_push' : 'fixing';
+          this.state(task, 'needs_input', reason);
+        } else if (!task.reason.includes(reason)) {
+          this.state(task, 'paused', `${task.reason} ${reason}`);
+        }
+      });
+    });
+  }
+
   async review(id: string, retry = false, clarification?: string) {
     const explicitRetry = retry;
     return this.lock(id, async () => {
@@ -725,8 +784,6 @@ export class Engine {
           );
           return;
         }
-        task.retiredReviewHandles = undefined;
-        task.retiredReviewCommentIds = undefined;
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
         this.store.enqueue(
           task,
@@ -783,6 +840,19 @@ export class Engine {
     }
     this.store.saveTask(task);
     return true;
+  }
+
+  async refreshQueuedReviewFeedback(job: Job) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state !== 'reviewing') return false;
+      if (!task.retiredReviewHandles?.length) return true;
+      if (!(await this.refreshRetiredReviewFeedback(task, task.review))) return false;
+      task.retiredReviewHandles = undefined;
+      task.retiredReviewCommentIds = undefined;
+      this.store.saveTask(task);
+      return true;
+    });
   }
 
   private async inspectPreviousDraft(task: Task, review: ReviewHandle, successor?: ReviewHandle) {
@@ -863,6 +933,7 @@ export class Engine {
           this.state(task, 'needs_input', draftInspectionRequired);
           return task;
         }
+        this.trackRecoveredReview(task, handle, snapshot);
         retainPublishedFeedback(task, snapshot, true);
       }
       if (pr.draft) return task;
@@ -2837,7 +2908,14 @@ export class Engine {
     )
       return false;
     const head = pending ?? this.lostFix(task, pr)?.head;
-    if (!head) return false;
+    if (!head) {
+      if (!this.hasUnconfirmedFixSave(task)) return false;
+      this.holdTaskForInput(
+        task,
+        'The worker copy must be checked for an interrupted fix before review.',
+      );
+      return true;
+    }
     this.holdLostFix(task, head, this.savedFixReviewReason(task, head, pr));
     return true;
   }
@@ -3768,7 +3846,13 @@ export class Engine {
   }
   async recordSavedFix(job: Job, savedFix: { head: string; revision: Revision }) {
     // The checkout can outlive this process even when SQLite is unavailable.
-    const receipt = this.store.stageSavedFixReceipt(job, savedFix);
+    let receipt: string | undefined;
+    try {
+      receipt = this.store.stageSavedFixReceipt(job, savedFix);
+    } catch {
+      // If the receipt directory is unavailable, SQLite can still preserve the fix.
+      // The saved run marker fences review if SQLite is unavailable as well.
+    }
     for (let attempt = 0; ; attempt++) {
       try {
         this.store.journalSavedFix(job.taskId, job.id, savedFix, receipt);
@@ -4247,6 +4331,14 @@ export class Engine {
           return task;
         }
         const saved = pending ?? lost?.head;
+        if (!saved && this.hasUnconfirmedFixSave(task)) {
+          this.state(
+            task,
+            'needs_input',
+            'The worker copy must be checked for an interrupted fix before resuming.',
+          );
+          return task;
+        }
         if (saved) {
           if (lost) {
             task.pendingAuthorHead = lost.head;
