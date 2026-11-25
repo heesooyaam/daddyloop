@@ -1558,7 +1558,6 @@ function TaskReport({
         live.reason,
       ].join(':')
     : '';
-  const reloadVersion = liveVersion + ':' + (live?.statusLabel ?? '');
   const detail = value?.task.id === id ? value : undefined;
   const detailVersion = detail
     ? [
@@ -1572,7 +1571,7 @@ function TaskReport({
         detail.task.reason,
       ].join(':')
     : '';
-  const current = !!detail && (!live || detailVersion === liveVersion);
+  const current = !!detail && !!live && detailVersion === liveVersion;
   const controlsDisabled = busy || loading || !!error || !current;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
   const request = live?.workerRequest ?? detail?.task.workerRequest;
@@ -1597,7 +1596,10 @@ function TaskReport({
     return () => {
       active = false;
     };
-  }, [id, reloadVersion]);
+  }, [id, board]);
+  useEffect(() => {
+    setWaiverReason('');
+  }, [id, live?.generation, live?.head]);
   const action = async (action: string, reason?: string) => {
     if (!board || !detail || !current || error) return;
     setBusy(true);

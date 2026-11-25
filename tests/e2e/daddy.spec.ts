@@ -463,15 +463,22 @@ test('keeps an open task report on one revision while board state changes', asyn
     pendingAuthorHead: '1'.repeat(40) as string | undefined,
     reason: 'Ready on the first revision',
     checks: 'passing',
+    checkName: 'Check on the first revision',
   };
   let hold = false,
     fail = false,
+    missing = false,
     releaseDetail: (() => void) | undefined,
     detailStarted: (() => void) | undefined;
   await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
     const response = await route.fetch(),
       board = await response.json();
+    if (missing) board.tasks = board.tasks.filter((item: { id: string }) => item.id !== taskId);
     const task = board.tasks.find((item: { id: string }) => item.id === taskId);
+    if (!task) {
+      await route.fulfill({ response, json: board });
+      return;
+    }
     Object.assign(task, {
       state: snapshot.state,
       generation: snapshot.generation,
@@ -510,7 +517,7 @@ test('keeps an open task report on one revision while board state changes', asyn
         checks: snapshot.checks,
         checkDetails: [
           {
-            name: `Fixture ${snapshot.generation}`,
+            name: snapshot.checkName,
             status: snapshot.checks === 'passing' ? 'success' : 'failed',
           },
         ],
@@ -536,6 +543,7 @@ test('keeps an open task report on one revision while board state changes', asyn
     pendingAuthorHead: undefined,
     reason: 'Waiting for checks on the second revision',
     checks: 'failing',
+    checkName: 'Check A',
   });
   await started;
   await expect(submit).toBeDisabled();
@@ -543,7 +551,7 @@ test('keeps an open task report on one revision while board state changes', asyn
   releaseDetail?.();
   await expect(report.getByText(snapshot.head, { exact: true })).toBeVisible();
   await expect(submit).toHaveCount(0);
-  await expect(report.getByText('Fixture 11')).toBeVisible();
+  await expect(report.getByText('Check A')).toBeVisible();
   const reason = report.getByLabel('Reason for allowing this revision without passing CI');
   await reason.fill('Verified offline');
   const waive = report.getByRole('button', { name: 'Allow without passing CI' });
@@ -552,19 +560,49 @@ test('keeps an open task report on one revision while board state changes', asyn
   started = new Promise<void>((resolve) => {
     detailStarted = resolve;
   });
-  fail = true;
+  snapshot.checkName = 'Check B';
+  await started;
+  await expect(report.getByText('Check B')).toBeVisible();
+  await expect(report.getByText('Check A')).toHaveCount(0);
+
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
   Object.assign(snapshot, {
-    state: 'complete',
     generation: 12,
     head: '3'.repeat(40),
-    reason: 'Complete on the third revision',
-    checks: 'passing',
+    reason: 'Waiting for checks on the third revision',
+    checkName: 'Check C',
   });
+  await started;
+  await expect(report.getByText('3'.repeat(40), { exact: true })).toBeVisible();
+  await expect(reason).toHaveValue('');
+  await expect(waive).toBeDisabled();
+
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  fail = true;
   await started;
   await expect(report.getByRole('alert')).toContainText('Request failed');
   await expect(waive).toBeDisabled();
-  await expect(report.getByText('2'.repeat(40), { exact: true })).toBeVisible();
-  await expect(report.getByText('3'.repeat(40), { exact: true })).toHaveCount(0);
+
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  fail = false;
+  await started;
+  await expect(report.getByRole('alert')).toHaveCount(0);
+  await expect(report.getByText('Check C')).toBeVisible();
+  await reason.fill('New revision verified offline');
+  await expect(waive).toBeEnabled();
+
+  started = new Promise<void>((resolve) => {
+    detailStarted = resolve;
+  });
+  missing = true;
+  await started;
+  await expect(waive).toBeDisabled();
 });
 
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {

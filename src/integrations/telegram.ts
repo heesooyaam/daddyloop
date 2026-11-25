@@ -558,8 +558,10 @@ export class Telegram {
     this.engine.store.transaction(() => {
       this.engine.store.setSetting('telegram.pairing', null);
       this.engine.store.setSetting('telegram.pairCode', null);
+      this.engine.store.setSetting('telegram.group', null);
       this.engine.store.db.prepare('DELETE FROM bot_actions').run();
     });
+    if (this.menuController) this.refreshCommandMenus();
     return { paired: false };
   }
   private paired() {
@@ -940,19 +942,10 @@ export class Telegram {
           ? [this.engine.store.setting<number>('telegram.menuGroupChatId')!]
           : []),
       ]);
-    const operations = (['', 'ru', 'en'] as const).flatMap((language) => {
+    const languages = ['', 'ru', 'en'] as const;
+    const activeOperations = languages.flatMap((language) => {
       const localized = language ? { language_code: language } : {};
       return [
-        {
-          method: 'deleteMyCommands',
-          body: { scope: { type: 'all_group_chats' }, ...localized },
-        },
-        ...[...installedChatIds]
-          .filter((chatId) => chatId !== room?.chatId)
-          .map((chatId) => ({
-            method: 'deleteMyCommands',
-            body: { scope: { type: 'chat', chat_id: chatId }, ...localized },
-          })),
         {
           method: 'setMyCommands',
           body: {
@@ -975,13 +968,34 @@ export class Telegram {
           : []),
       ];
     });
-    for (const operation of operations) {
+    const cleanupOperations = languages.flatMap((language) => {
+      const localized = language ? { language_code: language } : {};
+      return [
+        {
+          method: 'deleteMyCommands',
+          body: { scope: { type: 'all_group_chats' }, ...localized },
+        },
+        ...[...installedChatIds]
+          .filter((chatId) => chatId !== room?.chatId)
+          .map((chatId) => ({
+            method: 'deleteMyCommands',
+            body: { scope: { type: 'chat', chat_id: chatId }, ...localized },
+          })),
+      ];
+    });
+    const run = async (
+      operation: (typeof activeOperations)[number] | (typeof cleanupOperations)[number],
+    ) => {
       let delayMs = 3000;
       while (!signal.aborted) {
         try {
           await this.api.call(operation.method, operation.body, signal);
-          if (operation.method === 'setMyCommands' && operation.body.scope.type === 'chat') {
-            installedChatIds.add(operation.body.scope.chat_id!);
+          if (
+            operation.method === 'setMyCommands' &&
+            'chat_id' in operation.body.scope &&
+            operation.body.scope.chat_id !== undefined
+          ) {
+            installedChatIds.add(operation.body.scope.chat_id);
             this.engine.store.setSetting('telegram.menuGroupChatIds', [...installedChatIds]);
           }
           break;
@@ -993,7 +1007,11 @@ export class Telegram {
           if (!databaseLocked) delayMs = Math.min(delayMs * 2, 300000);
         }
       }
-    }
+    };
+    await Promise.all([
+      Promise.all(activeOperations.map(run)),
+      Promise.all(cleanupOperations.map(run)),
+    ]);
     let delayMs = 3000;
     while (!signal.aborted) {
       try {

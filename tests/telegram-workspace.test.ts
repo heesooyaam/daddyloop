@@ -315,7 +315,13 @@ it('keeps repository paths private for topic, general-group and new-session choi
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
   const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Repository session' }),
+    privateGroup = f.daddy.create({ workspaceId: f.workspace.id, title: 'Private session B' }),
     topic = await bot.ensureTopic(group);
+  f.store.setSetting('telegram.currentDaddy', privateGroup.id);
+  vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => ({
+    ...workspace,
+    repoPath: input?.path ?? workspace.repoPath,
+  }));
   let id = 180;
   const message = (text: string, chatId = -10042, threadId?: number): Update => ({
     update_id: id++,
@@ -347,10 +353,6 @@ it('keeps repository paths private for topic, general-group and new-session choi
     expect(topicCard.buttons[0][0].text).toBe('Use workspace defaults');
     const privateUrl = topicCard.buttons[1][0].url as string;
 
-    await bot.handle(message(`/session ${group.id.slice(0, 8)}`));
-    await bot.handle(message('/repo'));
-    expect(sent.at(-1)!.card.text).not.toContain(f.workspace.repoPath);
-
     const payload = new URL(privateUrl).searchParams.get('start');
     await bot.handle(message(`/start ${payload}`, 7));
     expect(sent.at(-1)!.destination).toEqual({ chatId: 7, threadId: undefined });
@@ -361,15 +363,52 @@ it('keeps repository paths private for topic, general-group and new-session choi
         .card.buttons.flat()
         .map((button: any) => button.text),
     ).toContain('Browse server folders');
+    const browse = sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Browse server folders').callback_data;
+    await bot.handle(click(browse, 7));
+    await bot.handle(message('/repo /server/topic-choice', 7));
     await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
     expect(
-      f.store.setting(`telegram.nextRepo:7:-10042:${topic!.threadId}:${group.id}`),
-    ).toBeTruthy();
+      f.store.setting<{ workspace: { repoPath: string } }>(
+        `telegram.nextRepo:7:-10042:${topic!.threadId}:${group.id}`,
+      )?.workspace.repoPath,
+    ).toBe('/server/topic-choice');
+    expect(f.store.setting('telegram.currentDaddy')).toBe(privateGroup.id);
+
+    await bot.handle(message(`/session ${group.id.slice(0, 8)}`));
+    await bot.handle(message('/repo'));
+    const generalCard = sent.at(-1)!.card;
+    expect(generalCard.text).not.toContain(f.workspace.repoPath);
+    await bot.handle(
+      message(`/start ${new URL(generalCard.buttons[1][0].url).searchParams.get('start')}`, 7),
+    );
+    await bot.handle(message('/repo /server/general-choice', 7));
+    await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
+    expect(
+      f.store.setting<{ workspace: { repoPath: string } }>(
+        `telegram.nextRepo:7:-10042:0:${group.id}`,
+      )?.workspace.repoPath,
+    ).toBe('/server/general-choice');
+    expect(f.store.setting('telegram.currentDaddy')).toBe(privateGroup.id);
 
     await bot.handle(message('/new', -10042));
     await bot.handle(click(`dad:new:${f.workspace.id}`));
-    expect(sent.at(-1)!.card.text).toContain(f.workspace.name);
-    expect(sent.at(-1)!.card.text).not.toContain(f.workspace.repoPath);
+    const newCard = sent.at(-1)!.card;
+    expect(newCard.text).toContain(f.workspace.name);
+    expect(newCard.text).not.toContain(f.workspace.repoPath);
+    await bot.handle(
+      message(`/start ${new URL(newCard.buttons[1][0].url).searchParams.get('start')}`, 7),
+    );
+    await bot.handle(message('/repo /server/new-session-choice', 7));
+    await bot.handle(click(sent.at(-1)!.card.buttons[0][0].callback_data, 7));
+    expect(
+      f.daddy
+        .sessions()
+        .some((session) => session.workspace?.repoPath === '/server/new-session-choice'),
+    ).toBe(true);
+    expect(f.store.setting('telegram.currentDaddy')).toBe(privateGroup.id);
 
     for (const item of sent.filter(({ destination }) => destination.chatId === -10042))
       expect(item.card.text ?? item.card).not.toContain(f.workspace.repoPath);

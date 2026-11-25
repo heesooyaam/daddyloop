@@ -8,6 +8,7 @@ import { setLocale } from '../src/core/preferences.js';
 it('serves scoped Russian help and installs localized suggestions without consuming a worker', async () => {
   const f = daddyFixture();
   const sent: { method: string; body: Record<string, any> }[] = [];
+  let blockedChatId: number | undefined;
   const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, req) => {
     const method = String(url).split('/').at(-1)!;
     if (method === 'getUpdates')
@@ -16,6 +17,8 @@ it('serves scoped Russian help and installs localized suggestions without consum
       );
     const body = JSON.parse(String(req?.body));
     sent.push({ method, body });
+    if (method === 'deleteMyCommands' && body.scope.chat_id === blockedChatId)
+      return Response.json({ ok: false, error_code: 403, description: 'Bot was removed' });
     return Response.json({
       ok: true,
       result:
@@ -115,6 +118,53 @@ it('serves scoped Russian help and installs localized suggestions without consum
           x.body.scope.chat_id === -10042,
       ),
     ).toHaveLength(3);
+
+    blockedChatId = -10099;
+    await bot.handle(msg('/group'));
+    const nextRequest = f.store.setting<{ id: number }>('telegram.workspaceRequest')!;
+    await bot.handle({
+      update_id: ++id,
+      message: {
+        message_id: id,
+        chat: { id: 7, type: 'private' },
+        from: { id: 7 },
+        chat_shared: {
+          request_id: nextRequest.id,
+          chat_id: -10100,
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        sent.filter(
+          (x) =>
+            x.method === 'setMyCommands' &&
+            x.body.scope.type === 'chat' &&
+            x.body.scope.chat_id === -10100,
+        ),
+      ).toHaveLength(3),
+    );
+    expect(
+      sent.some(
+        (x) =>
+          x.method === 'deleteMyCommands' &&
+          x.body.scope.type === 'chat' &&
+          x.body.scope.chat_id === -10099,
+      ),
+    ).toBe(true);
+
+    bot.unpair();
+    expect(f.store.setting('telegram.group')).toBeNull();
+    await vi.waitFor(() =>
+      expect(
+        sent.filter(
+          (x) =>
+            x.method === 'deleteMyCommands' &&
+            x.body.scope.type === 'chat' &&
+            x.body.scope.chat_id === -10100,
+        ),
+      ).toHaveLength(3),
+    );
   } finally {
     await bot.stop();
     await f.close();

@@ -1776,6 +1776,9 @@ export class TelegramWorkspace {
   private repoKey(destination: Destination, groupId: string) {
     return `telegram.nextRepo:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}:${groupId}`;
   }
+  private repoInputKey(destination: Destination) {
+    return `telegram.repoInput:${this.pair()!.userId}:${destination.chatId}`;
+  }
   private registrationKey(destination: Destination) {
     return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
   }
@@ -1828,6 +1831,8 @@ export class TelegramWorkspace {
     if (choice.groupId) this.authorize(choice.destination, choice.groupId);
     const controlDestination = choice.controlDestination ?? choice.destination;
     if (controlDestination.chatId !== this.pair()?.chatId) return this.repositoryEntry(choice);
+    if (choice.controlDestination && choice.destination.chatId !== controlDestination.chatId)
+      this.store.setSetting(this.repoInputKey(controlDestination), choice);
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
@@ -1985,6 +1990,8 @@ export class TelegramWorkspace {
         );
         await this.api.send(destination, response);
       } else await this.newSession(choice.workspace.id, choice.destination, selected);
+      if (choice.controlDestination)
+        this.store.setSetting(this.repoInputKey(choice.controlDestination), null);
       this.store.setSetting(key, null);
     }
     return true;
@@ -2988,6 +2995,25 @@ export class TelegramWorkspace {
       const pool = text.match(/^\/pool(?:\s+([1-8]))?$/);
       const repo = text.match(/^\/repo(?:\s+(.+))?$/);
       if (repo) {
+        const contextual = privateChat
+          ? this.store.setting<RepoChoice>(this.repoInputKey(destination))
+          : undefined;
+        if (contextual) {
+          if (contextual.expiresAt <= now())
+            this.store.setSetting(this.repoInputKey(destination), null);
+          else {
+            await this.repository({
+              ...contextual,
+              input:
+                repo[1] === undefined
+                  ? contextual.input
+                  : repo[1] === 'default'
+                    ? undefined
+                    : { path: repo[1] },
+            });
+            return true;
+          }
+        }
         const pending = this.store.setting<{ workspaceId?: string; expiresAt: string }>(
           this.creationKey(destination),
         );
