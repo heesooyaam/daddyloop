@@ -2,16 +2,23 @@
 
 # Arcadia and Tracker
 
-Choose `arcadia` during installation. Arc, Arcanum CLI and the corporate lease helper must be installed and authenticated on the server.
+Arc, Arcanum CLI and the corporate lease helper must be installed and authenticated on the server.
 
-For an existing managed installation, pause work first and rerun the installer with the complete current module list plus `arcadia`. For example, for an installation that otherwise has only Codex and GitHub:
+The newest published release, [v0.20.3](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.3), predates the [setup fixes from PR #37](https://github.com/heesooyaam/daddyloop/pull/37). To use this guide today, build from a verified source revision containing both those setup fixes and the [fix for launching executable lease helpers with their own interpreter](https://github.com/heesooyaam/daddyloop/pull/128). In that checkout, use Node 24, run `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --include=dev` and `npm run build`, and use `scripts/daddy.mjs` from that checkout as `daddy`. If you already use a source wrapper, keep it and update the checkout it runs.
+
+For an existing managed installation, wait for a [release](https://github.com/heesooyaam/daddyloop/releases) that includes both fixes. Then pause work, set `release_tag` to that release's actual tag, and use the full current module list plus `arcadia`. For example, for an installation with Codex and GitHub:
 
 ```bash
-curl -fsSL https://github.com/heesooyaam/daddyloop/releases/download/v0.20.3/install.sh \
-  | bash -s -- --yes --modules codex,github,arcadia
+(
+  installer="$(mktemp)" || exit 1
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL "https://github.com/heesooyaam/daddyloop/releases/download/${release_tag:?set a supported release tag}/install.sh" \
+    -o "$installer" &&
+    bash "$installer" --no-setup --modules codex,github,arcadia
+)
 ```
 
-If `daddy` is a user-owned wrapper that runs a source checkout, do not replace that command with the installer. Update the checkout to a verified version first, then enable the complete module set without reinstalling or restarting the service:
+After successfully building from source or running the installer, enable the complete module set without restarting the service:
 
 ```bash
 daddy init --yes --no-service --modules codex,github,arcadia
@@ -21,11 +28,13 @@ For a first connection with the module disabled, there are no old Arc workers: i
 
 If Arcadia is already enabled and a source update changes the helper, pause the Arc sessions and prevent new work from starting first. Wait for operations from the old version to finish, then perform the agreed service restart onto the verified new version while retaining the old helper. Only then run `setup` with the new helper, check `daddy arcadia mounts` and the saved journals, and resume the sessions. Do not change the helper while the old service can still allocate a copy.
 
-Install the supported Arcanum CLI from the internal npm registry. The similarly named script in the `arcanum` skill is not a replacement for this binary:
+Use the Arcanum client distributed through `ya`. Run this as the service user:
 
 ```bash
-npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-cli
+ya tool --print-path gena-arcanum-cli
 ```
+
+Set `arcadia.arcanumCli` in the service's `config.json` to the absolute executable path printed by the command. Keep the other settings in the `arcadia` object. The similarly named script from the `arcanum` skill is a separate tool.
 
 After enabling the module, first check the helper selection in the same environment used by the service:
 
@@ -33,30 +42,26 @@ After enabling the module, first check the helper selection in the same environm
 daddy arcadia mounts
 ```
 
-A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. If the entry whose `mount` is `$HOME/arcadia2` has `status` set to `mounted`, assign the selected value from the configuration, environment variable or `PATH` to `helper`. Check for a file with that name in the current directory first. Only use `command -v` for a bare name when no such file exists:
+A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. When the entry for `$HOME/arcadia2` has `status: mounted`, run setup from the same directory and environment as the first `mounts` call:
 
 ```bash
-: "${helper:?set helper to the discovered value}" &&
-if [ -f "$helper" ]; then
-  helper="$(realpath "$helper")"
-else
-  helper="$(command -v "$helper")" &&
-    helper="$(realpath "$helper")"
-fi &&
-  test -f "$helper" &&
-  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+daddy arcadia setup --workspace ~/arcadia2 &&
   (cd /tmp && daddy arcadia mounts)
 ```
 
-Do not run `setup` without an explicit path at this step: the option saves an absolute name. The final `mounts` must return the original inventory after the working directory changes; it is skipped when `setup` fails.
+Setup uses the same helper selection as `mounts` and saves the selected file's absolute path, preserving the name of a final symlink. To select a different helper, pass its original path or name with `--lease-helper`. The final `mounts` should return the same inventory after the working directory changes.
 
-If `daddy arcadia mounts` fails, check the saved `arcadia.leaseHelper`, then `DADDYLOOP_ARCADIA_LEASE_HELPER`, `command -v arcadia-mount-lease`, the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
+If `daddy arcadia mounts` fails, check the saved `arcadia.leaseHelper`, then `DADDYLOOP_ARCADIA_LEASE_HELPER`, the first file named `arcadia-mount-lease` in `PATH` (including Bash scripts without the executable bit), the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
 
 ```bash
 source="$HOME/arcadia2"
 helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
 test -f "$helper"
-bash "$helper" --json status
+if [ -x "$helper" ]; then
+  "$helper" --json status
+else
+  bash "$helper" --json status
+fi
 arc mount -l --json
 ```
 
@@ -67,7 +72,6 @@ The source does not have to appear in the helper lease inventory. If the helper 
 ```bash
 source="$HOME/arcadia2" &&
   helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease" &&
-  helper="$(realpath "$helper")" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)
@@ -89,13 +93,13 @@ After installing the skill, save its absolute path as well. Do not change the se
 
 ```bash
 : "${SKILLS_DIR:?restore the previous SKILLS_DIR}" &&
-  helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")" &&
+  helper="$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)
 ```
 
-daddyloop invokes the helper through Bash, so it does not need an executable bit.
+daddyloop runs executable lease helpers directly, using their declared interpreter. A Bash lease helper without the executable bit runs through Bash.
 
 For Arcanum, daddyloop checks `ARC_TOKEN`, `ARC_OAUTH_TOKEN`, `~/.tokens/arcadia`, and the standard `~/.arc/token`, in that order. Setup verifies Arcanum read access without copying or changing credentials.
 
@@ -111,6 +115,14 @@ Already have Work? Update its defaults with `daddy workspaces set Work ~/arcadia
 ## Agent instructions
 
 Codex reads the global `~/.codex/AGENTS.md` and applicable `AGENTS.md` files from the repository root to the starting subdirectory. If Arcadia rules live below the root, save that directory as the workspace or session `scope`. Personal files from another machine are not transferred automatically.
+
+When Codex starts in an Arcadia subdirectory, the detected project root determines which parent `AGENTS.md` files it reads. If Codex starts its search at the subdirectory or treats an enclosing project as the root, add `.arc` to the top-level `project_root_markers` in the service user's `~/.codex/config.toml` (or in the configured `CODEX_HOME`). This marks the Arcadia checkout as the boundary for project instructions. Keep all existing markers. If you use the default Git marker, the top-level setting is:
+
+```toml
+project_root_markers = [".git", ".arc"]
+```
+
+If Codex starts at the Arcadia root itself, it can read the root's `AGENTS.md` without this setting. See [Codex instruction discovery](https://developers.openai.com/codex/guides/agents-md).
 
 Session skills are selected separately for daddy and workers. You can give the Arc VCS skill to both roles. The service needs `arcadia-mounts` as an installed helper; agents do not need to lease another checkout on top of the one already assigned to them. Skills neither enable the repository module nor install their scripts; see [instructions and skills](../instructions/en.md).
 
