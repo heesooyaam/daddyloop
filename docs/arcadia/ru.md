@@ -31,7 +31,21 @@ npm install -g --registry https://npm.yandex-team.ru/ @yandex-tools/ai-arcanum-c
 daddy arcadia mounts
 ```
 
-Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, возьми выбранный путь из настройки, переменной окружения или `PATH`. Для относительного пути выполни `realpath` из каталога, где прошёл `mounts`, и подставь результат в показанную ниже форму с `--lease-helper`. Не запускай на этом шаге `setup` без явного пути: флаг сохраняет абсолютное имя, которое останется рабочим после смены каталога.
+Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, запиши выбранное значение из настройки, переменной окружения или `PATH` в `helper`. Короткое имя без `/` сначала разреши через `command -v`; путь с каталогом можно сразу передать в `realpath`:
+
+```bash
+: "${helper:?укажи найденный helper}"
+case "$helper" in
+  */*) ;;
+  *) helper="$(command -v "$helper")" ;;
+esac
+helper="$(realpath "$helper")"
+test -f "$helper"
+daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+(cd /tmp && bash "$helper" --json status)
+```
+
+Не запускай на этом шаге `setup` без явного пути: флаг сохраняет абсолютное имя, а заключительная команда проверяет тот же helper после смены каталога.
 
 Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
 
@@ -51,7 +65,9 @@ arc mount -l --json
 source="$HOME/arcadia2"
 helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease"
 helper="$(realpath "$helper")"
+test -f "$helper"
 daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+(cd /tmp && bash "$helper" --json status)
 ```
 
 Только если helper не выбран службой и не найден ни одним из перечисленных способов, установи корпоративный навык `arcadia-mounts`. Сначала выполни обязательные bootstrap и `--agent-check` из [инструкции SkillStore](https://skillstore.yandex-team.ru/install/instruction.md). Затем выбери каталог навыков один раз и используй его и для Store, и для `arcadia-mounts`:
@@ -66,12 +82,14 @@ bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "
 
 Если helper работает, но у источника нет `status: mounted`, SkillStore это не исправит: сначала подключи исходную Arcadia, затем повтори `setup`.
 
-После установки навыка также сохрани его абсолютный путь:
+После установки навыка также сохрани его абсолютный путь. Не меняй выбранный `SKILLS_DIR`; если это новая оболочка, сначала восстанови то же значение, которое использовал при `--download-only`:
 
 ```bash
-SKILLS_DIR="$HOME/.codex/skills"
+: "${SKILLS_DIR:?восстанови прежний SKILLS_DIR}"
 helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")"
+test -f "$helper"
 daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper"
+(cd /tmp && bash "$helper" --json status)
 ```
 
 Helper запускается через Bash, поэтому исполняемый бит ему не нужен.
