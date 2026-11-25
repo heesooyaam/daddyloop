@@ -338,6 +338,7 @@ export class Worker {
       for (const task of store.tasks())
         if (
           task.state === 'awaiting_publication' &&
+          !(task.partialReview?.retryAt && task.partialReview.retryAt > Date.now()) &&
           !store.busy(task.id) &&
           !githubWait(store, task.ref)
         ) {
@@ -348,6 +349,24 @@ export class Worker {
             if (error instanceof GitHubQuotaError) continue;
             const current = store.getTask(task.id);
             if (current.generation === task.generation && current.state !== 'paused') {
+              if (
+                current.partialReview &&
+                error instanceof AppError &&
+                [
+                  'draft_unconfirmed',
+                  'publication_unconfirmed',
+                  'provider_unreachable',
+                  'provider_500',
+                  'provider_502',
+                  'provider_503',
+                  'provider_504',
+                ].includes(error.code)
+              ) {
+                current.partialReview.retryAt = Date.now() + this.pollMs;
+                store.saveTask(current);
+                store.event(task.id, 'publication.deferred', { errorCode: error.code });
+                continue;
+              }
               current.state = 'needs_input';
               current.reason = redact(String(error));
               store.saveTask(current);

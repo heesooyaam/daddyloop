@@ -238,6 +238,14 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  openReviewQuestion?: { head: string; text: string };
+  partialReview?: {
+    reviewId: string;
+    runId: string;
+    question?: string;
+    limitation: string;
+    retryAt?: number;
+  };
   draftRecheck?: { commentIds: string[]; retried?: boolean };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
