@@ -97,6 +97,7 @@ describe('opt-in GitHub merging', () => {
     'changed base',
     'revoked',
     'late check failure',
+    'late native findings',
   ] as const)('holds the merge for %s', async (why) => {
     const f = await setup();
     try {
@@ -120,6 +121,17 @@ describe('opt-in GitHub merging', () => {
           f.setRemote({ checks: 'failing' });
           return f.send;
         });
+      if (why === 'late native findings')
+        f.prepareMerge.mockImplementationOnce(async () => {
+          const t = f.store.getTask(f.task.id),
+            review = t.review!;
+          const native = await f.provider.getReview(prRef(t), review);
+          f.store.setSetting('demo-review:' + review.id, {
+            ...native,
+            comments: [{ id: 'new-finding' }],
+          });
+          return f.send;
+        });
       if (why === 'revoked')
         f.prepareMerge.mockImplementationOnce(async () => {
           f.daddy.taskAutoMerge(f.group.id, f.task.id, 'off');
@@ -133,6 +145,83 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
+  it.each(['review', 'reconcile', 'merge poll', 'last merge check'] as const)(
+    'assigns the same pinned repair once when the conflict is first seen by %s',
+    async (source) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        const group = f.store.getGroup(f.group.id);
+        saveWorkerSlots(f.store, group, [{ number: 1, taskId: f.task.id }]);
+        const base = 'd'.repeat(40);
+        const conflict = () =>
+          f.setRemote({ base, start: base, mergeable: false, mergeConflict: true });
+        if (source === 'last merge check')
+          f.prepareMerge.mockImplementationOnce(async () => {
+            conflict();
+            return f.send;
+          });
+        else conflict();
+        if (source === 'review') await f.engine.review(f.task.id, true);
+        else if (source === 'reconcile') await f.engine.reconcile(f.task.id);
+        else await f.poll();
+        await Promise.all([f.engine.reconcile(f.task.id), f.poll()]);
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'fixing',
+          fixingMergeConflict: true,
+          reviewFinished: false,
+          revision: { head: f.task.revision!.head, base },
+        });
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([{ role: 'author', kind: 'fix' }]);
+        expect(workerSlots(f.store, f.store.getGroup(group.id))[0].taskId).toBe(f.task.id);
+        expect(f.send).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it.each(['completed', 'incomplete'] as const)(
+    'waits for GitHub before dispatching fixes from a %s review',
+    async (status) => {
+      const f = await setup();
+      try {
+        await f.daddy.settings(f.group.id, { autoMerge: true });
+        await f.engine.review(f.task.id, true);
+        const t = f.store.getTask(f.task.id),
+          h = { ...t.review!, authorId: 'owner' };
+        f.store.saveTask({ ...t, review: h });
+        f.store.setSetting('demo-review:' + h.id, {
+          ...(await f.provider.getReview(prRef(t), h)),
+          authorId: 'owner',
+        });
+        const job = f.store.claim()!;
+        await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Published finding' });
+        await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
+        await f.engine.completeJob(job, {
+          status,
+          summary: 'Report',
+          checkedHead: t.revision!.head,
+        });
+        f.store.saveJob({ ...job, status: 'completed' });
+        f.setRemote({ mergeable: null });
+        await f.engine.publish(t.id);
+        expect(f.store.getTask(t.id).state).toBe('awaiting_publication');
+        expect(f.store.activeJobs(t.id)).toHaveLength(0);
+        f.setRemote({ mergeable: false, mergeConflict: true });
+        await f.engine.publish(t.id);
+        expect(f.store.getTask(t.id)).toMatchObject({
+          state: 'fixing',
+          fixingMergeConflict: true,
+          feedback: { comments: [{ body: expect.stringContaining('Published finding') }] },
+        });
+        expect(f.store.activeJobs(t.id)).toHaveLength(1);
+        expect(f.send).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
   it('reserves the original worker from clean review through a late conflict', async () => {
     const f = await setup();
     try {
