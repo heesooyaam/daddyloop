@@ -476,7 +476,7 @@ export class Store {
   }
   decisionPage(
     taskId: string,
-    filters: { commentId?: string; head?: string; before?: string },
+    filters: { commentId?: string; head?: string; before?: string; includeBefore?: boolean },
     publishedIds: string[] | undefined,
     limit: number,
   ): { id: string; data: string }[] {
@@ -495,7 +495,8 @@ export class Store {
       args.push(JSON.stringify(publishedIds));
     }
     const predicate = where.join(' AND ');
-    if (filters.before === undefined)
+    const before = filters.before;
+    if (before === undefined)
       return this.db
         .prepare(`SELECT id, data FROM decisions WHERE ${predicate} ORDER BY rowid DESC LIMIT ?`)
         .all(...args, limit) as { id: string; data: string }[];
@@ -503,11 +504,11 @@ export class Store {
       .prepare(
         `
         SELECT id, data FROM decisions WHERE ${predicate}
-        AND rowid < (SELECT rowid FROM decisions WHERE id = ? AND ${predicate})
+        AND rowid ${filters.includeBefore ? '<=' : '<'} (SELECT rowid FROM decisions WHERE id = ? AND ${predicate})
         ORDER BY rowid DESC LIMIT ?
       `,
       )
-      .all(...args, filters.before, ...args, limit) as { id: string; data: string }[];
+      .all(...args, before, ...args, limit) as { id: string; data: string }[];
   }
   setting<T>(key: string): T | undefined {
     const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key);

@@ -145,19 +145,33 @@ it('keeps whole decisions, limits distinct entries and pages history within the 
       decisions: [historical],
       nextBefore: null,
     });
-    expect(await history({ commentId: large.commentId! })).toEqual({
-      decisions: [large],
+    const filter = { commentId: large.commentId!, head: revision.head };
+    let reason = '';
+    let before: string | null = null;
+    do {
+      const page = await history(before ? { ...filter, before } : filter);
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+      expect(page.reasonOffset).toBe(reason.length);
+      expect(page.decisions).toMatchObject([{ id: large.id, ...filter }]);
+      reason += page.decisions[0].reason;
+      before = page.nextBefore;
+    } while (before);
+    expect(reason).toBe(large.reason);
+    const first = await history({ head: revision.head });
+    expect(first).toMatchObject({
+      decisions: [{ id: large.id }],
+      nextBefore: expect.any(String),
+      reasonOffset: 0,
+    });
+    expect(f.engine.broker.readDecisions(author, task, { before: first.nextBefore! })).toEqual({
+      decisions: [],
       nextBefore: null,
     });
-    expect(await history({ head: revision.head })).toEqual({
-      decisions: [large],
-      nextBefore: large.id,
-    });
-    expect(await history({ head: revision.head, before: large.id })).toMatchObject({
-      decisions: [29, 28, 27, 26, 25, 24, 23, 22, 21, 20].map((i) => ({
-        commentId: `draft-${i}`,
-      })),
+    const older = await history({ head: revision.head, before: large.id });
+    expect(older).toMatchObject({
+      decisions: [{ commentId: 'draft-29' }],
       nextBefore: expect.any(String),
+      reasonOffset: 0,
     });
     expect(f.engine.broker.readDecisions(author, task, {})).toEqual({
       decisions: [current, historical],
@@ -326,8 +340,8 @@ it('budgets decisions against the complete text received by turn/start', async (
       }),
     ).toMatchObject({ status: 'completed' });
     expect(f.engine.broker.readDecisions(job, task, {})).toEqual({
-      decisions: [kept, omitted],
-      nextBefore: null,
+      decisions: [kept],
+      nextBefore: kept.id,
     });
     process.stdout.write(
       `Near-limit turn/start: ${mandatory.length} required; ${prompt.length} with decisions\n`,
@@ -393,6 +407,48 @@ it('parses only the SQLite page during a complete filtered walk', async () => {
       decisions: [],
       nextBefore: null,
     });
+  } finally {
+    f.store.close();
+  }
+});
+
+it('follows a single cursor through a mixed page of Markdown decisions', async () => {
+  const f = await fixture();
+  try {
+    const task = f.task;
+    const job = f.job();
+    const commentId = 'published-1';
+    const head = task.revision!.head;
+    const expected = Array.from({ length: 10 }, (_, index) =>
+      f.store.decision(task, {
+        commentId,
+        outcome: 'verified',
+        reason: [
+          `Decision ${index}`,
+          '~~~md',
+          '🧩 "\\" café\u0000'.repeat(index % 2 === 0 ? 150 : 700),
+          `CONTROL_MARKER_${index}`,
+          '~~~',
+          '[Example](https://example.invalid)',
+        ].join('\r\n'),
+      }),
+    ).reverse();
+
+    const received = new Map<string, Decision>();
+    let before: string | undefined;
+    let pages = 0;
+    do {
+      expect(++pages).toBeLessThan(50);
+      const page = f.engine.broker.readDecisions(job, task, { commentId, head, before });
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+      for (const decision of page.decisions) {
+        const prior = received.get(decision.id)?.reason ?? '';
+        expect(page.reasonOffset ?? 0).toBe(prior.length);
+        received.set(decision.id, { ...decision, reason: prior + decision.reason });
+      }
+      before = page.nextBefore ?? undefined;
+    } while (before);
+    expect([...received.values()]).toEqual(expected);
   } finally {
     f.store.close();
   }

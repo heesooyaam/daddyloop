@@ -111,7 +111,7 @@ export function taskSession(input: AgentInput): SessionInput {
         input.job.instructions,
       ) +
       (decisionHistoryAvailable
-        ? '\nThe starting context may omit recorded decisions. Use read_review_decisions to read whole records scoped to this task. Filter by commentId or head, and pass nextBefore as before with the same filters for the next page. Each entry applies to its recorded head. In Codex this tool is provided by the daddyloop_history MCP server.'
+        ? '\nThe starting context may omit recorded decisions. Use read_review_decisions to read records scoped to this task. Filter by commentId or head, and pass nextBefore unchanged as before with the same filters until null. A page with reasonOffset carries one fragment. Join the reason fragments for its decision ID in order. Each entry applies to its recorded head. In Codex this tool is provided by the daddyloop_history MCP server.'
         : ''),
   };
 }
