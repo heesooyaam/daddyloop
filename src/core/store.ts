@@ -18,6 +18,18 @@ import {
   type DaddyJob,
 } from './types.js';
 
+function readTask(data: string): Task {
+  const task: Task = JSON.parse(data);
+  if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
+  return task;
+}
+
+// A replacement run keeps the queue position of the original, including across restarts.
+const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
+  (SELECT rowid FROM ${table} AS first_attempt WHERE id=json_extract(${table}.data,'$.firstAttemptId')),
+  ${table}.rowid
+)`;
+
 export class Store {
   readonly db: DatabaseSync;
   readonly changes = new EventEmitter();
@@ -69,6 +81,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
       PRAGMA user_version=7;
     `);
+    this.db.exec(`
+      UPDATE tasks SET data=json_remove(data,'$.policy.publication','$.policy.autoPush')
+        WHERE json_type(data,'$.policy.publication') IS NOT NULL
+           OR json_type(data,'$.policy.autoPush') IS NOT NULL;
+      UPDATE review_groups SET data=json_remove(data,'$.defaultPolicy')
+        WHERE json_type(data,'$.defaultPolicy') IS NOT NULL;
+    `);
     this.changes.setMaxListeners(100);
   }
   transaction<T>(fn: () => T): T {
@@ -90,7 +109,7 @@ export class Store {
   getTask(id: string): Task {
     const row = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
     if (!row) throw new AppError('not_found', 'Task not found', 404);
-    return JSON.parse(row.data as string);
+    return readTask(row.data as string);
   }
   tasks(groupId?: string): Task[] {
     const rows =
@@ -101,7 +120,7 @@ export class Store {
               "SELECT data FROM tasks WHERE json_extract(data,'$.groupId')=? ORDER BY rowid DESC",
             )
             .all(groupId);
-    return rows.map((row) => JSON.parse(row.data as string));
+    return rows.map((row) => readTask(row.data as string));
   }
   taskCountsByGroup() {
     const rows = this.db
@@ -120,6 +139,13 @@ export class Store {
         { total: Number(row.total), complete: Number(row.complete) },
       ]),
     );
+  }
+  pendingReviewWrites(taskId: string, marker: string) {
+    return this.db
+      .prepare(
+        "SELECT id,request FROM operations WHERE task_id=? AND status='pending' AND id GLOB ?",
+      )
+      .all(taskId, marker + ':*');
   }
   saveTask(task: Task) {
     task.updatedAt = now();
@@ -201,11 +227,12 @@ export class Store {
         : this.db.prepare('SELECT data FROM jobs ORDER BY rowid').all()
     ).map((row) => JSON.parse(row.data as string));
   }
-  activeJobs(): Job[] {
-    return this.db
-      .prepare("SELECT data FROM jobs WHERE status IN ('queued','running') ORDER BY rowid")
-      .all()
-      .map((row) => JSON.parse(row.data as string));
+  activeJobs(taskId?: string): Job[] {
+    const active = "SELECT data FROM jobs WHERE status IN ('queued','running')";
+    const rows = taskId
+      ? this.db.prepare(`${active} AND task_id=? ${jobOrder('jobs')}`).all(taskId)
+      : this.db.prepare(`${active} ${jobOrder('jobs')}`).all();
+    return rows.map((row) => JSON.parse(row.data as string));
   }
   claim(
     eligible: (job: Job) => boolean = () => true,
@@ -214,7 +241,7 @@ export class Store {
     return this.transaction(() => {
       const rows = this.db
         .prepare(
-          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ORDER BY rowid`,
+          `SELECT data FROM jobs WHERE status='queued' AND task_id NOT IN (SELECT task_id FROM jobs WHERE status='running') ${jobOrder('jobs')}`,
         )
         .all();
       for (const row of rows) {
@@ -278,8 +305,10 @@ export class Store {
   }
   daddyJobs(groupId?: string): DaddyJob[] {
     const rows = groupId
-      ? this.db.prepare('SELECT data FROM daddy_jobs WHERE group_id=? ORDER BY rowid').all(groupId)
-      : this.db.prepare('SELECT data FROM daddy_jobs ORDER BY rowid').all();
+      ? this.db
+          .prepare(`SELECT data FROM daddy_jobs WHERE group_id=? ${jobOrder('daddy_jobs')}`)
+          .all(groupId)
+      : this.db.prepare(`SELECT data FROM daddy_jobs ${jobOrder('daddy_jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
   activeDaddyJobs(): DaddyJob[] {
@@ -306,7 +335,7 @@ export class Store {
     text: string,
     runId?: string,
     workspace?: Message['workspace'],
-    metadata?: Pick<Message, 'origin' | 'phase'>,
+    metadata?: Pick<Message, 'origin' | 'phase' | 'needsReply'>,
   ) {
     const message: Message = {
       id: randomUUID(),
@@ -331,7 +360,7 @@ export class Store {
       .get(id, taskId);
     return row ? JSON.parse(String(row.data)) : undefined;
   }
-  finishDaddyReply(groupId: string, text: string, runId: string) {
+  finishDaddyReply(groupId: string, text: string, runId: string, needsReply = false) {
     const row = this.db
       .prepare(
         "SELECT data FROM messages WHERE task_id=? AND json_extract(data,'$.runId')=? AND json_extract(data,'$.sender')='agent' ORDER BY rowid DESC LIMIT 1",
@@ -340,13 +369,17 @@ export class Store {
     const previous: Message | undefined = row ? JSON.parse(String(row.data)) : undefined;
     if (previous?.text.trim() === text.trim()) {
       previous.phase = 'final';
+      if (needsReply) previous.needsReply = true;
       this.db
         .prepare('UPDATE messages SET data=? WHERE id=?')
         .run(JSON.stringify(previous), previous.id);
       this.event(groupId, 'daddy.message', { messageId: previous.id, sender: 'agent' }, runId);
       return previous;
     }
-    return this.daddyMessage(groupId, 'agent', text, runId, undefined, { phase: 'final' });
+    return this.daddyMessage(groupId, 'agent', text, runId, undefined, {
+      phase: 'final',
+      ...(needsReply ? { needsReply: true } : {}),
+    });
   }
   getGroup(id: string): ReviewGroup {
     const row = this.db.prepare('SELECT data FROM review_groups WHERE id=?').get(id);
@@ -375,9 +408,16 @@ export class Store {
     sender: Message['sender'],
     text: string,
     runId?: string,
+    messageId?: string,
   ) {
+    if (messageId) {
+      const row = this.db
+        .prepare('SELECT data FROM messages WHERE id=? AND task_id=?')
+        .get(messageId, taskId);
+      if (row) return JSON.parse(row.data as string) as Message;
+    }
     const msg: Message = {
-      id: randomUUID(),
+      id: messageId ?? randomUUID(),
       taskId,
       role,
       sender,

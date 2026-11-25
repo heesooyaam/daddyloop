@@ -2,11 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
 import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
-import { profilesSchema } from '../core/agents.js';
+import { profileSchema, profilesSchema } from '../core/agents.js';
 import { AppError } from '../core/types.js';
 import { sessionInstructionsSchema } from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
+  const workerNumber = z.number().int().min(1).max(8);
 
   {
     const prefix = '/api/workspaces';
@@ -48,7 +49,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         repository: repositorySelectionSchema.optional(),
         title: z.string().trim().min(1).max(200).optional(),
         message: z.string().trim().min(1).max(20000).optional(),
-        workerLimit: z.number().int().min(1).max(8).optional(),
+        workerLimit: workerNumber.optional(),
         requestId: id.optional(),
         publication: z.enum(['auto', 'human']).optional(),
         autoPush: z.boolean().optional(),
@@ -56,7 +57,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       })
       .strict()
       .parse(request.body);
-    const { repository, ...options } = input;
+    const { repository, publication: _publication, autoPush: _autoPush, ...options } = input;
     const workspace = await daddy.workspaces.selection(
       daddy.workspaces.get(input.workspaceId),
       repository,
@@ -108,8 +109,11 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         id.parse(request.params.id),
         z
           .object({
-            workerLimit: z.number().int().min(1).max(8).optional(),
-            profiles: profilesSchema.optional(),
+            workerLimit: workerNumber.optional(),
+            profiles: profilesSchema.partial().optional(),
+            forceDaddy: z.boolean().optional(),
+            applyWorkers: z.boolean().optional(),
+            autoMerge: z.boolean().optional(),
             instructions: sessionInstructionsSchema.optional(),
           })
           .strict()
@@ -122,6 +126,47 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/resume', async (request) =>
     daddy.resume(id.parse(request.params.id)),
   );
+  app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/tasks', async (request, reply) => {
+    const input = z
+      .object({
+        requirements: z.string().trim().min(1).max(20000),
+        requestId: id,
+        repository: repositorySelectionSchema.optional(),
+        workerRequest: z
+          .object({ slot: workerNumber.optional(), profile: profileSchema.optional() })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .parse(request.body);
+    const sessionId = id.parse(request.params.id);
+    const workspace = await daddy.workspaces.selection(
+      daddy.group(sessionId).workspace!,
+      input.repository,
+    );
+    const task = await daddy.createTask(sessionId, {
+      requirements: input.requirements,
+      requestId: `web:task:${input.requestId}`,
+      workerRequest: input.workerRequest,
+      workspace,
+    });
+    return reply.code(201).send({ id: task.id });
+  });
+  app.post<{ Params: { id: string; number: string } }>(
+    '/api/daddy/sessions/:id/workers/:number',
+    async (request) => {
+      const input = z
+        .object({ profile: profileSchema, forceTaskId: id.optional() })
+        .strict()
+        .parse(request.body);
+      return daddy.configureWorker(
+        id.parse(request.params.id),
+        workerNumber.parse(Number(request.params.number)),
+        input.profile,
+        { force: !!input.forceTaskId, expectedTaskId: input.forceTaskId },
+      );
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/delete', async (request, reply) => {
     const input = z
       .object({ expectedGeneration: z.number().int().positive() })
@@ -130,11 +175,25 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const result = await daddy.remove(id.parse(request.params.id), input.expectedGeneration);
     return reply.code(202).send(result);
   });
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/auto-merge',
+    async (request) => {
+      const { mode } = z
+        .object({ mode: z.enum(['on', 'off', 'inherit']) })
+        .strict()
+        .parse(request.body);
+      return daddy.taskAutoMerge(
+        id.parse(request.params.id),
+        id.parse(request.params.taskId),
+        mode,
+      );
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {
     const input = z
       .object({
         taskId: id,
-        action: z.enum(['approve-plan', 'waive-checks', 'publish', 'submit']),
+        action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
       })
@@ -151,8 +210,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       generation: input.expectedGeneration,
       groupId: request.params.id,
     };
-    if (input.action === 'publish') return daddy.engine.publish(task.id, expected);
-    if (input.action === 'submit') return daddy.tickets.submit(task.id, expected);
     return daddy.engine.action(task.id, input.action, '', expected);
   });
 }

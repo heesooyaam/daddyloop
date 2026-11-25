@@ -1,0 +1,25 @@
+name: Link PR to issue
+on:
+  pull_request_target:
+    types: [opened]
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+concurrency:
+  group: pr-issue-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  link:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const link = require('./.github/scripts/link-pr-issue.cjs');
+            await link(github, context.repo, context.payload.pull_request.number);

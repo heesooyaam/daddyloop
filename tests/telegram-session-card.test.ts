@@ -3,8 +3,80 @@ import { daddyFixture } from './daddy-fixture.js';
 import { TelegramApi } from '../src/integrations/telegram.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
+import { TelegramProgress } from '../src/integrations/telegram-progress.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+it('pins one topic status card and edits it as the queue changes across restarts', async () => {
+  vi.useFakeTimers();
+  const f = daddyFixture();
+  const sent: { method: string; body: Record<string, unknown> }[] = [];
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    sent.push({ method: String(url).split('/').at(-1)!, body: JSON.parse(String(options?.body)) });
+    return Response.json({ ok: true, result: { message_id: 100 + sent.length } });
+  });
+  const route = { chatId: -10042, threadId: 17, ownerId: 7 };
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: route.chatId, ownerId: 7 });
+  const integration = () => {
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    return new TelegramProgress(
+      f.store,
+      api,
+      'telegram.progress:fixture_bot:',
+      () => 'en',
+      () => route,
+    );
+  };
+  let progress = integration();
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Work' });
+  try {
+    progress.start();
+    await vi.advanceTimersByTimeAsync(5000);
+    await api.delivery!.flush();
+    expect(sent[0]).toMatchObject({
+      method: 'sendMessage',
+      body: { message_thread_id: 17, text: expect.stringContaining('No work in progress') },
+    });
+    expect(sent[1]).toMatchObject({
+      method: 'pinChatMessage',
+      body: { chat_id: route.chatId, message_id: 101, disable_notification: true },
+    });
+    await progress.stop();
+    await api.delivery!.stop();
+
+    progress = integration();
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Show in pin',
+      requestId: 'task',
+    });
+    progress.start();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(sent.at(-1)).toMatchObject({
+      method: 'editMessageText',
+      body: { message_id: 101, text: expect.stringContaining(task.source!.key) },
+    });
+    const queued = f.store.jobs(task.id)[0]!;
+    f.store.saveJob({ ...queued, status: 'completed' });
+    f.store.saveTask({ ...task, state: 'complete' });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(sent.map(({ method }) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+      'editMessageText',
+    ]);
+    expect(sent.at(-1)?.body).toMatchObject({
+      message_id: 101,
+      text: expect.stringContaining('All tasks complete'),
+    });
+  } finally {
+    await progress.stop();
+    await api.delivery?.stop();
+    await f.close();
+    vi.useRealTimers();
+  }
+});
 
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();
@@ -43,6 +115,7 @@ it('updates the initial private-chat card after /new as well', async () => {
     const boardId = sent.indexOf(board) + 1;
     expect(status.body.text).toContain('Preparing');
     expect(board.body.text).toContain('Preparing');
+    await api.delivery.flush();
     expect(sent.find((item) => item.method === 'pinChatMessage')?.body).toMatchObject({
       chat_id: 7,
       message_id: statusId,
@@ -121,6 +194,7 @@ it.each(['online', 'failed-edit', 'missed-event'])(
         ),
       ).toBe(true);
       expect(initial.filter((item) => item.body.text.includes('Server status'))).toHaveLength(1);
+      await api.delivery.flush();
       expect(sent.filter((item) => item.method === 'pinChatMessage')).toHaveLength(1);
       group.workspacePreparation = { state: 'ready' };
       group.updatedAt = new Date(Date.now() + 1000).toISOString();

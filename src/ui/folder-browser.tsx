@@ -26,6 +26,7 @@ export function FolderBrowser({
   const [path, setPath] = useState(initialPath),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const pathInput = useRef<HTMLInputElement>(null);
   const request = useRef<AbortController | undefined>(undefined);
   const browse = async (target: string) => {
     request.current?.abort();
@@ -48,6 +49,11 @@ export function FolderBrowser({
     } finally {
       if (!controller.signal.aborted) setBusy(false);
     }
+  };
+  const navigate = (target: string) => {
+    // The navigation buttons become disabled while the directory is loading.
+    pathInput.current?.focus();
+    void browse(target);
   };
   useEffect(() => {
     void browse(initialPath);
@@ -75,6 +81,7 @@ export function FolderBrowser({
           type="button"
           className="daddy-icon"
           aria-label={t('Close folder browser')}
+          autoFocus
           onClick={onCancel}
         >
           <X size={17} />
@@ -85,12 +92,13 @@ export function FolderBrowser({
           type="button"
           className="daddy-icon"
           aria-label={t('Parent folder')}
-          onClick={() => void browse(listing?.parent ?? '')}
+          onClick={() => navigate(listing?.parent ?? '')}
           disabled={busy || !listing?.path}
         >
           <ArrowUp size={17} />
         </button>
         <input
+          ref={pathInput}
           aria-label={t('Server directory')}
           value={path}
           placeholder={t('Absolute path on the server')}
@@ -104,14 +112,14 @@ export function FolderBrowser({
             if (event.key === 'Enter') {
               event.preventDefault();
               event.stopPropagation();
-              void browse(path.trim());
+              navigate(path.trim());
             }
           }}
         />
         <button
           type="button"
           className="daddy-button quiet"
-          onClick={() => void browse(path.trim())}
+          onClick={() => navigate(path.trim())}
           disabled={busy}
         >
           {t('Open folder')}
@@ -125,7 +133,7 @@ export function FolderBrowser({
             : t('Server folders')}
         </strong>
         {!!listing?.path && (
-          <button type="button" onClick={() => void browse('')} disabled={busy}>
+          <button type="button" onClick={() => navigate('')} disabled={busy}>
             {t('All server folders')}
           </button>
         )}
@@ -148,7 +156,7 @@ export function FolderBrowser({
             key={entry.path}
             disabled={busy}
             aria-label={t('Open folder {name}', { name: entry.name })}
-            onClick={() => void browse(entry.path)}
+            onClick={() => navigate(entry.path)}
           >
             <Folder size={17} />
             <span>{entry.name}</span>

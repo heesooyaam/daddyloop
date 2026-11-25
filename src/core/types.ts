@@ -10,26 +10,21 @@ export type State =
   | 'awaiting_publication'
   | 'fixing'
   | 'awaiting_push'
+  | 'awaiting_merge'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'
   | 'paused'
   | 'complete';
 export interface Policy {
-  publication: 'human' | 'auto';
   planApproval: 'human' | 'auto';
-  maxRounds: number;
   maxNoProgress: number;
   requireChecks: boolean;
-  autoPush: boolean;
 }
 export const defaultPolicy: Policy = {
-  publication: 'auto',
   planApproval: 'human',
-  maxRounds: 3,
   maxNoProgress: 2,
   requireChecks: true,
-  autoPush: true,
 };
 export interface PRRef {
   kind?: 'pull_request';
@@ -51,9 +46,22 @@ export interface AgentProfile {
   model?: string;
   effort?: ReasoningEffort;
 }
+export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
+  return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
+}
 export interface AgentProfiles {
   worker: AgentProfile;
   daddy: AgentProfile;
+}
+export interface WorkerRequest {
+  slot?: number;
+  profile?: AgentProfile;
+}
+export interface WorkerSlot {
+  number: number;
+  taskId?: string;
+  /** Model to use for the next task. */
+  profile?: AgentProfile;
 }
 export interface TicketSource {
   kind: 'github_issue' | 'tracker' | 'local';
@@ -67,6 +75,7 @@ export interface TicketSource {
   comments?: { id: string; author: string; body: string }[];
 }
 export type PRTask = Task & { ref: PRRef };
+export type AutoMergeMode = 'inherit' | 'on' | 'off';
 export interface ReviewGroup {
   titleSource?: 'placeholder' | 'goal' | 'manual';
   resourceWait?: { reasons: string[]; since: string; state: 'waiting' | 'repairing' | 'blocked' };
@@ -85,8 +94,10 @@ export interface ReviewGroup {
   orchestrated?: boolean;
   workerLimit?: number;
   requestedWorkerLimit?: number;
-  /** Occupied slots survive author turns, review, pauses and restarts. */
+  /** The occupied task list from stores created before numbered slots. */
   workerTasks?: string[];
+  /** Occupied slots survive author turns, review, pauses and restarts. */
+  workerSlots?: WorkerSlot[];
   /** Snapshot: later edits to workspace defaults affect new sessions only. */
   workspace?: Workspace;
   worker?: AgentProfile;
@@ -97,7 +108,6 @@ export interface ReviewGroup {
   daddyToolSignature?: string;
   parentGroupId?: string;
   createdByAction?: string;
-  defaultPolicy?: Pick<Policy, 'publication' | 'autoPush'>;
   workspacePreparation?: {
     state: 'pending' | 'preparing' | 'ready' | 'error';
     path?: string;
@@ -126,11 +136,13 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  firstAttemptId?: string;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   groupId: string;
   generation: number;
   trigger: 'user' | 'worker' | 'recovery' | 'resources';
+  waitingTaskId?: string;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
@@ -148,6 +160,11 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  draft?: boolean;
+  mergeable?: boolean | null;
+  mergeConflict?: boolean;
+  targetCloneUrl?: string;
+  mergeCommit?: string;
   title: string;
   body: string;
   branch: string;
@@ -165,6 +182,7 @@ export interface Location {
   startLine?: number;
 }
 export interface ReviewComment {
+  nodeId?: string;
   id: string;
   body: string;
   url: string;
@@ -183,6 +201,7 @@ export interface ReviewHandle {
   baselineNoteId?: number;
 }
 export interface ReviewSnapshot {
+  authorId?: string;
   status: 'draft' | 'published' | 'missing' | 'partial';
   body: string;
   comments: ReviewComment[];
@@ -190,6 +209,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  inputRequest?: { runId: string; role: Role; generation: number };
   resourcePause?: { generation: number; at: string };
   id: string;
   title: string;
@@ -204,6 +224,7 @@ export interface Task {
   dependsOn?: string[];
   createdByAction?: string;
   agents?: AgentProfiles;
+  workerRequest?: WorkerRequest;
   ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
   policy: Policy;
@@ -217,14 +238,29 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  openReviewQuestion?: { head: string; text: string };
+  partialReview?: {
+    reviewId: string;
+    runId: string;
+    question?: string;
+    limitation: string;
+    retryAt?: number;
+  };
+  draftRecheck?: { commentIds: string[]; retried?: boolean };
   snapshot?: ReviewSnapshot;
+  workerReport?: { runId: string; revision: Revision };
   summary: string;
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
+  verifiedMerge?: Revision & { mergeCommit?: string };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  fixingMergeConflict?: boolean;
+  conflictCheckpoint?: string;
+  deferredWorkerInstructions?: { id: string; text: string }[];
+  pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
     Record<
@@ -268,6 +304,7 @@ export interface Event {
   at: string;
 }
 export interface Message {
+  needsReply?: boolean;
   phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
   origin?: { channel: 'telegram'; chatId: number; threadId?: number };
@@ -295,7 +332,11 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat' | 'implement';
+  kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
+  freshContextRetry?: boolean;
+  timeoutRetry?: boolean;
+  deferredResult?: AgentResult;
+  errorCode?: string;
   profile?: AgentProfile;
   groupId?: string;
   groupGeneration?: number;
@@ -308,7 +349,13 @@ export interface Job {
   finishedAt?: string;
   createdAt: string;
   actionId?: string;
+  firstAttemptId?: string;
   notBefore?: string;
+}
+export function requestsHumanInput(result: AgentResult) {
+  return (
+    result.status === 'needs_input' || (result.status === 'incomplete' && !!result.question?.trim())
+  );
 }
 export interface AgentResult {
   status: 'completed' | 'needs_input' | 'incomplete';

@@ -12,9 +12,16 @@ import {
 
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
+  targetAdvanced?(ref: PRRef, before: string, after: string): Promise<boolean>;
+  prepareMerge?(ref: PRRef): Promise<(expectedHead: string) => Promise<string>>;
   findReview(ref: PRRef, marker: string): Promise<ReviewHandle | undefined>;
   createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
+  discardSupersededDraft?(
+    ref: PRRef,
+    review: ReviewHandle,
+    snapshot: ReviewSnapshot,
+  ): Promise<void>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,
@@ -22,8 +29,19 @@ export interface ReviewProvider {
     marker: string,
     location?: Location,
   ): Promise<ReviewComment>;
-  updateComment(ref: PRRef, review: ReviewHandle, id: string, body: string): Promise<ReviewComment>;
-  deleteComment(ref: PRRef, review: ReviewHandle, id: string): Promise<void>;
+  updateComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    body: string,
+    current?: ReviewComment,
+  ): Promise<ReviewComment>;
+  deleteComment(
+    ref: PRRef,
+    review: ReviewHandle,
+    id: string,
+    current?: ReviewComment,
+  ): Promise<void>;
   updateSummary(ref: PRRef, review: ReviewHandle, body: string): Promise<void>;
   publish(ref: PRRef, review: ReviewHandle): Promise<void>;
 }

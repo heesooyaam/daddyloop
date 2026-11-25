@@ -24,7 +24,7 @@ class GitHubSubmission implements SubmissionBackend {
         body,
         head: task.ticketRepository!.branch,
         base: task.ticketRepository!.baseBranch,
-        draft: true,
+        draft: false,
       });
     return {
       provider: 'github',
@@ -102,6 +102,7 @@ export const githubModule: RepositoryModule = {
       url: url.origin + url.pathname.replace(/\/$/, ''),
     };
   },
-  review: (ref) => new GitHubProvider(ref.host, credential('github', ref.host)),
+  review: (ref, store) =>
+    new GitHubProvider(ref.host, credential('github', ref.host), undefined, store),
   submission: (context) => new GitHubSubmission(context),
 };

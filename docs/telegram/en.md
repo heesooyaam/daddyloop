@@ -2,6 +2,10 @@
 
 # Telegram: private chat and forum topics
 
+When daddy or a worker asks for a decision, the bot sends a new message with a mention of the paired owner and the question. It uses the session topic or the paired private chat. A plan awaiting approval also alerts the owner. Attention and All notifications include these mentions. Ordinary progress updates stay silent. A private draft that requires the owner’s inspection includes a link to its PR. On restart, outstanding worker questions are recovered from the saved agent result when it still matches the current task.
+
+In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.
@@ -18,22 +22,36 @@ The bot token belongs to this service installation. A dedicated bot must not sim
 
 ## Work from the chat
 
-In the private chat, choose **New task** or open a conversation from the list. The bot shows which conversation receives your next message. In a group topic, send a task description or an issue link. **Settings** in the private chat opens repositories, group setup, notifications and updates.
+In the private chat, choose **New task** or open a conversation from the list. The bot shows which conversation receives your next message. A regular message or issue link goes to daddy. Use `/task` to put a specific description straight into the worker queue. **Settings** in the private chat opens repositories, group setup, notifications and updates.
 
-The bot posts a status card to the session topic or to the selected private conversation when there is no group. The card updates when the phase changes and roughly once a minute during work. It shows the queue, current phase, elapsed time and the latest agent activity. The server timestamp updates while the agent is quiet. If the server goes offline, the card shows the last update time. Send `/status` for the current status.
+The bot adds 👀 to an accepted message after saving the request. The reaction is queued and retried after temporary failures. In a topic, it depends on the group's settings. The status card shows the current stage.
+
+The bot keeps an editable status card pinned in the session topic, with the current phase at the top and unfinished task IDs below it. The card updates when the phase changes and roughly once a minute during work. It shows elapsed time and the latest agent activity. When there is no group, the bot posts progress in the selected private conversation. Send `/status` for the current status.
 
 ## A topic per daddy session
 
-Create a Telegram **supergroup with Topics enabled**, add the bot as administrator, and allow it to manage topics. In the private bot chat send `/group` and select the group using Telegram's picker. The service verifies your membership and the bot's rights. Telegram requires you to create/join the group; the bot cannot silently create one and add you.
+Create a Telegram **supergroup with Topics enabled**, add the bot as administrator, and grant **Manage Topics** and **Pin Messages**. In the private bot chat send `/group` and select the group using Telegram's picker. The service verifies your membership and the bot's rights. Telegram requires you to create or join the group yourself.
 
-Each daddy session gets a topic. Send goals and tickets there; workers report to daddy. `/new Another job` inside a topic starts a separate session/topic. Ordinary messages add work to the current session. If topic creation had an uncertain result, follow the bot's `/attach` instruction rather than creating duplicates.
+Each daddy session gets a topic. Send goals and tickets there. Workers report to daddy. `/new Another job` inside a topic starts a separate session and topic. If topic creation had an uncertain result, follow the bot's `/attach` instructions.
+
+## Tasks and workers
+
+- `/task Fix search filters` creates and queues a task in the current session. The bot returns a short ID such as `DADDY-12ab34cd`.
+- `/task DADDY-12ab34cd` shows the task’s current stage, assigned worker and PR when available.
+- `/queue` lists unfinished tasks. `/workers` shows the numbered workers, their models and assigned work.
+- `/task --worker 2 --model MODEL --effort EFFORT -- Fix search filters` waits for worker 2 and uses the requested profile. The options are independent. A model request without a worker number prefers a free worker with that profile and reconfigures the first free worker if needed.
+- `/worker 2 MODEL EFFORT` sets worker 2’s profile for its next task. Add `--force` to resume an active author run with the new profile in the same working copy. A run that is already saving a result finishes that step first. Add `--engine ENGINE` with a model when switching agent engines. Use `/models` to find available models and reasoning levels.
 
 ## Commands
 
-| Where                                     | Commands                                                                                                                                                                                                                |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
-| Private chat                              | `/group`, `/updates`, `/web`                                                                                                                                                                                            |
+Send `/help` in the private chat or a group topic to see available commands and descriptions. Use `/help task` or `/help /worker` for syntax and options. In groups, `/help@your_bot task` also works. Telegram suggests commands for the current chat type when you type `/`. Russian Telegram clients receive Russian menu descriptions. Use `/language` to select the language for bot replies.
+
+| Where                                     | Commands                                                                                                                                                                                                                                                          |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/task`, `/queue`, `/workers`, `/worker`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
+| Private chat                              | `/group`, `/updates`, `/web`, `/cleanup`                                                                                                                                                                                                                          |
+
+In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enable cleanup and check its threshold, skill and most recent result here. See [operations](../operations/en.md) for the settings.
 
 `/web` creates a browser login link after [permanent HTTPS access](../web/en.md) is configured. CLI updates and account confirmations stay in the private chat. Work continues when the phone and laptop are offline.
 
@@ -65,12 +83,12 @@ The server hosts the agents, SQLite history and Telegram connection. A laptop te
 
 - `/new Your task description` saves the goal, then lets you choose a workspace. The description is optional. The session and topic use the goal as their name; a session started without a goal gets its name from the first message.
 - `/rename New name` changes this session and the same Telegram topic. It preserves topic ID, history, tasks and running agents. In private chat, open the intended session first.
-- A new message in the current conversation gives work to the same daddy.
+- A regular message goes to the current conversation with daddy.
 - `/modules` shows enabled integrations. `/models` selects an installed agent and model. Missing modules are added through the server installer.
 
 **Working copy settings** is a separate optional screen. Automatic copies are recommended: daddy creates the session's folders and removes them after archiving results on deletion. Prepared copies require an administrator-managed set of free server checkouts. The ordinary session screen keeps **Start session** and **Browse server folders** as its main actions.
 
-If SQLite fails while saving an incoming text or voice message, the bot fetches the unconfirmed message again and preserves the order. Use `daddy telegram status` to see a polling error. Telegram retains incoming updates for up to 24 hours. [Telegram Bot API](https://core.telegram.org/bots/api#getting-updates)
+If SQLite fails while saving a task command or an incoming text or voice message, the bot fetches the unconfirmed message again and preserves the order. Use `daddy telegram status` to see a polling error. Telegram retains incoming updates for up to 24 hours. [Telegram Bot API](https://core.telegram.org/bots/api#getting-updates)
 
 Outgoing messages are buffered in SQLite before sending. Failed deliveries retry after 1, 2, 4… seconds, capped at five minutes; new conversation messages also wake the buffer. Telegram's `retry_after` always takes precedence. Queues survive service restarts and preserve ordering within a topic. Superseded unsent progress is replaced by the newest text, and acknowledged parts of a long reply are not resent. Renaming a topic uses this queue too.
 

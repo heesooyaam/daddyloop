@@ -1,5 +1,5 @@
 import { RepositoryModuleField } from './repository-module.js';
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { Check, ChevronDown, FolderGit2, FolderOpen, LoaderCircle, RotateCcw } from 'lucide-react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { Workspace } from '../core/types.js';
@@ -13,17 +13,19 @@ export function WorkspaceFields({
   workspace,
   value,
   onChange,
-  compact = false,
+  target = 'session',
   sessionId,
   onEditingChange,
+  onPreviewingChange,
 }: {
   api: DaddyApi;
   workspace: Workspace;
   value?: RepositorySelection;
   onChange: (value?: RepositorySelection) => void;
-  compact?: boolean;
+  target?: 'session' | 'message' | 'task';
   sessionId?: string;
   onEditingChange?: (editing: boolean) => void;
+  onPreviewingChange?: (previewing: boolean) => void;
 }) {
   const { t } = useLocale();
   const [editing, setEditing] = useState(false),
@@ -31,12 +33,20 @@ export function WorkspaceFields({
   const [draft, setDraft] = useState<RepositorySelection>({});
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const pathInput = useRef<HTMLInputElement>(null);
   const request = useRef<AbortController | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (editing && !picking) pathInput.current?.focus();
+  }, [editing, picking]);
   useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
     onEditingChange?.(editing);
     return () => onEditingChange?.(false);
   }, [editing, onEditingChange]);
+  useEffect(() => {
+    onPreviewingChange?.(busy);
+    return () => onPreviewingChange?.(false);
+  }, [busy, onPreviewingChange]);
   useEffect(() => {
     if (!value) {
       request.current?.abort();
@@ -103,49 +113,62 @@ export function WorkspaceFields({
       if (!controller.signal.aborted) setBusy(false);
     }
   };
+  const changeLabel = t(
+    {
+      session: 'Change folder for this session',
+      message: 'Change folder for the next message',
+      task: 'Change folder for this task',
+    }[target],
+  );
+  const change = (
+    <button
+      type="button"
+      className="daddy-button quiet"
+      onClick={begin}
+      aria-label={changeLabel}
+      aria-expanded={false}
+    >
+      {target === 'message' && !value ? changeLabel : t('Change')}
+    </button>
+  );
   return (
-    <div className={'daddy-workspace-fields' + (compact ? ' compact' : '')}>
-      {!editing && (
-        <div className="daddy-repository-summary">
-          <FolderGit2 size={18} />
-          <div>
-            <span>
-              {t(
-                value
-                  ? compact
-                    ? 'Repository for the next message'
-                    : 'Repository for this session'
-                  : 'Workspace source',
-              )}
-            </span>
-            <code>
-              {path}
-              {scope ? '/' + scope : ''}
-            </code>
-            {base && <small>{t('Starting branch: {branch}', { branch: base })}</small>}
+    <div className={'daddy-workspace-fields' + (target === 'task' ? ' compact' : '')}>
+      {!editing &&
+        (target === 'message' && !value ? (
+          change
+        ) : (
+          <div className="daddy-repository-summary">
+            <FolderGit2 size={18} />
+            <div>
+              <span>
+                {t(
+                  value
+                    ? {
+                        session: 'Repository for this session',
+                        message: 'Repository for the next message',
+                        task: 'Repository for this task',
+                      }[target]
+                    : 'Workspace source',
+                )}
+              </span>
+              <code>
+                {path}
+                {scope ? '/' + scope : ''}
+              </code>
+              {base && <small>{t('Starting branch: {branch}', { branch: base })}</small>}
+            </div>
+            {change}
           </div>
-          {!editing && (
-            <button
-              type="button"
-              className="daddy-button quiet"
-              onClick={begin}
-              aria-label={t(
-                compact ? 'Change folder for the next message' : 'Change folder for this session',
-              )}
-              aria-expanded={false}
-            >
-              {t('Change')}
-            </button>
-          )}
-        </div>
-      )}
+        ))}
       {!editing && value && (
         <div className="daddy-repository-override">
           <span>
             {t(
-              compact
-                ? 'Only the next message uses this folder.'
-                : 'Only this session uses these settings.',
+              {
+                session: 'Only this session uses these settings.',
+                message: 'Only the next message uses this folder.',
+                task: 'Only this task uses this folder.',
+              }[target],
             )}
           </span>
           <button type="button" className="daddy-text-button" onClick={() => onChange(undefined)}>
@@ -154,7 +177,7 @@ export function WorkspaceFields({
           </button>
         </div>
       )}
-      {!editing && !compact && workspace.vcs === 'arcadia' && copyMode && (
+      {!editing && target === 'session' && workspace.vcs === 'arcadia' && copyMode && (
         <label className="daddy-toggle">
           <input
             type="checkbox"
@@ -188,18 +211,29 @@ export function WorkspaceFields({
             }}
           >
             <legend>
-              {t(compact ? 'Settings for the next message' : 'Settings for this session')}
+              {t(
+                {
+                  session: 'Settings for this session',
+                  message: 'Settings for the next message',
+                  task: 'Settings for this task',
+                }[target],
+              )}
             </legend>
             <p className="daddy-muted">
               {t(
-                compact
-                  ? 'Choose where daddy should handle your next message. Following messages use the session folder again.'
-                  : 'Choose another source for this session. The saved workspace stays as it is.',
+                {
+                  session:
+                    'Choose another source for this session. The saved workspace stays as it is.',
+                  message:
+                    'Choose where daddy should handle your next message. Following messages use the session folder again.',
+                  task: 'Choose the repository and folder for this task.',
+                }[target],
               )}
             </p>
             <label style={picking ? { display: 'none' } : undefined}>
               {t('Repository URL or server folder')}
               <input
+                ref={pathInput}
                 aria-label={t('Repository URL or server folder')}
                 value={draft.path ?? ''}
                 onChange={(event) => setDraft({ path: event.target.value })}

@@ -1,9 +1,18 @@
+import { commandHelp } from './telegram-commands.js';
+import { githubWait } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
-import { AppError, now, type Event, type ReviewGroup, type AgentProfiles } from '../core/types.js';
+import {
+  sameAgentProfile,
+  AppError,
+  now,
+  type Event,
+  type ReviewGroup,
+  type Task,
+} from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
-import { TelegramText } from './telegram-text.js';
+import { TelegramText, safeLink } from './telegram-text.js';
 import {
   daddyHome,
   workspacePicker,
@@ -33,7 +42,21 @@ import { isGitAddress, parseGitSource } from '../modules/repositories/git-source
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
-type Pair = { chatId: number; userId: number };
+import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
+import { draftInspectionRequired, taskReference } from '../core/task-activity.js';
+import { workerSlots } from '../core/worker-pool.js';
+import { profileText, taskActivity } from '../core/task-activity.js';
+import {
+  parseTaskInput,
+  parseWorkerInput,
+  queueCard,
+  queuedTaskCard,
+  taskCard,
+  taskCommands,
+  taskReferenceId,
+  workersCard,
+} from './telegram-tasks.js';
+type Pair = { chatId: number; userId: number; ownerLabel?: string };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
 type Destination = { chatId: number; threadId?: number };
@@ -333,7 +356,7 @@ export class TelegramWorkspace {
       chat_id: pair.chatId,
       text:
         this.t(
-          'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.',
+          'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.',
         ) +
         '\n\n@' +
         this.username,
@@ -446,6 +469,140 @@ export class TelegramWorkspace {
       buttons: [[{ text: this.t('Back'), callback_data: `dad:open:${group.id}` }]],
     });
   }
+  private async showTasks(groupId: string, destination: Destination, view: 'queue' | 'workers') {
+    const group = this.authorize(destination, groupId);
+    const slots = workerSlots(this.store, group);
+    const tasks = taskActivity(
+      this.store.tasks(groupId).reverse(),
+      this.store.activeJobs(),
+      (task) =>
+        githubActivityStatus(
+          task,
+          autoMergeSettings(this.store, group, task),
+          githubWait(this.store, task.ref),
+        ),
+      slots,
+    );
+    const locale = this.locale();
+    await this.api.send(
+      destination,
+      view === 'queue'
+        ? queueCard(locale, groupId, tasks)
+        : workersCard(
+            locale,
+            groupId,
+            slots,
+            tasks,
+            group.worker ?? this.daddy.engine.defaultAgents().worker,
+          ),
+    );
+  }
+  private async showTask(groupId: string, taskId: string, destination: Destination) {
+    const group = this.authorize(destination, groupId);
+    const task = this.daddy.task(groupId, taskId);
+    const slots = workerSlots(this.store, group);
+    const [activity] = taskActivity(
+      [task],
+      this.store.activeJobs(taskId),
+      (t) =>
+        githubActivityStatus(
+          t,
+          autoMergeSettings(this.store, group, t),
+          githubWait(this.store, t.ref),
+        ),
+      slots,
+    );
+    const slot = slots.find((item) => item.taskId === taskId);
+    const merge =
+      group.workspace?.provider === 'github' && task.ref.provider === 'github'
+        ? autoMergeSettings(this.store, group, task)
+        : undefined;
+    await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge));
+  }
+  private async taskCommand(
+    command: string,
+    args: string,
+    groupId: string,
+    destination: Destination,
+    receipt: string,
+  ) {
+    const group = this.authorize(destination, groupId);
+    const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
+    if (command === 'queue' || command === 'workers') {
+      await this.showTasks(groupId, destination, command);
+      return;
+    }
+    if (command === 'worker') {
+      const input = parseWorkerInput(args);
+      if (!input) {
+        await this.api.send(
+          destination,
+          this.t('Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.'),
+        );
+        return;
+      }
+      const slot = workerSlots(this.store, group).find((item) => item.number === input.number);
+      if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      const profile = {
+        engine: input.engine ?? slot.profile?.engine ?? defaults.engine,
+        model: input.model,
+        effort: input.effort,
+      };
+      const result = await this.daddy.configureWorker(groupId, input.number, profile, {
+        force: input.force,
+      });
+      await this.api.send(
+        destination,
+        this.t(
+          result.restarted
+            ? 'Worker {number} will resume the task · {profile}'
+            : 'Worker {number} model saved · {profile}',
+          { number: input.number, profile: profileText(profile) },
+        ),
+        undefined,
+        { key: receipt },
+      );
+      return;
+    }
+    const reference = taskReferenceId(args);
+    if (reference) {
+      const tasks = this.store.tasks(groupId).filter((task) => task.id.startsWith(reference));
+      if (tasks.length > 1)
+        throw new AppError(
+          'ambiguous_task',
+          'This ID matches multiple tasks. Open a task from /queue.',
+          409,
+        );
+      if (!tasks[0]) throw new AppError('not_found', 'Task not found in this session', 404);
+      await this.showTask(groupId, tasks[0].id, destination);
+      return;
+    }
+    const request = parseTaskInput(args, defaults.engine);
+    if (!request) {
+      await this.api.send(
+        destination,
+        this.t(
+          'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
+        ),
+      );
+      return;
+    }
+    const nextKey = this.repoKey(destination, groupId);
+    const next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(nextKey);
+    if (next && next.expiresAt <= now()) {
+      this.store.setSetting(nextKey, null);
+      throw new Error(this.t('This selection expired. Choose the repository again.'));
+    }
+    const task = await this.daddy.createTask(groupId, {
+      ...request,
+      requestId: receipt,
+      workspace: next?.workspace,
+    });
+    if (next) this.store.setSetting(nextKey, null);
+    await this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
+      key: receipt,
+    });
+  }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
     const board = this.daddy.board(groupId);
     const id = `telegram:daddy-intro:${destination.chatId}:${groupId}`;
@@ -493,21 +650,31 @@ export class TelegramWorkspace {
   }
   private async models(groupId: string, destination: Destination, role?: 'worker' | 'daddy') {
     const group = this.authorize(destination, groupId);
+    const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
     const text = new TelegramText()
       .add('🤖 ' + this.t('Models'), 'bold')
       .add('\n\ndaddy: ')
       .add(group.daddy.model ?? this.t('Engine configuration'), 'code')
       .add(' / ' + (group.daddy.effort ?? this.t('Default')))
-      .add('\n' + this.t('New workers') + ': ')
-      .add(group.worker?.model ?? this.t('Engine configuration'), 'code')
-      .add(' / ' + (group.worker?.effort ?? this.t('Default')));
+      .add('\n' + this.t('All workers') + ': ')
+      .add(defaults.model ?? this.t('Engine configuration'), 'code')
+      .add(' / ' + (defaults.effort ?? this.t('Default')));
+    for (const slot of workerSlots(this.store, group)) {
+      if (slot.profile && !sameAgentProfile(slot.profile, defaults))
+        text.add(
+          '\n' +
+            this.t('Worker {number}', { number: slot.number }) +
+            ' · ' +
+            profileText(slot.profile),
+        );
+    }
     if (!role) {
       await this.api.send(destination, {
         ...text,
         buttons: [
           [
             { text: 'daddy', callback_data: `dad:models:${groupId}:daddy` },
-            { text: this.t('New workers'), callback_data: `dad:models:${groupId}:worker` },
+            { text: this.t('All workers'), callback_data: `dad:models:${groupId}:worker` },
           ],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
         ],
@@ -898,6 +1065,49 @@ export class TelegramWorkspace {
       return true;
     }
     if (await this.repositoryCallback(data, destination)) return true;
+    const queue = data.match(/^dad:(queue|workers):([a-f0-9-]{36})$/);
+    if (queue) {
+      await this.showTasks(queue[2]!, destination, queue[1] as 'queue' | 'workers');
+      return true;
+    }
+    const sessionMerge = /^dad:sm:([a-f0-9-]{36}):(on|off)$/.exec(data);
+    if (sessionMerge) {
+      const id = sessionMerge[1]!;
+      this.authorize(destination, id);
+      const board = await this.daddy.settings(id, { autoMerge: sessionMerge[2] === 'on' });
+      await this.api.send(destination, sessionSettings(this.locale(), board));
+      return true;
+    }
+    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
+    if (taskMerge) {
+      const task = this.store.getTask(taskMerge[1]!);
+      if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, task.groupId);
+      this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
+      await this.showTask(task.groupId, task.id, destination);
+      return true;
+    }
+    const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);
+    if (merge) {
+      const item = this.store.getTask(merge[1]!);
+      if (!item.groupId || !item.revision)
+        throw new AppError('wrong_session', 'Task not found in this session', 404);
+      this.authorize(destination, item.groupId);
+      await this.daddy.engine.action(item.id, 'verify-merge', '', {
+        groupId: item.groupId,
+        head: item.revision.head,
+        generation: Number(merge[2]),
+      });
+      await this.showTask(item.groupId, item.id, destination);
+      return true;
+    }
+    const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
+    if (task) {
+      const { groupId } = this.store.getTask(task[1]!);
+      if (!groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
+      await this.showTask(groupId, task[1]!, destination);
+      return true;
+    }
     const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);
     if (repo) {
       this.authorize(destination, repo[1]);
@@ -910,7 +1120,7 @@ export class TelegramWorkspace {
       });
       return true;
     }
-    const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2}))?$/);
+    const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2})(:force)?)?$/);
     if (modelAction) {
       const key = 'dad-model:' + modelAction[1],
         row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(key);
@@ -945,17 +1155,26 @@ export class TelegramWorkspace {
           ...text,
           buttons: action.model.efforts.map((effort, index) => [
             { text: effort, callback_data: `${key}:${index}` },
+            ...(action.role === 'daddy'
+              ? [
+                  {
+                    text: this.t('Apply now · {effort}', { effort }),
+                    callback_data: `${key}:${index}:force`,
+                  },
+                ]
+              : []),
           ]),
         });
       } else {
         const effort = action.model.efforts[Number(modelAction[2])];
         if (!effort) throw new Error('Unsupported reasoning effort');
-        const profiles: AgentProfiles = {
-          daddy: group.daddy,
-          worker: group.worker ?? group.daddy,
-        };
-        profiles[action.role] = { engine: action.model.engine, model: action.model.id, effort };
-        await this.daddy.settings(group.id, { profiles });
+        await this.daddy.settings(group.id, {
+          profiles: {
+            [action.role]: { engine: action.model.engine, model: action.model.id, effort },
+          },
+          forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
+          applyWorkers: action.role === 'worker',
+        });
         this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
         await this.models(group.id, destination);
       }
@@ -1250,8 +1469,19 @@ export class TelegramWorkspace {
           .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
         return true;
       }
-      const text = message?.text?.trim().replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
-      if (!text) return false;
+      const rawText = message?.text?.trim();
+      if (!rawText) return false;
+      const addressedTo = /^\/\w+@(\w+)(?=\s|$)/.exec(rawText)?.[1];
+      if (addressedTo && addressedTo.toLowerCase() !== this.username.toLowerCase()) return false;
+      const text = rawText.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+      const help = /^\/help(?:\s+([\s\S]*))?$/i.exec(text);
+      if (help) {
+        await this.api.send(
+          destination,
+          commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
+        );
+        return true;
+      }
       const registrationKey = this.registrationKey(destination);
       const registration = this.store.setting<{
         provider: string;
@@ -1304,6 +1534,15 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/notifications') return await this.callback('notifications:show', destination);
+      if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
+        await this.api.send(destination, {
+          ...new TelegramText().add(
+            this.t('Send /cleanup in the private bot chat to manage disk cleanup.'),
+          ),
+          buttons: [[{ text: this.t('Open private chat'), url: `https://t.me/${this.username}` }]],
+        });
+        return true;
+      }
       if (text === '/updates' && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(this.t('Open the private bot chat for CLI updates.')),
@@ -1326,7 +1565,7 @@ export class TelegramWorkspace {
         await this.setup();
         return true;
       }
-      if (['/sessions', '/start', '/start daddy', '/help'].includes(text)) {
+      if (['/sessions', '/start', '/start daddy'].includes(text)) {
         await this.home(destination);
         return true;
       }
@@ -1369,6 +1608,18 @@ export class TelegramWorkspace {
       const groupId = privateChat
         ? this.store.setting<string>('telegram.currentDaddy')
         : this.groupAt(destination);
+      const task = taskCommands.exec(text);
+      if (task) {
+        if (!groupId) throw new Error(this.t('Start a daddy session first.'));
+        await this.taskCommand(
+          task[1]!,
+          task[2] ?? '',
+          groupId,
+          destination,
+          `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+        );
+        return true;
+      }
       const rename = text.match(/^\/rename(?:\s+([\s\S]+))?$/);
       if (rename) {
         if (!groupId) throw new Error(this.t('Open the session you want to rename.'));
@@ -1641,7 +1892,59 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.error', null);
     this.store.setSetting(key, null);
   }
+  private async ownerMention(pair: Pair) {
+    let label = pair.ownerLabel;
+    if (!label) {
+      // Older pairings only recorded the bot name. The owner's private chat is authoritative.
+      try {
+        const user = await this.api.call<{ id: number; username?: string; first_name?: string }>(
+          'getChat',
+          { chat_id: pair.chatId },
+        );
+        if (user?.id === pair.userId && this.pair()?.userId === pair.userId) {
+          label = user.username ? '@' + user.username : user.first_name;
+          if (label)
+            this.store.setSetting('telegram.pairing', { ...this.pair(), ownerLabel: label });
+        }
+      } catch {
+        /* The numeric mention also works without a display name. */
+      }
+    }
+    return new TelegramText().add(label || this.t('Session owner'), 'text_link', {
+      url: `tg://user?id=${pair.userId}`,
+    });
+  }
+  private taskRequestKey(task: Task) {
+    if (task.state === 'awaiting_plan_approval')
+      return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
+    if (
+      task.state === 'needs_input' &&
+      task.reason === draftInspectionRequired &&
+      task.review &&
+      !this.store.pendingReviewWrites(task.id, task.review.marker).length
+    )
+      return 'inspect-draft:' + task.review.id;
+    if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
+      return task.inputRequest.runId;
+  }
+  private queueTaskRequest(task: Task, event: Event) {
+    const request = this.taskRequestKey(task);
+    if (!request || !task.groupId) return;
+    this.onEvent({
+      ...event,
+      taskId: task.groupId,
+      type: 'daddy.task_question',
+      data: { ...(event.data as object), taskId: task.id, request },
+    });
+  }
   onEvent(event: Event): boolean {
+    if (event.type === 'task.state') {
+      if (
+        ['needs_input', 'awaiting_plan_approval'].includes((event.data as { state: string }).state)
+      )
+        this.queueTaskRequest(this.store.getTask(event.taskId), event);
+      return false;
+    }
     if (!event.type.startsWith('daddy.')) return false;
     if (this.eventDeferred(event)) return true;
     if (
@@ -1785,32 +2088,46 @@ export class TelegramWorkspace {
         .catch((error) => this.deferEvent(event, error));
       return true;
     }
-    if (event.type !== 'daddy.message') return true;
+    if (event.type !== 'daddy.message' && event.type !== 'daddy.task_question') return true;
     this.pending = this.pending
       .then(async () => {
         if (this.eventDeferred(event)) return;
         const pair = this.pair();
         if (this.stopped || !pair) return;
         if (this.store.getGroup(event.taskId).deletedAt) return;
-        const group = this.daddy.group(event.taskId),
-          message = this.store.messageById(
-            group.id,
-            (event.data as { messageId: string }).messageId,
-          );
-        if (!message || !['user', 'agent'].includes(message.sender)) return;
-        const topic = await this.ensureTopic(group);
-        if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
+        const group = this.daddy.group(event.taskId);
+        const { taskId, request, messageId } = event.data as {
+          taskId?: string;
+          request?: string;
+          messageId?: string;
+        };
+        const task = taskId ? this.store.getTask(taskId) : undefined;
+        const message = messageId ? this.store.messageById(group.id, messageId) : undefined;
+        if (
+          task &&
+          (task.groupId !== group.id || !request || this.taskRequestKey(task) !== request)
+        )
           return;
+        if (!task && (!message || !['user', 'agent'].includes(message.sender))) return;
+        const prefs = notificationPreferences(this.store);
+        const answered =
+          message?.needsReply &&
+          this.store
+            .messages(group.id)
+            .some((entry) => entry.sender === 'user' && entry.at > message.at);
+        const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
+        if (task && !ping) return;
+        const topic = await this.ensureTopic(group);
         const destination = topic
           ? { chatId: topic.chatId, threadId: topic.threadId }
           : { chatId: pair.chatId };
         if (
-          message.origin?.channel === 'telegram' &&
+          message?.origin?.channel === 'telegram' &&
           message.origin.chatId === destination.chatId &&
           message.origin.threadId === destination.threadId
         )
           return;
-        if (!topic && message.sender === 'agent') {
+        if (!topic && !ping && message?.sender === 'agent') {
           const job = message.runId
             ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
             : undefined;
@@ -1823,7 +2140,9 @@ export class TelegramWorkspace {
             }
           }
         }
-        const id = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}${message.phase ? ':' + message.phase : ''}`;
+        const id = task
+          ? `telegram:question:${pair.userId}:${task.id}:${request}`
+          : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;
         if (
           ['sent', 'superseded'].includes(
             String(
@@ -1835,16 +2154,51 @@ export class TelegramWorkspace {
         this.store.db
           .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
           .run(id, 'pending', now());
-        const text = new TelegramText()
-          .add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold')
-          .add('\n\n');
-        if (message.sender === 'user') text.add(message.text);
-        else text.markdown(message.text);
-        const result = await this.api.send(destination, text, undefined, {
-          key: message.sender === 'agent' ? `message:${message.id}` : id,
-          replace: message.sender === 'agent',
-          order: message.at,
-          final: message.phase !== 'progress',
+        const text = new TelegramText();
+        if (ping)
+          text
+            .append(await this.ownerMention(pair))
+            .add(' · ' + this.t('Your reply is needed') + '\n\n');
+        if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
+          return;
+        if (
+          task &&
+          (this.taskRequestKey(this.store.getTask(task.id)) !== request ||
+            !notificationPreferences(this.store).enabled)
+        )
+          return;
+        if (task) {
+          const worker = task.inputRequest?.role === 'author';
+          text
+            .add(worker ? this.t('Worker') : 'daddy', 'bold')
+            .add(' · ')
+            .add(taskReference(task), 'code')
+            .add('  ' + task.title + '\n\n')
+            .markdown(this.t(redact(task.reason)));
+        } else if (message) {
+          text.add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold').add('\n\n');
+          if (message.sender === 'user') text.add(message.text);
+          else text.markdown(message.text);
+        }
+        // An edit to a progress message does not send a fresh mention notification.
+        const replaceMessage = !ping && message?.sender === 'agent';
+        const url = task && task.ref.kind !== 'ticket' && safeLink(task.ref.url);
+        const card = task
+          ? {
+              ...text,
+              buttons: [
+                [
+                  { text: this.t('Open task'), callback_data: `dad:task:${task.id}` },
+                  ...(url ? [{ text: 'PR', url }] : []),
+                ],
+              ],
+            }
+          : text;
+        const result = await this.api.send(destination, card, undefined, {
+          key: replaceMessage ? `message:${message!.id}` : id,
+          replace: replaceMessage,
+          order: message?.at ?? event.at,
+          final: message?.phase !== 'progress',
           notificationId: id,
         });
         this.store.db
@@ -1866,6 +2220,14 @@ export class TelegramWorkspace {
         type: 'daddy.created',
         data: { retryAttempt },
         at: now(),
+      });
+    for (const task of this.store.tasks(group.id))
+      this.queueTaskRequest(task, {
+        id: retry ? -1 : 0,
+        at: now(),
+        taskId: task.id,
+        type: 'task.state',
+        data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
     for (const message of messages.filter((message) => ['user', 'agent'].includes(message.sender)))

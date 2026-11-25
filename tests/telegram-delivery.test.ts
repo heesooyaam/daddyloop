@@ -30,6 +30,74 @@ function fixture() {
 }
 const text = (value: string) => new TelegramText().add(value);
 
+it('keeps status edits delivering while a durable pin retries', async () => {
+  const f = fixture();
+  const target = { chatId: -10042, threadId: 4 };
+  const options = { key: 'status', replace: true, pin: true };
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.send(target, text('Waiting'), options);
+    f.call.mockRejectedValueOnce(new Error('Bad Request: not enough rights'));
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
+    await f.queue.send(target, text('Working'), options);
+    expect(f.call.mock.calls.at(-1)).toMatchObject([
+      'editMessageText',
+      { message_id: 1, text: 'Working' },
+      expect.anything(),
+    ]);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(60 * 60 * 1000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method]) => method)).toEqual([
+      'sendMessage',
+      'pinChatMessage',
+      'editMessageText',
+      'pinChatMessage',
+    ]);
+    expect(restored.status().pending).toBe(0);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('retries a rate-limited receipt reaction after restart and deduplicates repeated updates', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  const target = { chatId: -10042, threadId: 4 };
+  try {
+    f.call.mockRejectedValueOnce(
+      Object.assign(new Error('Too many requests'), { retryAfter: 10, telegramStatus: 429 }),
+    );
+    f.queue.enqueueReaction(target, 116);
+    expect(f.call).not.toHaveBeenCalled();
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(9999);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledOnce();
+    f.advance(1);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([method, body]) => [method, body])).toEqual(
+      [1, 2].map(() => [
+        'setMessageReaction',
+        { chat_id: -10042, message_id: 116, reaction: [{ type: 'emoji', emoji: '👀' }] },
+      ]),
+    );
+    expect(restored.status().pending).toBe(0);
+    restored.enqueueReaction(target, 116);
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(2);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('replaces a confirmed deleted card, but keeps editing after a transient failure', async () => {
   const f = fixture();
   try {
@@ -324,17 +392,18 @@ it('pins an existing replaceable status card once and keeps editing that message
       pin: true,
       final: true,
     });
+    await f.queue.flush();
     expect(f.call.mock.calls.map(([method]) => method)).toEqual([
       'sendMessage',
-      'pinChatMessage',
       'editMessageText',
+      'pinChatMessage',
     ]);
-    expect(f.call.mock.calls[1][1]).toEqual({
+    expect(f.call.mock.calls[2][1]).toEqual({
       chat_id: -10042,
       message_id: 1,
       disable_notification: true,
     });
-    expect(f.call.mock.calls[2][1]).toMatchObject({ message_id: 1, text: 'Working' });
+    expect(f.call.mock.calls[1][1]).toMatchObject({ message_id: 1, text: 'Working' });
     expect(f.call.mock.calls.some(([method]) => method.startsWith('unpin'))).toBe(false);
   } finally {
     await f.close();
@@ -354,7 +423,8 @@ it('keeps a status update queued while the initial pin request is in flight', as
     });
     const destination = { chatId: -10042, threadId: 4 };
     const options = { key: 'status', replace: true, pin: true, final: true };
-    const initial = f.queue.send(destination, text('Preparing'), options);
+    await f.queue.send(destination, text('Preparing'), options);
+    const pinning = f.queue.flush(1);
     await vi.waitFor(() =>
       expect(f.call.mock.calls.some(([method]) => method === 'pinChatMessage')).toBe(true),
     );
@@ -362,7 +432,7 @@ it('keeps a status update queued while the initial pin request is in flight', as
       status: 'queued',
     });
     finishPin();
-    await initial;
+    await pinning;
     await f.queue.flush();
     expect(f.call.mock.calls.map(([method]) => method)).toEqual([
       'sendMessage',
@@ -390,7 +460,8 @@ it('retries a denied idle status pin without another send or edit', async () => 
     await expect(
       f.queue.send({ chatId: -10042, threadId: 4 }, text('Working'), options),
     ).resolves.toMatchObject({ status: 'sent' });
-    expect(f.queue.status().pending).toBe(0);
+    await f.queue.flush();
+    expect(f.queue.status().pending).toBe(1);
     expect(f.store.setting<string>('telegram.error')).toContain(
       'Give the bot permission to pin messages',
     );
@@ -434,6 +505,7 @@ it('applies pin retry_after to all delivery traffic without reporting a permissi
         final: true,
       }),
     ).resolves.toMatchObject({ status: 'sent' });
+    await f.queue.flush();
     expect(f.store.setting('telegram.deliveryLimit:test_bot')).toBe(f.clock() + 60000);
     expect(f.store.setting('telegram.error')).toBeUndefined();
     await f.queue.send(destination, text('Agent answer'), { key: 'answer' });
@@ -471,6 +543,7 @@ it('retries a transient pin failure without reporting a permissions error', asyn
         final: true,
       }),
     ).resolves.toMatchObject({ status: 'sent' });
+    await f.queue.flush();
     expect(f.store.setting('telegram.error')).toBeUndefined();
     f.advance(999);
     await f.queue.flush();
@@ -501,13 +574,14 @@ it('does not hold conversation messages behind a delayed status pin', async () =
       pin: true,
       final: true,
     });
+    await f.queue.flush();
     await f.queue.send(destination, text('Agent answer'), { key: 'answer' });
     expect(f.call.mock.calls.map(([method, body]) => [method, body.text])).toEqual([
       ['sendMessage', 'Idle status'],
       ['pinChatMessage', undefined],
       ['sendMessage', 'Agent answer'],
     ]);
-    expect(f.queue.status().pending).toBe(0);
+    expect(f.queue.status().pending).toBe(1);
   } finally {
     await f.close();
   }
@@ -529,6 +603,7 @@ it('restores an idle status pin retry after restart', async () => {
       pin: true,
       final: true,
     });
+    await f.queue.flush();
     await f.queue.stop();
     restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
     canPin = true;

@@ -145,6 +145,7 @@ export const daddyRu: Record<string, string> = {
   'Workspace folder': 'Папка воркспейса',
   'Starting branch: {branch}': 'Ветка: {branch}',
   'Change folder for the next message': 'Изменить папку для следующего сообщения',
+  'Repository override for the next message': 'Другой репозиторий для следующего сообщения',
   'Change folder for this session': 'Изменить папку для этой сессии',
   Change: 'Изменить',
   'Only the next message uses this folder.': 'Эта папка выбрана только для следующего сообщения.',
@@ -165,8 +166,8 @@ export const daddyRu: Record<string, string> = {
   'The branch daddy starts from. Leave it empty to use the repository default.':
     'С какой ветки папочка начнёт работу. Можно оставить пустым.',
   'Apply settings': 'Применить настройки',
-  'Apply or cancel folder settings before sending.':
-    'Примени или отмени настройки папки перед отправкой.',
+  'Apply or cancel folder settings before saving.':
+    'Примени или отмени настройки папки перед сохранением.',
   'Apply or cancel folder settings before starting the session.':
     'Примени или отмени настройки папки перед началом сессии.',
   'Tell daddy the goal, paste a ticket, or start with a question.':
@@ -367,6 +368,8 @@ export const daddyRu: Record<string, string> = {
   'Your sessions': 'Твои сессии',
   'YOUR SESSIONS': 'ТВОИ СЕССИИ',
   Sessions: 'Сессии',
+  'Show sessions panel': 'Развернуть панель сессий',
+  'Hide sessions panel': 'Свернуть панель сессий',
   done: 'готово',
   'Your next workspace starts with a conversation.': 'Следующий воркспейс начинается с разговора.',
   Workspaces: 'Воркспейсы',
@@ -392,6 +395,8 @@ export const daddyRu: Record<string, string> = {
     'Enter — отправить · Shift+Enter — новая строка · Можно закрыть страницу: работа продолжится',
   'Your team': 'Твоя команда',
   'Worker pool': 'Пул воркеров',
+  'Show workers and tasks panel': 'Развернуть панель воркеров и задач',
+  'Hide workers and tasks panel': 'Свернуть панель воркеров и задач',
   'Maximum workers': 'Максимум воркеров',
   'daddy decides what can run in parallel.': 'daddy сам решает, что можно выполнять параллельно.',
   'Prerequisites: {count}': 'Зависимостей: {count}',
@@ -487,6 +492,30 @@ export const daddyRu: Record<string, string> = {
   'Handling your request': 'Разбирает запрос',
   'Checking server resources': 'Проверяет ресурсы сервера',
   'Waiting for assignment': 'Ждёт назначения',
+  'Continuing the interrupted fix against confirmed published feedback.':
+    'Воркер продолжает прерванное исправление по подтверждённым замечаниям.',
+  'Open task': 'Открыть задачу',
+  'Apply now and restart the active daddy turn or review':
+    'Применить сейчас и перезапустить текущий ход daddy или ревью',
+  'Apply this profile to all worker slots': 'Применить этот профиль ко всем воркерам',
+  'Apply now · {effort}': 'Применить сейчас · {effort}',
+  'The session is busy. Choose Apply now to switch the active daddy turn or review.':
+    'Сессия занята. Выбери «Применить сейчас», чтобы переключить текущий ход daddy или ревью.',
+  'Session owner': 'Владелец сессии',
+  'Your reply is needed': 'Нужен твой ответ',
+  'The target branch advanced. Continuing the published feedback on the same PR commit.':
+    'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
+  'The target branch advanced. Reviewing the updated change.':
+    'Целевая ветка обновилась. daddy заново проверяет изменения.',
+  'Rechecking the existing draft on the updated target branch':
+    'daddy перепроверяет замечания на новой версии целевой ветки',
+  'Reviewer could not verify the carried draft on the updated target branch':
+    'Ревьюеру не удалось перепроверить замечания на новой версии целевой ветки',
+  'Conflict repair found additional local changes. The working copies were preserved.':
+    'В рабочей копии появились дополнительные правки. Обе копии сохранены.',
+  'The PR changed during draft review': 'PR изменился во время подготовки ревью',
+  'Earlier worker changes need reconciliation': 'Нужно сверить прежние правки воркера',
+  'Assigned worker is waiting to start': 'Воркер назначен, запуск в очереди',
   'Waiting for a worker': 'Ждёт свободного воркера',
   'Implementing the task': 'Выполняет задачу',
   'Ready for review': 'Изменения готовы к ревью',
@@ -495,6 +524,8 @@ export const daddyRu: Record<string, string> = {
   'Submitting the changes': 'Отправляет изменения',
   'Review ready to publish': 'Ревью ждёт публикации',
   'Waiting for changes to be pushed': 'Ждёт отправки изменений',
+  'Sending fixes': 'Отправляет исправления',
+  'Publishing review': 'Публикует ревью',
   'Waiting for plan approval': 'План ждёт подтверждения',
   'Action needed': 'Требуется внимание',
   'Agent run failed': 'Запуск агента завершился с ошибкой',
@@ -505,6 +536,143 @@ export const daddyRu: Record<string, string> = {
   'Last agent activity · {time}': 'Последнее событие агента · {time}',
   'No agent activity received yet': 'Событий от агента пока нет',
   'Server status at {time}': 'Обновлено сервером · {time}',
+  'Auto-merge GitHub PRs': 'Автослияние PR в GitHub',
+  'Includes already reviewed open PRs in this session. Task overrides take precedence.':
+    'Настройка действует и для уже проверенных открытых PR сессии. У отдельной задачи можно выбрать свой режим.',
+  'Enable auto-merge for session': 'Включить автослияние для всей сессии',
+  'Disable auto-merge for session': 'Выключить автослияние для сессии',
+  'Use session setting (on)': 'Как в сессии (включено)',
+  'Use session setting (off)': 'Как в сессии (выключено)',
+  'On for this task': 'Включено для задачи',
+  'Off for this task': 'Выключено для задачи',
+  'Session default': 'Как в сессии',
+  'Auto-merge is available for GitHub sessions': 'Автослияние доступно для сессий GitHub',
+  'Merged on GitHub': 'PR влит в GitHub',
+  'GitHub merged a different revision': 'В GitHub влита другая ревизия',
+  'Waiting for passing CI': 'Ожидает успешных проверок CI',
+  'Waiting for a completed review of this revision': 'Ожидает завершения ревью этой ревизии',
+  'Could not stage a clean conflict resolution. Inspect the working copy for remaining conflict markers.':
+    'Не удалось подготовить исправление. Проверь оставшиеся маркеры конфликта в рабочей копии.',
+  'The worker copy contains earlier changes. Inspect them before resolving the merge conflict.':
+    'В рабочей копии уже есть изменения. Их нужно проверить перед исправлением конфликта.',
+  'The merge conflict includes files outside the task scope. The working copy was preserved.':
+    'Конфликт затрагивает файлы за пределами области задачи. Рабочая копия сохранена.',
+  'Worker assigned to resolve the GitHub merge conflict':
+    'Воркеру поручено разрешить конфликт с целевой веткой PR',
+  'Waiting for GitHub merge': 'Ожидает слияния PR в GitHub',
+  'Review complete. Waiting for GitHub to merge the PR.':
+    'Ревью завершено. Ожидает слияния PR в GitHub.',
+  'The reviewed revision needs verification before completion':
+    'Перед завершением задачи нужно проверить результат ревью.',
+  'Conflict repair queued for worker {number}': 'Исправление конфликта в очереди воркера №{number}',
+  'Waiting for a free worker to resolve the merge conflict':
+    'Для исправления конфликта нужен свободный воркер',
+  'Waiting for a worker to resolve the merge conflict': 'В очереди на исправление конфликта',
+  'Resolving the merge conflict': 'Воркер разрешает конфликт слияния',
+  'The PR changed during conflict resolution. Inspect the preserved worker copy.':
+    'PR изменился во время исправления конфликта. Изменения воркера сохранены для проверки.',
+  'Auto-merge is disabled. The saved conflict resolution is waiting for submission.':
+    'Автослияние выключено. Исправление конфликта сохранено и ожидает отправки.',
+  'Enable auto-merge before resuming conflict resolution.':
+    'Для продолжения исправления конфликта включи автослияние.',
+  'Reviewer context was full. Restarting the independent review.':
+    'Контекст ревьюера заполнен. Запущено повторное независимое ревью.',
+  'Disk cleanup': 'Очистка диска',
+  'Enable scheduled cleanup': 'Включить плановую уборку',
+  'Disable scheduled cleanup': 'Выключить плановую уборку',
+  'Cleanup skill': 'Скилл чистильщика',
+  'Every {minutes} min when disk usage exceeds {percent}%':
+    'Каждые {minutes} мин при заполнении диска выше {percent}%',
+  'Cleanup in progress': 'Идёт уборка',
+  'Last disk check': 'Последняя проверка диска',
+  'Next disk check': 'Следующая проверка диска',
+  'Last cleanup': 'Последняя уборка',
+  'Cleanup threshold (%)': 'Порог заполнения диска (%)',
+  'Check interval (minutes)': 'Интервал проверки (минуты)',
+  'New skill path on the server': 'Путь к новому скиллу на сервере',
+  'Remove cleanup skill': 'Убрать скилл чистильщика',
+  'Cleanup settings saved': 'Настройки уборки сохранены',
+  'Enable automatic cache cleanup on the host first':
+    'Сначала включи автоочистку на сервере командой daddy cache auto on',
+  'The cleanup threshold must be lower than the pause threshold':
+    'Порог уборки должен быть ниже порога приостановки задач',
+  'Send /cleanup in the private bot chat to manage disk cleanup.':
+    'Управление уборкой доступно в личке бота. Отправь /cleanup.',
+  'Use /cleanup, /cleanup threshold N, /cleanup interval N or /cleanup skill PATH':
+    'Используй /cleanup, /cleanup threshold N, /cleanup interval N или /cleanup skill ПУТЬ',
+  'No cleanup skill': 'Скилл не задан',
+  'Refresh cleanup status': 'Обновить статус уборки',
+  'The PR or native draft changed. Inspect the interrupted review.':
+    'PR или черновик изменился. Проверь остановленное ревью.',
+  'Waiting for GitHub API quota until {time} UTC':
+    'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
+  'Review reached the run time limit': 'Ревью остановилось по таймауту',
+  'Continuing the independent review on the verified PR head':
+    'Независимое ревью продолжается на проверенном коммите PR',
+  'Publishing recorded findings from an incomplete review':
+    'Публикует готовые замечания незавершённого ревью',
+  'Checking the GitHub draft': 'Сверяет черновик с GitHub',
+  'Waiting to confirm the GitHub draft or its target branch before restarting review.':
+    'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
+  'Inspect the old review draft: it contains changes that daddy cannot safely replace.':
+    'Проверь старый черновик: в нём есть правки, которые требуют твоего решения.',
+  'Checking GitHub auto-merge': 'Проверяется автослияние PR',
+  'GitHub is calculating mergeability': 'GitHub проверяет возможность слияния',
+  'Draft PR: mark it ready for review on GitHub':
+    'PR в черновике. Отметь его готовым к ревью в GitHub',
+  'Waiting for GitHub to allow this PR to merge': 'Ожидает готовности PR к слиянию в GitHub',
+  'Waiting for a published review with no outstanding findings':
+    'Ожидает публикации ревью с закрытыми замечаниями',
+  'PR or checks changed during the merge check': 'PR или состояние CI изменились во время проверки',
+  'Waiting for GitHub to confirm the previous merge request':
+    'Ожидает подтверждения предыдущего запроса на слияние',
+  'The PR is closed or its branches changed': 'PR закрыт или его ветки изменились',
+  'Could not check GitHub auto-merge': 'Не удалось проверить возможность автослияния в GitHub',
+  'GitHub refused the auto-merge check (HTTP {status})':
+    'GitHub отклонил запрос автослияния (HTTP {status})',
+  'Task queue': 'Очередь задач',
+  'No unfinished tasks.': 'Открытых задач нет.',
+  'Task queued': 'Задача в очереди',
+  'Waiting for review': 'Ждёт ревью',
+  'Unfinished tasks · {count}': 'Открытые задачи · {count}',
+  'Worker {number}': 'Воркер {number}',
+  Free: 'Свободен',
+  'Next task · {profile}': 'Для следующей задачи · {profile}',
+  'Worker {number} model saved · {profile}': 'Модель воркера {number} сохранена · {profile}',
+  'Worker {number} will resume the task · {profile}':
+    'Воркер {number} продолжит задачу · {profile}',
+  'Choose a worker from this session': 'Выбери воркера этой сессии',
+  'This worker has changed tasks. Open its settings again.':
+    'Воркер уже сменил задачу. Открой его настройки заново.',
+  'Queue task': 'Поставить в очередь',
+  'Task description': 'Описание задачи',
+  'Assign to worker': 'Назначить воркеру',
+  'Any free worker': 'Любой свободный воркер',
+  'Use the worker model': 'Модель воркера',
+  'Configure worker {number}': 'Настроить воркера {number}',
+  'Save model': 'Сохранить модель',
+  'Apply to current task': 'Применить к текущей задаче',
+  'An active worker step restarts in the same working copy.':
+    'Активный шаг воркера перезапустится в той же рабочей копии.',
+  'Repository for this task': 'Репозиторий для этой задачи',
+  'Change folder for this task': 'Изменить папку для этой задачи',
+  'Only this task uses this folder.': 'Эту папку использует только текущая задача.',
+  'Settings for this task': 'Настройки для этой задачи',
+  'Choose the repository and folder for this task.': 'Выбери репозиторий и папку для этой задачи.',
+  'A task is waiting for a worker that would be removed by this change':
+    'Одной из задач назначен воркер, которого уберёт эта настройка. Дождись её запуска.',
+  'Task not found in this session': 'В этой сессии такой задачи нет',
+  'This ID matches multiple tasks. Open a task from /queue.':
+    'Этот ID совпал у нескольких задач. Открой нужную из /queue или укажи полный ID.',
+  'Use /task DESCRIPTION to queue a task. Send a regular message to talk to daddy.':
+    'Поставить задачу в очередь можно командой /task ОПИСАНИЕ. Обычные сообщения идут в разговор с daddy.',
+  'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.':
+    'Отправь /task ОПИСАНИЕ для постановки задачи или /task DADDY-ID для проверки статуса. Чтобы выбрать воркера и модель, отправь /task --worker НОМЕР --model МОДЕЛЬ --effort УРОВЕНЬ -- ОПИСАНИЕ.',
+  'Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.':
+    'Отправь /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force]. Воркеры доступны в /workers, модели в /models.',
+  'Change a model with /worker NUMBER MODEL [EFFORT].':
+    'Смени модель командой /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ].',
   'Workspaces are folders on the server. daddy creates separate working copies for workers.':
     'Воркспейсы — это папки на сервере. daddy создаёт отдельные рабочие копии для воркеров.',
   'Find workspaces on the server': 'Найти воркспейсы на сервере',
@@ -520,8 +688,8 @@ export const daddyRu: Record<string, string> = {
     'Выбери максимум одновременно работающих воркеров. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
   Back: 'Назад',
   'Telegram group connected': 'Группа подключена',
-  'Create a Telegram group, enable Topics, then choose it below. Telegram can add the bot with permission to manage topics. Each daddy session will get its own topic.':
-    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Telegram сможет добавить бота с правом управления темами. У каждой сессии daddy будет своя тема.',
+  'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.':
+    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Боту нужны права на управление темами и закрепление сообщений.',
   'Choose a group with topics': 'Выбрать группу с темами',
   'Group selection expired. Send /workspace again.':
     'Выбор группы истёк. Отправь /workspace ещё раз.',
@@ -665,6 +833,7 @@ export const daddyRu: Record<string, string> = {
   'Session copy ready': 'Копия для сессии готова',
   'Preparing the session copy': 'Готовлю копию для сессии',
   'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
+  'Error details': 'Подробности ошибки',
   'Session deletion stopped; working copies were preserved':
     'Удаление остановлено. Рабочие копии сохранены.',
   'Saving results and removing session copies': 'Сохраняю результаты и убираю копии сессии',

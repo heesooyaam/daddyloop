@@ -29,6 +29,7 @@ export const daddySchemas = {
     .strict(),
   create_task: z
     .object({
+      source: z.string().url().max(2048).optional(),
       title: z.string().trim().min(1).max(200),
       requirements: text,
       workspaceId: id.optional(),
@@ -41,7 +42,7 @@ export const daddySchemas = {
   pause_task: z.object({ taskId: id, reason: text }).strict(),
   resume_task: z.object({ taskId: id }).strict(),
   submit_task: z.object({ taskId: id }).strict(),
-  retry_review: z.object({ taskId: id }).strict(),
+  retry_review: z.object({ taskId: id, clarification: text.optional() }).strict(),
   set_worker_model: z.object({ taskId: id, profile: profileSchema }).strict(),
 };
 const descriptions: Record<keyof typeof daddySchemas, string> = {
@@ -62,9 +63,9 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   attach_review:
     'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The workspace must match the native repository.',
   create_task:
-    'Create a concrete task from the user requirements. Choose a registered workspace and optional dependencies. Does not start a worker.',
+    'Create a concrete task from the user requirements. For an existing GitHub issue or newly created sub-issue, pass its canonical issue URL in source (one task per issue). Choose a registered workspace and optional dependencies. Does not start a worker.',
   dispatch:
-    'Start implementation of a ready task. Dependencies and per-session worker limits are enforced by the service. Native push/review follows the task policy.',
+    'Start work on a ready task. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
   message_worker:
     'Send scoped instructions or a question to the task worker. Results return to daddy; do not ask the user to contact workers.',
   set_dependencies:
@@ -76,7 +77,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   submit_task:
     'Submit or reconcile a completed implementation when its automatic-push policy allows it. An uncertain native PR creation is reconciled, never repeated blindly.',
   retry_review:
-    'Retry an incomplete pinned native review after inspecting task state. Does not publish, approve or merge anything.',
+    'Retry an incomplete review of a worker report or a pinned native revision after inspecting task state.',
   set_worker_model:
     'Choose a validated model/effort for one idle task worker. Does not change daddy or other workers.',
 };

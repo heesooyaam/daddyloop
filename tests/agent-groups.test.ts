@@ -74,12 +74,11 @@ it('runs independent authors together and serializes one persistent reviewer acr
     store.close();
   }
 });
-it('records profiles at enqueue, keeps manual policy explicit and rejects competing child reviewers', async () => {
+it('records profiles at enqueue and rejects competing child reviewers', async () => {
   const store = new Store(':memory:'),
     engine = new Engine(store, () => new DemoProvider(store), profiles);
   try {
     const root = await engine.createTicket(ticketInput());
-    expect(root.policy.publication).toBe('auto');
     engine.setDefaultAgents({ worker: { engine: 'codex' }, daddy: { engine: 'codex' } });
     expect(store.jobs(root.id)[0].profile).toEqual(profiles.worker);
     await expect(
@@ -89,13 +88,10 @@ it('records profiles at enqueue, keeps manual policy explicit and rejects compet
         agents: { ...profiles, daddy: profiles.worker },
       }),
     ).rejects.toThrow('inherit');
-    const child = await engine.createTicket({
+    await engine.createTicket({
       ...ticketInput(44),
       parentTaskId: root.id,
-      publication: 'human',
-      autoPush: false,
     });
-    expect(child.policy).toMatchObject({ publication: 'human', autoPush: false });
     expect(store.groups()).toHaveLength(1);
     const settled = await Promise.allSettled([
       engine.createTicket(ticketInput(45)),

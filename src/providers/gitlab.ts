@@ -62,6 +62,8 @@ export class GitLabProvider implements ReviewProvider {
       target_branch: string;
       source_project_id: number;
       diff_refs: { head_sha: string; base_sha: string; start_sha: string };
+      merge_commit_sha?: string;
+      squash_commit_sha?: string;
       head_pipeline: {
         id: number;
         sha: string;
@@ -83,6 +85,7 @@ export class GitLabProvider implements ReviewProvider {
     const status = pipeline?.status;
     return {
       head: mr.diff_refs.head_sha,
+      mergeCommit: mr.merge_commit_sha ?? mr.squash_commit_sha ?? undefined,
       base: mr.diff_refs.base_sha,
       start: mr.diff_refs.start_sha,
       title: mr.title,

@@ -16,6 +16,7 @@ import { command } from '../ops/process.js';
 import { defaultDataDir, loadConfig, privateWrite } from '../ops/config.js';
 import { resources } from '../core/resources.js';
 import { AppError, type Role } from '../core/types.js';
+import { acquireFileLock } from '../ops/data-lock.js';
 import { leaseHelper } from './arc-lease.js';
 import type { ArcLease } from './arcadia.js';
 
@@ -63,6 +64,30 @@ const configSchema = z.object({
 });
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
+async function waitForTurn(turn: Promise<void>, signal?: AbortSignal) {
+  if (!signal) return turn;
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      fn();
+    };
+    const abort = () =>
+      finish(() =>
+        reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError')),
+      );
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    turn.then(
+      () => finish(resolve),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /** Only paths with an owned journal under this data directory can be created or removed. */
 export class ManagedArcMounts {
   private static locks = new Map<string, Promise<void>>();
@@ -75,33 +100,65 @@ export class ManagedArcMounts {
       if (!status.ok) throw new AppError('resource_limit', status.reasons.join('; '), 422);
     },
     private helper: () => string = leaseHelper,
+    private lockTimeoutMs = 120000,
   ) {
     this.root = join(resolve(dataDir), 'arcadia-sessions');
   }
-  private async lock<T>(fn: () => Promise<T>): Promise<T> {
+  private async lock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const before = ManagedArcMounts.locks.get(this.root) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
     });
-    ManagedArcMounts.locks.set(this.root, next);
-    await before;
+    ManagedArcMounts.locks.set(this.root, turn);
+    const finishTurn = () => {
+      releaseTurn();
+      if (ManagedArcMounts.locks.get(this.root) === turn) ManagedArcMounts.locks.delete(this.root);
+    };
     try {
+      await waitForTurn(before, signal);
+    } catch (error) {
+      void before.then(finishTurn, finishTurn);
+      throw error;
+    }
+    let releaseFile: (() => Promise<void>) | undefined;
+    try {
+      releaseFile = await acquireFileLock(
+        join(this.dataDir, 'arcadia-session-journals.lock'),
+        this.lockTimeoutMs,
+        signal,
+      );
+      signal?.throwIfAborted();
       return await fn();
     } finally {
-      release();
-      if (ManagedArcMounts.locks.get(this.root) === next) ManagedArcMounts.locks.delete(this.root);
+      try {
+        await releaseFile?.();
+      } finally {
+        finishTurn();
+      }
     }
+  }
+  async withJournalLock<T>(fn: () => Promise<T>) {
+    return this.lock(fn);
+  }
+  private helperCommand(args: string[], options: Parameters<typeof command>[2] = {}) {
+    return this.run('bash', [this.helper(), ...args], options);
   }
   directory(sessionId: string, taskId: string, role: Role) {
     identity.parse(sessionId);
     identity.parse(taskId);
     return join(this.root, sessionId, `${taskId}-${role}`);
   }
-  private safeDirectory(path: string, create = false) {
+  validateSessionRoot() {
+    if (/\s/.test(this.root))
+      throw new Error('Automatic Arc copies require a data directory without whitespace');
     const data = realpathSync(this.dataDir);
     if (resolve(this.dataDir) !== data)
       throw new Error('Managed Arc copies require a data directory without symlink aliases');
+  }
+  private safeDirectory(path: string, create = false) {
+    this.validateSessionRoot();
     const relative = path.slice(this.root.length);
     if (!path.startsWith(this.root + '/') && path !== this.root)
       throw new Error('Arc copy escaped its managed directory');
@@ -175,7 +232,7 @@ export class ManagedArcMounts {
   }
   private async config(records: ManagedArcRecord[], file: string) {
     const base = configSchema.parse(
-      JSON.parse((await this.run(this.helper(), ['--json', 'config'])).stdout),
+      JSON.parse((await this.helperCommand(['--json', 'config'])).stdout),
     ).data;
     for (const shared of [base.object_store, base.lease_root]) {
       const path = existsSync(shared) ? realpathSync(shared) : resolve(shared);
@@ -229,24 +286,28 @@ export class ManagedArcMounts {
       join(this.directory(record.sessionId, record.taskId, record.role), 'lease.env'),
     );
   }
+  async validateHelperConfig() {
+    await this.config(this.records(), join(this.dataDir, 'arcadia-session-leases.env'));
+  }
   async status() {
-    const records = this.records().filter((record) => record.state !== 'creating');
+    const records = this.records();
     if (!records.length) return [];
     const file = await this.config(records, join(this.dataDir, 'arcadia-session-leases.env'));
+    const visible = records.filter((record) => record.state !== 'creating');
+    if (!visible.length) return [];
     const value = JSON.parse(
-      (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+      (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
     );
     if (value.status !== 'success' || !Array.isArray(value.data?.mounts))
       throw new Error('The Arc lease helper returned an invalid session inventory');
     return value.data.mounts
-      .filter((mount: { path: string }) => records.some((record) => record.mount === mount.path))
+      .filter((mount: { path: string }) => visible.some((record) => record.mount === mount.path))
       .map((mount: object) => ({ ...mount, managed: true }));
   }
   async ensure(sessionId: string, taskId: string, role: Role, signal?: AbortSignal) {
     return this.lock(async () => {
       signal?.throwIfAborted();
-      if (/\s/.test(this.root))
-        throw new Error('Automatic Arc copies require a data directory without whitespace');
+      this.validateSessionRoot();
       const directory = this.directory(sessionId, taskId, role);
       this.safeDirectory(join(this.root, sessionId), true);
       let record = this.records(sessionId).find(
@@ -256,7 +317,7 @@ export class ManagedArcMounts {
         this.resourceCheck();
         if (existsSync(directory)) throw new Error('The target Arc copy directory already exists');
         const base = configSchema.parse(
-          JSON.parse((await this.run(this.helper(), ['--json', 'config'])).stdout),
+          JSON.parse((await this.helperCommand(['--json', 'config'])).stdout),
         ).data;
         record = {
           version: 1,
@@ -307,7 +368,7 @@ export class ManagedArcMounts {
       )
         throw new Error('Arc mounted the copy with unexpected storage paths; it was preserved');
       const inventory = JSON.parse(
-        (await this.run(this.helper(), ['--json', '--config', file, 'status'], { signal })).stdout,
+        (await this.helperCommand(['--json', '--config', file, 'status'], { signal })).stdout,
       );
       const existing = inventory.data?.mounts?.find(
         (mount: { path: string }) => mount.path === record!.mount,
@@ -317,8 +378,7 @@ export class ManagedArcMounts {
       if (existing?.lease_owner_id !== record.ownerId) {
         const claimed = JSON.parse(
           (
-            await this.run(
-              this.helper(),
+            await this.helperCommand(
               [
                 '--json',
                 '--config',
@@ -354,7 +414,7 @@ export class ManagedArcMounts {
         checkpoint: record.checkpoint,
         wasMounted: current?.status === 'mounted',
       };
-    });
+    }, signal);
   }
   checkpoint(lease: ArcLease, value: z.infer<typeof checkpointSchema>) {
     if (!lease.managed) return;
@@ -374,7 +434,7 @@ export class ManagedArcMounts {
     if (!record || record.ownerId !== lease.ownerId)
       throw new Error('Arc session copy ownership changed');
     const file = await this.recordConfig(record);
-    await this.run(this.helper(), [
+    await this.helperCommand([
       '--json',
       '--config',
       file,
@@ -401,7 +461,7 @@ export class ManagedArcMounts {
         throw new Error('The session mount was replaced with another Arc store');
       const file = await this.recordConfig(record);
       const status = JSON.parse(
-        (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+        (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
       );
       const owned = status.data?.mounts?.find(
         (mount: { path: string }) => mount.path === record.mount,
@@ -431,7 +491,7 @@ export class ManagedArcMounts {
         if (native.store !== saved.store || native['object-store'] !== saved.objectStore)
           throw new Error('Refusing to remove an Arc mount whose store changed');
         const status = JSON.parse(
-          (await this.run(this.helper(), ['--json', '--config', file, 'status'])).stdout,
+          (await this.helperCommand(['--json', '--config', file, 'status'])).stdout,
         );
         const owned = status.data?.mounts?.find(
           (mount: { path: string }) => mount.path === saved.mount,
@@ -451,7 +511,7 @@ export class ManagedArcMounts {
       }
       if ((await this.nativeMounts()).some((mount) => mount.mount === saved.mount))
         throw new Error('Arc still reports the session copy; local files were preserved');
-      await this.run(this.helper(), [
+      await this.helperCommand([
         '--json',
         '--config',
         file,

@@ -15,6 +15,52 @@ import { AppError, type AgentResult } from '../../../core/types.js';
 import { redact } from '../../../core/security.js';
 import { type Executable } from '../../../runtime/executable.js';
 
+// compact/start acknowledges scheduling. Only the compaction turn can confirm completion.
+async function compactThread(rpc: CodexConnection, threadId: string, interrupted: Promise<void>) {
+  let onMessage!: (message: RpcMessage) => void;
+  const finished = new Promise<void>((resolve, reject) => {
+    let started: string | undefined;
+    let compactTurn: string | undefined;
+    onMessage = ({ method, params }) => {
+      if (params?.threadId !== threadId) return;
+      const turn = params.turn as
+        { id: string; status: string; items?: { type: string }[] } | undefined;
+      if (method === 'turn/started' && turn) started = turn.id;
+      if (
+        (method === 'item/started' || method === 'item/completed') &&
+        (params.item as { type?: string } | undefined)?.type === 'contextCompaction'
+      )
+        compactTurn = String(params.turnId);
+      if (method !== 'turn/completed' || !turn) return;
+      if (turn.status !== 'completed' && (turn.id === compactTurn || turn.id === started))
+        reject(
+          new AppError('context_window_exceeded', 'Codex could not compact the review thread.'),
+        );
+      else if (
+        turn.status === 'completed' &&
+        (turn.id === compactTurn || turn.items?.some((item) => item.type === 'contextCompaction'))
+      )
+        resolve();
+    };
+    rpc.on('message', onMessage);
+  });
+  try {
+    await Promise.race([
+      Promise.all([rpc.request('thread/compact/start', { threadId }), finished]),
+      interrupted,
+    ]);
+  } catch (error) {
+    if (error instanceof AppError && error.code === 'codex_rpc')
+      throw new AppError(
+        'context_window_exceeded',
+        'Codex rejected compaction of the review thread.',
+      );
+    throw error;
+  } finally {
+    rpc.off('message', onMessage);
+  }
+}
+
 export class CodexRuntime implements AgentRuntime, SessionRuntime {
   constructor(
     private options: {
@@ -25,11 +71,53 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     } = {},
   ) {}
   async run(input: AgentInput): Promise<AgentResult> {
-    return this.runSession(taskSession(input));
+    const session = taskSession(input);
+    const executable = codexExecutable(this.options.executable);
+    const deadline = Date.now() + (this.options.timeoutMs ?? 20 * 60 * 1000);
+    let threadId = session.threadId;
+    const onSession = (id: string, turn?: string) => {
+      threadId = id;
+      session.onSession(id, turn);
+    };
+    try {
+      return await this.execute({ ...session, onSession }, executable, deadline);
+    } catch (error) {
+      if (
+        !(error instanceof AppError) ||
+        error.code !== 'context_window_exceeded' ||
+        input.job.role !== 'reviewer' ||
+        !['review', 'verify_merge'].includes(input.job.kind) ||
+        !threadId ||
+        input.signal.aborted
+      )
+        throw error;
+      input.onEvent('review.compacting', {});
+      return this.execute(
+        {
+          ...session,
+          threadId,
+          onSession,
+          prompt:
+            session.prompt +
+            '\nContinue the interrupted review. Inspect the saved draft or report and the current pinned revision before acting. Preserve completed work and do not duplicate findings.',
+        },
+        executable,
+        deadline,
+        true,
+      );
+    }
   }
-  async runSession(input: SessionInput): Promise<AgentResult> {
-    // Capture once per turn. Updating the selection never touches an existing process.
-    const rpc = new CodexConnection(codexExecutable(this.options.executable), this.options.args);
+  runSession(input: SessionInput): Promise<AgentResult> {
+    const deadline = Date.now() + (this.options.timeoutMs ?? 20 * 60 * 1000);
+    return this.execute(input, codexExecutable(this.options.executable), deadline);
+  }
+  private async execute(
+    input: SessionInput,
+    executable: string,
+    deadline: number,
+    compacting = false,
+  ): Promise<AgentResult> {
+    const rpc = new CodexConnection(executable, this.options.args);
     const profile = input.profile,
       readOnly = input.readOnly;
     const host = input.execution !== 'sandbox';
@@ -57,10 +145,22 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         rejectDone(new AppError('run_timeout', 'Agent exceeded the configured run time limit'));
         rpc.close();
       },
-      this.options.timeoutMs ?? 20 * 60 * 1000,
+      Math.max(1, deadline - Date.now()),
     );
     const acceptCompletion = (turn: Record<string, unknown>) => {
       if (turn.status !== 'completed') {
+        if (
+          (turn.error as { codexErrorInfo?: unknown } | null)?.codexErrorInfo ===
+          'contextWindowExceeded'
+        ) {
+          rejectDone(
+            new AppError(
+              'context_window_exceeded',
+              'Codex reached the context limit for this thread.',
+            ),
+          );
+          return;
+        }
         rejectDone(
           new AppError(
             'incomplete_turn',
@@ -79,6 +179,14 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     rpc.on('message', (message: RpcMessage) => {
       const params = message.params ?? {};
       if (params.threadId && threadId && params.threadId !== threadId) return;
+      if (compacting) {
+        if (message.id !== undefined && message.method)
+          rpc.send({
+            id: message.id,
+            error: { code: -32601, message: 'Tools are unavailable during compaction' },
+          });
+        return;
+      }
       if (message.id !== undefined && message.method) {
         toolChain = toolChain
           .then(async () => {
@@ -186,6 +294,11 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
           threadId,
           excludeTurns: true,
         });
+        if (compacting) {
+          await compactThread(rpc, threadId, done);
+          compacting = false;
+          input.onEvent('review.compacted', {});
+        }
         // A resumed rollout can retain developer messages from its first launch.
         // Append the current policy at developer priority before the model runs.
         await rpc.request('thread/inject_items', {
@@ -232,8 +345,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
       turnId = response.turn.id;
       input.onSession(threadId!, turnId);
       if (earlyCompletions.has(turnId)) acceptCompletion(earlyCompletions.get(turnId)!);
-      await done;
-      await toolChain;
+      await done.finally(() => toolChain);
       let parsed: z.infer<typeof resultSchema>;
       try {
         parsed = resultSchema.parse(JSON.parse(final));

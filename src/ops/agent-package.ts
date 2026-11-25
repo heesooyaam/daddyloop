@@ -9,6 +9,8 @@ import { command } from './process.js';
 
 import type { AgentPackage } from '../modules/contracts.js';
 
+const maxArchiveMembers = 64;
+
 // Extract each member to stdout, then to a file we create ourselves. Archive links,
 // permissions and paths can never make tar write outside the private staging folder.
 async function extract(
@@ -112,7 +114,7 @@ export async function installAgentPackage(
     const selected = layout(listing.stdout.trim().split('\n'));
     if (
       !selected.members.length ||
-      selected.members.length > 40 ||
+      selected.members.length > maxArchiveMembers ||
       new Set(selected.members.map((m) => m.source)).size !== selected.members.length ||
       new Set(selected.members.map((m) => m.target)).size !== selected.members.length ||
       !selected.members.some((m) => m.target === selected.executable)
