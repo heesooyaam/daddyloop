@@ -1,4 +1,4 @@
-import { cleanupOutcomes } from '../core/cleanup-outcomes.js';
+import { cleanupReportLines } from '../core/cleanup-outcomes.js';
 import { translate, translator, type Locale } from '../i18n/index.js';
 import type { TextEntity } from './telegram-text.js';
 import type { NotificationPreferences } from './notifications.js';
@@ -7,18 +7,9 @@ import type { CleanupReport } from '../ops/scheduled-cleanup.js';
 
 export function scheduledCleanupCard(locale: Locale, report: CleanupReport) {
   const t = translator(locale);
-  const gain = Math.max(0, report.after.diskAvailableGiB - report.before.diskAvailableGiB);
   return new TelegramText()
     .add(t('Scheduled cache cleanup'), 'bold')
-    .add(
-      '\n\n' +
-        t('Disk usage {before}% → {after}%. Free space gained {gain} GiB.', {
-          before: report.before.diskUsedPercent.toFixed(1),
-          after: report.after.diskUsedPercent.toFixed(1),
-          gain: gain.toFixed(2),
-        }),
-    )
-    .add('\n' + t(cleanupOutcomes[report.status]));
+    .add('\n\n' + cleanupReportLines(locale, report).join('\n'));
 }
 
 class LocalText extends TelegramText {

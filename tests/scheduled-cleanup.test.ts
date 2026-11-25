@@ -1,3 +1,5 @@
+import { hostCleanupActions } from '../src/ops/host-cleanup.js';
+import { cleanupReportLines } from '../src/core/cleanup-outcomes.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -317,4 +319,42 @@ it('cleans under pressure without a session and reports the measured result to T
     await server.app.close();
     f.close();
   }
+});
+
+it('reports decreasing host space and a failed operation for pre-upgrade reports', () => {
+  const lines = cleanupReportLines('ru', {
+    id: '1',
+    startedAt: 0,
+    finishedAt: 1,
+    status: 'failed',
+    before: { diskAvailableGiB: 241.18, diskUsedPercent: 84 },
+    after: { diskAvailableGiB: 235.26, diskUsedPercent: 84.4 },
+    actions: [{ id: 'review-caches', error: 'Error: Cache maintenance is already running' }],
+  });
+  expect(lines.join(' ')).toContain('меньше на 5.92 ГиБ');
+  expect(lines.join(' ')).toContain('Другая уборка уже выполнялась');
+});
+it('starts only a configured oneshot, honors a recovered disk and reports a busy cache', async () => {
+  const unit = 'daddyloop-cleanup-example.service',
+    signal = new AbortController().signal;
+  const run = vi.fn(async (_exe: string, args: string[]): Promise<string> =>
+    args[0] === 'show'
+      ? args.includes('--value')
+        ? '75'
+        : 'LoadState=loaded\nRemainAfterExit=no\nType=oneshot'
+      : '',
+  );
+  const [action] = hostCleanupActions(unit, run);
+  expect(hostCleanupActions(undefined, run)).toEqual([]);
+  expect(() => hostCleanupActions('ssh.service', run)).toThrow();
+  expect(await action.run(signal, () => false)).toEqual({ skipped: true });
+  expect(run.mock.calls).toHaveLength(1);
+  expect(await action.run(signal, () => true)).toEqual({ skipped: true });
+  expect(run).toHaveBeenCalledWith(
+    '/usr/bin/sudo',
+    ['-n', '/usr/bin/systemctl', 'start', unit],
+    signal,
+  );
+  run.mockResolvedValueOnce('LoadState=loaded\nRemainAfterExit=no\nType=simple');
+  await expect(action.run(signal, () => true)).rejects.toThrow(/oneshot/);
 });

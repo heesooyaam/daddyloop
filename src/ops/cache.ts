@@ -25,7 +25,7 @@ async function size(path: string, budget = { left: 100000 }): Promise<number> {
   return total;
 }
 export class CacheManager {
-  private running = false;
+  private maintenance: Promise<void> = Promise.resolve();
   constructor(
     private engine: Engine,
     private dataDir: string,
@@ -123,70 +123,75 @@ export class CacheManager {
     }
     return items;
   }
-  async prune(apply: boolean, options?: { signal: AbortSignal; shouldContinue: () => boolean }) {
-    if (this.running) throw new Error('Cache maintenance is already running');
-    this.running = true;
+  prune(apply: boolean, options?: { signal: AbortSignal; shouldContinue: () => boolean }) {
+    const result = this.maintenance.then(() => this.pruneExclusive(apply, options));
+    this.maintenance = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+  private async pruneExclusive(
+    apply: boolean,
+    options?: { signal: AbortSignal; shouldContinue: () => boolean },
+  ) {
     const canContinue = () => {
       options?.signal.throwIfAborted();
       return options?.shouldContinue() ?? true;
     };
-    try {
-      const candidates = await this.inspect(),
-        removed: string[] = [];
-      let removedBytes = 0;
-      if (apply)
-        for (const item of candidates.filter((i) => i.eligible)) {
-          if (!canContinue()) break;
-          const clean = async () => {
-            // Re-evaluate ownership, retention and active jobs immediately before deletion.
-            const current = (await this.inspect(item)).find((i) => i.eligible);
-            if (!current) return;
-            const path = await realpath(item.path);
-            if (this.mounts().some((mount) => mount === path || mount.startsWith(path + '/')))
-              return;
-            if (item.kind === 'reviewer') {
-              const bare = join(resolve(this.dataDir, 'workspaces', item.taskId!), 'objects.git');
-              const listed = await git(
-                ['--git-dir', bare, 'worktree', 'list', '--porcelain'],
-                this.dataDir,
-              );
-              const registered = await Promise.all(
-                listed
-                  .split('\n')
-                  .filter((line) => line.startsWith('worktree '))
-                  .map((line) => realpath(line.slice(9)).catch(() => undefined)),
-              );
-              if (!registered.includes(path))
-                throw new Error('Snapshot is not a registered worktree; preserved it');
-              if (!canContinue()) return;
-              await git(['--git-dir', bare, 'worktree', 'remove', item.path], this.dataDir);
-            } else {
-              if (
-                basename(item.path) === 'cache' ||
-                !item.path.startsWith(resolve(this.dataDir, 'cache') + '/')
-              )
-                throw new Error('Unsafe cleanup path');
-              if (!canContinue()) return;
-              await rm(item.path, { recursive: true });
-            }
-            removed.push(item.path);
-            removedBytes += current.bytes;
-          };
-          if (item.taskId) await this.engine.lock(item.taskId, clean);
-          else await clean();
-        }
-      if (apply) this.engine.store.event('_system', 'cache.pruned', { removed, removedBytes });
-      return {
-        dryRun: !apply,
-        candidates,
-        removableBytes: candidates.filter((c) => c.eligible).reduce((n, c) => n + c.bytes, 0),
-        removed,
-        removedBytes,
-        preserved:
-          'Author workspaces, shared object stores, credentials and workflow history are never removed by this command.',
-      };
-    } finally {
-      this.running = false;
-    }
+    options?.signal.throwIfAborted();
+    const candidates = !apply || canContinue() ? await this.inspect() : [],
+      removed: string[] = [];
+    let removedBytes = 0;
+    if (apply)
+      for (const item of candidates.filter((i) => i.eligible)) {
+        if (!canContinue()) break;
+        const clean = async () => {
+          // Re-evaluate ownership, retention and active jobs immediately before deletion.
+          const current = (await this.inspect(item)).find((i) => i.eligible);
+          if (!current) return;
+          const path = await realpath(item.path);
+          if (this.mounts().some((mount) => mount === path || mount.startsWith(path + '/'))) return;
+          if (item.kind === 'reviewer') {
+            const bare = join(resolve(this.dataDir, 'workspaces', item.taskId!), 'objects.git');
+            const listed = await git(
+              ['--git-dir', bare, 'worktree', 'list', '--porcelain'],
+              this.dataDir,
+            );
+            const registered = await Promise.all(
+              listed
+                .split('\n')
+                .filter((line) => line.startsWith('worktree '))
+                .map((line) => realpath(line.slice(9)).catch(() => undefined)),
+            );
+            if (!registered.includes(path))
+              throw new Error('Snapshot is not a registered worktree; preserved it');
+            if (!canContinue()) return;
+            await git(['--git-dir', bare, 'worktree', 'remove', item.path], this.dataDir);
+          } else {
+            if (
+              basename(item.path) === 'cache' ||
+              !item.path.startsWith(resolve(this.dataDir, 'cache') + '/')
+            )
+              throw new Error('Unsafe cleanup path');
+            if (!canContinue()) return;
+            await rm(item.path, { recursive: true });
+          }
+          removed.push(item.path);
+          removedBytes += current.bytes;
+        };
+        if (item.taskId) await this.engine.lock(item.taskId, clean);
+        else await clean();
+      }
+    if (apply) this.engine.store.event('_system', 'cache.pruned', { removed, removedBytes });
+    return {
+      dryRun: !apply,
+      candidates,
+      removableBytes: candidates.filter((c) => c.eligible).reduce((n, c) => n + c.bytes, 0),
+      removed,
+      removedBytes,
+      preserved:
+        'Author workspaces, shared object stores, credentials and workflow history are never removed by this command.',
+    };
   }
 }

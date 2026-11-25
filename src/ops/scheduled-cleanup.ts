@@ -12,17 +12,32 @@ const minute = 60000;
 const stateKey = 'cache.schedule.state';
 type Disk = Pick<ResourceStatus, 'diskUsedPercent' | 'diskAvailableGiB'>;
 
+export interface CleanupCounts {
+  checked: number;
+  eligible: number;
+  removed: number;
+  tooRecent?: number;
+}
 export interface CleanupAction {
   id: string;
   description: string;
-  run(signal: AbortSignal, shouldContinue: () => boolean): Promise<unknown>;
+  run(
+    signal: AbortSignal,
+    shouldContinue: () => boolean,
+  ): Promise<void | { counts?: CleanupCounts; removedBytes?: number; skipped?: boolean }>;
 }
 type CleanupRun = { id: string; startedAt: number; before: Disk };
 export interface CleanupReport extends CleanupRun {
   finishedAt: number;
   after: Disk;
   status: 'cleared' | 'still_high' | 'failed' | 'interrupted';
-  actions: { id: string; error?: string }[];
+  actions: {
+    id: string;
+    error?: string;
+    counts?: CleanupCounts;
+    removedBytes?: number;
+    skipped?: boolean;
+  }[];
   error?: string;
 }
 type ScheduleState = { lastCheckedAt?: number; run?: CleanupRun; report?: CleanupReport };
@@ -81,6 +96,9 @@ export class ScheduledCleanup {
       diskPercent: this.policy.diskPercent,
       skill: this.policy.skill?.name,
       targets: this.policy.targets,
+      hostUnits: this.options.actions
+        .filter((a) => a.id.startsWith('daddyloop-cleanup-'))
+        .map((a) => a.id + '.service'),
       lastCheckedAt:
         state.lastCheckedAt === undefined ? undefined : new Date(state.lastCheckedAt).toISOString(),
       nextCheckAt:
@@ -164,8 +182,8 @@ export class ScheduledCleanup {
         signal.throwIfAborted();
         if (!shouldContinue()) break;
         try {
-          await action.run(signal, shouldContinue);
-          actions.push({ id: action.id });
+          const result = await action.run(signal, shouldContinue);
+          actions.push({ id: action.id, ...result });
         } catch (failure) {
           signal.throwIfAborted();
           actions.push({ id: action.id, error: redact(String(failure)).slice(0, 500) });
