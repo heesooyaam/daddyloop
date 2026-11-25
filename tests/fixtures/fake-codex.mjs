@@ -40,6 +40,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     }, 40);
   }
   if (m.method === 'turn/start') {
+    if (mode === 'input-limit' && m.params.input[0].text.length > 1_048_576) {
+      send({
+        id: m.id,
+        error: { code: -32602, message: 'Input exceeds the maximum length of 1048576 characters' },
+      });
+      return;
+    }
     if (mode.startsWith('compact-') && (!compacted || mode === 'compact-overflows-again')) {
       send({ id: m.id, result: { turn: { id: turnId } } });
       send({
