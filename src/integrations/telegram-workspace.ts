@@ -5,7 +5,7 @@ import {
   type OwnerQuestion,
 } from './telegram-reminders.js';
 import { commandHelp } from './telegram-commands.js';
-import { githubWait } from '../providers/github-quota.js';
+import { githubBackoff } from '../providers/github-quota.js';
 import { randomBytes, randomInt } from 'node:crypto';
 import type { Daddy } from '../core/daddy.js';
 import {
@@ -514,7 +514,7 @@ export class TelegramWorkspace {
         githubActivityStatus(
           task,
           autoMergeSettings(this.store, group, task),
-          githubWait(this.store, task.ref),
+          githubBackoff(this.store, task.ref),
         ),
       slots,
     );
@@ -543,7 +543,7 @@ export class TelegramWorkspace {
         githubActivityStatus(
           t,
           autoMergeSettings(this.store, group, t),
-          githubWait(this.store, t.ref),
+          githubBackoff(this.store, t.ref),
         ),
       slots,
     );

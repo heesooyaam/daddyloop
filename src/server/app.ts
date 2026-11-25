@@ -255,7 +255,9 @@ export async function buildApp(options: ServerOptions) {
   );
   worker.refreshIssueSource = (id) => tickets.refreshIssueSource(id);
   worker.autoSubmit = (id) =>
-    store.getTask(id).ref.kind === 'ticket' ? tickets.submit(id) : tickets.pushFixes(id);
+    store.getTask(id).ref.kind === 'ticket'
+      ? tickets.submit(id, undefined, true)
+      : tickets.pushFixes(id);
   if (config.cache.auto)
     worker.autoCleanup = async () => {
       await runProcesses.recover(true);
