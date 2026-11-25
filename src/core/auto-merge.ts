@@ -1,6 +1,7 @@
 import { githubWait, type githubBackoff } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
+import { activityPrNumber, localRetryStatus, retryTime } from './task-activity.js';
 import {
   AppError,
   isTicket,
@@ -62,12 +63,15 @@ export function githubActivityStatus(
         'submitting',
       ].includes(task.state))
   ) {
-    const time = new Date(backoff.until).toISOString().slice(11, 19);
-    if (task.prLink?.ref && backoff.kind === 'read')
-      return `PR #${task.prLink.ref.number} · GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
-    if (backoff.kind === 'read')
-      return `GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
-    return `Waiting for GitHub API quota until ${time.slice(0, 5)} UTC`;
+    const local = localRetryStatus(task, job);
+    if (local && local.until >= backoff.until) return;
+    const time = retryTime(backoff.until);
+    const number = activityPrNumber(task);
+    if (backoff.kind === 'read') {
+      const target = number ? `PR #${number} · GitHub` : 'GitHub';
+      return `${target} ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
+    }
+    return `Waiting for GitHub API quota until ${time} UTC${number ? ` · PR #${number}` : ''}`;
   }
   if (!reviewed(task) || task.ref.provider !== 'github') return;
   if (settings.result?.state === 'merged') return settings.result.message;

@@ -629,6 +629,8 @@ export const daddyRu: Record<string, string> = {
     'PR или черновик изменился. Проверь остановленное ревью.',
   'Waiting for GitHub API quota until {time} UTC':
     'Ожидает восстановления лимита GitHub API до {time} UTC',
+  'Waiting for GitHub API quota until {time} UTC · PR #{number}':
+    'Ожидает восстановления лимита GitHub API до {time} UTC · PR #{number}',
   'Check the draft on the previous commit': 'Нужно проверить черновик на старом коммите',
   'Review reached the run time limit': 'Ревью остановилось по таймауту',
   'Continuing the independent review on the verified PR head':
@@ -637,6 +639,8 @@ export const daddyRu: Record<string, string> = {
     'Публикует готовые замечания незавершённого ревью',
   'Continuing conflict resolution after a timeout at {time} UTC':
     'Продолжит исправлять конфликт после таймаута в {time} UTC',
+  'Continuing conflict resolution after a timeout at {time} UTC · PR #{number}':
+    'Продолжит исправлять конфликт после таймаута в {time} UTC · PR #{number}',
   'Continuing conflict resolution in the saved worker copy after a timeout':
     'Воркер продолжает исправлять конфликт в сохранённой копии после таймаута',
   'The PR head or target history changed. The partial merge is preserved in the worker copy.':
@@ -647,10 +651,14 @@ export const daddyRu: Record<string, string> = {
     'Ждёт автоматического повтора публикации ревью GitHub',
   'GitHub review publication · retry at {time} UTC':
     'Публикация ревью GitHub · повтор в {time} UTC',
+  'GitHub review publication · retry at {time} UTC · PR #{number}':
+    'Публикация ревью GitHub · повтор в {time} UTC · PR #{number}',
   'Preparing the GitHub review draft': 'Готовит черновик ревью GitHub',
   'Waiting to retry the GitHub review draft':
     'Ждёт автоматического повтора создания черновика GitHub',
   'GitHub review draft · retry at {time} UTC': 'Черновик ревью GitHub · повтор в {time} UTC',
+  'GitHub review draft · retry at {time} UTC · PR #{number}':
+    'Черновик ревью GitHub · повтор в {time} UTC · PR #{number}',
   'A different pending GitHub review belongs to this account. Its contents have been preserved.':
     'У этой учётной записи есть другой черновик ревью. Его содержимое сохранено.',
   'Waiting for your answer': 'Ждёт твоего ответа',

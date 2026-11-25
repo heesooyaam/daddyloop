@@ -75,17 +75,52 @@ export function queueDetail(task: Task): string | undefined {
   if (task.inputRequest?.generation === task.generation || task.resumeState !== 'reviewing')
     return task.reason;
 }
+
+export function activityPrNumber(task: Task) {
+  return task.prLink?.ref?.number ?? (task.ref?.kind !== 'ticket' ? task.ref?.number : undefined);
+}
+
+export function retryTime(until: number) {
+  return new Date(Math.ceil(until / 1000) * 1000).toISOString().slice(11, 19);
+}
+
+export function localRetryStatus(task: Task, job?: Job) {
+  const number = activityPrNumber(task);
+  const pr = number ? ` · PR #${number}` : '';
+  if (task.state === 'awaiting_publication') {
+    const until = Math.max(task.publicationRetry?.retryAt ?? 0, task.partialReview?.retryAt ?? 0);
+    if (until)
+      return { until, label: `GitHub review publication · retry at ${retryTime(until)} UTC${pr}` };
+  }
+  if (task.state === 'queued' && task.draftStart?.retryAt) {
+    const until = task.draftStart.retryAt;
+    return { until, label: `GitHub review draft · retry at ${retryTime(until)} UTC${pr}` };
+  }
+  if (task.state === 'submitting' && task.prLink?.retryAt) {
+    const until = task.prLink.retryAt;
+    const target = number ? `PR #${number}` : 'GitHub';
+    return { until, label: `${target} · retry at ${retryTime(until)} UTC` };
+  }
+  if (
+    task.state === 'fixing' &&
+    task.fixingMergeConflict &&
+    job?.timeoutRetry &&
+    job.status === 'queued' &&
+    job.notBefore
+  ) {
+    const until = Date.parse(job.notBefore);
+    return {
+      until,
+      label: `Continuing conflict resolution after a timeout at ${retryTime(until)} UTC${pr}`,
+    };
+  }
+}
+
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
-  if (task.state === 'awaiting_publication' && task.publicationRetry)
-    return `GitHub review publication · retry at ${new Date(task.publicationRetry.retryAt).toISOString().slice(11, 19)} UTC`;
-  if (task.state === 'queued' && task.draftStart?.retryAt)
-    return `GitHub review draft · retry at ${new Date(task.draftStart.retryAt).toISOString().slice(11, 19)} UTC`;
   if (mergeStatus) return mergeStatus;
-  if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
-    return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
-  if (task.state === 'submitting' && task.prLink?.ref && task.prLink.retryAt)
-    return `PR #${task.prLink.ref.number} · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
+  const retry = localRetryStatus(task, job);
+  if (retry) return retry.label;
   if (task.state === 'needs_input') {
     if (task.inputRequest?.generation === task.generation) return 'Waiting for your answer';
     if (task.reason === draftSyncPending) return 'Checking the GitHub draft';
@@ -108,8 +143,6 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
       return 'Review reached the run time limit';
   }
   if (task.fixingMergeConflict && task.state === 'fixing') {
-    if (job?.timeoutRetry && job.status === 'queued' && job.notBefore)
-      return `Continuing conflict resolution after a timeout at ${new Date(job.notBefore).toISOString().slice(11, 19)} UTC`;
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
       ? `Conflict repair queued for worker ${assignedWorker}`

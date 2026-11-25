@@ -363,12 +363,12 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         {
           state: 'queued',
           draftStart: { marker: 'review', revision: prTask.revision!, retry: true, retryAt },
-          label: 'GitHub review draft · retry at 12:34:56 UTC',
+          label: 'GitHub review draft · retry at 12:34:56 UTC · PR #72',
         },
         {
           state: 'awaiting_publication',
           publicationRetry: { retryAt, delay: 15_000 },
-          label: 'GitHub review publication · retry at 12:34:56 UTC',
+          label: 'GitHub review publication · retry at 12:34:56 UTC · PR #72',
         },
       ] as const;
       for (const { label, ...retry } of githubReviewRetries) {
@@ -406,6 +406,84 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         await bot.handle(openTask());
         expect(lastText()).toContain(`\n${retry}\n${worker}`);
         expect(lastText()).toContain(detail);
+      }
+      const localUntil = Math.floor(Date.now() / 1000) * 1000 + 120_000;
+      const localTime = new Date(localUntil).toISOString().slice(11, 19);
+      for (const retry of [
+        {
+          state: 'queued' as const,
+          draftStart: {
+            marker: 'review',
+            revision: prTask.revision!,
+            retry: true,
+            retryAt: localUntil,
+          },
+          label: `GitHub review draft · retry at ${localTime} UTC · PR #72`,
+        },
+        {
+          state: 'awaiting_publication' as const,
+          publicationRetry: { retryAt: localUntil, delay: 15_000 },
+          label: `GitHub review publication · retry at ${localTime} UTC · PR #72`,
+        },
+        {
+          state: 'submitting' as const,
+          prLink: {
+            ref: prRef,
+            retryAt: localUntil,
+            head: prTask.revision!.head,
+            generation: prTask.generation,
+          },
+          label: `PR #72 · retry at ${localTime} UTC`,
+        },
+        {
+          state: 'fixing' as const,
+          fixingMergeConflict: true,
+          label: `Continuing conflict resolution after a timeout at ${localTime} UTC · PR #72`,
+        },
+      ]) {
+        const { label, state, ...local } = retry;
+        const fix = state === 'fixing';
+        const job = { ...authorJob, kind: fix ? 'fix' : 'chat', status: 'queued' } as const;
+        const withoutLocal = { ...prTask, state, fixingMergeConflict: fix };
+        const setLocal = (enabled: boolean) => {
+          f.store.saveTask({ ...withoutLocal, ...(enabled ? local : {}) });
+          f.store.saveJob({
+            ...job,
+            timeoutRetry: fix && enabled,
+            notBefore: fix && enabled ? new Date(localUntil).toISOString() : undefined,
+          });
+        };
+        const expectRetry = async (expected: string) => {
+          expect(await boardStatus()).toBe(expected);
+          await bot.handle(message('/queue'));
+          expect(lastText()).toContain(translate(locale, expected));
+          await bot.handle(openTask());
+          expect(lastText()).toContain(translate(locale, expected));
+        };
+        for (const kind of ['quota', 'read-backoff'] as const) {
+          const key = `github.${kind}:${prRef.host}`;
+          for (const offset of [-60_000, 60_000]) {
+            setLocal(true);
+            const until = localUntil + offset;
+            const time = new Date(until).toISOString().slice(11, 19);
+            f.store.setSetting(key, { until, delay: 60_000, status: 503 });
+            const global =
+              kind === 'quota'
+                ? `Waiting for GitHub API quota until ${time} UTC · PR #72`
+                : `PR #72 · GitHub HTTP 503 · retry at ${time} UTC`;
+            await expectRetry(offset > 0 ? global : label);
+            if (offset > 0) {
+              f.store.setSetting(key, null);
+              await expectRetry(label);
+              setLocal(false);
+            } else {
+              setLocal(false);
+              await expectRetry(global);
+              f.store.setSetting(key, null);
+            }
+            expect(await boardStatus()).not.toContain('UTC');
+          }
+        }
       }
       const publicQuestion = 'Should the old filters remain available?';
       const scenarios: Task[] = [
