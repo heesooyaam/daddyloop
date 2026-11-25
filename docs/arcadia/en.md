@@ -42,24 +42,16 @@ After enabling the module, first check the helper selection in the same environm
 daddy arcadia mounts
 ```
 
-A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. If the entry whose `mount` is `$HOME/arcadia2` has `status` set to `mounted`, assign the selected value from the configuration, environment variable or `PATH` to `helper`. Check for a file with that name in the current directory first. Only use `command -v` for a bare name when no such file exists:
+A successful call confirms that a helper is already selected. Check the Arcadia source separately with `arc mount -l --json`. When the entry for `$HOME/arcadia2` has `status: mounted`, run setup from the same directory and environment as the first `mounts` call:
 
 ```bash
-: "${helper:?set helper to the discovered value}" &&
-if [ -f "$helper" ]; then
-  helper="$(realpath "$helper")"
-else
-  helper="$(command -v "$helper")" &&
-    helper="$(realpath "$helper")"
-fi &&
-  test -f "$helper" &&
-  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+daddy arcadia setup --workspace ~/arcadia2 &&
   (cd /tmp && daddy arcadia mounts)
 ```
 
-Do not run `setup` without an explicit path at this step: the option saves an absolute name. The final `mounts` must return the original inventory after the working directory changes; it is skipped when `setup` fails.
+Setup uses the same helper selection as `mounts` and saves the selected file's absolute path, preserving the name of a final symlink. To select a different helper, pass its original path or name with `--lease-helper`. The final `mounts` should return the same inventory after the working directory changes.
 
-If `daddy arcadia mounts` fails, check the saved `arcadia.leaseHelper`, then `DADDYLOOP_ARCADIA_LEASE_HELPER`, `command -v arcadia-mount-lease`, the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
+If `daddy arcadia mounts` fails, check the saved `arcadia.leaseHelper`, then `DADDYLOOP_ARCADIA_LEASE_HELPER`, the first file named `arcadia-mount-lease` in `PATH` (including Bash scripts without the executable bit), the standard `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills` and `~/.cursor/skills` directories, and the file beside the Arcadia source. The last option is shown below:
 
 ```bash
 source="$HOME/arcadia2"
@@ -80,7 +72,6 @@ The source does not have to appear in the helper lease inventory. If the helper 
 ```bash
 source="$HOME/arcadia2" &&
   helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease" &&
-  helper="$(realpath "$helper")" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)
@@ -102,7 +93,7 @@ After installing the skill, save its absolute path as well. Do not change the se
 
 ```bash
 : "${SKILLS_DIR:?restore the previous SKILLS_DIR}" &&
-  helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")" &&
+  helper="$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)

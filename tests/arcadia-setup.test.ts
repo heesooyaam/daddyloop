@@ -137,6 +137,96 @@ it('keeps the active Arc helper until setup finishes successfully', async () => 
   }
 });
 
+it.each(['relative symlink', 'bare name'])(
+  'keeps the mounts inventory after setup saves a %s',
+  async (selection) => {
+    const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-setup-'));
+    const originalCwd = process.cwd();
+    const originalConfig = loadConfig();
+    const doctor = vi.spyOn(ArcBridge.prototype, 'doctor');
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const isSymlink = selection === 'relative symlink';
+      const name = 'fixture-arc-lease';
+      const target = join(directory, 'target');
+      const later = join(directory, 'later');
+      const helper = isSymlink ? './current/../fixture-arc-lease' : name;
+      const saved = join(target, name);
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      mkdirSync(later);
+      if (isSymlink) {
+        symlinkSync('target/bin', join(directory, 'current'));
+        symlinkSync('driver', saved);
+      }
+      const inventory = { status: 'success', data: { mounts: [{ path: '/expected-pool' }] } };
+      const helperConfig = {
+        status: 'success',
+        data: {
+          object_store: join(directory, 'objects'),
+          lease_root: join(directory, 'leases'),
+          store_root: join(directory, 'stores'),
+          mount_prefix: join(directory, 'mount'),
+          mount_start: 1,
+          mount_end: 2,
+          extra_mounts: '',
+          human_reserved_mount_numbers: '',
+        },
+      };
+      writeFileSync(
+        isSymlink ? join(target, 'driver') : saved,
+        `#!/usr/bin/env bash
+[[ "\${0##*/}" == ${name} && "$1" == --json ]] || exit 7
+case "$2" in
+  status) printf '%s\\n' '${JSON.stringify(inventory)}' ;;
+  config) printf '%s\\n' '${JSON.stringify(helperConfig)}' ;;
+  *) exit 7 ;;
+esac
+`,
+        { mode: isSymlink ? 0o700 : 0o600 },
+      );
+      writeFileSync(
+        join(later, name),
+        `#!/bin/sh\nprintf '%s\\n' '{"status":"success","data":{"mounts":[{"path":"/other-pool"}]}}'\n`,
+        { mode: 0o700 },
+      );
+      const config = structuredClone(originalConfig);
+      config.modules = [...new Set([...config.modules, 'arcadia'])];
+      config.dataDir = directory;
+      config.arcadia.leaseHelper = undefined;
+      saveConfig(config);
+      vi.stubEnv('DADDYLOOP_ARCADIA_LEASE_HELPER', helper);
+      vi.stubEnv('PATH', [target, later, process.env.PATH].join(delimiter));
+      process.chdir(directory);
+      const before = await new ArcBridge(directory).mounts();
+      expect(before).toEqual(inventory.data.mounts);
+      doctor.mockImplementation(async function (this: ArcBridge) {
+        expect(await this.mounts()).toEqual(before);
+        return { user_login: 'tester', hash: 'a'.repeat(40), branch: 'trunk', source: '/source' };
+      });
+      await program().parseAsync([
+        'node',
+        'daddy',
+        '--data-dir',
+        directory,
+        'arcadia',
+        'setup',
+        ...(isSymlink ? ['--lease-helper', helper] : []),
+      ]);
+      expect(loadConfig().arcadia.leaseHelper).toBe(saved);
+      process.chdir(later);
+      vi.stubEnv('PATH', [later, process.env.PATH].join(delimiter));
+      expect(await new ArcBridge(directory).mounts()).toEqual(before);
+    } finally {
+      process.chdir(originalCwd);
+      vi.unstubAllEnvs();
+      doctor.mockRestore();
+      output.mockRestore();
+      saveConfig(originalConfig);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 it.each(['non-executable Bash script', 'executable Node script'])(
   'validates the inventory and journals with a %s',
   async (helperType) => {

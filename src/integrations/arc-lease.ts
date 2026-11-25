@@ -18,34 +18,40 @@ function under(directory: string, path: string) {
   return isAbsolute(path) ? path : `${directory}/${path}`;
 }
 
+export function resolveLeaseHelperPath(
+  helper: string,
+  { cwd: workingDirectory, env }: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+) {
+  const cwd = workingDirectory ? under(process.cwd(), workingDirectory) : process.cwd();
+  const local = under(cwd, helper);
+  // Bash also checks the current directory before searching PATH for a bare script name.
+  const path =
+    helper.includes('/') || isFile(local)
+      ? local
+      : (env?.PATH ?? process.env.PATH ?? '')
+          .split(delimiter)
+          .map((directory) => under(under(cwd, directory || '.'), helper))
+          .find(isFile);
+  // Resolve the parent before the interpreter normalizes the path. Keep the launch name.
+  return path?.split('/').includes('..')
+    ? join(realpathSync.native(dirname(path)), basename(path))
+    : path;
+}
+
 export function runLeaseHelper(
   helper: string,
   args: string[],
   options: Parameters<typeof command>[2] = {},
   run = command,
 ) {
-  const cwd = options.cwd ? under(process.cwd(), options.cwd) : process.cwd();
-  const local = under(cwd, helper);
-  // Bash also checks the current directory before searching PATH for a bare script name.
-  const path =
-    helper.includes('/') || isFile(local)
-      ? local
-      : (options.env?.PATH ?? process.env.PATH ?? '')
-          .split(delimiter)
-          .map((directory) => under(under(cwd, directory || '.'), helper))
-          .find(isFile);
+  const path = resolveLeaseHelperPath(helper, options);
   if (!path) return run('bash', [helper, ...args], options);
-  let executable: string;
   try {
     accessSync(path, constants.X_OK);
-    // Resolve the parent before the interpreter normalizes the path. Keep the launch name.
-    executable = path.split('/').includes('..')
-      ? join(realpathSync.native(dirname(path)), basename(path))
-      : path;
   } catch {
     return run('bash', [path, ...args], options);
   }
-  return run(executable, args, options);
+  return run(path, args, options);
 }
 
 export function leaseHelper() {

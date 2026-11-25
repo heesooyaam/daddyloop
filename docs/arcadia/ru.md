@@ -42,24 +42,16 @@ ya tool --print-path gena-arcanum-cli
 daddy arcadia mounts
 ```
 
-Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Arcadia через `arc mount -l --json`. Если запись с `mount` равным `$HOME/arcadia2` имеет `status` равный `mounted`, запиши выбранное значение из настройки, переменной окружения или `PATH` в `helper`. Сначала проверь файл с таким именем в текущем каталоге. Только если его нет, ищи короткое имя через `command -v`:
+Успешный вызов подтверждает, что helper уже выбран. Отдельно проверь исходную Аркадию через `arc mount -l --json`. Если у записи для `$HOME/arcadia2` указано `status: mounted`, выполни setup в том же каталоге и окружении, что и первый вызов `mounts`:
 
 ```bash
-: "${helper:?укажи найденный helper}" &&
-if [ -f "$helper" ]; then
-  helper="$(realpath "$helper")"
-else
-  helper="$(command -v "$helper")" &&
-    helper="$(realpath "$helper")"
-fi &&
-  test -f "$helper" &&
-  daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
+daddy arcadia setup --workspace ~/arcadia2 &&
   (cd /tmp && daddy arcadia mounts)
 ```
 
-Не запускай на этом шаге `setup` без явного пути: флаг сохраняет абсолютное имя. Заключительный `mounts` должен вернуть исходный список после смены каталога; при ошибке `setup` он не запускается.
+Setup выбирает helper по тем же правилам, что и `mounts`, и сохраняет абсолютный путь к файлу, сохраняя имя конечной символической ссылки. Чтобы выбрать другой helper, передай его исходный путь или имя через `--lease-helper`. После смены каталога заключительный `mounts` должен вернуть тот же список.
 
-Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, команду `command -v arcadia-mount-lease`, стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
+Если `daddy arcadia mounts` завершился с ошибкой, проверь по порядку сохранённый `arcadia.leaseHelper`, переменную `DADDYLOOP_ARCADIA_LEASE_HELPER`, первый файл с именем `arcadia-mount-lease` в `PATH` (включая Bash-скрипты без бита исполнения), стандартные каталоги `~/.agents/skills`, `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills` и файл рядом с исходной Arcadia. Ниже показан последний вариант:
 
 ```bash
 source="$HOME/arcadia2"
@@ -80,7 +72,6 @@ arc mount -l --json
 ```bash
 source="$HOME/arcadia2" &&
   helper="$source/ai/artifacts/skills/community/arcadia-mounts/scripts/arcadia-mount-lease" &&
-  helper="$(realpath "$helper")" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)
@@ -102,7 +93,7 @@ bash "$SKILLS_DIR/store/scripts/store.sh" install arcadia-mounts --skills-root "
 
 ```bash
 : "${SKILLS_DIR:?восстанови прежний SKILLS_DIR}" &&
-  helper="$(realpath "$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease")" &&
+  helper="$SKILLS_DIR/arcadia-mounts/scripts/arcadia-mount-lease" &&
   test -f "$helper" &&
   daddy arcadia setup --workspace ~/arcadia2 --lease-helper "$helper" &&
   (cd /tmp && daddy arcadia mounts)
