@@ -453,3 +453,51 @@ it('follows a single cursor through a mixed page of Markdown decisions', async (
     f.store.close();
   }
 });
+
+it('walks past a saved decision whose comment ID alone exceeds the page budget', async () => {
+  const f = await fixture();
+  try {
+    const task = f.task;
+    const job = f.job();
+    await f.engine.broker.ensureReview(task);
+    f.store.saveTask(task);
+    const commentId = 'x'.repeat(4096);
+    const expected = [];
+    for (const id of ['oldest', commentId, 'newest']) {
+      expected.push(
+        await f.engine.broker.call(job, 'record_decision', {
+          commentId: id,
+          outcome: 'verified',
+          reason: 'Exact Markdown: [evidence](https://example.invalid)',
+        }),
+      );
+    }
+
+    const received = [];
+    let record = '';
+    let before: string | undefined;
+    let pages = 0;
+    do {
+      expect(++pages).toBeLessThan(10);
+      const page = f.engine.broker.readDecisions(job, task, { before });
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+      received.push(...page.decisions);
+      if (page.recordFragment) {
+        const { id, offset, json, complete } = page.recordFragment;
+        expect(offset).toBe(record.length);
+        record += json;
+        if (complete) {
+          const decision = JSON.parse(record) as Decision;
+          expect(decision.id).toBe(id);
+          received.push(decision);
+          record = '';
+        }
+      }
+      before = page.nextBefore ?? undefined;
+    } while (before);
+    expect(record).toBe('');
+    expect(received).toEqual(expected.toReversed());
+  } finally {
+    f.store.close();
+  }
+});
