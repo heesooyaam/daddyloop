@@ -97,6 +97,16 @@ export class TelegramDelivery {
     );
     if (recoveryDeliveries.length)
       this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
+    const deletedGroups = new Set(
+      store
+        .groups()
+        .filter((group) => !!group.deletedAt)
+        .map((group) => group.id),
+    );
+    const legacyGroups = new Map<string, string>();
+    if (deletedGroups.size)
+      for (const row of store.db.prepare('SELECT id,group_id FROM daddy_jobs').all())
+        if (typeof row.group_id === 'string') legacyGroups.set(String(row.id), row.group_id);
     this.recovering = recoveryDeliveries.some(
       ({ value }) => this.storedMessage(value) !== undefined,
     );
@@ -109,6 +119,16 @@ export class TelegramDelivery {
         this.storedMessage(value) !== undefined;
       if (['queued', 'sending'].includes(value.status)) {
         value.status = 'queued';
+        const groupId =
+          value.options.groupId ??
+          (value.options.key?.startsWith('turn:')
+            ? legacyGroups.get(value.options.key.slice(5))
+            : undefined);
+        if (groupId && deletedGroups.has(groupId)) {
+          value.status = 'cancelled';
+          this.store.setSetting(key, value);
+          continue;
+        }
         if (this.recovering && !isIndependent(value)) {
           this.deferredKeys.add(key);
           this.deferredValues.set(key, value);
@@ -456,8 +476,9 @@ export class TelegramDelivery {
   }
   private inheritedPartsBelongToSibling(value: Delivery) {
     if (!value.options.key?.startsWith('turn:') || !this.hasDeliveredSibling(value)) return false;
-    if (this.previousSibling(value)?.id !== this.latestDeliveredSibling(value)?.id) return false;
-    return this.acknowledgedPartsMatchSibling(value);
+    if (!this.acknowledgedPartsMatchSibling(value)) return false;
+    if (this.previousSibling(value)?.id === this.latestDeliveredSibling(value)?.id) return true;
+    return value.attempts === 0;
   }
   private receiptFor(messages: Delivery['messages'], value: Delivery) {
     if (!messages.length) return;
@@ -511,7 +532,22 @@ export class TelegramDelivery {
       this.legacyByNotification.get(legacyKey) ??
       (includeSent ? this.sentDelivery(destination, notificationId) : undefined);
     if (!row || row.key === key) return;
-    if (!includeSent && row.value.messages.length) return;
+    if (!includeSent && row.value.messages.length) {
+      const receipt = this.receiptFor(row.value.messages, row.value);
+      row.value.status = 'cancelled';
+      this.store.transaction(() => {
+        if (receipt) this.store.setSetting(receipt.key, receipt.value);
+        this.store.setSetting(row.key, row.value);
+      });
+      this.pending.delete(row.key);
+      this.deferredKeys.delete(row.key);
+      this.historyDeferredKeys.delete(row.key);
+      this.deferredValues.delete(row.key);
+      this.retainedDeferredKeys.delete(row.key);
+      this.remember(row.key, row.value);
+      this.releaseUnblocked(row.value.destination);
+      return;
+    }
     if (row.value.status === 'sending') row.value.status = 'queued';
     let receipt: ReturnType<TelegramDelivery['receiptFor']>;
     if (row.value.options.key?.startsWith('turn:')) {
