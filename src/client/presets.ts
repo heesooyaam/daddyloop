@@ -11,9 +11,6 @@ export function presetLines(presets: { name: string; description?: string }[], l
     ...(presets.length > 20 ? [t('Open the website or CLI for the full preset list.')] : []),
     '',
     '/preset <name>',
-    '/preset parts <name>',
-    '/preset save|update|delete <name>',
-    '/preset rename|describe <name> :: <value>',
     t('Preset library changes run in the paired private Telegram chat.'),
   ];
 }

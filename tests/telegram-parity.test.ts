@@ -1,4 +1,6 @@
 import { expect, it, vi } from 'vitest';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import type { TelegramApi, Update } from '../src/integrations/telegram.js';
@@ -120,6 +122,51 @@ it('imports and exports instructions and phone skill files only through the pair
     expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('Public group preference');
     expect(telegram.sent.at(-1)?.card).not.toContain('PRIVATE_TOKEN_MUST_NOT_BE_ECHOED');
     expect(telegram.sent.at(-1)?.card).toContain('Full text is available in the private chat');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('confirms local and pasted skills with their role, session and duplicate result', async () => {
+  const f = daddyFixture(),
+    telegram = apiFixture();
+  let locale: 'en' | 'ru' = 'en';
+  const bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => locale);
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Phone session' });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const directory = join(f.dir, 'local-skill');
+  mkdirSync(directory);
+  writeFileSync(
+    join(directory, 'SKILL.md'),
+    '---\nname: local-phone\ndescription: Local fixture\n---\nKeep local checks.\n',
+  );
+  let id = 40;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  try {
+    await bot.handle(message(`/skill worker local ${directory}`));
+    expect(telegram.sent.at(-1)!.card).toContain('local-phone');
+    expect(telegram.sent.at(-1)!.card).toContain('All workers');
+    expect(telegram.sent.at(-1)!.card).toContain(group.title);
+    await bot.handle(message(`/skill worker local ${directory}`));
+    expect(telegram.sent.at(-1)!.card).toContain('already connected');
+
+    locale = 'ru';
+    await bot.handle(message('/skill daddy text pasted-phone :: Keep pasted checks.'));
+    expect(telegram.sent.at(-1)!.card).toContain('pasted-phone');
+    expect(telegram.sent.at(-1)!.card).toContain('добавлен');
+    expect(telegram.sent.at(-1)!.card).toContain(group.title);
+    await bot.handle(message('/skill daddy text pasted-phone :: Keep pasted checks.'));
+    expect(telegram.sent.at(-1)!.card).toContain('уже подключён');
   } finally {
     await bot.stop();
     await f.close();
@@ -336,6 +383,7 @@ it('manages preset snapshots and per-session components from Telegram', async ()
       description: 'Used from Telegram',
       revision: 3,
     });
+    const originalId = library.list()[0].id;
     await bot.handle(message('/preset Mobile style'));
     expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Mobile style');
 
@@ -360,10 +408,39 @@ it('manages preset snapshots and per-session components from Telegram', async ()
     await restarted.stop();
 
     await bot.handle(message('/preset delete Mobile style'));
-    const remove = telegram.sent.at(-1)!.card.buttons[0][0].callback_data;
-    await bot.handle(click(remove));
+    const remove = telegram.sent.at(-1)!.card.buttons[0][0].callback_data,
+      cancel = telegram.sent.at(-1)!.card.buttons[1][0].callback_data;
+    await bot.handle(click(cancel));
+    const afterCancel = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+    await afterCancel.handle(click(remove));
+    expect(library.list()).toHaveLength(1);
+    await afterCancel.stop();
+
+    await bot.handle(message('/preset delete Mobile style'));
+    await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
     expect(library.list()).toHaveLength(0);
     expect(f.daddy.group(group.id).instructions?.presets?.[0].preset.name).toBe('Mobile style');
+
+    await bot.handle(message('/preset disable Mobile style'));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].enabled).toBe(false);
+    await bot.handle(message(`/preset enable ${originalId}`));
+    expect(f.daddy.group(group.id).instructions?.presets?.[0].enabled).toBe(true);
+
+    const replacement = library.save({
+      name: 'Mobile style',
+      instructions: { daddy: { prompt: 'Replacement' }, worker: {} },
+    });
+    await bot.handle(message('/preset disable Mobile style'));
+    expect(f.daddy.group(group.id).instructions?.presets).toMatchObject([
+      { preset: { id: originalId }, enabled: false },
+    ]);
+    await bot.handle(message(`/preset remove ${originalId}`));
+    expect(f.daddy.group(group.id).instructions?.presets).toEqual([]);
+    expect(library.list()).toMatchObject([{ id: replacement.id, name: 'Mobile style' }]);
+    await bot.handle(message('/preset Mobile style'));
+    expect(f.daddy.group(group.id).instructions?.presets).toMatchObject([
+      { preset: { id: replacement.id }, enabled: true },
+    ]);
   } finally {
     await bot.stop();
     await f.close();

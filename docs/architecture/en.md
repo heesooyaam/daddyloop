@@ -170,7 +170,7 @@ flowchart TB
     C -->|"Passed"| E["Task complete"]
 ```
 
-**From review to fixes.** `Engine.review()` queues a review. The reviewer reads the code and leaves draft comments. The service publishes only after the review finishes successfully. If it contains findings, `Engine.reconcile()` creates a fix run. The worker receives the published snapshot; the private draft is unavailable to it.
+**From review to fixes.** The reviewer prepares native comments during a turn. When a GitHub review is incomplete, daddy can publish its confirmed findings on the original PR commit and assign the worker to address them. With auto-merge enabled, a confirmed merge conflict goes to the assigned worker first. The next commit still requires a full independent review. The coordinator can read the actual question using read_task.
 
 **From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
 

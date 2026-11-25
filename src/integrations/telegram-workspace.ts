@@ -102,7 +102,7 @@ type PendingDocument = {
   expiresAt: string;
 };
 type PresetControl = {
-  kind: 'delete' | 'part' | 'select';
+  kind: 'delete' | 'part' | 'select' | 'cancel';
   ownerId: number;
   destination: Destination;
   presetId: string;
@@ -110,6 +110,7 @@ type PresetControl = {
   groupId?: string;
   part?: string;
   enabled?: boolean;
+  cancels?: string;
   expiresAt: string;
 };
 export class TelegramWorkspace {
@@ -680,7 +681,10 @@ export class TelegramWorkspace {
         throw new Error(this.t('Choose a UTF-8 Markdown or text file.'));
       }
       const skill = await new InstructionSources().import({ kind: 'file', name: filename, text });
-      await this.addSkill(current, pending.role!, skill, pending, destination);
+      const added = await this.addSkill(current, pending.role!, skill, pending, destination);
+      this.store.setSetting(this.documentKey(destination), null);
+      await this.skillConfirmation(current, pending.role!, skill, added, destination);
+      return true;
     }
     this.store.setSetting(this.documentKey(destination), null);
     await this.api.send(
@@ -718,6 +722,7 @@ export class TelegramWorkspace {
     pending?: PendingDocument,
     destination?: Destination,
   ) {
+    let added = false;
     await this.daddy.updateInstructions(
       group.id,
       {
@@ -727,11 +732,35 @@ export class TelegramWorkspace {
       (current) => {
         const instructions = structuredClone(current ?? { daddy: {}, worker: {} });
         const skills = instructions[role].skills ?? [];
-        if (!skills.some((item) => item.checksum === skill.checksum))
+        if (!skills.some((item) => item.checksum === skill.checksum)) {
+          added = true;
           instructions[role].skills = [...skills, skill];
+        }
         return instructions;
       },
       pending && destination ? () => this.requirePendingDocument(destination, pending) : undefined,
+    );
+    return added;
+  }
+  private async skillConfirmation(
+    group: ReviewGroup,
+    role: 'daddy' | 'worker',
+    skill: SkillSnapshot,
+    added: boolean,
+    destination: Destination,
+  ) {
+    await this.api.send(
+      destination,
+      this.t(
+        added
+          ? 'Skill {name} added to {role} in {title}.'
+          : 'Skill {name} is already connected to {role} in {title}.',
+        {
+          name: skill.name,
+          role: role === 'daddy' ? 'daddy' : this.t('All workers'),
+          title: group.title,
+        },
+      ),
     );
   }
   private presetControl(data: Omit<PresetControl, 'ownerId' | 'expiresAt'>) {
@@ -865,6 +894,27 @@ export class TelegramWorkspace {
       return true;
     }
     const library = new InstructionPresets(this.store);
+    if (control.kind === 'cancel') {
+      this.store.transaction(() => {
+        const target = this.store.db
+          .prepare('SELECT data,consumed FROM bot_actions WHERE id=?')
+          .get(control.cancels!);
+        if (target && !target.consumed) {
+          const deletion = JSON.parse(String(target.data)) as PresetControl;
+          if (
+            deletion.kind === 'delete' &&
+            deletion.presetId === control.presetId &&
+            deletion.revision === control.revision
+          )
+            this.store.db
+              .prepare('UPDATE bot_actions SET consumed=1 WHERE id=?')
+              .run(control.cancels!);
+        }
+        this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(id);
+      });
+      await this.callback('dad:settings', destination);
+      return true;
+    }
     if (control.kind === 'delete') {
       if (destination.chatId !== this.pair()?.chatId)
         throw new Error(this.t('Preset library changes are available only in the private chat.'));
@@ -944,6 +994,17 @@ export class TelegramWorkspace {
         `\n\n${preset.name} · ${this.t('version')} ${preset.revision}`,
     );
   }
+  private appliedPreset(group: ReviewGroup, name: string) {
+    const query = name.trim().toLowerCase();
+    const matches = (group.instructions?.presets ?? []).filter(
+      (item) =>
+        item.preset.id === query ||
+        item.preset.id.startsWith(query) ||
+        item.preset.name.toLowerCase() === query,
+    );
+    if (matches.length > 1) throw new Error('Choose a unique preset name or ID');
+    return matches[0];
+  }
   private async confirmPresetDelete(name: string, destination: Destination) {
     if (destination.chatId !== this.pair()?.chatId)
       return this.privateStep(
@@ -952,6 +1013,12 @@ export class TelegramWorkspace {
       );
     const library = new InstructionPresets(this.store),
       preset = library.get(findPreset(library.list(), name).id);
+    const deletion = this.presetControl({
+      kind: 'delete',
+      destination,
+      presetId: preset.id,
+      revision: preset.revision,
+    });
     await this.api.send(destination, {
       ...new TelegramText()
         .add(this.t('Delete preset') + ': ' + preset.name, 'bold')
@@ -963,15 +1030,21 @@ export class TelegramWorkspace {
         [
           {
             text: this.t('Delete preset'),
+            callback_data: deletion,
+          },
+        ],
+        [
+          {
+            text: this.t('Cancel'),
             callback_data: this.presetControl({
-              kind: 'delete',
+              kind: 'cancel',
               destination,
               presetId: preset.id,
               revision: preset.revision,
+              cancels: deletion.slice('dad:preset:'.length),
             }),
           },
         ],
-        [{ text: this.t('Cancel'), callback_data: 'dad:settings' }],
       ],
     });
   }
@@ -1026,6 +1099,29 @@ export class TelegramWorkspace {
     )
       return this.daddy.group(groupId);
     throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
+  }
+  private groupText(destination: Destination, value: string) {
+    return destination.chatId === this.pair()?.chatId ? value : redact(value);
+  }
+  private groupTask(destination: Destination, task: Task): Task {
+    if (destination.chatId === this.pair()?.chatId) return task;
+    return {
+      ...task,
+      title: redact(task.title),
+      reason: redact(task.reason),
+      summary: task.summary ? redact(task.summary) : task.summary,
+      pr: task.pr
+        ? {
+            ...task.pr,
+            title: redact(task.pr.title),
+            body: redact(task.pr.body),
+            checkDetails: task.pr.checkDetails.map((check) => ({
+              ...check,
+              name: redact(check.name),
+            })),
+          }
+        : task.pr,
+    };
   }
   private findTask(groupId: string, value: string) {
     const query = value.trim().toLowerCase();
@@ -1183,7 +1279,7 @@ export class TelegramWorkspace {
     const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
     const text = new TelegramText()
       .add('📋 ' + (this.locale() === 'ru' ? 'Задачи' : 'Tasks'), 'bold')
-      .add('\n' + group.title);
+      .add('\n' + this.groupText(destination, group.title));
     if (!tasks.length)
       text.add(
         '\n\n' +
@@ -1209,7 +1305,10 @@ export class TelegramWorkspace {
       buttons: [
         ...visible.map((task) => [
           {
-            text: `${task.state === 'complete' ? '✅' : '•'} ${task.title}`.slice(0, 60),
+            text: `${task.state === 'complete' ? '✅' : '•'} ${this.groupText(destination, task.title)}`.slice(
+              0,
+              60,
+            ),
             callback_data: this.taskControl({
               kind: 'task',
               destination,
@@ -1226,6 +1325,7 @@ export class TelegramWorkspace {
   private async taskCard(task: Task, destination: Destination) {
     this.authorizeControl(destination, task.groupId!);
     this.store.setSetting(this.selectedTaskKey(destination, task.groupId!), task.id);
+    task = this.groupTask(destination, task);
     const version = this.taskVersion(task);
     const text = new TelegramText()
       .add(task.title, 'bold')
@@ -1315,12 +1415,13 @@ export class TelegramWorkspace {
       );
       return;
     }
+    task = this.groupTask(destination, task);
     const confirmedHead =
       action === 'submit' ? (version.pendingHead ?? version.head) : version.head;
     const text = new TelegramText()
       .add(this.taskActionLabel(action), 'bold')
       .add('\n\n' + task.title)
-      .add('\n' + this.daddy.group(task.groupId!).title)
+      .add('\n' + this.groupText(destination, this.daddy.group(task.groupId!).title))
       .add(
         '\n\n' + (this.locale() === 'ru' ? 'Подтверждается версия' : 'Confirming version') + ':\n',
       )
@@ -1328,7 +1429,13 @@ export class TelegramWorkspace {
       .add(
         '\n' + (this.locale() === 'ru' ? 'Поколение' : 'Generation') + ': ' + version.generation,
       );
-    if (reason) text.add('\n\n' + (this.locale() === 'ru' ? 'Причина' : 'Reason') + ': ' + reason);
+    if (reason)
+      text.add(
+        '\n\n' +
+          (this.locale() === 'ru' ? 'Причина' : 'Reason') +
+          ': ' +
+          this.groupText(destination, reason),
+      );
     text.add(
       '\n\n' +
         (this.locale() === 'ru'
@@ -1494,7 +1601,10 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, groupId);
     const slots = workerSlots(this.store, group);
     const tasks = taskActivity(
-      this.store.tasks(groupId).reverse(),
+      this.store
+        .tasks(groupId)
+        .reverse()
+        .map((task) => this.groupTask(destination, task)),
       this.store.activeJobs(),
       (task) =>
         githubActivityStatus(
@@ -1520,7 +1630,8 @@ export class TelegramWorkspace {
   }
   private async showTask(groupId: string, taskId: string, destination: Destination) {
     const group = this.authorize(destination, groupId);
-    const task = this.daddy.task(groupId, taskId);
+    const original = this.daddy.task(groupId, taskId),
+      task = this.groupTask(destination, original);
     const slots = workerSlots(this.store, group);
     const [activity] = taskActivity(
       [task],
@@ -1536,7 +1647,7 @@ export class TelegramWorkspace {
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
       group.workspace?.provider === 'github' && task.ref.provider === 'github'
-        ? autoMergeSettings(this.store, group, task)
+        ? autoMergeSettings(this.store, group, original)
         : undefined;
     this.store.setSetting(this.selectedTaskKey(destination, groupId), task.id);
     const card = activityTaskCard(this.locale(), activity!, slot, merge);
@@ -3143,12 +3254,15 @@ export class TelegramWorkspace {
             group,
             this.t('Local instruction paths are accepted only in the paired private chat.'),
           );
-        else
-          await this.addSkill(
-            group,
-            localSkill[1] as 'daddy' | 'worker',
-            await new InstructionSources().import({ kind: 'local', path: localSkill[2].trim() }),
-          );
+        else {
+          const role = localSkill[1] as 'daddy' | 'worker',
+            skill = await new InstructionSources().import({
+              kind: 'local',
+              path: localSkill[2].trim(),
+            }),
+            added = await this.addSkill(group, role, skill);
+          await this.skillConfirmation(group, role, skill, added, destination);
+        }
         return true;
       }
       const textSkill = text.match(
@@ -3163,16 +3277,16 @@ export class TelegramWorkspace {
             group,
             this.t('Pasted instruction text is accepted only in the paired private chat.'),
           );
-        else
-          await this.addSkill(
-            group,
-            textSkill[1] as 'daddy' | 'worker',
-            await new InstructionSources().import({
+        else {
+          const role = textSkill[1] as 'daddy' | 'worker',
+            skill = await new InstructionSources().import({
               kind: 'text',
               name: textSkill[2].trim(),
               text: textSkill[3],
             }),
-          );
+            added = await this.addSkill(group, role, skill);
+          await this.skillConfirmation(group, role, skill, added, destination);
+        }
         return true;
       }
       if (/^\/(instructions|skill)(?:\s|$)/.test(text)) {
@@ -3245,7 +3359,7 @@ export class TelegramWorkspace {
         return true;
       }
       const presetCommand = text.match(
-        /^\/preset\s+(save|update|delete|parts|enable|disable)\s+([\s\S]+)$/,
+        /^\/preset\s+(save|update|delete|parts|enable|disable|remove)\s+([\s\S]+)$/,
       );
       if (presetCommand) {
         const action = presetCommand[1],
@@ -3258,17 +3372,29 @@ export class TelegramWorkspace {
             await this.savePreset(group, name, action === 'update', destination);
           else {
             if (action === 'parts') {
-              const applied = findPreset(
-                (group.instructions?.presets ?? []).map((item) => ({
-                  id: item.preset.id,
-                  name: item.preset.name,
-                })),
-                name,
+              const applied = this.appliedPreset(group, name);
+              if (!applied) throw new Error(this.t('Enable this preset in the session first.'));
+              await this.presetPartsCard(group, applied.preset.id, destination);
+            } else if (action === 'remove') {
+              const applied = this.appliedPreset(group, name);
+              if (!applied) throw new Error(this.t('Enable this preset in the session first.'));
+              await this.daddy.updateInstructions(
+                group.id,
+                { generation: group.generation, instructionsHash: this.instructionsHash(group) },
+                (current) => ({
+                  ...(current ?? { daddy: {}, worker: {} }),
+                  presets: (current?.presets ?? []).filter(
+                    (item) => item.preset.id !== applied.preset.id,
+                  ),
+                }),
               );
-              await this.presetPartsCard(group, applied.id, destination);
+              await this.api.send(destination, this.t('Preset removed from this session.'));
             } else {
-              const library = new InstructionPresets(this.store),
-                preset = library.get(findPreset(library.list(), name).id);
+              const applied = this.appliedPreset(group, name),
+                library = new InstructionPresets(this.store);
+              if (!applied && action === 'disable')
+                throw new Error(this.t('Enable this preset in the session first.'));
+              const preset = applied?.preset ?? library.get(findPreset(library.list(), name).id);
               await this.daddy.updateInstructions(
                 group.id,
                 { generation: group.generation, instructionsHash: this.instructionsHash(group) },

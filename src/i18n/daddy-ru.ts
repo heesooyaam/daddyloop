@@ -610,6 +610,8 @@ export const daddyRu: Record<string, string> = {
   'Review reached the run time limit': 'Ревью остановилось по таймауту',
   'Continuing the independent review on the verified PR head':
     'Независимое ревью продолжается на проверенном коммите PR',
+  'Publishing recorded findings from an incomplete review':
+    'Публикует готовые замечания незавершённого ревью',
   'Checking the GitHub draft': 'Сверяет черновик с GitHub',
   'Waiting to confirm the GitHub draft or its target branch before restarting review.':
     'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
@@ -759,6 +761,12 @@ export const daddyRu: Record<string, string> = {
   'Skill imported for {title}.': 'Навык импортирован для «{title}».',
   'File import cancelled.': 'Импорт файла отменён.',
   'Repository selection cancelled.': 'Выбор репозитория отменён.',
+  'Skill {name} added to {role} in {title}.':
+    'Навык {name} добавлен для {role} в сессии «{title}».',
+  'Skill {name} is already connected to {role} in {title}.':
+    'Навык {name} уже подключён для {role} в сессии «{title}».',
+  'File import and local or pasted skills run in the paired private Telegram chat.':
+    'Импорт файлов, локальные и вставленные навыки выполняются в привязанной личке Telegram.',
   'Send /task in the original topic for {title}. This folder applies only to that topic.':
     'Отправь /task в исходной теме сессии «{title}». Эта папка действует только для той темы.',
   'Return to {title} and send /task there. This folder applies only to that group route.':
@@ -789,6 +797,7 @@ export const daddyRu: Record<string, string> = {
   'Preset disabled.': 'Пресет отключён.',
   'Preset renamed.': 'Пресет переименован.',
   'Preset description updated.': 'Описание пресета обновлено.',
+  'Preset removed from this session.': 'Копия пресета удалена из этой сессии.',
   'Preset library changes run in the paired private Telegram chat.':
     'Библиотека пресетов изменяется в привязанной личке Telegram.',
   'Choose one workspace by its exact name or unique ID prefix.':

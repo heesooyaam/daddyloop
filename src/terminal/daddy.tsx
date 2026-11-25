@@ -358,7 +358,11 @@ export function DaddyTerminal({
         kind: 'instructions',
         index: 0,
         query: '',
-        notice: instructionLines(model.snapshot().board?.group.instructions, locale).join('\n'),
+        notice: instructionLines(
+          model.snapshot().board?.group.instructions,
+          locale,
+          'terminal',
+        ).join('\n'),
       });
       return;
     }
@@ -392,7 +396,11 @@ export function DaddyTerminal({
           kind: 'instructions',
           index: 0,
           query: '',
-          notice: instructionLines(model.snapshot().board?.group.instructions, locale).join('\n'),
+          notice: instructionLines(
+            model.snapshot().board?.group.instructions,
+            locale,
+            'terminal',
+          ).join('\n'),
         });
       return;
     }

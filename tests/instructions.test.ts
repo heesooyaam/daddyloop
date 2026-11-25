@@ -6,9 +6,37 @@ import { daddyFixture } from './daddy-fixture.js';
 import { InstructionSources } from '../src/ops/instruction-sources.js';
 import { sessionInstructionsSchema, withInstructions } from '../src/core/instructions.js';
 import { taskSession } from '../src/runtime/agent.js';
-import { instructionCommand } from '../src/client/instructions.js';
+import { instructionCommand, instructionLines } from '../src/client/instructions.js';
+import { presetLines } from '../src/client/presets.js';
 import type { Job } from '../src/core/types.js';
 afterEach(() => vi.restoreAllMocks());
+
+it.each(['en', 'ru'] as const)(
+  'shows only commands accepted by the interactive terminal in %s',
+  (locale) => {
+    const instructionCommands = instructionLines(undefined, locale, 'terminal').filter((line) =>
+      line.startsWith('/'),
+    );
+    expect(instructionCommands).toEqual([
+      '/instructions daddy <text>',
+      '/instructions worker <text>',
+      '/skill daddy <GitHub URL>',
+      '/skill worker <GitHub URL>',
+      '/instructions daddy --clear',
+      '/instructions worker --clear',
+      '/presets',
+      '/preset <name>',
+    ]);
+    expect(instructionLines(undefined, locale, 'terminal').join('\n')).toContain(
+      locale === 'ru' ? 'личке Telegram' : 'private Telegram chat',
+    );
+    for (const presets of [[], [{ name: 'Saved', description: 'Fixture' }]]) {
+      const lines = presetLines(presets, locale);
+      expect(lines.filter((line) => line.startsWith('/'))).toEqual(['/preset <name>']);
+      expect(lines.join('\n')).toContain(locale === 'ru' ? 'личке Telegram' : 'private Telegram');
+    }
+  },
+);
 
 it('pins role instructions in jobs, shares worker settings only inside the selected session and preserves defaults', async () => {
   const f = daddyFixture();

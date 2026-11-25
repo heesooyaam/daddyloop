@@ -3,6 +3,7 @@ import { assertTaskVersion, type PRRef } from '../src/core/types.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import type { TelegramApi, Update } from '../src/integrations/telegram.js';
 import { daddyFixture } from './daddy-fixture.js';
+import { rememberSecret } from '../src/core/security.js';
 
 function telegramFixture() {
   const sent: { destination: any; card: any }[] = [];
@@ -22,6 +23,96 @@ function telegramFixture() {
   } as unknown as TelegramApi;
   return { api, sent, calls };
 }
+
+it('redacts registered secrets from every group task card and button', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture();
+  let locale: 'en' | 'ru' = 'en';
+  const bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => locale);
+  const secret = rememberSecret('PRIVATE_TASK_MARKER_12345');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  const group = f.daddy.create({
+      workspaceId: f.workspace.id,
+      title: `Session ${secret}`,
+      autoPush: false,
+    }),
+    topic = await bot.ensureTopic(group),
+    task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 55,
+        url: 'https://demo.local/pull/55',
+      },
+      repoPath: f.dir,
+      requirements: 'Keep group diagnostics private',
+      groupId: group.id,
+      groupGeneration: group.generation,
+    });
+  task.title = `Task ${secret}`;
+  task.reason = `Question ${secret}`;
+  task.state = 'awaiting_push';
+  task.policy.autoPush = false;
+  task.pendingAuthorHead = 'f'.repeat(40);
+  task.pr!.checkDetails = [{ name: `Check ${secret}`, status: 'failed' }];
+  f.store.saveTask(task);
+  let id = 20;
+  const message = (text: string, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: -10042, type: 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  const click = (data: string, threadId?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: threadId,
+      },
+    },
+  });
+  const safe = () => expect(JSON.stringify(telegram.sent.at(-1)!.card)).not.toContain(secret);
+  try {
+    await bot.handle(message('/tasks', topic!.threadId));
+    safe();
+    await bot.handle(
+      click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data, topic!.threadId),
+    );
+    safe();
+    const prepare = telegram.sent
+      .at(-1)!
+      .card.buttons.flat()
+      .find((button: any) => button.text === 'Submit for review').callback_data;
+    await bot.handle(click(prepare, topic!.threadId));
+    safe();
+    await bot.handle(
+      click(telegram.sent.at(-1)!.card.buttons[1][0].callback_data, topic!.threadId),
+    );
+    safe();
+    await bot.handle(message(`/task DADDY-${task.id.slice(0, 8)}`, topic!.threadId));
+    safe();
+
+    locale = 'ru';
+    await bot.handle(message(`/session ${group.id.slice(0, 8)}`));
+    safe();
+    await bot.handle(message('/tasks'));
+    safe();
+    expect(JSON.stringify(telegram.sent.slice(-7).map((item) => item.card))).not.toContain(secret);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
 
 it('binds a Telegram submit confirmation to its owner, topic, task and exact revision across retries and restart', async () => {
   const f = daddyFixture(true),

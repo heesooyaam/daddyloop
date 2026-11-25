@@ -3,7 +3,11 @@ import { translator, type Locale } from '../i18n/index.js';
 import { effectiveInstructions } from '../core/instruction-compose.js';
 import { clearInstructionRole } from './presets.js';
 
-export function instructionLines(value: SessionInstructions | undefined, locale: Locale): string[] {
+export function instructionLines(
+  value: SessionInstructions | undefined,
+  locale: Locale,
+  surface: 'telegram' | 'terminal' = 'telegram',
+): string[] {
   const t = translator(locale),
     current = {
       daddy: effectiveInstructions(value, 'daddy') ?? {},
@@ -32,15 +36,20 @@ export function instructionLines(value: SessionInstructions | undefined, locale:
     '/instructions worker <text>',
     '/skill daddy <GitHub URL>',
     '/skill worker <GitHub URL>',
-    '/skill daddy|worker file',
-    '/skill daddy|worker local <server path>',
-    '/skill daddy|worker text <name> :: <text>',
-    '/instructions import',
-    '/instructions export',
+    ...(surface === 'telegram'
+      ? [
+          '/skill daddy|worker file',
+          '/skill daddy|worker local <server path>',
+          '/skill daddy|worker text <name> :: <text>',
+          '/instructions import',
+          '/instructions export',
+        ]
+      : [t('File import and local or pasted skills run in the paired private Telegram chat.')]),
     '/instructions daddy --clear',
     '/instructions worker --clear',
     '/presets',
     '/preset <name>',
+    ...(surface === 'telegram' ? ['/preset remove <name or ID>'] : []),
   ];
 }
 export async function instructionCommand(

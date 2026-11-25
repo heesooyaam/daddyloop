@@ -46,7 +46,7 @@ The shared preset library can be browsed without selecting a session. Applying a
 
 Secrets and account credentials are never rendered in a group. CLI updates, browser login links and group connection stay in the paired private chat. A group command that needs a private step links to that chat instead of asking for a token.
 
-The private chat accepts bounded UTF-8 `.json`, `.md` and `.txt` documents. Instruction JSON is validated by the same schema as the website; skill files use the same snapshots and size limits. Exports are generated documents and never posted to a group. `/workspace` edits saved repository defaults, while `/preset save|update|delete|rename|describe|parts` covers the shared preset library and per-session component choices.
+The private chat accepts bounded UTF-8 `.json`, `.md` and `.txt` documents. Instruction JSON is validated by the same schema as the website; skill files use the same snapshots and size limits. Exports are generated documents and never posted to a group. `/workspace` edits saved repository defaults. `/preset save|update|delete|rename|describe|parts` covers the shared library, while `enable|disable|remove` manages a session’s saved copy.
 
 ## Commands and routing
 

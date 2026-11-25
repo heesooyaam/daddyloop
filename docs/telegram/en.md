@@ -67,9 +67,9 @@ Open **Settings → Instructions for this session** from the session card. `/ins
 
 The paired private chat also supports `/skill <role> file`, `/skill <role> local <server path>` and `/skill <role> text <name> :: <text>`. `/instructions import` accepts a bounded JSON document and `/instructions export` returns one. A group command that needs file contents links to the private chat; the bot does not echo saved prompts or documents into the group.
 
-`/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. Other sessions keep their choices. Individual parts are selected with `/preset parts <name>` or in the website’s session settings.
+`/presets` lists shared presets. `/preset <name>` enables one for the selected conversation/topic. `/preset enable|disable <name or ID>` changes its saved session copy even if the library version was deleted, and `/preset remove <name or ID>` removes that copy from the session. Other sessions and the shared library keep their choices. Individual parts are selected with `/preset parts <name>` or in the website’s session settings.
 
-From the private chat, `/preset save|update|delete <name>` manages snapshots, `/preset rename|describe <name> :: <value>` edits metadata, and `/preset parts <name>` selects components for the current session. Existing sessions keep their selected snapshot when the library copy changes or is deleted.
+From the private chat, `/preset save|update|delete <name>` manages library snapshots, `/preset rename|describe <name> :: <value>` edits metadata, and `/preset parts <name>` selects components for the current session. Cancelling deletion invalidates that exact confirmation. Existing sessions keep their selected snapshot when the library copy changes or is deleted.
 
 After a successful callback-button action sends a replacement message, the bot deletes the clicked card. Failed actions keep the old card for retry; messages in another topic do not remove it. Link buttons open their URL directly and do not notify the bot of a click.
 
