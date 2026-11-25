@@ -434,7 +434,10 @@ export class Engine {
       const targetIssue =
         reviewTargetChange(task.review, pr, task.pr?.targetBranch) ??
         (retryWithoutTarget ? missingReviewTargetReason(pr) : undefined);
-      const changed = !sameRevision(task.revision, pr) || !!targetIssue;
+      const changed =
+        !sameRevision(task.revision, pr) ||
+        !!targetIssue ||
+        (!!pending && !!task.review && !sameRevision(task.review.revision, pr));
       const replacingReview = changed || (retry && !!task.review);
       let attempt =
         hasSharedDraftSlot(task) && (!task.review || replacingReview)
@@ -555,7 +558,6 @@ export class Engine {
             this.blockSavedFix(task, pending, staleDraftReason);
             return task;
           }
-          if (recoveredSnapshot) retainPublishedFeedback(task, recoveredSnapshot, true);
           await this.applyRepair(task, pr, repair, {
             snapshot: recoveredSnapshot,
             confirmedFix: true,
@@ -1305,7 +1307,10 @@ export class Engine {
           task.resumeState = undefined;
         }
         task.conflictCheckpoint = checkpoint;
-        if (feedback?.status === 'published' && feedback.revision.head === pr.head)
+        if (options.confirmedFix && options.snapshot?.status === 'published') {
+          task.round++;
+          retainPublishedFeedback(task, options.snapshot, true);
+        } else if (feedback?.status === 'published' && feedback.revision.head === pr.head)
           task.feedback =
             options.snapshot && carried?.revision.head === pr.head ? carried : feedback;
       }
@@ -2150,14 +2155,28 @@ export class Engine {
       !pending ||
       !head ||
       head !== pr.head ||
-      !sameRevision(task.revision, pr) ||
+      (!sameRevision(task.revision, pr) && !this.isConfirmedSavedFix(task, head)) ||
+      !samePullRequestBranches(task.pr, pr) ||
       !savedFixBaseChange(pending.revision, pr)
     )
       return;
     const check = await this.checkSavedFixForSubmission(task, pr, head);
     if (check.status === 'confirmed') {
-      pending.revision = check.original;
-      this.store.saveTask(task);
+      this.store.transaction(() => {
+        pending.revision = check.original;
+        if (!sameRevision(task.revision, pr)) {
+          task.pr = pr;
+          task.revision = revisionOf(pr);
+          task.approvedAt = undefined;
+          task.checksWaivedAt = undefined;
+          task.verifiedMerge = undefined;
+          this.store.event(task.id, 'revision.changed', {
+            revision: task.revision,
+            generation: task.generation,
+          });
+        }
+        this.store.saveTask(task);
+      });
     }
   }
 

@@ -1057,12 +1057,25 @@ describe('opt-in GitHub merging', () => {
   });
 });
 
-it.each(['review', 'reconcile then review', 'old draft', 'auto-merge disabled'] as const)(
+const savedFixReviewCases = [
+  'review',
+  'reconcile then review',
+  'old draft',
+  'published before recovery',
+  'auto-merge disabled',
+  'advanced with conflict',
+  'advanced after resume',
+  'advanced without auto-merge',
+  'rewritten base',
+  'retargeted',
+] as const;
+
+it.each(savedFixReviewCases)(
   'routes a confirmed saved fix on a conflicting revision (%s)',
   async (entry) => {
     const f = await setup();
     try {
-      const enabled = entry !== 'auto-merge disabled';
+      const enabled = entry !== 'auto-merge disabled' && entry !== 'advanced without auto-merge';
       await f.daddy.settings(f.group.id, { autoMerge: enabled });
       const task = f.store.getTask(f.task.id);
       const original = task.revision!;
@@ -1096,8 +1109,59 @@ it.each(['review', 'reconcile then review', 'old draft', 'auto-merge disabled'] 
         expect(f.store.activeJobs(task.id)).toHaveLength(0);
         await f.provider.publish(ref, staleDraft);
       }
+      const confirmed = f.store.getTask(task.id);
+      let recoveredFinding: string | undefined;
+      if (entry === 'published before recovery') {
+        const ref = prRef(task);
+        const review = await f.engine.broker.ensureReview({
+          ...confirmed,
+          round: confirmed.round + 1,
+        });
+        if (!review) throw new Error('Expected a persisted review creation');
+        const finding = await f.provider.createComment(
+          ref,
+          review,
+          'Check the changed code',
+          review.marker + ':comment:R1',
+        );
+        await f.provider.publish(ref, review);
+        recoveredFinding = finding.id;
+      }
+      const moved =
+        entry.startsWith('advanced') || entry === 'rewritten base' || entry === 'retargeted';
+      const base = moved ? 'c'.repeat(40) : original.base;
+      const targetAdvanced = vi.fn(async () => entry.startsWith('advanced'));
+      Object.assign(f.provider, { targetAdvanced });
+      if (moved)
+        f.setRemote({
+          base,
+          start: base,
+          ...(entry === 'retargeted' ? { targetBranch: 'release' } : {}),
+        });
+      if (entry === 'advanced after resume') {
+        targetAdvanced.mockResolvedValueOnce(false);
+        expect(await f.engine.review(task.id)).toMatchObject({ state: 'needs_input' });
+        expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'queued' });
+        targetAdvanced.mockClear();
+      }
       const routed = await f.engine.review(task.id, entry === 'old draft');
-      expect(routed.revision?.head).toBe(saved);
+      if (entry === 'rewritten base' || entry === 'retargeted') {
+        expect(routed.state).toBe('needs_input');
+        expect(routed.reason).toContain(saved);
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        expect(targetAdvanced).toHaveBeenCalledTimes(entry === 'rewritten base' ? 1 : 0);
+        return;
+      }
+      expect(routed.revision).toMatchObject({
+        head: saved,
+        base,
+        start: moved ? base : original.start,
+      });
+      expect(targetAdvanced).toHaveBeenCalledTimes(moved ? 1 : 0);
+      expect(
+        f.store.events(task.id).filter(({ type }) => type === 'author.submitted'),
+      ).toHaveLength(1);
+      if (recoveredFinding) expect(routed.round).toBe(confirmed.round + 1);
       if (!enabled) {
         expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
         return;
@@ -1123,10 +1187,15 @@ it.each(['review', 'reconcile then review', 'old draft', 'auto-merge disabled'] 
         async () => async () =>
           f.setRemote({ head: resolved, mergeConflict: false, mergeable: true }),
       );
-      expect(await f.engine.review(task.id)).toMatchObject({
+      const next = await f.engine.review(task.id);
+      expect(next).toMatchObject({
         state: 'reviewing',
-        review: { revision: { head: resolved } },
+        review: { revision: { head: resolved, base } },
       });
+      if (recoveredFinding) {
+        expect(next.round).toBe(confirmed.round + 2);
+        expect(next.feedback?.comments.map(({ id }) => id)).toContain(recoveredFinding);
+      }
       expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review', role: 'reviewer' }]);
     } finally {
       await f.close();
