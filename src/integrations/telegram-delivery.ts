@@ -96,13 +96,26 @@ export class TelegramDelivery {
     // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
     const row = this.store.db
       .prepare(
-        `SELECT json_extract(value,'$.options.groupId') AS groupId FROM settings
+        `SELECT json_extract(value,'$.options.groupId') AS groupId,
+      json_extract(value,'$.options.key') AS deliveryKey FROM settings
       WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
-        AND json_extract(value,'$.destination.chatId')=? AND json_extract(value,'$.options.groupId') IS NOT NULL
-        AND EXISTS(SELECT 1 FROM json_each(value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+        AND json_extract(value,'$.destination.chatId')=?
+        AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
       )
       .get(this.bot, ownerId, chatId, messageId);
-    return typeof row?.groupId === 'string' ? row.groupId : undefined;
+    if (typeof row?.groupId === 'string') return row.groupId;
+    // Receipts from older installs identify the task or turn in the delivery key.
+    const key = String(row?.deliveryKey ?? '');
+    const task = key.startsWith('telegram:question:' + ownerId + ':')
+      ? key.split(':')[3]
+      : undefined;
+    if (task) return this.store.tasks().find((t) => t.id === task)?.groupId;
+    if (key.startsWith('turn:')) {
+      const job = this.store.db
+        .prepare('SELECT group_id FROM daddy_jobs WHERE id=?')
+        .get(key.slice(5));
+      if (typeof job?.group_id === 'string') return job.group_id;
+    }
   }
   private createDelivery(
     destination: TelegramDestination,
