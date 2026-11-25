@@ -834,6 +834,13 @@ export const daddyRu: Record<string, string> = {
   'The service prepares the copies and removes them when the session is deleted.':
     'Сервис подготовит копии и удалит их вместе с сессией.',
   'Session copy ready': 'Копия для сессии готова',
+  'Copy failed': 'Ошибка копии',
+  'Deletion failed': 'Ошибка удаления',
+  'Waiting for resources': 'Ждём ресурсы',
+  'Low memory': 'Мало памяти',
+  'Low disk space': 'Мало места',
+  'Deleting session': 'Удаляю сессию',
+  'Preparing copy': 'Готовлю копию',
   'Preparing the session copy': 'Готовлю копию для сессии',
   'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
   'Error details': 'Подробности ошибки',

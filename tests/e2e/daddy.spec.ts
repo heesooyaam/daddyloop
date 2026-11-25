@@ -723,6 +723,10 @@ test('shows a full card on short screens and keeps actions available in a dense 
   await expect(page.getByRole('dialog').getByText(copyFailure)).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Escape');
   for (const viewport of [
+    { width: 375, height: 320 },
+    { width: 360, height: 360 },
+    { width: 375, height: 375 },
+    { width: 389, height: 375 },
     { width: 480, height: 320 },
     { width: 500, height: 320 },
     { width: 390, height: 390 },
@@ -737,11 +741,22 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await list.evaluate((element) => (element.scrollTop = 0));
     await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
     await expect(first).toBeInViewport({ ratio: 1 });
-    await expect(notices.getByText('Waiting for server resources')).toBeInViewport({ ratio: 1 });
+    if (viewport.width < 390 && viewport.height <= 375) {
+      for (const label of [
+        'Copy failed',
+        'Waiting for resources',
+        'Low memory',
+        'Low disk space',
+      ]) {
+        await expect(notices.getByText(label, { exact: true })).toBeInViewport({ ratio: 1 });
+      }
+    } else {
+      await expect(notices.getByText('Waiting for server resources')).toBeInViewport({ ratio: 1 });
+    }
     await expect(failedCopy.getByRole('button', { name: 'Retry', exact: true })).toBeInViewport({
       ratio: 1,
     });
-    if (viewport.width === 480) {
+    if (viewport.width === 375 && viewport.height === 320) {
       await list.hover();
       await page.mouse.wheel(0, 2200);
       await expect(cards.last()).toBeInViewport();
@@ -750,6 +765,9 @@ test('shows a full card on short screens and keeps actions available in a dense 
       await page.keyboard.press('Escape');
       await queue.click();
       await expect(page.getByRole('dialog', { name: 'Queue task' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await failedCopy.getByRole('button', { name: 'View details' }).click();
+      await expect(page.getByRole('dialog').getByText(copyFailure)).toBeVisible();
       await page.keyboard.press('Escape');
     }
   }

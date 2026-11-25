@@ -81,12 +81,14 @@ function NoticeRetry({ label, onClick }: { label: string; onClick: () => void })
 }
 function SessionMaintenanceError({
   title,
+  shortTitle,
   reason,
   retryLabel,
   onRetry,
   onDetails,
 }: {
   title: string;
+  shortTitle: string;
   reason?: string;
   retryLabel: string;
   onRetry: () => void;
@@ -96,7 +98,8 @@ function SessionMaintenanceError({
   return (
     <div className="daddy-error" role="alert">
       <div>
-        <strong>{t(title)}</strong>
+        <strong className="daddy-notice-full">{t(title)}</strong>
+        <strong className="daddy-notice-short">{t(shortTitle)}</strong>
         {reason && (
           <div className="daddy-session-error-reason" hidden={isLongDiagnostic(reason)}>
             {t(reason)}
@@ -538,6 +541,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           {preparation?.state === 'error' && (
             <SessionMaintenanceError
               title="Could not prepare the session copy"
+              shortTitle="Copy failed"
               reason={preparation.error}
               retryLabel="Retry"
               onDetails={showNoticeDetails}
@@ -547,6 +551,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           {deletion?.state === 'error' && (
             <SessionMaintenanceError
               title="Session deletion stopped; working copies were preserved"
+              shortTitle="Deletion failed"
               reason={deletion.error}
               retryLabel="Retry deletion"
               onDetails={showNoticeDetails}
@@ -555,13 +560,22 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           )}
           {resourceWait && (
             <div className="daddy-error daddy-resource-wait" role="status">
-              <div>
+              <div className="daddy-notice-full">
                 <strong>{t('Waiting for server resources')}</strong>
                 {resourceWait.reasons.length > 0 && (
                   <>
                     {' · '}
                     <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
                   </>
+                )}
+              </div>
+              <div className="daddy-notice-short">
+                <strong>{t('Waiting for resources')}</strong>
+                {resourceWait.reasons.includes('Not enough available RAM') && (
+                  <div>{t('Low memory')}</div>
+                )}
+                {resourceWait.reasons.includes('Disk-space threshold reached') && (
+                  <div>{t('Low disk space')}</div>
                 )}
               </div>
               <span className="daddy-resource-explanation">{t(resourceExplanation)}</span>
@@ -585,11 +599,16 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           )}
           {(preparing || deleting) && (
             <div className="daddy-session-progress" role="status">
-              {t(
-                deleting
-                  ? 'Saving results and removing session copies'
-                  : 'Preparing the session copy',
-              )}
+              <span className="daddy-notice-full">
+                {t(
+                  deleting
+                    ? 'Saving results and removing session copies'
+                    : 'Preparing the session copy',
+                )}
+              </span>
+              <span className="daddy-notice-short">
+                {t(deleting ? 'Deleting session' : 'Preparing copy')}
+              </span>
             </div>
           )}
         </div>
@@ -758,7 +777,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     aria-haspopup="dialog"
                     onClick={() => setModal('workers')}
                   >
-                    {t('Workers')}
+                    <Users className="daddy-board-worker-icon" size={15} aria-hidden="true" />
+                    <span className="daddy-board-worker-label">{t('Workers')}</span>
                     <span className="daddy-pool-count">
                       {board.workers.active}/{board.workers.limit}
                       {board.workers.pending && ` → ${board.workers.target}`}
