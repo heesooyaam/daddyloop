@@ -1,5 +1,6 @@
+import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
-import { GitHubQuotaError, githubWait } from '../providers/github-quota.js';
+import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
 import type { Job, ResourceStatus, Task } from '../core/types.js';
@@ -229,7 +230,7 @@ export class Worker {
           }
           if (
             task.state === 'needs_input' &&
-            task.resumeState === 'fixing' &&
+            (task.resumeState === 'fixing' || task.resumeState === 'needs_input') &&
             !task.fixingMergeConflict &&
             task.ref.provider === 'github'
           ) {
@@ -294,7 +295,9 @@ export class Worker {
       if (this.autoSubmit && resources.ok)
         for (const task of store.tasks()) {
           if (
-            ((isTicket(task) && task.state === 'ready_for_review') ||
+            ((isTicket(task) &&
+              (task.state === 'ready_for_review' ||
+                (poll && retryConfirmedSubmission(store, task)))) ||
               (poll &&
                 !isTicket(task) &&
                 task.state === 'awaiting_push' &&
@@ -324,7 +327,7 @@ export class Worker {
             await this.engine.review(task.id);
             if (this.stopped) return;
           } catch (error) {
-            if (error instanceof GitHubQuotaError) continue;
+            if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
             if (current.generation === task.generation && current.state !== 'paused') {
               current.state = 'needs_input';
@@ -347,7 +350,7 @@ export class Worker {
             await this.engine.publish(task.id);
             if (this.stopped) return;
           } catch (error) {
-            if (error instanceof GitHubQuotaError) continue;
+            if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
             if (current.generation === task.generation && current.state !== 'paused') {
               if (
@@ -653,7 +656,7 @@ export class Worker {
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }
-      let reviewQuota: GitHubQuotaError | undefined;
+      let reviewQuota: GitHubRetryError | undefined;
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
@@ -713,7 +716,7 @@ export class Worker {
           try {
             return await this.engine.broker.call(job, name, args, callId);
           } catch (error) {
-            if (job.kind === 'review' && error instanceof GitHubQuotaError) reviewQuota = error;
+            if (job.kind === 'review' && error instanceof GitHubRetryError) reviewQuota = error;
             throw error;
           }
         },
@@ -767,7 +770,7 @@ export class Worker {
         try {
           await this.engine.completeJob(job, result, saveFix);
         } catch (error) {
-          if (error instanceof GitHubQuotaError) job.deferredResult = result;
+          if (error instanceof GitHubRetryError) job.deferredResult = result;
           throw error;
         }
       }
@@ -775,7 +778,7 @@ export class Worker {
     } catch (error) {
       const capacity =
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
-      const quota = error instanceof GitHubQuotaError && !abort.signal.aborted;
+      const quota = error instanceof GitHubRetryError && !abort.signal.aborted;
       job.status = capacity || quota ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
       if (error instanceof AppError) job.errorCode = error.code;

@@ -1,4 +1,4 @@
-import { githubWait } from '../providers/github-quota.js';
+import { githubBackoff } from '../providers/github-quota.js';
 import { randomUUID } from 'node:crypto';
 import { workerSlots } from '../core/worker-pool.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
@@ -78,7 +78,7 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
       githubActivityStatus(
         task,
         autoMergeSettings(store, group, task),
-        githubWait(store, task.ref),
+        githubBackoff(store, task.ref),
       ),
     workerSlots(store, group),
   ).filter(outstandingActivity);

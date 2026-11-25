@@ -451,15 +451,18 @@ try {
   await page.getByRole('button', { name: t('Close'), exact: true }).click();
   await page
     .locator('.daddy-sidebar-bottom')
-    .getByRole('button', { name: t('Limits'), exact: false })
+    .getByRole('link', { name: t('Limits'), exact: true })
     .click();
+  const limits = page.getByRole('main');
+  await expect(limits.getByRole('heading', { name: t('Agent limits'), exact: true })).toBeVisible();
   await expect(
-    page.getByRole('dialog').getByText(t('Available resets: {count}', { count: 3 })),
+    limits.getByText(t('Available resets: {count}', { count: 3 }), { exact: true }),
   ).toBeVisible();
   await page.screenshot({ path: join(output, 'daddy-limits.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(output, 'daddy-phone-limits.png'), animations: 'disabled' });
-  await page.getByRole('button', { name: t('Close'), exact: true }).click();
+  await limits.getByRole('link', { name: t('Back to workspace'), exact: true }).click();
+  await expect(page.getByRole('heading', { name: group.title })).toBeVisible();
   await page.screenshot({ path: join(output, 'daddy-phone-chat.png'), animations: 'disabled' });
   await page
     .locator('.daddy-mobile-tabs')
@@ -557,6 +560,8 @@ try {
           'daddy-preset-library',
           'daddy-desktop',
           'daddy-models',
+          'daddy-limits',
+          'daddy-phone-limits',
           'daddy-phone-chat',
           'daddy-phone-tasks',
           ...capture.snapshots.map((s) => s.name),

@@ -1,18 +1,29 @@
 import { VoiceInput, appendDictation } from './voice-input.js';
 import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { KeyboardEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import type { KeyboardEvent, MouseEvent } from 'react';
+import { flushSync } from 'react-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
+  ArrowLeft,
   ArrowUpRight,
   Check,
   CircleCheck,
+  Info,
   Folder,
   FolderGit2,
-  HardDrive,
+  Gauge,
   GitPullRequest,
+  HardDrive,
   LoaderCircle,
   Menu,
   MessageSquare,
@@ -48,8 +59,7 @@ import { PresetLibrary } from './preset-library.js';
 import type { SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
-import { UsageStrip, UsagePanel } from './usage.js';
-import { usageSummary } from '../client/usage.js';
+import { UsageIndicator, UsagePanel } from './usage.js';
 import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
 import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
 import { profileText, taskReference, taskStatus } from '../core/task-activity.js';
@@ -67,37 +77,106 @@ function safeUrl(value: string) {
     return;
   }
 }
+const isLimitsPage = () => location.pathname === '/limits' || location.pathname === '/limits/';
+const sessionFromHash = () => (location.hash.startsWith('#session/') ? location.hash.slice(9) : '');
+const sessionFromHistory = () =>
+  (isLimitsPage() && (history.state?.limitsSessionId as string | undefined)) || sessionFromHash();
+
+function isLongDiagnostic(message: string) {
+  return message.length > 100 || /[\r\n]/.test(message);
+}
+
+function NoticeRetry({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button className="daddy-notice-retry" aria-label={label} title={label} onClick={onClick}>
+      <RefreshCw size={16} aria-hidden="true" />
+      <span>{label}</span>
+    </button>
+  );
+}
+function SessionMaintenanceError({
+  title,
+  shortTitle,
+  reason,
+  retryLabel,
+  onRetry,
+  onDetails,
+}: {
+  title: string;
+  shortTitle: string;
+  reason?: string;
+  retryLabel: string;
+  onRetry: () => void;
+  onDetails: (title: string, text: string) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="daddy-error" role="alert">
+      <div>
+        <strong className="daddy-notice-full">{t(title)}</strong>
+        <strong className="daddy-notice-short">{t(shortTitle)}</strong>
+        {reason && (
+          <div className="daddy-session-error-reason" hidden={isLongDiagnostic(reason)}>
+            {t(reason)}
+          </div>
+        )}
+      </div>
+      <div className="daddy-notice-actions">
+        {reason && (
+          <button
+            className="daddy-notice-details"
+            aria-label={t('View details')}
+            title={t('View details')}
+            onClick={() => onDetails(title, reason)}
+          >
+            <Info size={16} aria-hidden="true" />
+          </button>
+        )}
+        <NoticeRetry label={t(retryLabel)} onClick={onRetry} />
+      </div>
+    </div>
+  );
+}
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
+  const [limitsPage, setLimitsPage] = useState(isLimitsPage);
+  const chatHeading = useRef<HTMLHeadingElement>(null);
+  const limitsHeading = useRef<HTMLHeadingElement>(null);
+  const wasOnLimits = useRef(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
-  const [usageEngine, setUsageEngine] = useState<string>();
   const [newDraft, setNewDraft] = useState<NewSessionDraft>({});
   const [previewingRepository, setPreviewingRepository] = useState(false);
   const [returnToNew, setReturnToNew] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [tasksCollapsed, setTasksCollapsed] = useState(false);
-  const [model] = useState(
-    () => new DaddyClient(api, location.hash.startsWith('#session/') ? location.hash.slice(9) : ''),
-  );
+  const [deleteTarget, setDeleteTarget] =
+    useState<Pick<DaddyBoard['group'], 'id' | 'generation' | 'title'>>();
+  const formVersion = useRef(0);
+  const [model] = useState(() => new DaddyClient(api, sessionFromHistory()));
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
-  const [modal, setModal] = useState<
+  const [modal, updateModal] = useState<
       | 'new'
       | 'workspaces'
       | 'settings'
       | 'updates'
       | 'notifications'
       | 'cleanup'
-      | 'limits'
       | 'presets'
-      | 'delete'
       | 'queue-task'
       | 'workers'
       | null
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const setModal = useCallback((next: typeof modal) => {
+    formVersion.current++;
+    updateModal(next);
+  }, []);
   const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
+  const [noticeDetails, setNoticeDetails] = useState<{ title: string; text: string }>();
+  const showNoticeDetails = (title: string, text: string) => setNoticeDetails({ title, text });
+  const tasksPanel = useRef<HTMLElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const firstMenuItem = useRef<HTMLButtonElement>(null);
   const sessionSettingsButton = useRef<HTMLButtonElement>(null);
@@ -105,6 +184,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const wasMenuOpen = useRef(false);
   const [inspect, setInspect] = useState<string>(),
     chatScroll = useRef<HTMLDivElement>(null);
+  const lastScroll = useRef<{ chat: HTMLDivElement; history: string } | undefined>(undefined);
+  const chatHistory =
+    board && `${board.group.id}:${board.messages.length}:${board.messages.at(-1)?.id ?? ''}`;
   useEffect(() => {
     const media = matchMedia(sidebarMedia);
     const resize = () => {
@@ -127,17 +209,58 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   useEffect(() => {
     if (state.status?.preferences) adopt(state.status.preferences);
   }, [state.status?.preferences?.version]);
+  const sessionHash = state.selected ? `#session/${state.selected}` : '';
+  const limitsHash = limitsPage ? location.hash : sessionHash;
+  const limitsReference = limitsPage ? sessionFromHash() : '';
+  const limitsSessionId = limitsPage
+    ? ((history.state?.limitsSessionId as string | undefined) ??
+      (limitsReference &&
+      /^[a-f0-9-]{36}$/.test(state.selected) &&
+      state.selected.startsWith(limitsReference)
+        ? state.selected
+        : undefined))
+    : undefined;
+  const chatHref = limitsSessionId ? `/#session/${limitsSessionId}` : '/' + limitsHash;
+  const limitsHref = '/limits' + limitsHash;
+  useLayoutEffect(() => {
+    // Keep the original URL and pin the resolved conversation to this entry.
+    if (isLimitsPage() && limitsSessionId && !history.state?.limitsSessionId)
+      history.replaceState({ ...history.state, limitsSessionId }, '');
+  }, [limitsSessionId, limitsHash]);
   useEffect(() => {
-    history.replaceState(
-      null,
-      '',
-      state.selected ? `#session/${state.selected}` : location.pathname + location.search,
-    );
-  }, [state.selected]);
+    const syncPage = () => {
+      const id = sessionFromHistory();
+      flushSync(() => {
+        setModal(null);
+        setDeleteTarget(undefined);
+        setNoticeDetails(undefined);
+        setInspect(undefined);
+        setReturnToNew(false);
+      });
+      model.selectFromReference(id);
+      setLimitsPage(isLimitsPage());
+      setMenu(false);
+    };
+    window.addEventListener('popstate', syncPage);
+    return () => window.removeEventListener('popstate', syncPage);
+  }, [model, setModal]);
+  useEffect(() => {
+    // Keep the limits history entry tied to its original chat while a new session is selected.
+    if (!isLimitsPage() && location.hash !== sessionHash)
+      history.replaceState(history.state, '', location.pathname + location.search + sessionHash);
+  }, [sessionHash, limitsPage]);
+  useEffect(() => {
+    if (limitsPage) limitsHeading.current?.focus();
+    else if (wasOnLimits.current) chatHeading.current?.focus({ preventScroll: true });
+    wasOnLimits.current = limitsPage;
+  }, [limitsPage]);
   useEffect(() => {
     const chat = chatScroll.current;
-    if (chat) chat.scrollTo({ top: chat.scrollHeight });
-  }, [board?.messages.length, state.selected]);
+    if (limitsPage || !chatHistory || !chat?.clientHeight) return;
+    if (lastScroll.current?.chat === chat && lastScroll.current.history === chatHistory) return;
+    chat.scrollTo({ top: chat.scrollHeight });
+    lastScroll.current = { chat, history: chatHistory };
+  }, [chatHistory, limitsPage, pane]);
   const onMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!menu || !event.currentTarget.contains(event.target as Node)) return;
     if (event.key === 'Escape') {
@@ -160,10 +283,34 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       to?.focus();
     }
   };
-  const choose = (id: string) => {
-    void model.select(id);
+  const openChat = (id: string) => {
+    if (isLimitsPage()) {
+      history.pushState(null, '', `/#session/${id}`);
+      setLimitsPage(false);
+    }
     setMenu(false);
     setPane('chat');
+  };
+  const choose = (id: string) => {
+    setModal(null);
+    setNoticeDetails(undefined);
+    setReturnToNew(false);
+    openChat(id);
+    model.selectFromReference(id);
+  };
+  const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.button !== 0)
+      return;
+    event.preventDefault();
+    if (event.currentTarget.href !== location.href) {
+      setModal(null);
+      setNoticeDetails(undefined);
+      setReturnToNew(false);
+      history.pushState(null, '', event.currentTarget.href);
+      model.selectFromReference(sessionFromHistory());
+    }
+    setLimitsPage(isLimitsPage());
+    setMenu(false);
   };
   const setLanguage = async (value: 'en' | 'ru') => {
     local(value);
@@ -174,9 +321,22 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
-  const preparation = board?.group.workspacePreparation;
+  const currentFormVersion = formVersion.current;
+  const isCurrentForm = (sessionId = state.selected) =>
+    currentFormVersion === formVersion.current && model.snapshot().selected === sessionId;
+  const resourceWait = board?.group.resourceWait;
+  const resourceExplanation =
+    'The monitor has asked daddy to recover resources. Your messages and working files are saved.';
   const deletion = board?.group.deletion;
+  const preparation = deletion ? undefined : board?.group.workspacePreparation;
+  const deleting = deletion?.state === 'pending' || deletion?.state === 'running';
+  const preparing =
+    preparation?.state === 'preparing' || (preparation?.state === 'pending' && !paused);
+  const draft = state.drafts[state.selected] ?? '';
+  const messageDisabled = paused || !!deletion;
   const repository = state.overrides[state.selected];
+  const canSend =
+    !messageDisabled && !voiceBusy && modal !== 'settings' && !state.busy && !!draft.trim();
   const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
   const tasksToggleLabel = t(
     tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
@@ -187,6 +347,93 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
       (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
   );
+  const sidebarToggle = (
+    <button
+      type="button"
+      ref={menuButton}
+      className="daddy-icon mobile-menu"
+      aria-label={t('Sessions')}
+      aria-controls="daddy-sidebar"
+      aria-expanded={menu}
+      onClick={() => setMenu(!menu)}
+    >
+      <Menu size={20} />
+    </button>
+  );
+  const desktopSessionsToggle = (
+    <button
+      className="daddy-icon daddy-sessions-toggle"
+      aria-label={sessionsToggleLabel}
+      title={sessionsToggleLabel}
+      aria-controls="daddy-sidebar"
+      aria-expanded={!sessionsCollapsed}
+      onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
+    >
+      {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+    </button>
+  );
+  const firstTaskId = workItems?.[0]?.id;
+  useLayoutEffect(() => {
+    if (limitsPage) return;
+    const panel = tasksPanel.current;
+    const workspace = panel?.parentElement;
+    const main = workspace?.parentElement;
+    const topbar = main?.querySelector<HTMLElement>('.daddy-topbar');
+    const notices = main?.querySelector<HTMLElement>('.daddy-session-notices');
+    const tabs = main?.querySelector<HTMLElement>('.daddy-mobile-tabs');
+    const list = panel?.querySelector('.daddy-work-items');
+    const first = list?.querySelector('.daddy-work-item');
+    if (!panel || !workspace || !main || !topbar || !notices || !tabs || !list || !first) return;
+
+    const requiredTaskHeight = () => {
+      if (!panel.getClientRects().length) return 0;
+      const listStyle = getComputedStyle(list);
+      return Math.ceil(
+        list.getBoundingClientRect().top -
+          panel.getBoundingClientRect().top +
+          first.getBoundingClientRect().height +
+          parseFloat(listStyle.paddingTop) +
+          parseFloat(listStyle.paddingBottom) +
+          parseFloat(getComputedStyle(first).marginBottom) +
+          parseFloat(getComputedStyle(panel).paddingBottom) +
+          1,
+      );
+    };
+    const measure = () => {
+      // Always measure the single-column layout before deciding if the tasks need the side column.
+      main.removeAttribute('data-task-side');
+      let height = requiredTaskHeight();
+      const room =
+        main.clientHeight - topbar.offsetHeight - notices.offsetHeight - tabs.offsetHeight;
+      const side = pane === 'tasks' && tabs.offsetHeight > 0 && height > room;
+      main.toggleAttribute('data-task-side', side);
+      if (side) height = requiredTaskHeight();
+
+      workspace.style.setProperty('--first-task-space', height + 'px');
+      main.style.setProperty(
+        '--session-header-height',
+        Math.ceil(topbar.getBoundingClientRect().height) + 'px',
+      );
+      main.style.setProperty(
+        '--session-tabs-height',
+        Math.ceil(tabs.getBoundingClientRect().height) + 'px',
+      );
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(panel);
+    observer.observe(first);
+    for (const element of [main, topbar, notices, tabs]) observer.observe(element);
+    for (const header of panel.querySelectorAll('.daddy-board-controls, .daddy-board-heading'))
+      observer.observe(header);
+    measure();
+    return () => {
+      observer.disconnect();
+      workspace.style.removeProperty('--first-task-space');
+      main.style.removeProperty('--session-header-height');
+      main.style.removeProperty('--session-tabs-height');
+      main.removeAttribute('data-task-side');
+    };
+  }, [firstTaskId, limitsPage, pane, tasksCollapsed]);
   return (
     <div className="daddy-app">
       <aside
@@ -277,11 +524,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             <RefreshCw size={17} />
             {t('CLI updates')}
           </button>
-          <button onClick={() => setModal('limits')}>
-            <RefreshCw size={17} />
+          <a href={limitsHref} onClick={navigate} aria-current={limitsPage ? 'page' : undefined}>
+            <Gauge size={17} aria-hidden="true" />
             {t('Limits')}
-            {usageSummary(state.usage) && <span>{usageSummary(state.usage)}</span>}
-          </button>
+          </a>
           <ThemeButton showLabel />
           <div className="daddy-language">
             <select
@@ -308,38 +554,48 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           onClick={() => setMenu(false)}
         />
       )}
-      <main className="daddy-main" inert={menu}>
+      {limitsPage && (
+        <main className="daddy-main daddy-limits-page" inert={menu}>
+          <div className="daddy-limits-content">
+            <div className="daddy-limits-navigation">
+              {sidebarToggle}
+              {desktopSessionsToggle}
+              <a className="daddy-limits-back" href={chatHref} onClick={navigate}>
+                <ArrowLeft size={16} aria-hidden="true" />
+                {t('Back to workspace')}
+              </a>
+            </div>
+            <h1 ref={limitsHeading} tabIndex={-1}>
+              {t('Agent limits')}
+            </h1>
+            <UsagePanel
+              api={api}
+              overview={state.usage}
+              usageError={state.usageError}
+              onRefresh={() => model.refreshUsage(true)}
+              onConsume={model.consumeUsageReset}
+            />
+          </div>
+        </main>
+      )}
+      <main className="daddy-main" data-pane={pane} hidden={limitsPage} inert={menu}>
         <header className="daddy-topbar">
-          <button
-            ref={menuButton}
-            className="daddy-icon mobile-menu"
-            aria-label={t('Sessions')}
-            aria-controls="daddy-sidebar"
-            aria-expanded={menu}
-            onClick={() => setMenu(!menu)}
-          >
-            <Menu size={20} />
-          </button>
-          <button
-            className="daddy-icon daddy-sessions-toggle"
-            aria-label={sessionsToggleLabel}
-            title={sessionsToggleLabel}
-            aria-controls="daddy-sidebar"
-            aria-expanded={!sessionsCollapsed}
-            onClick={() => setSessionsCollapsed((collapsed) => !collapsed)}
-          >
-            {sessionsCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
-          </button>
+          {!limitsPage && sidebarToggle}
+          {!limitsPage && desktopSessionsToggle}
           <div className="daddy-title">
             <span className="daddy-eyebrow" title={board?.workspace?.name}>
               {board?.workspace?.name ?? 'daddyloop'}
             </span>
-            <h1 title={board?.group.title}>{board?.group.title ?? t('Your dashboard')}</h1>
+            <h1 ref={chatHeading} tabIndex={-1} title={board?.group.title}>
+              {board?.group.title ?? t('Your dashboard')}
+            </h1>
           </div>
           {board && (
             <div className="daddy-header-actions">
               <button
                 className="daddy-button quiet"
+                aria-label={t(paused ? 'Resume' : 'Pause')}
+                title={t(paused ? 'Resume' : 'Pause')}
                 onClick={() => void model.action(paused ? 'resume' : 'pause')}
                 disabled={state.busy || !!board.group.deletion}
               >
@@ -362,7 +618,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   disabled={
                     state.busy || (!!board.group.deletion && board.group.deletion.state !== 'error')
                   }
-                  onClick={() => setModal('delete')}
+                  onClick={() => setDeleteTarget(board.group)}
                 >
                   <Trash2 size={18} />
                 </button>
@@ -381,56 +637,120 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               {tasksCollapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
             </button>
           )}
+          {!limitsPage && (
+            <UsageIndicator
+              usage={state.usage}
+              usageError={state.usageError}
+              href={limitsHref}
+              onNavigate={navigate}
+            />
+          )}
         </header>
-        {state.error && (
-          <SessionError role="alert" error={state.error} onRetry={() => void model.refresh()} />
-        )}
-        {preparation &&
-          preparation.state !== 'ready' &&
-          !deletion &&
-          (preparation.state === 'error' ? (
-            <SessionError
+        <div
+          className="daddy-session-notices"
+          role="region"
+          aria-label={t('Session status')}
+          tabIndex={0}
+        >
+          {state.unavailableSession && (
+            <div className="daddy-error" role="alert">
+              {t('Session {id} is unavailable. Choose a session from the list.', {
+                id: state.unavailableSession,
+              })}
+            </div>
+          )}
+          {state.error && (modal !== 'workers' || !board) && (
+            <div className="daddy-error" role="alert">
+              <span className="daddy-notice-message">
+                {t(isLongDiagnostic(state.error) ? 'Request failed' : state.error)}
+              </span>
+              <div className="daddy-notice-actions">
+                <button
+                  className="daddy-notice-details"
+                  aria-label={t('View details')}
+                  title={t('View details')}
+                  onClick={() => showNoticeDetails('Session status', state.error!)}
+                >
+                  <Info size={16} aria-hidden="true" />
+                </button>
+                <NoticeRetry label={t('Retry')} onClick={() => void model.refresh()} />
+              </div>
+            </div>
+          )}
+          {preparation?.state === 'error' && (
+            <SessionMaintenanceError
               title="Could not prepare the session copy"
-              error={preparation.error}
+              shortTitle="Copy failed"
+              reason={preparation.error}
+              retryLabel="Retry"
+              onDetails={showNoticeDetails}
               onRetry={() => void model.action('resume')}
             />
-          ) : (
-            <div className="daddy-session-progress" role="status">
-              {t('Preparing the session copy')}
-            </div>
-          ))}
-        {deletion &&
-          (deletion.state === 'error' ? (
-            <SessionError
+          )}
+          {deletion?.state === 'error' && (
+            <SessionMaintenanceError
               title="Session deletion stopped; working copies were preserved"
-              error={deletion.error}
-              retry="Retry deletion"
-              onRetry={() => setModal('delete')}
+              shortTitle="Deletion failed"
+              reason={deletion.error}
+              retryLabel="Retry deletion"
+              onDetails={showNoticeDetails}
+              onRetry={() => board && setDeleteTarget(board.group)}
             />
-          ) : (
-            <div className="daddy-session-progress" role="status">
-              {t('Saving results and removing session copies')}
+          )}
+          {resourceWait && (
+            <div className="daddy-error daddy-resource-wait" role="status">
+              <div className="daddy-notice-full">
+                <strong>{t('Waiting for server resources')}</strong>
+                {resourceWait.reasons.length > 0 && (
+                  <>
+                    {' · '}
+                    <span>{resourceWait.reasons.map((reason) => t(reason)).join(' · ')}</span>
+                  </>
+                )}
+              </div>
+              <div className="daddy-notice-short">
+                <strong>{t('Awaiting resources')}</strong>
+                {resourceWait.reasons.includes('Not enough available RAM') && (
+                  <div>{t('Low memory')}</div>
+                )}
+                {resourceWait.reasons.includes('Disk-space threshold reached') && (
+                  <div>{t('Low disk space')}</div>
+                )}
+              </div>
+              <span className="daddy-resource-explanation">{t(resourceExplanation)}</span>
+              <button
+                className="daddy-notice-details"
+                aria-label={t('View details')}
+                title={t('View details')}
+                onClick={() =>
+                  showNoticeDetails(
+                    'Waiting for server resources',
+                    [
+                      ...resourceWait.reasons.map((reason) => t(reason)),
+                      t(resourceExplanation),
+                    ].join('\n'),
+                  )
+                }
+              >
+                <Info size={16} aria-hidden="true" />
+              </button>
             </div>
-          ))}
-        {board?.group.resourceWait && (
-          <div className="daddy-error" role="status">
-            <strong>{t('Waiting for server resources')}</strong>
-            <span>{board.group.resourceWait.reasons.map((reason) => t(reason)).join('; ')}</span>
-            <span>
-              {t(
-                'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-              )}
-            </span>
-          </div>
-        )}
-        <UsageStrip
-          usage={state.usage}
-          connected={state.connected}
-          onDetails={(engine) => {
-            setUsageEngine(engine);
-            setModal('limits');
-          }}
-        />
+          )}
+          {(preparing || deleting) && (
+            <div className="daddy-session-progress" role="status">
+              <span className="daddy-notice-full">
+                {t(
+                  deleting
+                    ? 'Saving results and removing session copies'
+                    : 'Preparing the session copy',
+                )}
+              </span>
+              <span className="daddy-notice-short">
+                {t(deleting ? 'Deleting session' : 'Preparing copy')}
+              </span>
+            </div>
+          )}
+        </div>
         {board ? (
           <>
             <div className="daddy-mobile-tabs">
@@ -454,7 +774,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 <span>{board.tasks.length}</span>
               </button>
             </div>
-            <div className="daddy-workspace">
+            <div className="daddy-workspace" data-pane={pane}>
               <section
                 id="daddy-chat-panel"
                 className={'daddy-conversation' + (pane === 'tasks' ? ' mobile-hidden' : '')}
@@ -508,19 +828,23 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   className="daddy-composer"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (!paused && !voiceBusy && modal !== 'settings') void model.send();
+                    if (canSend) void model.send();
                   }}
                 >
                   <textarea
                     ref={messageInput}
                     aria-label={t('Message daddy')}
-                    placeholder={t(
-                      paused
-                        ? 'Resume daddy to continue'
-                        : 'A task, a ticket, a voice note. daddy’s listening.',
-                    )}
-                    value={state.drafts[state.selected] ?? ''}
-                    disabled={paused}
+                    placeholder={
+                      deletion
+                        ? undefined
+                        : t(
+                            paused
+                              ? 'Resume daddy to continue'
+                              : 'A task, a ticket, a voice note. daddy’s listening.',
+                          )
+                    }
+                    value={draft}
+                    disabled={messageDisabled}
                     rows={3}
                     onChange={(event) => model.draft(event.target.value)}
                     onKeyDown={(event) => {
@@ -555,7 +879,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                     <VoiceInput
                       key={board.group.id}
                       onBusy={setVoiceBusy}
-                      disabled={paused}
+                      disabled={messageDisabled || limitsPage}
                       onText={(text) => {
                         const current = model.snapshot();
                         if (current.selected === board.group.id)
@@ -568,135 +892,110 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                       type="submit"
                       className="daddy-send"
                       aria-label={t('Send message')}
-                      disabled={
-                        voiceBusy ||
-                        state.busy ||
-                        paused ||
-                        modal === 'settings' ||
-                        !state.drafts[state.selected]?.trim()
-                      }
+                      disabled={!canSend}
                     >
                       <Send size={17} />
                     </button>
                   </footer>
                 </form>
-                <div className="daddy-composer-note">
-                  {t(
-                    'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
-                  )}
-                </div>
+                {!deletion && (
+                  <div className="daddy-composer-note">
+                    {t(
+                      'Enter to send · Shift+Enter for a new line · Closing this page keeps work running',
+                    )}
+                  </div>
+                )}
               </section>
               <aside
+                ref={tasksPanel}
                 id="daddy-tasks-panel"
                 className={`daddy-board${pane === 'chat' ? ' mobile-hidden' : ''}${tasksCollapsed ? ' collapsed' : ''}`}
+                aria-labelledby="daddy-task-heading"
               >
-                <div className="daddy-board-header">
-                  <div>
-                    <span className="daddy-eyebrow">{t('Your team')}</span>
-                    <h2>{t('Worker pool')}</h2>
-                  </div>
-                  <span className="daddy-pool-count">
-                    {board.workers.active}
-                    <small>/{board.workers.limit}</small>
-                  </span>
-                </div>
-                <label className="daddy-pool-control">
-                  {t('Maximum workers')}
-                  <select
-                    aria-label={t('Maximum workers')}
-                    value={board.workers.target}
-                    disabled={state.busy}
-                    onChange={(event) =>
-                      void model.action('settings', { workerLimit: Number(event.target.value) })
-                    }
-                  >
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((number) => (
-                      <option key={number} value={number}>
-                        {number}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="daddy-pool-hint" role="status">
-                  {t(
-                    board.workers.pending
-                      ? 'Pool: {limit} → {target}. Changes apply in the background.'
-                      : 'Pool: {limit}. Occupied by tasks: {occupied}.',
-                    board.workers,
-                  )}
-                </p>
                 <div className="daddy-board-controls">
-                  <button className="daddy-button outline" onClick={() => setModal('workers')}>
-                    <Users size={15} />
-                    {t('Workers')}
+                  <button
+                    className="daddy-button outline"
+                    aria-haspopup="dialog"
+                    onClick={() => setModal('workers')}
+                  >
+                    <Users className="daddy-board-worker-icon" size={15} aria-hidden="true" />
+                    <span className="daddy-board-worker-label">{t('Workers')}</span>
+                    <span className="daddy-pool-count">
+                      {board.workers.active}/{board.workers.limit}
+                      {board.workers.pending && ` → ${board.workers.target}`}
+                    </span>
                   </button>
                   <button
                     className="daddy-button primary"
+                    aria-haspopup="dialog"
+                    aria-label={t('Queue a task')}
                     onClick={() => setModal('queue-task')}
                     disabled={paused || !!board.group.deletion}
                   >
                     <Plus size={15} />
-                    {t('Queue task')}
+                    <span className="daddy-queue-full">{t('Queue a task')}</span>
+                    <span className="daddy-queue-short">{t('Queue')}</span>
                   </button>
                 </div>
-                <div className="daddy-section-label">
-                  {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                <div className="daddy-board-heading">
+                  <h2 id="daddy-task-heading">
+                    {t(board.taskQueue.length ? 'Task queue' : 'Tasks')}
+                  </h2>
                   <span>
                     {board.tasks.filter((task) => task.state === 'complete').length}/
                     {board.tasks.length}
                   </span>
                 </div>
                 <div className="daddy-work-items">
-                  {workItems?.map((task) => (
-                    <button
-                      key={task.id}
-                      className={'daddy-work-item ' + task.state}
-                      onClick={() => setInspect(task.id)}
-                    >
-                      <div>
+                  {workItems?.map((task) => {
+                    const workspaceName =
+                      state.workspaces.find((workspace) => workspace.id === task.workspaceId)
+                        ?.name ?? board.workspace?.name;
+                    return (
+                      <button
+                        key={task.id}
+                        className={'daddy-work-item ' + task.state}
+                        title={task.title}
+                        aria-haspopup="dialog"
+                        onClick={() => setInspect(task.id)}
+                      >
+                        <span className="daddy-work-heading">
+                          <strong>{task.title}</strong>
+                          <MoreHorizontal size={17} aria-hidden="true" />
+                        </span>
                         <span className="daddy-work-state">
                           {task.state === 'complete' ? (
-                            <CircleCheck size={15} />
+                            <CircleCheck size={14} aria-hidden="true" />
                           ) : task.running ? (
-                            <LoaderCircle className="spin" size={15} />
+                            <LoaderCircle className="spin" size={14} aria-hidden="true" />
                           ) : (
-                            <span className="daddy-work-dot" />
+                            <span className="daddy-work-dot" aria-hidden="true" />
                           )}
                           {t(task.statusLabel)}
                         </span>
-                        <MoreHorizontal size={17} />
-                      </div>
-                      <strong>{task.title}</strong>
-                      <code className="daddy-work-id">{taskReference(task)}</code>
-                      <footer>
-                        <span>
-                          {state.workspaces.find((workspace) => workspace.id === task.workspaceId)
-                            ?.name ?? board.workspace?.name}
+                        {task.queueDetail && (
+                          <small className="daddy-muted">{t(task.queueDetail)}</small>
+                        )}
+                        <span className="daddy-work-meta">
+                          <code>{taskReference(task)}</code>
+                          <span title={workspaceName}>{workspaceName}</span>
+                          {task.ref.kind !== 'ticket' && (
+                            <GitPullRequest size={14} aria-hidden="true" />
+                          )}
                         </span>
-                        {task.ref.kind !== 'ticket' && <GitPullRequest size={14} />}
-                      </footer>
-                      {task.dependsOn.length > 0 && (
-                        <small>
-                          {t('Prerequisites: {count}', { count: task.dependsOn.length })}
-                        </small>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                {!board.tasks.length && (
-                  <p className="daddy-empty-small">
-                    {t('The crew is ready. Give daddy something to handle.')}
-                  </p>
-                )}
-                <div className="daddy-board-bottom">
-                  <span className="daddy-avatar small">d.</span>
-                  <span>
-                    {t('One daddy. Shared context.')}
-                    <small>
-                      {board.group.daddy.model ?? t('Engine configuration')}{' '}
-                      {board.group.daddy.effort && '· ' + board.group.daddy.effort}
-                    </small>
-                  </span>
+                        {task.dependsOn.length > 0 && (
+                          <small>
+                            {t('Prerequisites: {count}', { count: task.dependsOn.length })}
+                          </small>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {!board.tasks.length && (
+                    <p className="daddy-empty-small">
+                      {t('The crew is ready. Give daddy something to handle.')}
+                    </p>
+                  )}
                 </div>
               </aside>
             </div>
@@ -751,11 +1050,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onDraft={setNewDraft}
             api={model.api}
             onCreate={async (workspaceId, message, title, repository, instructions) => {
-              await model.create(workspaceId, message, title, repository, instructions);
-              setNewDraft({});
+              const id = await model.create(workspaceId, message, title, repository, instructions, {
+                onCreated: () => setNewDraft((draft) => (draft === newDraft ? {} : draft)),
+                selectOnSuccess: isCurrentForm,
+              });
+              if (!id || !isCurrentForm(id)) return;
               setModal(null);
-              setPane('chat');
-              setMenu(false);
+              openChat(id);
             }}
           />
         </Dialog>
@@ -772,9 +1073,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <WorkspaceManager
             api={api}
             workspaces={state.workspaces}
-            onSaved={async (workspace) => {
+            onSaved={async (workspace, isCurrentEditor) => {
               await model.refresh();
-              if (returnToNew) {
+              if (returnToNew && isCurrentForm() && isCurrentEditor()) {
                 setNewDraft((draft) => ({
                   ...draft,
                   workspaceId: workspace.id,
@@ -807,16 +1108,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
-              await model.action('settings', {
-                profiles,
-                instructions,
-                autoMerge,
-                forceDaddy,
-                applyWorkers,
-              });
-              if (!model.snapshot().error) setModal(null);
+              await model.action(
+                'settings',
+                {
+                  profiles,
+                  instructions,
+                  autoMerge,
+                  forceDaddy,
+                  applyWorkers,
+                },
+                board.group.id,
+              );
+              if (isCurrentForm() && !model.snapshot().error) setModal(null);
             }}
           />
+        </Dialog>
+      )}
+      {noticeDetails && (
+        <Dialog title={t(noticeDetails.title)} onClose={() => setNoticeDetails(undefined)}>
+          <p className="daddy-notice-detail-text">{t(noticeDetails.text)}</p>
         </Dialog>
       )}
       {modal === 'queue-task' && board && (
@@ -826,8 +1136,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onQueued={(taskId) => {
-              setModal(null);
-              setInspect(taskId);
+              if (isCurrentForm()) {
+                setModal(null);
+                setInspect(taskId);
+              }
               void model.refresh();
             }}
           />
@@ -835,10 +1147,17 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {modal === 'workers' && board && (
         <Dialog title={t('Workers')} onClose={() => setModal(null)}>
+          {state.error && (
+            <p className="daddy-field-error" role="alert">
+              {t(state.error)}
+            </p>
+          )}
           <WorkerControls
             key={board.group.id}
             api={api}
             board={board}
+            busy={state.busy}
+            onLimitChange={(workerLimit) => void model.action('settings', { workerLimit })}
             onChange={() => model.refresh()}
           />
         </Dialog>
@@ -848,10 +1167,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
           <PresetLibrary api={api} />
         </Dialog>
       )}
-      {modal === 'delete' && board && (
-        <Dialog title={t('Delete session')} onClose={() => setModal(null)}>
+      {deleteTarget && deleteTarget.id === state.selected && (
+        <Dialog title={t('Delete session')} onClose={() => setDeleteTarget(undefined)}>
           <p>
-            <strong>{board.group.title}</strong>
+            <strong>{deleteTarget.title}</strong>
           </p>
           <p>
             {t(
@@ -859,14 +1178,18 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             )}
           </p>
           <div className="daddy-actions">
-            <button className="daddy-button quiet" onClick={() => setModal(null)}>
+            <button className="daddy-button quiet" onClick={() => setDeleteTarget(undefined)}>
               {t('Cancel')}
             </button>
             <button
               className="daddy-button danger"
               onClick={() => {
-                void model.action('delete', { expectedGeneration: board.group.generation });
-                setModal(null);
+                void model.action(
+                  'delete',
+                  { expectedGeneration: deleteTarget.generation },
+                  deleteTarget.id,
+                );
+                setDeleteTarget(undefined);
               }}
             >
               {t('Delete session')}
@@ -877,11 +1200,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       {modal === 'updates' && (
         <Dialog title={t('CLI updates')} onClose={() => setModal(null)}>
           <UpdatesPanel api={api} />
-        </Dialog>
-      )}
-      {modal === 'limits' && (
-        <Dialog title={t('Limits')} onClose={() => setModal(null)}>
-          <UsagePanel api={model.api} onUpdate={model.setUsage} initialEngine={usageEngine} />
         </Dialog>
       )}
       {modal === 'cleanup' && (
@@ -923,43 +1241,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     </div>
   );
 }
-function SessionError({
-  title,
-  error = '',
-  role = 'status',
-  retry = 'Retry',
-  onRetry,
-}: {
-  title?: string;
-  error?: string;
-  role?: 'alert' | 'status';
-  retry?: string;
-  onRetry: () => void;
-}) {
-  const { t } = useLocale();
-  const reason = t(error);
-  const showDetails = reason.length > 100 || /[\r\n]/.test(reason);
-  const heading = title ? t(title) : showDetails ? t('Request failed') : reason;
-  return (
-    <div className="daddy-error" role={role}>
-      <div className="daddy-error-heading">
-        <span>{heading}</span>
-        <button type="button" onClick={onRetry}>
-          {t(retry)}
-        </button>
-      </div>
-      {showDetails ? (
-        <details key={error} className="daddy-error-details">
-          <summary>{t('Error details')}</summary>
-          <pre>{reason}</pre>
-        </details>
-      ) : (
-        title && reason && <span>{reason}</span>
-      )}
-    </div>
-  );
-}
-
 interface NewSessionDraft {
   instructions?: SessionInstructions;
   workspaceId?: string;
@@ -1107,7 +1388,7 @@ function WorkspaceManager({
 }: {
   api: DaddyApi;
   workspaces: Workspace[];
-  onSaved: (workspace: Workspace) => Promise<void>;
+  onSaved: (workspace: Workspace, isCurrentEditor: () => boolean) => Promise<void>;
 }) {
   const { t } = useLocale();
   const [suggestions, setSuggestions] = useState<{ name: string; path: string }[]>([]);
@@ -1122,7 +1403,9 @@ function WorkspaceManager({
   const [copyMode, setCopyMode] = useState<Workspace['copyMode']>();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const editorVersion = useRef(0);
   const create = (path = '') => {
+    editorVersion.current++;
     setEditing(undefined);
     setName(path.split('/').at(-1) ?? '');
     setPath(path);
@@ -1147,6 +1430,8 @@ function WorkspaceManager({
   }, [api]);
   const save = async () => {
     if (busy || picking) return;
+    const submittedEditor = editorVersion.current;
+    const isCurrentEditor = () => submittedEditor === editorVersion.current;
     setBusy(true);
     setError('');
     try {
@@ -1161,11 +1446,13 @@ function WorkspaceManager({
           ...(base ? { base } : {}),
         },
       );
-      await onSaved(saved);
-      setShowForm(false);
-      setPicking(false);
+      await onSaved(saved, isCurrentEditor);
+      if (isCurrentEditor()) {
+        setShowForm(false);
+        setPicking(false);
+      }
     } catch (error) {
-      setError((error as Error).message);
+      if (isCurrentEditor()) setError((error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1186,6 +1473,7 @@ function WorkspaceManager({
               }
               aria-label={t('Edit workspace {name}', { name: workspace.name })}
               onClick={() => {
+                editorVersion.current++;
                 setEditing(workspace.id);
                 setName(workspace.name);
                 setPath(workspace.repoPath);
@@ -1240,6 +1528,7 @@ function WorkspaceManager({
               type="button"
               className="daddy-text-button"
               onClick={() => {
+                editorVersion.current++;
                 setShowForm(false);
                 setPicking(false);
               }}

@@ -4,14 +4,27 @@ import { AppError, type Task } from '../core/types.js';
 type Limit = { until: number; delay: number };
 const minute = 60_000;
 
-export class GitHubQuotaError extends AppError {
+export class GitHubRetryError extends AppError {
   constructor(
+    code: string,
+    message: string,
     readonly until: number,
-    readonly refusedWrite = false,
+    readonly refusedWrite: boolean,
+    status: number,
   ) {
+    super(code, message, status);
+  }
+  beforeWrite() {
+    return new GitHubRetryError(this.code, this.message, this.until, true, this.statusCode);
+  }
+}
+export class GitHubQuotaError extends GitHubRetryError {
+  constructor(until: number, refusedWrite = false) {
     super(
       'github_rate_limit',
       `GitHub API quota is unavailable until ${new Date(until).toISOString()}`,
+      until,
+      refusedWrite,
       429,
     );
   }
@@ -36,12 +49,20 @@ export function legacyQuotaRead(error?: string) {
 }
 
 const key = (host: string) => 'github.quota:' + host;
-export function githubWait(store: Store, ref: Task['ref']) {
+type ReadBackoff = Limit & { status?: number };
+const readKey = (host: string) => 'github.read-backoff:' + host;
+export function githubBackoff(store: Store, ref: Pick<Task['ref'], 'provider' | 'host'>) {
   if (ref.provider !== 'github') return;
-  const until = store.setting<Limit>(key(ref.host))?.until;
-  return until && until > Date.now() ? until : undefined;
+  const quota = store.setting<Limit>(key(ref.host));
+  const read = store.setting<ReadBackoff>(readKey(ref.host));
+  const now = Date.now();
+  if (read && read.until > now && (!quota || read.until > quota.until))
+    return { kind: 'read' as const, ...read };
+  if (quota && quota.until > now) return { kind: 'quota' as const, ...quota };
 }
-
+export function githubWait(store: Store, ref: Task['ref']) {
+  return githubBackoff(store, ref)?.until;
+}
 // All GitHub PR clients of one installation share its configured account for this host.
 export class GitHubQuota {
   constructor(
@@ -49,11 +70,43 @@ export class GitHubQuota {
     private host: string,
   ) {}
   check(method: string) {
-    const limit = this.store.setting<Limit>(key(this.host));
-    if (limit && limit.until > Date.now())
-      throw new GitHubQuotaError(limit.until, method !== 'GET');
+    const limit = githubBackoff(this.store, { provider: 'github', host: this.host });
+    if (!limit) return;
+    if (limit.kind === 'quota') throw new GitHubQuotaError(limit.until, method !== 'GET');
+    throw this.readError(limit, method !== 'GET');
+  }
+  private readError(wait: ReadBackoff, refusedWrite: boolean) {
+    return new GitHubRetryError(
+      'github_read_unavailable',
+      `GitHub read failed (${wait.status ? 'HTTP ' + wait.status : 'connection failure'}). Retrying at ${new Date(wait.until).toISOString()}.`,
+      wait.until,
+      refusedWrite,
+      503,
+    );
+  }
+  unavailable(method: string, status?: number, retryAfter?: string | null) {
+    if (method !== 'GET') return;
+    const previous = this.store.setting<ReadBackoff>(readKey(this.host)),
+      now = Date.now();
+    const delay =
+      previous && now - previous.until < 10 * minute
+        ? Math.min(5 * minute, previous.until > now ? previous.delay : previous.delay * 2)
+        : 15000;
+    const specified =
+      retryAfter && /^\d+$/.test(retryAfter)
+        ? now + Number(retryAfter) * 1000
+        : Date.parse(retryAfter ?? '');
+    const until = Math.max(
+      previous && previous.until > now ? previous.until : now + delay,
+      Number.isFinite(specified) ? specified : 0,
+    );
+    const wait = { until, delay, status };
+    this.store.setSetting(readKey(this.host), wait);
+    throw this.readError(wait, false);
   }
   observe(response: Response, method: string, body: string) {
+    if ([408, 500, 502, 503, 504].includes(response.status))
+      this.unavailable(method, response.status, response.headers.get('retry-after'));
     if (response.status !== 403 && response.status !== 429) return;
     const headers = response.headers;
     let message = '';

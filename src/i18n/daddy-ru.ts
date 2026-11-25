@@ -194,22 +194,26 @@ export const daddyRu: Record<string, string> = {
   'Starting branch (advanced)': 'Начальная ветка — дополнительная настройка',
   'Your dashboard': 'Рабочий стол',
   'No sessions yet. Give daddy the first task.': 'Пока тихо. Кидай папочке первую задачу.',
-  'View {provider} limits': 'Лимиты {provider}',
-  'Usage details for {provider}': 'Подробнее о лимитах {provider}',
-  'Remaining quota': 'Остаток квоты',
-  'Account balance': 'Баланс аккаунта',
   'No quota readings yet': 'Нет данных о лимитах',
-  'Details: {provider}, {window}': 'Подробнее: {provider}, {window}',
+  'Session {id} is unavailable. Choose a session from the list.':
+    'Сессия {id} недоступна. Выберите сессию из списка.',
+  'Session {id} is unavailable. Choose a session with Ctrl+T.':
+    'Сессия {id} недоступна. Нажмите Ctrl+T, чтобы выбрать сессию.',
+  'Ctrl+T sessions · Ctrl+J newline · /help · Ctrl+Q exit':
+    'Ctrl+T — сессии · Ctrl+J — новая строка · /help · Ctrl+Q — выход',
+  'Refresh limits for this provider before confirming the reset.':
+    'Обновите лимиты этого провайдера перед подтверждением сброса.',
+  'Reading agent limits…': 'Загружаем лимиты агентов…',
+  'Could not read agent limits: {reason}': 'Не удалось загрузить лимиты агентов: {reason}',
+  'Failed to fetch': 'Не удалось связаться с сервером',
   'No reading': 'Нет данных',
-  '{remaining}% left': '{remaining}% осталось',
-  'About {provider} credits': 'О кредитах {provider}',
   'Additional credits': 'Дополнительные кредиты',
   'Provider credits': 'Кредиты провайдера',
-  Unlimited: 'Без ограничений',
-  'Separate from quota percentages': 'Отдельно от квот в процентах',
-  'View details': 'Подробнее',
   'Agent limits': 'Лимиты агентов',
-  'Readings reported by providers': 'Данные провайдеров',
+  'Agent limit details': 'Подробности о лимитах агентов',
+  'Open limits page': 'Открыть страницу лимитов',
+  'View details': 'Подробнее',
+  'Back to workspace': 'К рабочему столу',
   'These limits belong to the {provider} account connected on this server. daddy and its workers use this account together.':
     'Это лимиты аккаунта {provider}, в который выполнен вход на этом сервере. Папочка и воркеры расходуют их вместе.',
   'Percentages show how much of each quota is left. Each period renews at its own time.':
@@ -382,6 +386,8 @@ export const daddyRu: Record<string, string> = {
   'Close menu': 'Закрыть меню',
   'What are we building?': 'Что будем делать?',
   'Session settings': 'Настройки сессии',
+  'Session overview': 'Сведения о сессии',
+  'Session status': 'Состояние сессии',
   'Conversation with daddy': 'Разговор с daddy',
   'Leave the job with daddy. I’ll get it moving and check the result myself.':
     'Оставь дело папочке. Запущу работу и сам проверю результат.',
@@ -516,6 +522,7 @@ export const daddyRu: Record<string, string> = {
   'Voice recognition is busy. Try again shortly.':
     'Распознаватель занят. Попробуй ещё раз чуть позже.',
   'Session owner': 'Владелец сессии',
+  'Reminder: your reply is still needed': 'Напоминание: всё ещё нужен твой ответ',
   'Your reply is needed': 'Нужен твой ответ',
   'The target branch advanced. Continuing the published feedback on the same PR commit.':
     'Целевая ветка обновилась. Воркер продолжает исправлять опубликованные замечания на том же коммите PR.',
@@ -626,6 +633,20 @@ export const daddyRu: Record<string, string> = {
     'Независимое ревью продолжается на проверенном коммите PR',
   'Publishing recorded findings from an incomplete review':
     'Публикует готовые замечания незавершённого ревью',
+  'Continuing the fix with the answer from the session':
+    'Воркер продолжает исправление с ответом из сессии',
+  'Waiting for your answer': 'Ждёт твоего ответа',
+  'The PR already exists. daddy will connect it automatically.':
+    'PR уже создан. daddy привяжет его автоматически.',
+  'Checking GitHub for the result of the previous PR creation':
+    'daddy проверяет, создался ли PR при прошлой попытке',
+  'GitHub · retry at {time} UTC': 'GitHub · повтор в {time} UTC',
+  'PR #{number} · GitHub {failure} · retry at {time} UTC':
+    'PR #{number} · GitHub {failure} · повтор в {time} UTC',
+  'Waiting to retry the connection to the existing PR':
+    'Автоматически повторит привязку созданного PR',
+  'PR #{number} · retry at {time} UTC': 'PR #{number} · повтор в {time} UTC',
+  'GitHub {failure} · retry at {time} UTC': 'GitHub {failure} · повтор в {time} UTC',
   'Checking the GitHub draft': 'Сверяет черновик с GitHub',
   'Waiting to confirm the GitHub draft or its target branch before restarting review.':
     'daddy сверяет незавершённую операцию GitHub и целевую ветку перед повторным ревью.',
@@ -660,6 +681,8 @@ export const daddyRu: Record<string, string> = {
   'This worker has changed tasks. Open its settings again.':
     'Воркер уже сменил задачу. Открой его настройки заново.',
   'Queue task': 'Поставить в очередь',
+  Queue: 'В очередь',
+  'Queue a task': 'В очередь',
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',
@@ -817,14 +840,10 @@ export const daddyRu: Record<string, string> = {
   Midnight: 'Полночь',
   Forest: 'Хвоя',
   Plum: 'Слива',
-  'Current usage': 'Текущий usage',
-  'Last known usage': 'Последние данные',
-  'Included usage is blocked': 'Codex ограничил использование',
-  'Reading usage…': 'Смотрю лимиты…',
+  'Last known usage': 'Данные устарели',
   'Usage unavailable': 'Usage недоступен',
   'Usage details and resets': 'Подробности usage и сбросы',
   'Resets: unknown': 'Сбросы: нет данных',
-  'Resets available: {count}': 'Сбросов: {count}',
   'Details and reset': 'Подробнее и сброс',
   Guides: 'Инструкции',
   'Open the site from your computer or phone': 'Как подключить компьютер или телефон',
@@ -845,6 +864,13 @@ export const daddyRu: Record<string, string> = {
   'The service prepares the copies and removes them when the session is deleted.':
     'Сервис подготовит копии и удалит их вместе с сессией.',
   'Session copy ready': 'Копия для сессии готова',
+  'Copy failed': 'Ошибка копии',
+  'Deletion failed': 'Ошибка удаления',
+  'Awaiting resources': 'Ждём ресурсы',
+  'Low memory': 'Мало памяти',
+  'Low disk space': 'Мало места',
+  'Deleting session': 'Удаляю сессию',
+  'Preparing copy': 'Готовлю копию',
   'Preparing the session copy': 'Готовлю копию для сессии',
   'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
   'Error details': 'Подробности ошибки',
