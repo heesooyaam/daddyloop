@@ -562,6 +562,7 @@ test('shows a full card on short screens and keeps actions available in a dense 
   let constrained = false;
   let copyFailed = false;
   let deletionFailed = false;
+  let visibleTaskCount: number | undefined;
   const copyFailure = 'The session copy could not be written';
   const longStatus = 'Waiting for GitHub to confirm the previous merge request';
   await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
@@ -573,6 +574,14 @@ test('shows a full card on short screens and keeps actions available in a dense 
       dependsOn: [prerequisite.id],
       ...(constrained || deletionFailed ? { statusLabel: longStatus } : {}),
     }));
+    const ordered = [...tasks.slice(0, -1), prerequisite, tasks.at(-1)!];
+    const visibleTasks =
+      visibleTaskCount === undefined
+        ? ordered
+        : Array.from({ length: visibleTaskCount }, (_, index) => {
+            const task = ordered[index % ordered.length]!;
+            return index < ordered.length ? task : { ...task, id: task.id + '-extra-' + index };
+          });
     await route.fulfill({
       response,
       json: {
@@ -596,7 +605,7 @@ test('shows a full card on short screens and keeps actions available in a dense 
               }
             : {}),
         },
-        tasks: [...tasks.slice(0, -1), prerequisite, tasks.at(-1)!],
+        tasks: visibleTasks,
         taskQueue: [],
       } satisfies DaddyBoard,
     });
@@ -729,6 +738,9 @@ test('shows a full card on short screens and keeps actions available in a dense 
     { width: 375, height: 320 },
     { width: 360, height: 360 },
     { width: 375, height: 375 },
+    { width: 375, height: 376 },
+    { width: 359, height: 320 },
+    { width: 320, height: 320 },
     { width: 389, height: 375 },
     { width: 480, height: 320 },
     { width: 500, height: 320 },
@@ -744,13 +756,8 @@ test('shows a full card on short screens and keeps actions available in a dense 
     await list.evaluate((element) => (element.scrollTop = 0));
     await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
     await expect(first).toBeInViewport({ ratio: 1 });
-    if (viewport.width < 390 && viewport.height <= 375) {
-      for (const label of [
-        'Copy failed',
-        'Waiting for resources',
-        'Low memory',
-        'Low disk space',
-      ]) {
+    if ((await page.locator('.daddy-main').getAttribute('data-task-side')) !== null) {
+      for (const label of ['Copy failed', 'Awaiting resources', 'Low memory', 'Low disk space']) {
         await expect(notices.getByText(label, { exact: true })).toBeInViewport({ ratio: 1 });
       }
     } else {
@@ -792,6 +799,41 @@ test('shows a full card on short screens and keeps actions available in a dense 
   await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
   await expect(first).toBeInViewport({ ratio: 1 });
   await expect(retryDeletion).toBeInViewport({ ratio: 1 });
+
+  deletionFailed = false;
+  constrained = true;
+  const tasksTab = page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ });
+  const counter = tasksTab.locator('span');
+  for (const count of [1, 12, 128]) {
+    visibleTaskCount = count;
+    await expect(counter).toHaveText(String(count));
+    for (const viewport of [
+      { width: 375, height: 320 },
+      { width: 390, height: 425 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.locator('.daddy-main').evaluate((element) => (element.scrollTop = 0));
+      await expect(counter).toBeInViewport({ ratio: 1 });
+      const hits = await counter.evaluate((element) => {
+        const tab = element.closest('button')!;
+        const text = element.firstChild!;
+        return Array.from(element.textContent!).map((_, index) => {
+          const range = document.createRange();
+          range.setStart(text, index);
+          range.setEnd(text, index + 1);
+          const rect = range.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          return { x, y, hitsTab: tab.contains(document.elementFromPoint(x, y)) };
+        });
+      });
+      expect(hits.every((hit) => hit.hitsTab)).toBe(true);
+      const lastDigit = hits.at(-1)!;
+      await page.mouse.click(lastDigit.x, lastDigit.y);
+      await expect(tasksTab).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    }
+  }
 });
 test('shows message send errors without scrolling on short screens', async ({ page }) => {
   const message = 'The server is temporarily unavailable';

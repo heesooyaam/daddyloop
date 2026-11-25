@@ -662,6 +662,7 @@ export const daddyRu: Record<string, string> = {
   'This worker has changed tasks. Open its settings again.':
     'Воркер уже сменил задачу. Открой его настройки заново.',
   'Queue task': 'Поставить в очередь',
+  Queue: 'В очередь',
   'Queue a task': 'В очередь',
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
@@ -850,7 +851,7 @@ export const daddyRu: Record<string, string> = {
   'Session copy ready': 'Копия для сессии готова',
   'Copy failed': 'Ошибка копии',
   'Deletion failed': 'Ошибка удаления',
-  'Waiting for resources': 'Ждём ресурсы',
+  'Awaiting resources': 'Ждём ресурсы',
   'Low memory': 'Мало памяти',
   'Low disk space': 'Мало места',
   'Deleting session': 'Удаляю сессию',

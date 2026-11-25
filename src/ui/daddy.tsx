@@ -280,30 +280,44 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     )
       return;
 
-    const measure = () => {
+    const requiredTaskHeight = () => {
+      if (!panel.getClientRects().length) return 0;
       const listStyle = getComputedStyle(list);
-      const height = panel.getClientRects().length
-        ? list.getBoundingClientRect().top -
+      return Math.ceil(
+        list.getBoundingClientRect().top -
           panel.getBoundingClientRect().top +
           first.getBoundingClientRect().height +
           parseFloat(listStyle.paddingTop) +
           parseFloat(listStyle.paddingBottom) +
           parseFloat(getComputedStyle(first).marginBottom) +
           parseFloat(getComputedStyle(panel).paddingBottom) +
-          1
-        : 0;
-      workspace.style.setProperty('--first-task-space', Math.ceil(height) + 'px');
+          1,
+      );
+    };
+    const measure = () => {
+      // Always measure the single-column layout before deciding if the tasks need the side column.
+      main.removeAttribute('data-task-side');
+      let height = requiredTaskHeight();
+      const room =
+        main.clientHeight - topbar.offsetHeight - notices.offsetHeight - tabs.offsetHeight;
+      const side = pane === 'tasks' && tabs.offsetHeight > 0 && height > room;
+      main.toggleAttribute('data-task-side', side);
+      if (side) height = requiredTaskHeight();
+
+      workspace.style.setProperty('--first-task-space', height + 'px');
       main.style.setProperty(
         '--session-header-height',
         Math.ceil(topbar.getBoundingClientRect().height) + 'px',
       );
-      const room =
-        main.clientHeight - topbar.offsetHeight - notices.offsetHeight - tabs.offsetHeight;
+      main.style.setProperty(
+        '--session-tabs-height',
+        Math.ceil(tabs.getBoundingClientRect().height) + 'px',
+      );
       main.toggleAttribute(
         'data-task-first',
         height > 0 &&
           getComputedStyle(main).display === 'flex' &&
-          Math.ceil(height) + parseFloat(getComputedStyle(overview).minBlockSize) > room,
+          height + parseFloat(getComputedStyle(overview).minBlockSize) > room,
       );
     };
     const observer = new ResizeObserver(measure);
@@ -317,7 +331,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       observer.disconnect();
       workspace.style.removeProperty('--first-task-space');
       main.style.removeProperty('--session-header-height');
+      main.style.removeProperty('--session-tabs-height');
       main.removeAttribute('data-task-first');
+      main.removeAttribute('data-task-side');
     };
   }, [firstTaskId, pane, tasksCollapsed]);
   return (
@@ -573,7 +589,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 )}
               </div>
               <div className="daddy-notice-short">
-                <strong>{t('Waiting for resources')}</strong>
+                <strong>{t('Awaiting resources')}</strong>
                 {resourceWait.reasons.includes('Not enough available RAM') && (
                   <div>{t('Low memory')}</div>
                 )}
@@ -802,11 +818,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   <button
                     className="daddy-button primary"
                     aria-haspopup="dialog"
+                    aria-label={t('Queue a task')}
                     onClick={() => setModal('queue-task')}
                     disabled={paused || !!board.group.deletion}
                   >
                     <Plus size={15} />
-                    {t('Queue a task')}
+                    <span className="daddy-queue-full">{t('Queue a task')}</span>
+                    <span className="daddy-queue-short">{t('Queue')}</span>
                   </button>
                 </div>
                 <div className="daddy-board-heading">
