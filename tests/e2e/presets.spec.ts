@@ -53,10 +53,37 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   await page.getByLabel('Session name (optional)').fill('Preset session fixture');
   await page.getByRole('button', { name: 'Start session', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Preset session fixture' })).toBeVisible();
-  const first = await board(page),
-    selected = first.group.instructions.presets;
+  const first = await board(page);
+  let selected = first.group.instructions.presets;
   expect(selected).toHaveLength(2);
   expect(selected[0].omit).toEqual(['worker:prompt']);
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  await settings.getByText('Style and skills for this session', { exact: true }).click();
+  await settings.getByRole('button', { name: 'Add presets', exact: true }).click();
+  await settings
+    .getByRole('button', {
+      name: 'Remove preset Brief fixture from this session',
+      exact: true,
+    })
+    .click();
+  await settings.getByRole('checkbox', { name: 'Use preset Brief fixture', exact: true }).check();
+  await expect(
+    settings.locator('.daddy-preset-choice strong').filter({ hasText: /Brief|Careful/ }),
+  ).toHaveText(['Careful fixture', 'Brief fixture']);
+  await settings.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(settings).toHaveCount(0);
+  selected = (await board(page)).group.instructions.presets;
+  expect(selected.map((entry: any) => entry.preset.name)).toEqual([
+    'Careful fixture',
+    'Brief fixture',
+  ]);
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  await settings.getByText('Style and skills for this session', { exact: true }).click();
+  await expect(
+    settings.locator('.daddy-preset-choice strong').filter({ hasText: /Brief|Careful/ }),
+  ).toHaveText(['Careful fixture', 'Brief fixture']);
+  await settings.getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'Presets', exact: true }).click();
   await page.getByRole('button', { name: 'Edit preset Brief fixture', exact: true }).click();
   await page.getByRole('button', { name: 'daddy', exact: true }).click();

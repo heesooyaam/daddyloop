@@ -1895,13 +1895,34 @@ function SessionSettings({
         const originalPresets = new Map(
             (before.presets ?? []).map((preset) => [preset.preset.id, preset]),
           ),
-          nextPresets = new Map((after.presets ?? []).map((preset) => [preset.preset.id, preset]));
+          nextPresets = new Map((after.presets ?? []).map((preset) => [preset.preset.id, preset])),
+          presetSelection = (value: NonNullable<SessionInstructions['presets']>[number] | null) =>
+            value
+              ? {
+                  revision: value.preset.revision,
+                  enabled: value.enabled,
+                  omit: value.omit,
+                }
+              : null;
         for (const id of new Set([...originalPresets.keys(), ...nextPresets.keys()])) {
           const original = originalPresets.get(id) ?? null,
             next = nextPresets.get(id) ?? null;
           if (JSON.stringify(original) !== JSON.stringify(next))
-            instructionChanges.push({ target: 'preset', id, before: original, after: next });
+            instructionChanges.push({
+              target: 'preset',
+              id,
+              before: presetSelection(original),
+              after: presetSelection(next),
+            });
         }
+        const originalOrder = (before.presets ?? []).map((preset) => preset.preset.id),
+          nextOrder = (after.presets ?? []).map((preset) => preset.preset.id);
+        if (JSON.stringify(originalOrder) !== JSON.stringify(nextOrder))
+          instructionChanges.push({
+            target: 'preset-order',
+            before: originalOrder,
+            after: nextOrder,
+          });
         void onSave(
           Object.keys(changed).length ? changed : undefined,
           !fullInstructionImport && instructionChanges.length ? instructionChanges : undefined,

@@ -112,22 +112,28 @@ const skillsChangeSchema = z
     after: z.array(skillSnapshotSchema).max(12),
   })
   .strict();
+const presetSelectionSchema = z
+  .object({
+    revision: z.number().int().positive(),
+    enabled: z.boolean(),
+    omit: z.array(z.string().max(100)).max(26),
+  })
+  .strict();
 const presetChangeSchema = z
   .object({
     target: z.literal('preset'),
     id: z.string().uuid(),
-    before: appliedPresetSchema.nullable(),
-    after: appliedPresetSchema.nullable(),
+    before: presetSelectionSchema.nullable(),
+    after: presetSelectionSchema.nullable(),
   })
-  .strict()
-  .refine(
-    (change) => change.before?.preset.id === change.id || change.before === null,
-    'The original preset ID does not match the target',
-  )
-  .refine(
-    (change) => change.after?.preset.id === change.id || change.after === null,
-    'The updated preset ID does not match the target',
-  );
+  .strict();
+const presetOrderChangeSchema = z
+  .object({
+    target: z.literal('preset-order'),
+    before: z.array(z.string().uuid()).max(16),
+    after: z.array(z.string().uuid()).max(16),
+  })
+  .strict();
 export const sessionInstructionChangesSchema = z
   .object({
     changes: z
@@ -136,10 +142,11 @@ export const sessionInstructionChangesSchema = z
           promptChangeSchema,
           skillsChangeSchema,
           presetChangeSchema,
+          presetOrderChangeSchema,
         ]),
       )
       .min(1)
-      .max(20),
+      .max(40),
   })
   .strict()
   .superRefine((value, context) => {
@@ -160,28 +167,51 @@ const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JS
 export function applyInstructionChanges(
   current: SessionInstructions | undefined,
   changes: SessionInstructionChange[],
+  resolvePreset: (id: string, revision: number) => InstructionPreset,
 ): SessionInstructions {
   const next = structuredClone(current ?? { daddy: {}, worker: {} });
+  const selection = (entry: AppliedPreset | undefined) =>
+    entry
+      ? {
+          revision: entry.preset.revision,
+          enabled: entry.enabled,
+          omit: entry.omit,
+        }
+      : null;
   const value = (change: SessionInstructionChange) => {
     if (change.target === 'preset')
-      return next.presets?.find((entry) => entry.preset.id === change.id) ?? null;
+      return selection(next.presets?.find((entry) => entry.preset.id === change.id));
+    if (change.target === 'preset-order')
+      return (next.presets ?? []).map((entry) => entry.preset.id);
     const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
-  for (const change of changes) {
+  for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
       throw new Error('instruction_conflict');
   }
-  for (const change of changes) {
+  for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     if (sameValue(value(change), change.after)) continue;
     if (change.target === 'preset') {
       const presets = next.presets ?? [],
         index = presets.findIndex((entry) => entry.preset.id === change.id);
       if (change.after === null) {
         if (index >= 0) presets.splice(index, 1);
-      } else if (index >= 0) presets[index] = change.after;
-      else presets.push(change.after);
+      } else {
+        const existing = index >= 0 ? presets[index] : undefined;
+        const preset =
+          existing?.preset.revision === change.after.revision
+            ? existing.preset
+            : resolvePreset(change.id, change.after.revision);
+        const selected = {
+          preset,
+          enabled: change.after.enabled,
+          omit: change.after.omit,
+        };
+        if (index >= 0) presets[index] = selected;
+        else presets.push(selected);
+      }
       if (presets.length) next.presets = presets;
       else delete next.presets;
       continue;
@@ -193,6 +223,14 @@ export function applyInstructionChanges(
     } else if ((change.after as SkillSnapshot[]).length)
       next[role].skills = change.after as SkillSnapshot[];
     else delete next[role].skills;
+  }
+  const order = changes.find((change) => change.target === 'preset-order');
+  if (order && !sameValue(value(order), order.after)) {
+    const presets = next.presets ?? [],
+      byId = new Map(presets.map((entry) => [entry.preset.id, entry]));
+    if (order.after.length !== presets.length || order.after.some((id) => !byId.has(id)))
+      throw new Error('instruction_conflict');
+    next.presets = order.after.map((id) => byId.get(id)!);
   }
   return sessionInstructionsSchema.parse(next);
 }

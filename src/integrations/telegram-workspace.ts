@@ -2180,6 +2180,9 @@ export class TelegramWorkspace {
         id: choice.inputId,
         choice,
       });
+    const preview = choice.input
+      ? await this.daddy.workspaces.selection(choice.workspace, choice.input)
+      : choice.workspace;
     this.store.db
       .prepare(
         "DELETE FROM settings WHERE key LIKE 'telegram.repo:%' AND (value='null' OR json_extract(value,'$.expiresAt') <= ?)",
@@ -2200,20 +2203,11 @@ export class TelegramWorkspace {
       title.add(`\n${this.locale() === 'ru' ? 'Назначение' : 'Target'}: ${route}`, 'bold');
     }
     title
-      .add(
-        '\n' +
-          (choice.input?.path ??
-            choice.workspace.repoPath +
-              (choice.workspace.scope ? '/' + choice.workspace.scope : '')),
-        'code',
-      )
+      .add('\n' + preview.repoPath + (preview.scope ? '/' + preview.scope : ''), 'code')
       .add('\n' + this.t('Base branch') + ': ')
-      .add(choice.input?.base ?? choice.workspace.base ?? this.t('Default'), 'code')
+      .add(preview.base ?? this.t('Default'), 'code')
       .add('\n' + this.t('Scope') + ': ')
-      .add(
-        choice.input?.scope ?? (choice.input?.path ? '/' : choice.workspace.scope || '/'),
-        'code',
-      )
+      .add(preview.scope || '/', 'code')
       .add(
         '\n\n' +
           this.t(
@@ -2347,7 +2341,6 @@ export class TelegramWorkspace {
       this.store.setting<string>('telegram.currentDaddy') !== choice.groupId
     ) {
       this.store.setSetting(key, null);
-      this.store.setSetting(this.repoKey(choice.destination, choice.groupId), null);
       throw new Error(this.t('The selected session changed. Choose the repository again.'));
     }
     if (choice.inputId) {
@@ -2375,7 +2368,7 @@ export class TelegramWorkspace {
         });
         const response = new TelegramText()
           .add('📁 ' + this.t('Repository for next task'), 'bold')
-          .add('\n\n' + choice.workspace.name);
+          .add('\n\n' + this.groupText(destination, choice.workspace.name));
         if (destination.chatId === this.pair()?.chatId)
           response.add(
             '\n' + selected.repoPath + (selected.scope ? '/' + selected.scope : ''),
@@ -2417,7 +2410,7 @@ export class TelegramWorkspace {
             '\n\n' +
               this.t(
                 'Send the task now for {title}. The following message will use the defaults again.',
-                { title: group.title },
+                { title: this.groupText(destination, group.title) },
               ),
           );
         }

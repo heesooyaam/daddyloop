@@ -283,6 +283,7 @@ it('scopes a one-message repository selection to its owner and conversation, the
   try {
     await workspace.handle(message('/repo /server/another-repository'));
     const use = sent.at(-1).buttons[0][0].callback_data;
+    vi.mocked(f.workspaces.selection).mockClear();
     await workspace.handle(click(use, 99));
     expect(f.workspaces.selection).not.toHaveBeenCalled();
     await workspace.handle(click(use));
@@ -624,6 +625,7 @@ it('expires, cancels and isolates private repository input for its original rout
     await open();
     await bot.handle(message('/repo /server/cancelled'));
     const cancelledUse = sent.at(-1)!.card.buttons[0][0].callback_data;
+    vi.mocked(f.workspaces.selection).mockClear();
     await bot.handle(message('/cancel'));
     expect(sent.at(-1)!.card).toContain('Repository selection cancelled');
     expect(f.store.setting(inputKey)).toBeNull();
@@ -710,11 +712,23 @@ it('rejects a private repository card after switching sessions and labels a fres
   try {
     await bot.handle(message('/repo /server/a'));
     const oldUse = sent.at(-1).buttons[0][0].callback_data;
+    await bot.handle(message('/repo /server/intended'));
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
     await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
     await bot.handle(click(oldUse));
-    expect(f.store.setting(`telegram.nextRepo:7:7:0:${first.id}`)).toBeFalsy();
+    expect(
+      f.store.setting<{ workspace: { repoPath: string } }>(`telegram.nextRepo:7:7:0:${first.id}`)
+        ?.workspace.repoPath,
+    ).toBe('/server/intended');
     expect(f.store.setting(`telegram.nextRepo:7:7:0:${second.id}`)).toBeFalsy();
 
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await bot.handle(message('/task Uses intended once'));
+    expect(
+      f.store.tasks(first.id).find((item) => item.title.includes('Uses intended'))?.repoPath,
+    ).toBe('/server/intended');
+
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
     await bot.handle(message('/repo /server/b'));
     await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
     expect(sent.at(-1).text).toContain('Session B');

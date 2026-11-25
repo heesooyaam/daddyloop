@@ -260,6 +260,11 @@ it('merges independent instruction elements and rejects an overlapping patch ato
     presetB = makePreset('Preset B'),
     presetC = makePreset('Preset C'),
     selected = (preset: typeof presetA, enabled = true) => ({ preset, enabled, omit: [] }),
+    state = (preset: typeof presetA, enabled = true) => ({
+      revision: preset.revision,
+      enabled,
+      omit: [],
+    }),
     skill = (name: string) => ({
       name,
       text: `# ${name}`,
@@ -286,8 +291,8 @@ it('merges independent instruction elements and rejects an overlapping patch ato
           {
             target: 'preset',
             id: presetA.id,
-            before: selected(presetA),
-            after: selected(presetA, false),
+            before: state(presetA),
+            after: state(presetA, false),
           },
         ],
       },
@@ -306,14 +311,14 @@ it('merges independent instruction elements and rejects an overlapping patch ato
           {
             target: 'preset',
             id: presetB.id,
-            before: selected(presetB),
-            after: selected(presetB, false),
+            before: state(presetB),
+            after: state(presetB, false),
           },
           {
             target: 'preset',
             id: presetC.id,
             before: null,
-            after: selected(presetC),
+            after: state(presetC),
           },
         ],
       },
@@ -327,6 +332,23 @@ it('merges independent instruction elements and rejects an overlapping patch ato
         { preset: { id: presetC.id }, enabled: true },
       ],
     });
+    const reordered = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/instructions-patch`,
+      payload: {
+        changes: [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id],
+            after: [presetC.id, presetA.id, presetB.id],
+          },
+        ],
+      },
+    });
+    expect(reordered.statusCode, reordered.body).toBe(200);
+    expect(
+      reordered.json().group.instructions.presets.map((entry: any) => entry.preset.id),
+    ).toEqual([presetC.id, presetA.id, presetB.id]);
 
     const conflict = await app.inject({
       method: 'POST',
@@ -337,8 +359,8 @@ it('merges independent instruction elements and rejects an overlapping patch ato
           {
             target: 'preset',
             id: presetA.id,
-            before: selected(presetA, false),
-            after: selected(presetA, true),
+            before: state(presetA, false),
+            after: state(presetA, true),
           },
         ],
       },

@@ -51,6 +51,7 @@ import {
   taskActivity,
 } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
+import { InstructionPresets } from './instruction-presets.js';
 import {
   sessionInstructionsSchema,
   applyInstructionChanges,
@@ -699,7 +700,21 @@ export class Daddy {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       let instructions: SessionInstructions;
       try {
-        instructions = applyInstructionChanges(group.instructions, changes);
+        const library = new InstructionPresets(this.store);
+        instructions = applyInstructionChanges(
+          group.instructions,
+          changes,
+          (presetId, revision) => {
+            const preset = library.get(presetId);
+            if (preset.revision !== revision)
+              throw new AppError(
+                'stale_preset',
+                'The selected preset changed in the shared library. Reopen settings and try again.',
+                409,
+              );
+            return preset;
+          },
+        );
       } catch (error) {
         if (error instanceof Error && error.message === 'instruction_conflict')
           throw new AppError(

@@ -939,6 +939,18 @@ it('redacts session and workspace names from group cards while keeping private l
       message_thread_id: threadId,
     },
   });
+  const click = (data: string, threadId?: number): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: {
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: threadId,
+      },
+    },
+  });
   const latest = () => JSON.stringify(telegram.sent.at(-1)!.card);
   try {
     for (const command of [
@@ -953,6 +965,11 @@ it('redacts session and workspace names from group cards while keeping private l
       expect(latest()).not.toContain(secret);
     }
     await bot.handle(message('/status', -10042, topic!.threadId));
+    expect(latest()).not.toContain(secret);
+    await bot.handle(message('/repo', -10042, topic!.threadId));
+    await bot.handle(
+      click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data, topic!.threadId),
+    );
     expect(latest()).not.toContain(secret);
 
     await bot.handle(message('/sessions', 7));
