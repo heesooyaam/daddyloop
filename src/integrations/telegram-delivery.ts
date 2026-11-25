@@ -13,6 +13,7 @@ export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
   reminder?: OwnerQuestion;
   mention?: OwnerQuestion;
+  questionSourceKey?: string;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
@@ -89,6 +90,7 @@ export class TelegramDelivery {
   private sentNotifications = new Set<string>();
   private cancelledRouteNotifications = new Set<string>();
   private cancelledQuestionNotifications = new Set<string>();
+  private detachedQuestionSources = new Map<string, string>();
   private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
@@ -108,6 +110,50 @@ export class TelegramDelivery {
       .all()
       .map((row) => ({ key: String(row.key), value: JSON.parse(String(row.value)) as Delivery }))
       .filter(({ value }) => value?.bot === bot);
+    const unboundProgress = deliveries.filter(
+      ({ value }) =>
+        !value.options.groupId &&
+        (value.options.key?.startsWith('progress:') || value.options.operation === 'pin'),
+    );
+    if (unboundProgress.length) {
+      const progressGroups = new Map<string, string>();
+      for (const row of store.db
+        .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.progress:%'")
+        .all()) {
+        const parsed = JSON.parse(String(row.value)) as {
+          id?: string;
+          cards?: { id?: string }[];
+        };
+        const cards = Array.isArray(parsed.cards) ? parsed.cards : [parsed];
+        const groupId = String(row.key).split(':').at(-1)!;
+        for (const card of cards) if (card.id) progressGroups.set(card.id, groupId);
+      }
+      for (const { key, value } of deliveries) {
+        const cardId = value.options.key?.startsWith('progress:')
+          ? value.options.key.slice('progress:'.length)
+          : undefined;
+        const groupId = cardId ? progressGroups.get(cardId) : undefined;
+        if (groupId && !value.options.groupId) {
+          value.options.groupId = groupId;
+          store.setSetting(key, value);
+        }
+      }
+      const messageGroups = new Map<number, string>();
+      for (const { value } of deliveries)
+        if (value.options.groupId && value.options.key?.startsWith('progress:'))
+          for (const message of value.messages)
+            messageGroups.set(message.id, value.options.groupId);
+      for (const { key, value } of deliveries) {
+        const groupId = value.options.pinMessageId
+          ? messageGroups.get(value.options.pinMessageId)
+          : undefined;
+        if (groupId && !value.options.groupId) {
+          value.options.groupId = groupId;
+          store.setSetting(key, value);
+        }
+      }
+    }
+    const deliveryKeys = new Set(deliveries.map(({ key }) => key));
     const recoveryDeliveries = deliveries.filter(
       ({ value }) =>
         ['queued', 'sending'].includes(value.status) &&
@@ -120,6 +166,22 @@ export class TelegramDelivery {
         .filter(({ value }) => value.status === 'sent' && !!value.options.notificationId)
         .map(({ value }) => value.options.notificationId!),
     );
+    const acknowledgedNotifications = deliveries.filter(
+      ({ value }) =>
+        ['queued', 'sending'].includes(value.status) &&
+        !!value.options.notificationId &&
+        this.fullyAcknowledged(value),
+    );
+    if (acknowledgedNotifications.length) {
+      const sentNotification = store.db.prepare(
+        "SELECT 1 FROM notifications WHERE id=? AND status='sent'",
+      );
+      for (const { value } of acknowledgedNotifications) {
+        const notificationId = value.options.notificationId;
+        if (notificationId && sentNotification.get(notificationId))
+          deliveredNotifications.add(notificationId);
+      }
+    }
     const questionTasks = new Set(
       deliveries
         .filter(
@@ -157,7 +219,10 @@ export class TelegramDelivery {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       value.recoveryOrder = this.messageOrder(value);
       value.queueOrder = queueOrder;
-      if (['queued', 'sending'].includes(value.status) && this.restoreQuestionOptions(value))
+      if (
+        ['queued', 'sending'].includes(value.status) &&
+        this.restoreQuestionOptions(key, value, deliveryKeys)
+      )
         this.store.setSetting(key, value);
       if (
         value.status === 'cancelled' &&
@@ -190,7 +255,8 @@ export class TelegramDelivery {
         }
         if (
           value.options.notificationId &&
-          this.sentNotifications.has(value.options.notificationId) &&
+          (this.sentNotifications.has(value.options.notificationId) ||
+            deliveredNotifications.has(value.options.notificationId)) &&
           this.fullyAcknowledged(value)
         ) {
           value.status = 'sent';
@@ -295,16 +361,16 @@ export class TelegramDelivery {
     this.save(key, value);
   }
   discardGroup(groupId: string) {
-    for (const [key, value] of [...this.deferredValues])
+    const routes = new Map<string, TelegramDestination>();
+    const values = new Map([...this.pending, ...this.deferredValues]);
+    for (const [key, value] of values)
       if (this.deliveryGroupId(value) === groupId) {
-        const notificationId = value.options.notificationId;
-        if (notificationId) this.discardDeferred(value.destination, notificationId);
-        else {
-          this.historyDeferredKeys.delete(key);
-          this.deferredKeys.delete(key);
-          this.deferredValues.delete(key);
-        }
+        routes.set(this.route(value.destination), value.destination);
+        if (value.options.operation === 'pin') this.clearPinError(value.error);
+        this.cancel(key, value);
       }
+    for (const destination of routes.values()) this.releaseUnblocked(destination);
+    if (routes.size) void this.flush();
   }
   reconcileGroupRoute(groupId: string, destination: TelegramDestination) {
     const released = new Map<string, TelegramDestination>();
@@ -434,10 +500,19 @@ export class TelegramDelivery {
   private valid(value: Delivery) {
     return (
       this.routeValid(value) &&
+      this.groupValid(value) &&
       (!value.options.reminder || reminderOpen(this.store, value.options.reminder))
     );
   }
-  private restoreQuestionOptions(value: Delivery) {
+  private groupValid(value: Delivery) {
+    const groupId = value.options.groupId;
+    if (!groupId) return true;
+    const row = this.store.db
+      .prepare("SELECT json_extract(data,'$.deletedAt') AS deletedAt FROM review_groups WHERE id=?")
+      .get(groupId);
+    return !row || !row.deletedAt;
+  }
+  private restoreQuestionOptions(key: string, value: Delivery, deliveryKeys: Set<string>) {
     let changed = false;
     const deliveryKey = value.options.key;
     if (!value.options.reminder && deliveryKey?.startsWith('telegram:question:')) {
@@ -467,6 +542,17 @@ export class TelegramDelivery {
             changed = true;
           }
         }
+        if (
+          value.options.mention &&
+          !value.options.questionSourceKey &&
+          value.options.key !== `message:${messageId}`
+        ) {
+          const sourceKey = prefix + digest([this.bot, value.destination, `message:${messageId}`]);
+          if (sourceKey !== key && deliveryKeys.has(sourceKey)) {
+            value.options.questionSourceKey = sourceKey;
+            changed = true;
+          }
+        }
       }
     }
     return changed;
@@ -477,7 +563,15 @@ export class TelegramDelivery {
     const message = this.store.messageById(mention.groupId, mention.messageId);
     if (!message || message.sender !== 'agent') return;
     value.content = new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(message.text);
+    const source = value.options.questionSourceKey
+      ? this.store.setting<Delivery>(value.options.questionSourceKey)
+      : undefined;
+    if (!value.messages.length && source?.messages.length) {
+      value.messages = structuredClone(source.messages);
+      if (!this.acknowledgedPartsMatch(value)) value.messages = [];
+    }
     value.options.mention = undefined;
+    value.options.questionSourceKey = undefined;
     value.revision++;
   }
   private notificationMessageId(value: Delivery) {
@@ -692,6 +786,7 @@ export class TelegramDelivery {
       (includeSent ? this.sentDelivery(destination, notificationId) : undefined);
     if (!row || row.key === key) return;
     if (!includeSent && (row.value.messages.length || row.value.status === 'sending')) {
+      this.detachedQuestionSources.set(key, row.key);
       const receipt = this.receiptFor(row.value.messages, row.value);
       row.value.revision++;
       row.value.status = 'cancelled';
@@ -862,7 +957,7 @@ export class TelegramDelivery {
       ),
     );
   }
-  private enqueuePin(destination: TelegramDestination, messageId: number) {
+  private enqueuePin(destination: TelegramDestination, messageId: number, groupId?: string) {
     const key = prefix + digest([this.bot, 'pin', destination.chatId, messageId]);
     if (this.pending.has(key)) return;
     const existing = this.store.setting<Delivery>(key);
@@ -881,7 +976,7 @@ export class TelegramDelivery {
       this.createDelivery(
         destination,
         { text: '', entities: [] },
-        { operation: 'pin', pinMessageId: messageId },
+        { operation: 'pin', pinMessageId: messageId, groupId },
       ),
     );
   }
@@ -907,6 +1002,13 @@ export class TelegramDelivery {
         options.groupId,
         !!options.replace,
       );
+    if (!value && !options.questionSourceKey) {
+      const questionSourceKey = this.detachedQuestionSources.get(key);
+      if (questionSourceKey) {
+        options = { ...options, questionSourceKey };
+        this.detachedQuestionSources.delete(key);
+      }
+    }
     if (
       value?.status === 'cancelled' &&
       options.replace &&
@@ -960,7 +1062,7 @@ export class TelegramDelivery {
         digest([content, options.final, options.pin])
       ) {
         if (value.status === 'sent' && options.pin && value.messages[0])
-          this.enqueuePin(value.destination, value.messages[0].id);
+          this.enqueuePin(value.destination, value.messages[0].id, options.groupId);
         await this.kick();
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       }
@@ -1188,7 +1290,7 @@ export class TelegramDelivery {
       }
       if (value.revision === revision && this.valid(value)) {
         if (options.pin && value.messages[0])
-          this.enqueuePin(value.destination, value.messages[0].id);
+          this.enqueuePin(value.destination, value.messages[0].id, options.groupId);
         value.status = 'sent';
         value.error = undefined;
         value.attempts = 0;

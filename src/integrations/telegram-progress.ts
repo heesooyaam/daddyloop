@@ -284,7 +284,7 @@ export class TelegramProgress {
       .filter((group) => group.orchestrated && !group.deletedAt);
     const groupIds = new Set(liveGroups.map((group) => group.id));
     for (const groupId of cards.keys())
-      if (!groupIds.has(groupId)) this.clearCard(this.prefix + groupId);
+      if (!groupIds.has(groupId)) this.clearCard(this.prefix + groupId, groupId);
     const groups = forcedGroupId
       ? liveGroups.filter((group) => group.id === forcedGroupId)
       : liveGroups;
@@ -317,6 +317,7 @@ export class TelegramProgress {
         this.store.setSetting(key, { cards: groupCards } satisfies StoredCards);
       }
       await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
+        groupId: group.id,
         key: `progress:${card.id}`,
         replace: true,
         pin: true,
@@ -329,8 +330,9 @@ export class TelegramProgress {
     }
   }
 
-  private clearCard(key: string) {
+  private clearCard(key: string, groupId: string) {
     this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
+    this.api.delivery?.discardGroup(groupId);
   }
 
   async stop() {

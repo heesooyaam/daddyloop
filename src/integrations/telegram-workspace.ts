@@ -2025,6 +2025,7 @@ export class TelegramWorkspace {
             : pair.chatId;
           if (group.deletedAt) {
             if (event.type !== 'daddy.deleted') return;
+            this.api.delivery?.discardGroup(group.id);
             if (this.store.setting('telegram.currentDaddy') === group.id)
               this.store.setSetting('telegram.currentDaddy', null);
             const text = new TelegramText().add(

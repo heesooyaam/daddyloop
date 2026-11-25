@@ -307,6 +307,73 @@ it.each([
   },
 );
 
+it.each([
+  ['en', 'queued private card', { chatId: 7, ownerId: 7 }, 'queued'],
+  ['ru', 'topic card with a denied pin', { chatId: -10042, threadId: 17, ownerId: 7 }, 'pin'],
+] as const)(
+  'cancels unsent status work after the session is deleted: %s, %s',
+  async (locale, _case, route, mode) => {
+    const f = daddyFixture();
+    const sent: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 600;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      sent.push({ method, body });
+      if (method === 'pinChatMessage' && mode === 'pin')
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: not enough rights to pin a message',
+          }),
+          { status: 400 },
+        );
+      return Response.json({
+        ok: true,
+        result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    if ('threadId' in route)
+      f.store.setSetting('telegram.group', { chatId: route.chatId, ownerId: 7 });
+    if (mode === 'queued') f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    const progress = new TelegramProgress(
+      f.store,
+      api,
+      'telegram.progress:fixture_bot:',
+      () => locale,
+      () => route,
+    );
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Deleted status' });
+    try {
+      await progress.ensure(group.id);
+      if (mode === 'pin') await api.delivery.flush(10);
+      const deleted = f.store.getGroup(group.id);
+      f.store.saveGroup({ ...deleted, deletedAt: new Date().toISOString() });
+      clock += 60 * 60 * 1000;
+      await api.delivery.flush(20);
+      await progress.ensure(group.id);
+      await api.delivery.flush(20);
+      expect(sent.map(({ method }) => method)).toEqual(
+        mode === 'pin' ? ['sendMessage', 'pinChatMessage'] : [],
+      );
+      await api.delivery.stop();
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+      await api.delivery.flush(20);
+      expect(sent.map(({ method }) => method)).toEqual(
+        mode === 'pin' ? ['sendMessage', 'pinChatMessage'] : [],
+      );
+    } finally {
+      await progress.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();
   const sent: { method: string; body: Record<string, any> }[] = [];

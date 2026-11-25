@@ -1218,6 +1218,18 @@ it.each([
       await api.delivery.flush(50);
       expect(matching('Reminder clarification')).toHaveLength(1);
       expect(matching('Reminder plan approval')).toHaveLength(1);
+      for (const notificationId of [clarificationId, planId]) {
+        const row = f.store.db
+          .prepare(
+            `SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'
+             AND json_extract(value,'$.destination.chatId')=?
+             AND json_extract(value,'$.options.notificationId')=?`,
+          )
+          .get(activeChat, notificationId)!;
+        const interrupted = JSON.parse(String(row.value));
+        interrupted.status = 'sending';
+        f.store.setSetting(String(row.key), interrupted);
+      }
       f.store.db
         .prepare('UPDATE notifications SET at=? WHERE id IN (?,?)')
         .run(new Date(Date.now() - 31 * 60000).toISOString(), clarificationId, planId);

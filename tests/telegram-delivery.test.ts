@@ -335,6 +335,61 @@ it.each([
   },
 );
 
+it.each([
+  ['short private reply', { chatId: 7 }, 100],
+  ['long topic reply', { chatId: -10042, threadId: 4 }, 5000],
+])(
+  'reuses an in-flight progress receipt after its owner question closes: %s',
+  async (_case, destination, size) => {
+    const f = fixture();
+    let finishFirst = () => {};
+    try {
+      const body = 'A'.repeat(size);
+      const message = f.store.daddyMessage('group', 'agent', body, 'run', undefined, {
+        phase: 'progress',
+      });
+      const progressNotification = `telegram:dialog:${destination.chatId}:${
+        'threadId' in destination ? destination.threadId : 0
+      }:${message.id}:progress`;
+      const agentText = new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(body);
+      const first = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      f.call.mockImplementationOnce(async () => {
+        await first;
+        return { message_id: 41 };
+      });
+      const progress = f.queue.send(destination, agentText, {
+        groupId: 'group',
+        key: `message:${message.id}`,
+        replace: true,
+        notificationId: progressNotification,
+      });
+      await vi.waitFor(() => expect(f.call).toHaveBeenCalledOnce());
+      f.store.finishDaddyReply('group', body, 'run', true);
+      const finalNotification = progressNotification.replace(/:progress$/, ':final');
+      await f.queue.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
+        groupId: 'group',
+        key: finalNotification,
+        replacePending: true,
+        final: true,
+        notificationId: finalNotification,
+        mention: { groupId: 'group', messageId: message.id },
+      });
+      finishFirst();
+      await progress;
+      await new Promise((resolve) => setImmediate(resolve));
+      await f.queue.flush(10);
+      expect(f.call.mock.calls.every(([method]) => method === 'sendMessage')).toBe(true);
+      expect(f.call.mock.calls.some(([, request]) => request.text?.includes('@Owner'))).toBe(false);
+      expect(f.call).toHaveBeenCalledTimes(size > 3800 ? 2 : 1);
+    } finally {
+      finishFirst();
+      await f.close();
+    }
+  },
+);
+
 it('reuses a sent legacy progress receipt when the same message becomes final', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
