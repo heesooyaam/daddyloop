@@ -346,6 +346,8 @@ export class Engine {
     });
   }
   requireSubmittedFix(task: Task, pr?: PullRequest): string | undefined {
+    // A targeted receipt read can add the authoritative SHA to the journal.
+    const unconfirmed = this.hasUnconfirmedFixSave(task);
     const pending = this.pendingFixHead(task, pr);
     if (
       pending &&
@@ -355,7 +357,7 @@ export class Engine {
       return pending;
     const lost = pending ? undefined : this.lostFix(task, pr);
     const unsent = pending ?? lost?.head;
-    if (!unsent && this.hasUnconfirmedFixSave(task))
+    if (!unsent && unconfirmed)
       throw new AppError(
         'fix_pending',
         'The worker copy must be checked for an interrupted fix before review.',
@@ -1979,10 +1981,13 @@ export class Engine {
   }
 
   private async prepareMergeVerificationFeedback(task: Task, pr: PullRequest): Promise<boolean> {
+    this.recoverSavedFixReviews(task);
+    if (
+      task.review?.revision.head === pr.head &&
+      (task.pendingAuthorHead === pr.head || task.snapshot?.status === 'published')
+    )
+      this.trackRecoveredReview(task, task.review, task.snapshot);
     if (task.pendingAuthorHead === pr.head) {
-      this.recoverSavedFixReviews(task);
-      if (task.review?.revision.head === pr.head)
-        this.trackRecoveredReview(task, task.review, task.snapshot);
       const stale = task.pendingAuthorFix?.staleDraft;
       if (stale) {
         this.trackRecoveredReview(task, stale);
@@ -2840,9 +2845,10 @@ export class Engine {
   }
 
   private async stopMergeBeforeSavedFix(task: Task, pr: PullRequest): Promise<boolean> {
+    const unconfirmed = this.hasUnconfirmedFixSave(task);
     const legacyConfirmation = await this.confirmLegacyMergedFix(task, pr);
     return legacyConfirmation === undefined
-      ? this.stopReviewBeforeSavedFix(task, pr, true)
+      ? this.stopReviewBeforeSavedFix(task, pr, true, unconfirmed)
       : !legacyConfirmation;
   }
 
@@ -2927,7 +2933,12 @@ export class Engine {
     );
   }
 
-  private stopReviewBeforeSavedFix(task: Task, pr: PullRequest, merged = false): boolean {
+  private stopReviewBeforeSavedFix(
+    task: Task,
+    pr: PullRequest,
+    merged = false,
+    unconfirmed = this.hasUnconfirmedFixSave(task),
+  ): boolean {
     const pending = this.pendingFixHead(task, pr);
     if (merged && pr.state === 'merged' && pending === pr.head) {
       if (!this.hasMergedFixEvidence(task, pr)) {
@@ -2955,7 +2966,7 @@ export class Engine {
       return false;
     const head = pending ?? this.lostFix(task, pr)?.head;
     if (!head) {
-      if (!this.hasUnconfirmedFixSave(task)) return false;
+      if (!unconfirmed) return false;
       this.holdTaskForInput(
         task,
         'The worker copy must be checked for an interrupted fix before review.',
@@ -4368,6 +4379,7 @@ export class Engine {
           );
           return task;
         }
+        const unconfirmed = this.hasUnconfirmedFixSave(task);
         const pending = this.pendingFixHead(task);
         const lost = pending ? undefined : this.lostFix(task);
         const recoveryBlock = lost && lostFixRecoveryBlock(lost, task);
@@ -4384,10 +4396,9 @@ export class Engine {
           outstanding.every(
             (job) => rejectedBeforeCommit(job) && sameRevision(job.fixSaveRevision, task.revision),
           ) &&
-          (task.fixingMergeConflict
-            ? task.resumeState === 'fixing'
-            : hasReleasedReview(task) && task.snapshot?.status === 'published');
-        if (!saved && outstanding.length && !resumePrecommit) {
+          (task.fixingMergeConflict ||
+            (hasReleasedReview(task) && task.snapshot?.status === 'published'));
+        if (!saved && unconfirmed && !resumePrecommit) {
           this.state(
             task,
             'needs_input',
@@ -4417,9 +4428,11 @@ export class Engine {
           });
           return task;
         }
-        if (task.resumeState === 'fixing' && task.fixingMergeConflict) {
+        if ((task.resumeState === 'fixing' || resumePrecommit) && task.fixingMergeConflict) {
           const pr = await this.provider(prRef(task)).getPR(prRef(task));
-          const action = this.prAction(task, pr, { resumeRepair: true });
+          const action = this.prAction({ ...task, resumeState: 'fixing' }, pr, {
+            resumeRepair: true,
+          });
           if (action.kind !== 'repair')
             throw new AppError(
               action.kind === 'wait' ? 'automerge_disabled' : 'stale_revision',

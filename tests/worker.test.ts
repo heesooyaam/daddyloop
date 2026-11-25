@@ -3525,50 +3525,67 @@ it.each([true, false])(
   },
 );
 
-it('retries the failed task transition together with the outcome when SQLite is busy', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'daddy-locked-outcome-')),
-    path = join(dir, 'state.sqlite');
-  const f = await fixture({}, path),
-    lock = new DatabaseSync(path),
-    ws = new Workspaces(dir);
-  const runtime = { run: vi.fn(async () => f.result()) };
-  const worker = new Worker(f.engine, ws, runtime, runtime, healthy, 0);
-  let locked = false;
-  try {
-    await queueFix(f);
-    const t = f.store.getTask(f.task.id);
-    f.store.saveTask({ ...t, ref: { ...prRef(t), provider: 'github' } });
-    f.store.db.exec('PRAGMA busy_timeout=0');
-    vi.spyOn(ws, 'prepare').mockResolvedValue(dir);
-    vi.spyOn(ws, 'commitFix').mockImplementationOnce(async () => {
-      lock.exec('BEGIN IMMEDIATE');
-      locked = true;
-      throw new AppError('fix_precommit_rejected', 'Index is locked');
-    });
-    const job = f.store.claim()!;
-    await worker['run'](job);
-    lock.exec('ROLLBACK');
-    locked = false;
-    await worker.tick();
-    expect(f.store.getTask(t.id)).toMatchObject({ state: 'needs_input', resumeState: 'fixing' });
-    expect(f.store.jobs(t.id).find((j) => j.id === job.id)).toMatchObject({
-      status: 'failed',
-      errorCode: 'fix_precommit_rejected',
-    });
-    expect((await f.engine.action(t.id, 'resume')).state).toBe('fixing');
-    expect(f.store.activeJobs(t.id)).toHaveLength(1);
-  } finally {
-    if (locked) lock.exec('ROLLBACK');
-    await worker.stop();
-    lock.close();
-    f.store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+it.each(['poll', 'shutdown and restart'] as const)(
+  'persists a blocked pre-commit rejection after SQLite recovers (%s)',
+  async (recovery) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-locked-outcome-')),
+      path = join(dir, 'state.sqlite');
+    const f = await fixture({}, path),
+      lock = new DatabaseSync(path),
+      ws = new Workspaces(dir);
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, ws, runtime, runtime, healthy, 0);
+    let locked = false;
+    let store = f.store;
+    let engine = f.engine;
+    try {
+      await queueFix(f);
+      const t = f.store.getTask(f.task.id);
+      f.store.saveTask({ ...t, ref: { ...prRef(t), provider: 'github' } });
+      f.store.db.exec('PRAGMA busy_timeout=0');
+      vi.spyOn(ws, 'prepare').mockResolvedValue(dir);
+      vi.spyOn(ws, 'commitFix').mockImplementationOnce(async () => {
+        lock.exec('BEGIN IMMEDIATE');
+        locked = true;
+        throw new AppError('fix_precommit_rejected', 'Index is locked');
+      });
+      const job = f.store.claim()!;
+      await worker['run'](job);
+      lock.exec('ROLLBACK');
+      locked = false;
+      if (recovery === 'shutdown and restart') {
+        await worker.stop();
+        store.close();
+        store = new Store(path);
+        engine = new Engine(store, () => new DemoProvider(store));
+        engine.recoverInterruptedJobs();
+      } else await worker.tick();
+      expect(store.getTask(t.id)).toMatchObject({ state: 'needs_input', resumeState: 'fixing' });
+      expect(store.jobs(t.id).find((j) => j.id === job.id)).toMatchObject({
+        status: 'failed',
+        errorCode: 'fix_precommit_rejected',
+      });
+      expect((await engine.action(t.id, 'resume')).state).toBe('fixing');
+      expect(store.activeJobs(t.id)).toHaveLength(1);
+    } finally {
+      if (locked) lock.exec('ROLLBACK');
+      await worker.stop();
+      lock.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
-it.each(['deleted', 'edited', 'unchanged'] as const)(
-  'presents the current published feedback after preparing a merged checkout (%s)',
-  async (change) => {
+it.each(
+  [true, false].flatMap((pending) =>
+    (['deleted', 'edited', 'added', 'unchanged', 'edited while reviewing'] as const).map(
+      (change) => [pending, change] as const,
+    ),
+  ),
+)(
+  'presents the current published feedback after preparing a merged checkout (pending: %s, %s)',
+  async (pending, change) => {
     const f = await fixture(),
       task = f.store.getTask(f.task.id);
     const ref = { ...prRef(task), provider: 'github' as const },
@@ -3580,8 +3597,10 @@ it.each(['deleted', 'edited', 'unchanged'] as const)(
       state: 'reviewing' as const,
       revision: revisionOf(pr),
       pr,
-      pendingAuthorHead: head,
-      pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+      pendingAuthorHead: pending ? head : undefined,
+      pendingAuthorFix: pending
+        ? { revision: task.revision!, generation: task.generation }
+        : undefined,
     };
     const ws = new Workspaces('/tmp'),
       runtime = { run: vi.fn(async (_input: AgentInput) => f.result()) };
@@ -3596,12 +3615,23 @@ it.each(['deleted', 'edited', 'unchanged'] as const)(
         handle.marker + ':comment:R',
       );
       await f.provider.publish(ref, handle);
-      f.store.saveTask(queued);
+      runtime.run.mockImplementation(async (input) => {
+        const verifiedCommentIds = input.task.feedback?.comments.map(({ id }) => id) ?? [];
+        if (change === 'edited while reviewing')
+          await f.provider.updateComment(ref, handle, finding.id, 'Changed during review');
+        return f.result({ checkedHead: head, verifiedCommentIds });
+      });
+      const snapshot = await f.provider.getReview(ref, handle);
+      f.store.saveTask(
+        pending ? queued : { ...queued, review: handle, feedback: snapshot, snapshot },
+      );
       f.store.setSetting('demo-pr:1', pr);
       vi.spyOn(ws, 'prepare').mockImplementation(async () => {
         if (change === 'deleted') await f.provider.deleteComment(ref, handle, finding.id);
         if (change === 'edited')
           await f.provider.updateComment(ref, handle, finding.id, 'Updated finding');
+        if (change === 'added')
+          await f.provider.createComment(ref, handle, 'New finding', handle.marker + ':comment:R2');
         return '/tmp';
       });
       f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged task');
@@ -3609,11 +3639,77 @@ it.each(['deleted', 'edited', 'unchanged'] as const)(
       await vi.waitFor(() => expect(runtime.run).toHaveBeenCalled());
       const shown = runtime.run.mock.calls[0][0].task.feedback?.comments ?? [];
       expect(shown.map((c) => c.body.split('\n')[0])).toEqual(
-        change === 'deleted' ? [] : [change === 'edited' ? 'Updated finding' : 'Original finding'],
+        change === 'deleted'
+          ? []
+          : change === 'added'
+            ? ['Original finding', 'New finding']
+            : [change === 'edited' ? 'Updated finding' : 'Original finding'],
+      );
+      await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
+      expect(f.store.getTask(task.id).state).toBe(
+        change === 'edited while reviewing' ? 'needs_input' : 'complete',
       );
     } finally {
       await worker.stop();
       f.store.close();
+    }
+  },
+);
+
+it.skipIf(process.getuid?.() === 0).each([
+  [0, false],
+  [0o100, false],
+  [0o100, true],
+] as const)(
+  'checks an old cancelled author receipt (directory mode %s, resume first: %s)',
+  async (mode, resumeFirst) => {
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-legacy-paused-fix-'));
+    const path = join(dir, 'state.sqlite');
+    const receipts = path + '.saved-fixes';
+    const f = await fixture({}, path);
+    const saved = 'f'.repeat(40);
+    try {
+      await queueFix(f);
+      const task = f.store.getTask(f.task.id);
+      const job = f.store.claim()!;
+      f.store.stageSavedFixReceipt(job, { head: saved, revision: task.revision! });
+      f.store.saveJob({ ...job, status: 'cancelled' });
+      f.store.saveTask({
+        ...task,
+        ref: { ...prRef(task), provider: 'github' },
+        state: 'needs_input',
+        resumeState: 'fixing',
+        generation: task.generation + 1,
+      });
+      chmodSync(receipts, mode);
+      const create = vi.spyOn(f.provider, 'createReview');
+      const retry = () =>
+        expect(f.engine.review(task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+          message: expect.stringContaining(mode ? saved : 'worker copy must be checked'),
+        });
+      const resume = () =>
+        expect(f.engine.action(task.id, 'resume')).resolves.toMatchObject({
+          state: 'needs_input',
+          revision: task.revision,
+        });
+      if (resumeFirst) {
+        await resume();
+        await retry();
+      } else {
+        await retry();
+        await resume();
+      }
+      const prepare = vi.fn();
+      await f.engine.submitSavedFix(task.id, prepare);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      if (mode) expect(f.store.getTask(task.id).reason).toContain(saved);
+    } finally {
+      chmodSync(receipts, 0o700);
+      f.store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   },
 );

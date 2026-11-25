@@ -1022,14 +1022,22 @@ export class Worker {
   async stop() {
     this.stopped = true;
     clearInterval(this.timer);
-    for (const id of this.active.keys())
-      await this.engine.interruptTask(
-        id,
-        'The service stopped during this run. Inspect the saved work and resume or retry.',
-        'service.interrupted',
-      );
+    for (const id of this.active.keys()) {
+      try {
+        await this.engine.interruptTask(
+          id,
+          'The service stopped during this run. Inspect the saved work and resume or retry.',
+          'service.interrupted',
+        );
+      } catch (error) {
+        if (!isSqliteBusy(error)) throw error;
+      }
+    }
     for (const abort of this.active.values()) abort.abort();
     await this.tickDone;
     await Promise.allSettled([...this.pendingRuns]);
+    // Pending outcomes still have their durable save intent if SQLite remains busy.
+    for (const { job, failure } of [...this.pendingJobOutcomes.values()])
+      this.writeJobOutcome(job, failure);
   }
 }

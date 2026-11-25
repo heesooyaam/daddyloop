@@ -1509,7 +1509,19 @@ describe('opt-in GitHub merging', () => {
         });
         expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(head);
         await f.checkouts.prepareConflict(input.task);
-
+        return { status: 'completed', summary: 'Unresolved markers', checkedHead: head };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => {
+        expect(f.store.getTask(task.id).state).toBe('needs_input');
+        expect(f.store.pendingFixSaves(task.id)).toMatchObject([{ errorCode: 'unresolved_merge' }]);
+      });
+      await f.engine.action(task.id, 'pause');
+      expect(await f.engine.action(task.id, 'resume')).toMatchObject({ state: 'fixing' });
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.cwd).toBe(previousCopy);
+        expect(await git(['rev-parse', 'MERGE_HEAD'], input.cwd)).toBe(base);
+        expect(readFileSync(join(input.cwd, 'feature'), 'utf8')).toContain('<<<<<<<');
         writeFileSync(join(input.cwd, 'feature'), 'first half of the resolution');
         throw new AppError('run_timeout', 'Agent exceeded the configured run time limit');
       });
