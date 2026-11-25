@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import type { SessionRuntime } from '../src/runtime/agent.js';
 import { ScheduledCleanup, type CleanupAction } from '../src/ops/scheduled-cleanup.js';
@@ -23,6 +23,19 @@ import { approveCacheTarget, pruneCacheTarget } from '../src/ops/cache-targets.j
 import { buildApp } from '../src/server/app.js';
 import { Telegram, TelegramApi } from '../src/integrations/telegram.js';
 import { healthy, profiles } from './planning-fixture.js';
+
+const runHostCommand = vi.hoisted(() =>
+  vi.fn(async (_file: string, args: string[]) => {
+    if (args[0] !== 'show') return '';
+    if (args.includes('--value')) return '0';
+    return 'LoadState=loaded\nRemainAfterExit=no\nType=oneshot';
+  }),
+);
+vi.mock(import('../src/ops/host-cleanup.js'), async (importOriginal) => {
+  const { hostCleanupActions } = await importOriginal();
+  return { hostCleanupActions: (units, run = runHostCommand) => hostCleanupActions(units, run) };
+});
+afterEach(() => vi.unstubAllEnvs());
 
 const completed = { status: 'completed', summary: 'Ordered operations', checkedHead: '' } as const;
 
@@ -196,6 +209,7 @@ it('requires explicit target approval and protects workspaces, fresh files, link
 });
 
 it('cleans under pressure without a session and reports the measured result to Telegram', async () => {
+  vi.stubEnv('DADDYLOOP_CLEANUP_UNITS', 'daddyloop-cleanup-fixture.service');
   const f = fixture();
   const cacheDir = join(f.directory, 'cache');
   mkdirSync(cacheDir);
@@ -256,6 +270,8 @@ it('cleans under pressure without a session and reports the measured result to T
         lastReport: { status: 'cleared' },
       }),
     );
+    expect(runHostCommand.mock.calls.map(([file, args]) => [file, ...args])).toEqual([]);
+    expect((await status()).json()).toMatchObject({ hostUnits: [] });
     expect(f.store.groups()).toHaveLength(0);
     expect(existsSync(old)).toBe(false);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
