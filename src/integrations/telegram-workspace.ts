@@ -9,6 +9,7 @@ import {
   type Event,
   type ReviewGroup,
   type Task,
+  type TelegramReply,
 } from '../core/types.js';
 import { redact } from '../core/security.js';
 import type { TelegramApi, Update } from './telegram.js';
@@ -69,6 +70,29 @@ type RepoChoice = {
   expiresAt: string;
   creationExpiresAt?: string;
 };
+function telegramReply(message: Update['message']): TelegramReply | undefined {
+  if (!message) return;
+  const parent = message.reply_to_message;
+  const quote = message.quote?.text && redact(message.quote.text.slice(0, 4096));
+  // External quotes carry only the excerpt Telegram provided in this chat.
+  if (
+    !parent ||
+    parent.chat.id !== message.chat.id ||
+    (parent.message_thread_id !== undefined &&
+      parent.message_thread_id !== message.message_thread_id)
+  )
+    return quote ? { quote } : undefined;
+  if (parent.forum_topic_created || (parent.message_id === message.message_thread_id && !quote))
+    return;
+  const author = parent.from?.username ? '@' + parent.from.username : parent.from?.first_name;
+  const text = parent.text ?? parent.caption;
+  return {
+    messageId: parent.message_id,
+    author: author && redact(author.slice(0, 128)),
+    text: text && redact(text.slice(0, 4096)),
+    quote: quote || undefined,
+  };
+}
 export class TelegramWorkspace {
   private pending = Promise.resolve();
   private stopped = false;
@@ -143,12 +167,12 @@ export class TelegramWorkspace {
     }, 1000);
     this.retryTimer.unref();
   }
-  private voiceRoute(destination: Destination): VoiceRoute | undefined {
+  private voiceRoute(destination: Destination, replyGroup?: string): VoiceRoute | undefined {
     const pair = this.pair();
     if (!pair) return;
     const id =
       destination.chatId === pair.chatId
-        ? this.store.setting<string>('telegram.currentDaddy')
+        ? (replyGroup ?? this.store.setting<string>('telegram.currentDaddy'))
         : this.groupAt(destination);
     if (!id) return;
     const group = this.authorize(destination, id),
@@ -185,6 +209,8 @@ export class TelegramWorkspace {
     const text = job.fileId ? '🎙️ ' + job.text : job.text!;
     this.daddy.chat(group.id, text, receipt, job.route.workspace, {
       channel: 'telegram',
+      messageId: job.messageId,
+      replyTo: job.replyTo,
       chatId: job.route.chatId,
       threadId: job.route.threadId,
     });
@@ -524,6 +550,7 @@ export class TelegramWorkspace {
     groupId: string,
     destination: Destination,
     receipt: string,
+    replyTo?: TelegramReply,
   ) {
     const group = this.authorize(destination, groupId);
     const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
@@ -595,6 +622,7 @@ export class TelegramWorkspace {
     const task = await this.daddy.createTask(groupId, {
       ...request,
       requestId: receipt,
+      replyTo,
       workspace: next?.workspace,
     });
     if (next) this.store.setSetting(nextKey, null);
@@ -1414,6 +1442,11 @@ export class TelegramWorkspace {
     const privateChat = chat.type === 'private' && chat.id === pair.chatId;
     if (!privateChat && (chat.type !== 'supergroup' || this.room()?.chatId !== chat.id))
       return false;
+    const replyTo = telegramReply(message);
+    const replyGroup =
+      privateChat && replyTo?.messageId && !message?.text?.trimStart().startsWith('/')
+        ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
+        : undefined;
     try {
       if (callback) {
         if (
@@ -1438,7 +1471,7 @@ export class TelegramWorkspace {
         if (!this.voice)
           throw new Error(this.t('Voice recognition is unavailable on this server.'));
         const pending = this.store.setting<{ expiresAt: string }>(this.creationKey(destination));
-        const route = this.voiceRoute(destination);
+        const route = this.voiceRoute(destination, replyGroup);
         if (!route || (pending && pending.expiresAt > now()))
           throw new Error(
             this.t('Start a daddy session in a workspace, then send the voice message.'),
@@ -1451,7 +1484,12 @@ export class TelegramWorkspace {
           const created = this.voice!.enqueue(
             `telegram:${chat.id}:${message.message_id ?? update.update_id}`,
             route,
-            { fileId: message.voice!.file_id, duration: message.voice!.duration },
+            {
+              fileId: message.voice!.file_id,
+              duration: message.voice!.duration,
+              replyTo,
+              messageId: message.message_id,
+            },
           );
           if (created) this.store.setSetting(this.repoKey(destination, route.groupId), null);
           return created;
@@ -1604,7 +1642,7 @@ export class TelegramWorkspace {
         return true;
       }
       const groupId = privateChat
-        ? this.store.setting<string>('telegram.currentDaddy')
+        ? (replyGroup ?? this.store.setting<string>('telegram.currentDaddy'))
         : this.groupAt(destination);
       const task = taskCommands.exec(text);
       if (task) {
@@ -1615,6 +1653,7 @@ export class TelegramWorkspace {
           groupId,
           destination,
           `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+          replyTo,
         );
         return true;
       }
@@ -1761,14 +1800,14 @@ export class TelegramWorkspace {
         return true;
       }
       this.authorize(destination, groupId);
-      const route = this.voiceRoute(destination);
+      const route = this.voiceRoute(destination, replyGroup);
       if (route && this.voice?.pending(route)) {
         this.store.transaction(() => {
           if (
             this.voice!.enqueue(
               `telegram:${chat.id}:${message?.message_id ?? update.update_id}`,
               route,
-              { text },
+              { text, replyTo, messageId: message?.message_id },
             )
           )
             this.store.setSetting(this.repoKey(destination, groupId), null);
@@ -1785,6 +1824,8 @@ export class TelegramWorkspace {
       }
       this.daddy.chat(groupId, text, receipt, next?.workspace, {
         channel: 'telegram',
+        messageId: message?.message_id,
+        replyTo,
         ...destination,
       });
       if (next) this.store.setSetting(nextKey, null);
@@ -2191,6 +2232,7 @@ export class TelegramWorkspace {
             }
           : text;
         const result = await this.api.send(destination, card, undefined, {
+          groupId: group.id,
           key: replaceTurn ? `turn:${message!.runId}` : id,
           replace: replaceTurn,
           order: message?.at ?? event.at,

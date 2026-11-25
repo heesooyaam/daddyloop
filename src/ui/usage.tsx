@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type MouseEventHandler } from 'react';
 import { ArrowRight, CircleAlert, Clock, Gauge } from 'lucide-react';
-import type { DaddyApi } from '../client/daddy.js';
+import { UsageResetAlreadyRunningError, type DaddyApi } from '../client/daddy.js';
 import type { UsageView, AgentUsageView, ResetPlan } from '../core/usage.js';
 import { resetOutcomeText, usageDate, windowLabel } from '../client/usage.js';
 import { useLocale } from './i18n.js';
@@ -314,27 +314,29 @@ export function UsagePanel({
   const canConfirm = () => isRetry || canStartReset();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [notice, setNotice] = useState('');
+    [notice, setNotice] = useState<{ provider: string; message: string }>();
   const action = async (kind: 'refresh' | 'prepare' | 'consume') => {
     if (busy || (kind === 'consume' && !canConfirm())) return;
     setBusy(true);
     setError('');
-    setNotice('');
+    setNotice(undefined);
     try {
       if (kind === 'refresh') await onRefresh();
       if (kind === 'prepare' && usage) {
         const prepared = await api<ResetPlan>('/usage/reset/prepare', { engine: usage.engine });
         setConfirmation({ plan: prepared, engine: usage.engine, provider: usage.name });
       }
-      if (kind === 'consume' && plan) {
-        const result = await onConsume(plan.id);
-        setNotice(t(resetOutcomeText[result.outcome!]));
+      if (kind === 'consume' && confirmation) {
+        const result = await onConsume(confirmation.plan.id);
+        setEngine(confirmation.engine);
+        setNotice({ provider: confirmation.provider, message: resetOutcomeText[result.outcome!] });
         setConfirmation(undefined);
       }
     } catch (error) {
       if (
         kind === 'consume' &&
         confirmation &&
+        !(error instanceof UsageResetAlreadyRunningError) &&
         !(
           error instanceof Error &&
           'status' in error &&
@@ -410,7 +412,11 @@ export function UsagePanel({
         </p>
       )}
       {error && <p role="alert">{t(error)}</p>}
-      {notice && <p role="status">{notice}</p>}
+      {notice && (
+        <p role="status">
+          {notice.provider} · {t(notice.message)}
+        </p>
+      )}
       {plan ? (
         <div className="daddy-usage-confirm">
           <strong>

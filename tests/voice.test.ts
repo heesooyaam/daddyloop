@@ -56,6 +56,12 @@ it('checks the owner before downloading, preserves message ordering and cleans p
     await f.botWorkspace.handle(f.voice(99));
     expect(f.downloadVoice).not.toHaveBeenCalled();
     const update = f.voice();
+    update.message!.reply_to_message = {
+      message_id: 359,
+      chat: { id: 7, type: 'private' },
+      text: 'Review PR #39',
+    };
+    update.message!.quote = { text: 'PR #39', position: 7 };
     await f.botWorkspace.handle(update);
     await vi.waitFor(() => expect(finish).toBeDefined());
     await f.botWorkspace.handle(f.text('Then add tests'));
@@ -66,6 +72,10 @@ it('checks the owner before downloading, preserves message ordering and cleans p
       '🎙️ Implement the feature',
       'Then add tests',
     ]);
+    expect(f.store.messages(f.group.id)[0].origin?.replyTo).toMatchObject({
+      messageId: 359,
+      quote: 'PR #39',
+    });
     await f.botWorkspace.handle(update);
     expect(speech.transcribe).toHaveBeenCalledOnce();
     expect(f.store.messages(f.group.id)).toHaveLength(2);

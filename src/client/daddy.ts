@@ -44,6 +44,12 @@ function resolveSessionId(sessions: DaddySession[], reference: string) {
   return matches.length === 1 ? matches[0].id : undefined;
 }
 
+export class UsageResetAlreadyRunningError extends Error {
+  constructor() {
+    super('A rate-limit reset is already running.');
+  }
+}
+
 export class DaddyClient {
   private value: DaddyClientState = {
     sessions: [],
@@ -246,7 +252,7 @@ export class DaddyClient {
     return pending;
   };
   consumeUsageReset = async (id: string): Promise<ResetPlan> => {
-    if (this.usageReset) throw new Error('A rate-limit reset is already running.');
+    if (this.usageReset) throw new UsageResetAlreadyRunningError();
     const current = this.beginUsageRequest();
     this.usagePending = undefined;
     const pending = this.api<{ usage: UsageView; plan: ResetPlan }>(

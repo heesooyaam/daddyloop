@@ -2291,3 +2291,13 @@ body {
   margin: 2px 0 0;
   accent-color: var(--accent);
 }
+
+.daddy-voice-control {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.daddy-voice-control [role='alert'] {
+  color: var(--danger, #bc3c30);
+}

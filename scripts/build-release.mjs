@@ -5,7 +5,7 @@ import { join, resolve, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { prepareSpeech } from './prepare-speech.mjs';
+import { prepareSpeech } from '../dist/server/runtime/prepare-speech.js';
 import { moduleCatalogue } from '../dist/server/modules/catalogue.js';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));

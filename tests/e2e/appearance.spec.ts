@@ -538,3 +538,93 @@ test('binds reset confirmation to fresh readings from its provider and retries t
   await expect(confirm).toHaveCount(0);
   expect(writes).toEqual(Array(2).fill('/api/usage/reset/' + plan.id));
 });
+
+test('a reset rejected locally while another is running still needs current credits', async ({
+  page,
+}) => {
+  await login(page);
+  const current = (await (await page.request.get('/api/usage')).json()) as UsageView;
+  const codex = { ...current.agents[0], available: true, stale: false, retrievedAt: undefined };
+  const empty = {
+    agents: [{ ...codex, resets: { ...codex.resets, availableCount: 0, canUse: false } }],
+  };
+  let usage = { agents: [codex] };
+  const first = {
+    id: crypto.randomUUID(),
+    status: 'ready',
+    title: 'First reset',
+    availableCount: 1,
+  };
+  const second = { ...first, id: crypto.randomUUID(), title: 'Second reset' };
+  let prepares = 0;
+  const writes: string[] = [];
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/api/usage*', (route) => route.fulfill({ json: usage }));
+  await page.route('**/api/usage/reset/*', async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    if (id === 'prepare') return route.fulfill({ json: prepares++ === 0 ? first : second });
+    writes.push(id);
+    if (id === first.id) await hold;
+    usage = empty;
+    await route.fulfill({ json: { plan: { ...first, status: 'done', outcome: 'reset' }, usage } });
+  });
+  const limits = page.getByRole('link', { name: 'Limits', exact: true });
+  const prepare = page.getByRole('button', { name: 'Use a reset', exact: true });
+  const confirm = page.getByRole('button', { name: 'Confirm: use one reset' });
+  try {
+    await limits.click();
+    await prepare.click();
+    await confirm.click();
+    await expect.poll(() => writes).toEqual([first.id]);
+    await page.getByRole('link', { name: 'Back to workspace', exact: true }).click();
+    await limits.click();
+    await prepare.click();
+    await confirm.click();
+    await expect(page.getByRole('alert')).toHaveText('A rate-limit reset is already running.');
+    expect(writes).toEqual([first.id]);
+    release();
+    await expect(page.getByText('Available resets: 0')).toBeVisible();
+    await expect(confirm).toBeDisabled();
+    expect(writes).toEqual([first.id]);
+  } finally {
+    release();
+  }
+});
+
+for (const keepProvider of [true, false]) {
+  test(`keeps the reset result tied to Codex when it ${keepProvider ? 'moves in the list' : 'disappears'}`, async ({
+    page,
+  }) => {
+    await login(page);
+    const initial = (await (await page.request.get('/api/usage')).json()) as UsageView;
+    const codex = { ...initial.agents[0], available: true, stale: false, retrievedAt: undefined };
+    const claude = { ...codex, engine: 'claude', name: 'Claude' };
+    let usage = { agents: [codex, claude] };
+    const plan = {
+      id: crypto.randomUUID(),
+      status: 'ready',
+      title: 'Full reset',
+      availableCount: 1,
+    };
+    await page.route('**/api/usage*', (route) => route.fulfill({ json: usage }));
+    await page.route('**/api/usage/reset/prepare', (route) => route.fulfill({ json: plan }));
+    await page.route('**/api/usage/reset/' + plan.id, (route) => {
+      usage = { agents: keepProvider ? [claude, codex] : [claude] };
+      return route.fulfill({
+        json: { plan: { ...plan, status: 'done', outcome: 'reset' }, usage },
+      });
+    });
+    await page.getByRole('link', { name: 'Limits', exact: true }).click();
+    await page.getByRole('button', { name: 'Use a reset', exact: true }).click();
+    await page.getByRole('button', { name: 'Confirm: use one reset' }).click();
+    const notice = page.getByRole('status').filter({ hasText: 'One reset was used.' });
+    const provider = page.getByLabel('Agent usage');
+    await expect(notice).toContainText('Codex');
+    await expect(provider).toHaveValue(keepProvider ? 'codex' : 'claude');
+    if (keepProvider) await provider.selectOption('claude');
+    await expect(notice).toContainText('Codex');
+  });
+}

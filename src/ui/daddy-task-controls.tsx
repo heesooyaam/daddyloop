@@ -1,3 +1,4 @@
+import { VoiceInput, appendDictation } from './voice-input.js';
 import { useRef, useState } from 'react';
 import { ChevronDown, RefreshCw, Settings2 } from 'lucide-react';
 import type { DaddyApi, DaddyBoard } from '../client/daddy.js';
@@ -18,6 +19,7 @@ export function QueueTaskForm({
   onQueued: (id: string) => void;
 }) {
   const { t } = useLocale();
+  const [voiceBusy, setVoiceBusy] = useState(false);
   const [requirements, setRequirements] = useState('');
   const [slot, setSlot] = useState('');
   const [profile, setProfile] = useState<AgentProfile>({ engine: board.workerDefault.engine });
@@ -28,7 +30,7 @@ export function QueueTaskForm({
   const { catalogue, load } = useAgentCatalogue(api, false);
   const last = useRef<{ key: string; id: string } | undefined>(undefined);
   const submit = async () => {
-    if (busy || editingRepository || !requirements.trim()) return;
+    if (busy || voiceBusy || editingRepository || !requirements.trim()) return;
     const input = {
       requirements: requirements.trim(),
       repository,
@@ -72,6 +74,12 @@ export function QueueTaskForm({
           onChange={(event) => setRequirements(event.target.value)}
         />
       </label>
+      <VoiceInput
+        key={board.group.id}
+        onBusy={setVoiceBusy}
+        disabled={busy}
+        onText={(text) => setRequirements(appendDictation(requirements, text))}
+      />
       <label>
         {t('Assign to worker')}
         <select value={slot} onChange={(event) => setSlot(event.target.value)}>
@@ -127,7 +135,7 @@ export function QueueTaskForm({
       )}
       <button
         className="daddy-button primary"
-        disabled={busy || editingRepository || !requirements.trim()}
+        disabled={busy || voiceBusy || editingRepository || !requirements.trim()}
       >
         {t('Queue task')}
       </button>

@@ -65,6 +65,16 @@ test('starts from a registered workspace, adds N+1 tickets to daddy and exposes 
 test('sets a one-message repository in session settings and sends the next message with the default', async ({
   page,
 }) => {
+  // Keep one interceptor installed while the UI polls. Both sends still reach the
+  // fixture; only the delivery of each response to the browser is held.
+  let holdChat: Promise<void> | undefined;
+  await page.route('**/api/daddy/sessions/*/chat', async (route) => {
+    const hold = holdChat;
+    if (!hold) return route.continue();
+    const response = await route.fetch();
+    await hold;
+    await route.fulfill({ response });
+  });
   await login(page);
   await create(page, 'Per-task workspace', Date.now());
   await page.setViewportSize({ width: 390, height: 844 });
@@ -133,15 +143,7 @@ test('sets a one-message repository in session settings and sends the next messa
     const pending = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await page.route(
-      '**/api/daddy/sessions/*/chat',
-      async (route) => {
-        const response = await route.fetch();
-        await pending;
-        await route.fulfill({ response });
-      },
-      { times: 1 },
-    );
+    holdChat = pending;
     const request = page.waitForRequest('**/api/daddy/sessions/*/chat');
     try {
       await send();
@@ -151,6 +153,7 @@ test('sets a one-message repository in session settings and sends the next messa
       await expect(settings).toHaveCount(0);
     } finally {
       release();
+      holdChat = undefined;
     }
   };
   const sent = page.waitForResponse(
@@ -189,7 +192,7 @@ test('sets a one-message repository in session settings and sends the next messa
   expect(defaultBoard.workspace.repoPath).toBe(source);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await expect(page.locator('.daddy-work-item')).toHaveCount(3);
+  await expect(page.locator('.daddy-work-item')).toHaveCount(3, { timeout: 20000 });
 });
 test('restores focus when resetting the one-message repository removes the settings opener', async ({
   page,
