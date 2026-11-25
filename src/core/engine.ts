@@ -529,6 +529,8 @@ export class Engine {
     await this.verifyPartialDraft(task, pr, snapshot, partial.runId);
     task.snapshot = snapshot;
     task.feedback = snapshot;
+    if (partial.question)
+      task.openReviewQuestion = { head: snapshot.revision.head, text: redact(partial.question) };
     task.draftRecheck = undefined;
     this.store.saveTask(task);
     if (
@@ -568,6 +570,8 @@ export class Engine {
       (task.state === 'needs_input' || task.snapshot?.status === 'published')
     )
       return { question: redact(task.partialReview.question), head: task.review?.revision.head };
+    if (task.openReviewQuestion && task.state !== 'needs_input' && task.state !== 'complete')
+      return { question: task.openReviewQuestion.text, head: task.openReviewQuestion.head };
     if (task.state !== 'needs_input') return;
     const job = this.store.jobs(task.id).at(-1);
     if (task.resumeState !== 'reviewing' && (!task.review || task.reviewFinished))
@@ -2104,6 +2108,7 @@ export class Engine {
           task.draftRecheck = undefined;
         }
         task.reviewFinished = true;
+        delete task.openReviewQuestion;
         for (const id of verified)
           this.store.decision(task, {
             commentId: id,

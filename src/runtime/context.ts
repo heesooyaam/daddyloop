@@ -39,6 +39,7 @@ export function buildContext(store: Store, task: Task, job: Job): string {
       : undefined,
     source: task.source,
     workerReport: report?.text,
+    unresolvedReviewQuestion: task.openReviewQuestion,
     ...(group
       ? {
           reviewGroup: {

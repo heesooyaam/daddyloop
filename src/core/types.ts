@@ -238,6 +238,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  openReviewQuestion?: { head: string; text: string };
   partialReview?: {
     reviewId: string;
     runId: string;
