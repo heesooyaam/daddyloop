@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { prepareSpeech } from './prepare-speech.js';
 import { fileURLToPath } from 'node:url';
 import { AppError } from '../core/types.js';
 import type { Locale } from '../i18n/index.js';
@@ -10,20 +10,38 @@ export interface Speech {
   transcribe(path: string, locale: Locale, signal: AbortSignal): Promise<string>;
 }
 export class LocalSpeech implements Speech {
+  private prepared?: Promise<void>;
+  private last: Promise<void> = Promise.resolve();
   constructor(private dataDir: string) {}
   transcribe(path: string, locale: Locale, signal: AbortSignal): Promise<string> {
     const bundle = bundledRoot();
     const model = bundle
       ? join(bundle, 'app/speech/whisper-small')
       : join(this.dataDir, 'speech/whisper-small');
-    if (!existsSync(join(model, 'config.json')))
-      return Promise.reject(
-        new AppError(
-          'speech_model_missing',
-          'Install the release with voice support, or run npm run speech:prepare for a source checkout.',
-          422,
-        ),
-      );
+    // The web and Telegram share one CPU recognizer. A failed download can be retried on the next recording.
+    const result = this.last.then(async () => {
+      signal.throwIfAborted();
+      if (!bundle) {
+        this.prepared ??= prepareSpeech(model).catch((error) => {
+          this.prepared = undefined;
+          throw error;
+        });
+        await this.prepared;
+      }
+      return this.recognize(path, model, locale, signal);
+    });
+    this.last = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+  private recognize(
+    path: string,
+    model: string,
+    locale: Locale,
+    signal: AbortSignal,
+  ): Promise<string> {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
       const child = spawn(

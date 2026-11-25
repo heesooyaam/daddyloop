@@ -1,4 +1,4 @@
-import { GitHubQuotaError } from '../providers/github-quota.js';
+import { GitHubRetryError } from '../providers/github-quota.js';
 import { createHash } from 'node:crypto';
 import { AppError, ProviderWriteNotAttempted } from './types.js';
 import type { Store } from './store.js';
@@ -81,7 +81,7 @@ export class Outbox {
         const notAttempted = error instanceof ProviderWriteNotAttempted;
         if (
           notAttempted ||
-          (error instanceof GitHubQuotaError && error.refusedWrite) ||
+          (error instanceof GitHubRetryError && error.refusedWrite) ||
           refused?.(error) === true
         ) {
           this.store.transaction(() => {

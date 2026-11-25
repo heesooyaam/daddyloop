@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { DaddyClient, type DaddyApi } from '../src/client/daddy.js';
+import type { UsageView } from '../src/core/usage.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { healthy } from './planning-fixture.js';
 it('fences a late session read and preserves drafts for both conversations', async () => {
@@ -123,6 +124,30 @@ it('can remount after cleanup without reusing an aborted read controller', async
   expect(signals.at(-1)?.aborted).toBe(false);
   model.stop();
 });
+it.each(['success', 'failure'] as const)(
+  'keeps a manual usage update after an older poll finishes with %s',
+  async (outcome) => {
+    const old: UsageView = { agents: [] };
+    const current: UsageView = { agents: [] };
+    let finish!: () => void;
+    const poll = new Promise<UsageView>((resolve, reject) => {
+      finish = () => (outcome === 'success' ? resolve(old) : reject(new Error('Read failed')));
+    });
+    const api: DaddyApi = async <T>(path: string) =>
+      (path === '/usage' ? await poll : current) as T;
+    const model = new DaddyClient(api);
+    try {
+      const pending = model.refreshUsage();
+      await model.refreshUsage(true);
+      finish();
+      await pending;
+      expect(model.snapshot().usage).toBe(current);
+      expect(model.snapshot().usageError).toBeUndefined();
+    } finally {
+      model.stop();
+    }
+  },
+);
 it('keeps a changed repository draft during an uncertain send and binds retry identity to the whole request', async () => {
   const f = daddyFixture(),
     group = f.daddy.create({ workspaceId: f.workspace.id });

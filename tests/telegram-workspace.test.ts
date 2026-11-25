@@ -1,3 +1,4 @@
+import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
@@ -888,6 +889,132 @@ it.each(['private', 'topic'])(
   },
 );
 
+it('repeats only an open owner question after 30 minutes, once across replays and restarts', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_to, card, _unused, options) => {
+      sent.push({ card, options });
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(),
+  } as unknown as TelegramApi;
+  let bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7, ownerLabel: 'Owner' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const t = await f.daddy.createTask(group.id, { requirements: 'Layout', requestId: 'test' });
+  f.store.saveTask({
+    ...t,
+    state: 'needs_input',
+    reason: 'Which layout?',
+    inputRequest: { role: 'author', runId: 'run', generation: t.generation },
+  });
+  const pings = () =>
+    sent.filter((x) => x.card.entities?.some((e: any) => e.url === 'tg://user?id=7'));
+  try {
+    bot.replay();
+    await vi.waitFor(() => expect(pings()).toHaveLength(1));
+    const id = pings()[0].options.notificationId;
+    const age = (minutes: number, key = id) =>
+      f.store.db
+        .prepare('UPDATE notifications SET at=? WHERE id=?')
+        .run(new Date(Date.now() - minutes * 60000).toISOString(), key);
+    age(29);
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(1);
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    age(95);
+    bot.remindOwners();
+    bot.remindOwners();
+    await vi.waitFor(() => expect(pings()).toHaveLength(2));
+    const reminder = pings()[1];
+    expect(reminder.options.replace).toBe(false);
+    expect(reminder.card.text).toContain('Which layout?');
+    bot.replay();
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(2);
+    bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    age(31, reminder.options.notificationId);
+    f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
+    bot.remindOwners();
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'attention' });
+    f.store.saveTask({ ...t, state: 'fixing' });
+    bot.remindOwners();
+    await bot.stop();
+    expect(pings()).toHaveLength(2);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('acknowledges an explicit reply to the matching task ping while its answer is being processed', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.daddy.createTask(group.id, { requirements: 'Task', requestId: 'asked' });
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      inputRequest: { runId: 'question', role: 'author', generation: task.generation },
+    });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    const q = { groupId: group.id, taskId: task.id, request: 'question' };
+    f.store.setSetting('telegram.delivery:test', {
+      destination: { chatId: -1001 },
+      options: { key: 'telegram:question:7:' + task.id + ':question' },
+      messages: [{ id: 42 }],
+    });
+    f.store.daddyMessage(group.id, 'user', 'Another reply', undefined, undefined, {
+      origin: { channel: 'telegram', chatId: 7, replyTo: { messageId: 42 } },
+    });
+    expect(reminderOpen(f.store, q)).toBe(true);
+    f.store.daddyMessage(group.id, 'user', 'Use main', undefined, undefined, {
+      origin: { channel: 'telegram', chatId: -1001, replyTo: { messageId: 42 } },
+    });
+    expect(reminderOpen(f.store, q)).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
+
+it('stops reminders for a coordinator question after an owner answer', async () => {
+  const f = daddyFixture();
+  const sent: any[] = [];
+  const api = {
+    send: vi.fn(async (_to, card, _unused, options) => {
+      sent.push({ card, options });
+      return { message_id: sent.length };
+    }),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7, ownerLabel: 'Owner' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    f.store.finishDaddyReply(group.id, 'Which branch?', 'test-turn', true);
+    bot.replay();
+    await vi.waitFor(() => expect(sent.length).toBe(1));
+    f.store.db
+      .prepare('UPDATE notifications SET at=? WHERE id=?')
+      .run('2000-01-01T00:00:00.000Z', sent[0].options.notificationId);
+    bot.remindOwners();
+    await vi.waitFor(() => expect(sent.length).toBe(2));
+    f.store.db
+      .prepare('UPDATE notifications SET at=? WHERE id=?')
+      .run('2000-01-02T00:00:00.000Z', sent[1].options.notificationId);
+    f.daddy.chat(group.id, 'Use main.');
+    bot.remindOwners();
+    await bot.stop();
+    expect(sent.length).toBe(2);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
 it('offers an immediate model switch from the daddy effort picker', async () => {
   const f = daddyFixture();
   const sent: any[] = [];
@@ -934,6 +1061,63 @@ it('offers an immediate model switch from the daddy effort picker', async () => 
         forceDaddy: true,
       }),
     );
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('binds the current turn to the quoted Telegram parent even after an unrelated update', async () => {
+  const f = daddyFixture();
+  const api = {
+    send: vi.fn(async () => ({ message_id: 1 })),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const chat = { id: 7, type: 'private' };
+  const message = {
+    message_id: 365,
+    from: { id: 7 },
+    chat,
+    text: 'а на что это влияет?',
+    reply_to_message: {
+      message_id: 359,
+      chat,
+      from: { id: 12, username: 'fixture_bot', is_bot: true },
+      text: 'Воркер · DADDY-ccf7e32c · PR #39. Какой контракт сохранить?',
+    },
+    quote: { text: 'Какой контракт сохранить?', position: 38, is_manual: true },
+  };
+  try {
+    f.store.daddyMessage(group.id, 'agent', 'Newer result about PR #64');
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({ update_id: 365, message });
+    await bot.handle({
+      update_id: 366,
+      message: { message_id: 366, chat, from: { id: 7 }, text: 'и отдельный вопрос' },
+    });
+    const jobs = f.store.daddyJobs(group.id);
+    expect(jobs.filter((j) => j.trigger === 'user')).toHaveLength(2);
+    expect(jobs[0].replyTo).toMatchObject({
+      messageId: 359,
+      text: message.reply_to_message.text,
+      quote: message.quote.text,
+    });
+    expect(jobs[1].replyTo).toBeUndefined();
+    const saved = f.store.messages(group.id).find((m) => m.text === message.text);
+    expect(saved?.origin).toMatchObject({ messageId: 365, replyTo: jobs[0].replyTo });
+    f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledOnce());
+    const context = JSON.parse(f.runtime.runSession.mock.calls[0][0].prompt);
+    expect(context.currentInstruction).toBe(message.text);
+    expect(context.replyTo).toMatchObject({
+      messageId: 359,
+      text: expect.stringContaining('PR #39'),
+      quote: message.quote.text,
+    });
   } finally {
     await bot.stop();
     await f.close();

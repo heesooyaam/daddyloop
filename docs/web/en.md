@@ -6,6 +6,8 @@ The website runs **on the service host**, at `http://127.0.0.1:4317`. Your brows
 
 In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
 
+In chat and in the task form, use the microphone button to dictate. Review the transcript before sending. See [voice input](../voice/en.md).
+
 ## Which machine does what?
 
 | Location                       | What to do here                                                    |
@@ -111,7 +113,7 @@ Choose **Change theme** in the settings at the bottom of the sidebar. On a narro
 
 The web palettes cover the conversation, task board, dialogs, forms and login screen. The terminal separately supports `daddy --theme dark` and `daddy --theme light`.
 
-The panel above the conversation shows [agent quotas](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).
+Hover over or focus the gauge in the workspace header to see remaining quotas. Select the gauge for provider details and a link to the [limits page](../agents/en.md#limits). For logs and device revocation, see [operations](../operations/en.md).
 
 ## Interface typography
 

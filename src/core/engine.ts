@@ -8,7 +8,7 @@ import {
   type PrEvidence,
 } from './pr-routing.js';
 import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
-import { GitHubQuotaError, legacyQuotaRead } from '../providers/github-quota.js';
+import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
@@ -50,6 +50,13 @@ import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
 
+const interruptedSubmission =
+  'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
+const reviewRetryInstruction =
+  'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.';
+const clarifiedReviewPrefix =
+  reviewRetryInstruction +
+  '\nClarification from the session coordinator; verify it against the task: ';
 const oldReviewStartLimit = 'Review round limit reached';
 const oldPublishedReviewLimit =
   'Review round limit reached; inspect the remaining published findings';
@@ -591,6 +598,8 @@ export class Engine {
         task.resumeState = undefined;
       }
       this.store.transaction(() => {
+        task.pendingFix = undefined;
+        if (clarification?.trim()) this.rememberClarification(task, clarification);
         if (confirmedLegacyRetry)
           this.store.event(task.id, 'author.fix_confirmed_for_review', {
             savedEventId: legacySave.id,
@@ -616,11 +625,9 @@ export class Engine {
           'reviewer',
           'review',
           retry
-            ? 'Continue the interrupted review. Re-read the native draft and previous decisions; do not recreate deleted comments.' +
-                (clarification?.trim()
-                  ? '\nClarification from the session coordinator; verify it against the task: ' +
-                    clarification.trim()
-                  : '')
+            ? clarification?.trim()
+              ? clarifiedReviewPrefix + clarification.trim()
+              : reviewRetryInstruction
             : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
         );
       });
@@ -1458,13 +1465,61 @@ export class Engine {
       const task = this.store.getTask(id);
       if (
         task.state !== 'needs_input' ||
-        task.resumeState !== 'fixing' ||
+        !(task.resumeState === 'fixing' || task.resumeState === 'needs_input') ||
         task.pendingFix ||
         task.fixingMergeConflict ||
         this.store.busy(id)
       )
         return;
       const job = this.store.jobs(id).at(-1);
+      if (task.resumeState === 'needs_input') {
+        if (
+          job?.kind !== 'chat' ||
+          job.role !== 'author' ||
+          job.status !== 'failed' ||
+          job.errorCode !== 'stale_revision' ||
+          job.generation !== task.generation ||
+          job.error !== task.reason ||
+          !job.actionId?.startsWith('daddy:') ||
+          !task.review ||
+          !hasReleasedReview(task) ||
+          task.snapshot?.status !== 'published'
+        )
+          return;
+        const previous = this.store.jobs(id).at(-2);
+        if (
+          previous?.kind !== 'fix' ||
+          previous.status !== 'completed' ||
+          previous.generation !== task.generation
+        )
+          return;
+        const result = this.recordedAgentResult(id, previous.id);
+        if (
+          !result ||
+          !requestsHumanInput(result) ||
+          !result.question?.trim() ||
+          result.checkedHead !== task.revision?.head
+        )
+          return;
+        const group = task.groupId && this.store.getGroup(task.groupId);
+        if (
+          !group ||
+          group.generation !== job.groupGeneration ||
+          group.deletion ||
+          group.deletedAt ||
+          group.daddyState === 'paused' ||
+          group.daddyState === 'archived'
+        )
+          return;
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        if (
+          !sameOpenTarget(task.pr, pr) ||
+          (!sameRevision(pr, task.revision) && !(await this.publishedFixBaseAdvanced(task, pr)))
+        )
+          return;
+        this.store.transaction(() => this.queueAnsweredFix(task, job.input, job.actionId));
+        return;
+      }
       if (!job || job.kind !== 'fix') return;
       const restarted = restartInterrupted(task, job);
       if (!restarted && job.generation !== task.generation) return;
@@ -2277,7 +2332,7 @@ export class Engine {
       return await this.provider(ref).getPR(ref);
     } catch (error) {
       const pending = task.pendingAuthorFix;
-      if (error instanceof GitHubQuotaError && !pending?.pushStarted && !pending?.sent) throw error;
+      if (error instanceof GitHubRetryError && !pending?.pushStarted && !pending?.sent) throw error;
       const until = pending?.confirmUntil;
       if (until !== undefined && Date.now() < until) throw error;
       this.blockSavedFix(task, head, `Could not confirm the PR revision. ${redact(String(error))}`);
@@ -2359,7 +2414,7 @@ export class Engine {
       if (!(await this.provider(ref).targetAdvanced?.(ref, pending.revision.base, pr.base)))
         return check;
     } catch (error) {
-      if (error instanceof GitHubQuotaError && !pending.pushStarted && !pending.sent) throw error;
+      if (error instanceof GitHubRetryError && !pending.pushStarted && !pending.sent) throw error;
       if (pending.confirmUntil !== undefined && Date.now() < pending.confirmUntil) throw error;
       return {
         status: 'blocked',
@@ -2915,6 +2970,22 @@ export class Engine {
       return this.reconcileLocked(id, publication);
     });
   }
+  private rememberClarification(task: Task, text: string) {
+    task.latestClarification = {
+      text: text.trim(),
+      question:
+        task.openReviewQuestion?.text ??
+        (task.inputRequest?.role === 'author' ? task.reason : undefined),
+    };
+    delete task.openReviewQuestion;
+    if (task.partialReview) delete task.partialReview.question;
+  }
+  private queueAnsweredFix(task: Task, text: string, actionId?: string) {
+    this.rememberClarification(task, text);
+    task.resumeState = 'fixing';
+    this.state(task, 'fixing', 'Continuing the fix with the answer from the session');
+    this.store.enqueue(task, 'author', 'fix', text, actionId);
+  }
   async chat(
     id: string,
     role: 'author' | 'reviewer',
@@ -2953,7 +3024,19 @@ export class Engine {
         );
       this.store.transaction(() => {
         this.store.message(id, role, 'user', text);
-        this.store.enqueue(task, role, 'chat', text, actionId);
+        if (
+          role === 'author' &&
+          task.state === 'needs_input' &&
+          task.resumeState === 'fixing' &&
+          !task.fixingMergeConflict &&
+          task.inputRequest?.role === 'author' &&
+          task.inputRequest.generation === task.generation &&
+          hasReleasedReview(task) &&
+          sameRevision(task.revision, task.snapshot?.revision) &&
+          task.snapshot?.status === 'published'
+        ) {
+          this.queueAnsweredFix(task, text, actionId);
+        } else this.store.enqueue(task, role, 'chat', text, actionId);
       });
       return task;
     });
@@ -3545,6 +3628,37 @@ export class Engine {
   }
   recoverInterruptedJobs() {
     for (const task of this.store.tasks()) {
+      if (!task.latestClarification && task.state !== 'complete') {
+        const review = this.store
+          .jobs(task.id)
+          .findLast((j) => j.kind === 'review' && j.input.startsWith(clarifiedReviewPrefix));
+        if (review) {
+          task.latestClarification = { text: review.input.slice(clarifiedReviewPrefix.length) };
+          this.store.saveTask(task);
+        }
+      }
+
+      // The outbox commits its receipt before sending the POST. A process can exit before
+      // submit() records the response, so recover that window using the same request hash.
+      if (
+        isTicket(task) &&
+        task.ref.provider === 'github' &&
+        task.pendingAuthorHead &&
+        !task.prLink &&
+        task.resumeState === 'submitting' &&
+        (task.state === 'submitting' ||
+          (task.state === 'needs_input' && task.reason === interruptedSubmission)) &&
+        this.store.db
+          .prepare("SELECT 1 FROM operations WHERE id=? AND task_id=? AND status='pending'")
+          .get('ticket-submit:' + task.id, task.id)
+      ) {
+        task.prLink = { generation: task.generation, head: task.pendingAuthorHead };
+        this.state(
+          task,
+          'submitting',
+          'Checking GitHub for the result of the previous PR creation',
+        );
+      }
       if (task.state !== 'needs_input' || task.inputRequest) continue;
       const job = this.store.jobs(task.id).at(-1);
       if (!job || job.status !== 'completed' || job.generation !== task.generation) continue;
@@ -3559,12 +3673,13 @@ export class Engine {
       }
     }
     for (const task of this.store.tasks())
-      if (task.state === 'submitting')
-        this.state(
-          task,
-          'needs_input',
-          'PR submission was interrupted. Submit again to reconcile its native result before retrying.',
-        );
+      if (
+        task.state === 'submitting' &&
+        !(
+          task.prLink?.generation === task.generation && task.prLink.head === task.pendingAuthorHead
+        )
+      )
+        this.state(task, 'needs_input', interruptedSubmission);
     for (const job of this.store.jobs())
       if (
         job.status === 'running' ||
@@ -3802,6 +3917,7 @@ export class Engine {
     );
   }
   async createTicket(input: {
+    replyTo?: Task['replyTo'];
     ref: TicketRef;
     source: TicketSource;
     repoPath: string;
@@ -3908,6 +4024,7 @@ export class Engine {
         source: input.source,
         repoPath: input.repoPath,
         ticketRepository: input.repository,
+        replyTo: input.replyTo,
         requirements: input.requirements ?? (input.source.body || input.source.title),
         parentTaskId: parent?.id,
         groupId: group.id,
@@ -4061,11 +4178,26 @@ export class Engine {
           'repository_mismatch',
           'The PR must belong to this task’s configured repository',
         );
+      if (expectedHead && task.pendingAuthorHead !== expectedHead)
+        throw new AppError(
+          'submitted_head_changed',
+          'The task now has a different saved commit. Inspect the submission before connecting.',
+        );
       const pr = await this.provider(ref).getPR(ref);
       if (expectedHead && pr.head !== expectedHead)
         throw new AppError(
           'submitted_head_changed',
           'The PR does not point to the submitted implementation; inspect it before connecting',
+        );
+      if (
+        ref.provider === 'github' &&
+        task.ticketRepository &&
+        (pr.branch !== task.ticketRepository.branch ||
+          pr.targetBranch !== task.ticketRepository.baseBranch)
+      )
+        throw new AppError(
+          'submitted_branch_changed',
+          'The PR branches changed after submission; inspect it before connecting.',
         );
       if (pr.state !== 'open') throw new AppError('pr_closed', 'Connect an open PR');
       if (
@@ -4077,6 +4209,7 @@ export class Engine {
       )
         throw new AppError('already_attached', 'This PR is already attached');
       task.ref = ref;
+      delete task.prLink;
       task.pr = pr;
       task.revision = revisionOf(pr);
       task.generation++;

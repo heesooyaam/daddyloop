@@ -190,6 +190,8 @@ For example, GitHub may still be calculating mergeability when findings are publ
 
 [nextPrAction](../../src/core/pr-routing.ts) defines the order of decisions. [Engine](../../src/core/engine.ts) preserves drafts or local changes and assigns the worker. [Auto-merge](../../src/core/auto-merge.ts) consults the same rule after reading the review and immediately before writing to GitHub. The [regression tests](../../tests/auto-merge.test.ts) exercise the same conflict through different entry points.
 
+A transient GitHub read failure is retried by the scheduler, with a persistent backoff. When a PR was already created the service records its URL, submitted commit and task generation and retries only the read needed to attach it. If the response to PR creation was lost, daddy searches for the original submission using its marker, branch and author before taking further action. The queue displays the retry time or an actual owner question.
+
 ## 5. Which runs can work in parallel
 
 **One task has at most one active agent run.** While a worker implements “Fix search,” a second run for that task waits. Another task — such as updating documentation — can run alongside it.

@@ -6,6 +6,10 @@ When daddy or a worker asks for a decision, the bot sends a new message with a m
 
 In session settings, the All workers profile applies to every slot, including slots with individual profiles. A running worker turn finishes on its current model and the next turn uses the new profile. Choose Apply now to restart the active daddy turn or review on the new model. In Telegram, open /models to access these controls.
 
+Replying in a topic sends the original message and the selected quotation to daddy with your question. You can reply to an older worker question after the conversation has moved on. A voice reply keeps the same context during transcription.
+
+While an owner decision remains open, the bot repeats the mention 30 minutes after the previous delivery. Resolution, pausing and disabled notifications stop reminders. After downtime only one overdue reminder is sent.
+
 ## Connect the bot
 
 1. Create a dedicated bot with **@BotFather** and copy its token.

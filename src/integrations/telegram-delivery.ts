@@ -1,3 +1,4 @@
+import { reminderOpen, type OwnerQuestion } from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
@@ -5,6 +6,8 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  reminder?: OwnerQuestion;
+  groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
   pinMessageId?: number;
@@ -82,6 +85,7 @@ export class TelegramDelivery {
     else this.pending.delete(key);
   }
   private valid(value: Delivery) {
+    if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
@@ -90,6 +94,31 @@ export class TelegramDelivery {
       value.destination.chatId === pair.chatId ||
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
+  }
+  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+    // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
+    const row = this.store.db
+      .prepare(
+        `SELECT json_extract(value,'$.options.groupId') AS groupId,
+      json_extract(value,'$.options.key') AS deliveryKey FROM settings
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+        AND json_extract(value,'$.destination.chatId')=?
+        AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+      )
+      .get(this.bot, ownerId, chatId, messageId);
+    if (typeof row?.groupId === 'string') return row.groupId;
+    // Receipts from older installs identify the task or turn in the delivery key.
+    const key = String(row?.deliveryKey ?? '');
+    const task = key.startsWith('telegram:question:' + ownerId + ':')
+      ? key.split(':')[3]
+      : undefined;
+    if (task) return this.store.tasks().find((t) => t.id === task)?.groupId;
+    if (key.startsWith('turn:')) {
+      const job = this.store.db
+        .prepare('SELECT group_id FROM daddy_jobs WHERE id=?')
+        .get(key.slice(5));
+      if (typeof job?.group_id === 'string') return job.group_id;
+    }
   }
   private createDelivery(
     destination: TelegramDestination,
@@ -247,6 +276,11 @@ export class TelegramDelivery {
   private async attempt(key: string, value: Delivery) {
     if (!this.valid(value)) {
       value.status = 'cancelled';
+      if (value.options.reminder && value.options.notificationId)
+        this.store.db
+          .prepare("UPDATE notifications SET status='superseded',at=? WHERE id=?")
+          .run(new Date(this.clock()).toISOString(), value.options.notificationId);
+
       this.save(key, value);
       return;
     }
@@ -370,8 +404,8 @@ export class TelegramDelivery {
         value.attempts = 0;
         if (options.notificationId)
           this.store.db
-            .prepare("UPDATE notifications SET status='sent' WHERE id=?")
-            .run(options.notificationId);
+            .prepare("UPDATE notifications SET status='sent',at=? WHERE id=?")
+            .run(new Date(this.clock()).toISOString(), options.notificationId);
         if (options.deletePrevious) {
           try {
             await this.api.call(

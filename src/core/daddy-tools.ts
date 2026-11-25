@@ -67,7 +67,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   dispatch:
     'Start work on a ready task. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
   message_worker:
-    'Send scoped instructions or a question to the task worker. Results return to daddy; do not ask the user to contact workers.',
+    'Send scoped instructions to the task worker. When an author asks a question and the answer is already in the session, send the decision here to resume that fix. Results return to daddy.',
   set_dependencies:
     'Set same-session prerequisites before a task starts. This orders work; it does not merge branches. Keep interdependent edits in one implementation task unless their base already contains the prerequisites.',
   pause_task:

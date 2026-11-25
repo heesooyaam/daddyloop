@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubProvider } from '../src/providers/github.js';
+import { githubWait } from '../src/providers/github-quota.js';
 import { GitLabProvider } from '../src/providers/gitlab.js';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
@@ -392,18 +393,31 @@ describe('GitHub draft review contract', () => {
         return;
       }
       if (scenario === 'unavailable before creation') {
-        await expect(engine.review(task.id)).rejects.toMatchObject({ code: 'provider_503' });
+        await expect(engine.review(task.id)).rejects.toMatchObject({
+          code: 'github_read_unavailable',
+          refusedWrite: true,
+        });
         expect(attempts).toBe(0);
         expect(store.db.prepare("SELECT id FROM operations WHERE status='pending'").all()).toEqual(
           [],
         );
-        reviewsAvailable = true;
-        base = 'e'.repeat(40);
-        const restarted = new Engine(store, () => provider);
-        const next = await restarted.review(task.id, true);
-        expect(next).toMatchObject({ state: 'reviewing', review: { id: '1', revision: { base } } });
-        expect(store.busy(task.id)).toBe(true);
-        expect(attempts).toBe(1);
+        const retryAt = githubWait(store, ref);
+        expect(retryAt).toBeGreaterThan(Date.now());
+        const now = vi.spyOn(Date, 'now').mockReturnValue(retryAt! + 1);
+        try {
+          reviewsAvailable = true;
+          base = 'e'.repeat(40);
+          const restarted = new Engine(store, () => provider);
+          const next = await restarted.review(task.id, true);
+          expect(next).toMatchObject({
+            state: 'reviewing',
+            review: { id: '1', revision: { base } },
+          });
+          expect(store.busy(task.id)).toBe(true);
+          expect(attempts).toBe(1);
+        } finally {
+          now.mockRestore();
+        }
         return;
       }
       if (scenario !== 'regular') {
@@ -1235,6 +1249,36 @@ it('shares GitHub quota deadlines across provider instances and permits ordinary
     expect(normal).toHaveBeenCalledTimes(1);
   } finally {
     vi.useRealTimers();
+    store.close();
+  }
+});
+
+it('persists backoff for transient GitHub reads and does not treat a failed mutation as a safe retry', async () => {
+  const store = new Store(':memory:');
+  const calls = vi.fn(
+    () =>
+      new Response('temporarily unavailable', { status: 503, headers: { 'retry-after': '35' } }),
+  );
+  const p = new GitHubProvider('github.com', 'fake', transport(calls), store);
+  try {
+    await expect(p.http.request('POST', '/graphql', {})).rejects.toMatchObject({
+      code: 'provider_503',
+    });
+    const start = Date.now();
+    await expect(p.http.request('GET', '/repos/test/repo')).rejects.toMatchObject({
+      code: 'github_read_unavailable',
+      refusedWrite: false,
+    });
+    const deadline = store.setting<{ until: number }>('github.read-backoff:github.com')!.until;
+    expect(deadline).toBeGreaterThanOrEqual(start + 35000);
+    const afterRestart = new GitHubProvider('github.com', 'fake', transport(calls), store);
+    await expect(afterRestart.http.request('POST', '/graphql', {})).rejects.toMatchObject({
+      code: 'github_read_unavailable',
+      until: deadline,
+      refusedWrite: true,
+    });
+    expect(calls).toHaveBeenCalledTimes(2);
+  } finally {
     store.close();
   }
 });

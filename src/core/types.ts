@@ -136,6 +136,7 @@ export interface Workspace {
   updatedAt: string;
 }
 export interface DaddyJob {
+  replyTo?: TelegramReply;
   firstAttemptId?: string;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
@@ -211,6 +212,7 @@ export interface ReviewSnapshot {
   revision: Revision;
 }
 export interface Task {
+  replyTo?: TelegramReply;
   inputRequest?: { runId: string; role: Role; generation: number };
   resourcePause?: { generation: number; at: string };
   id: string;
@@ -240,6 +242,7 @@ export interface Task {
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
+  latestClarification?: { text: string; question?: string };
   openReviewQuestion?: { head: string; text: string };
   partialReview?: {
     reviewId: string;
@@ -269,6 +272,14 @@ export interface Task {
     sent?: boolean;
     confirmUntil?: number;
     staleDraft?: ReviewHandle;
+  };
+  prLink?: {
+    ref?: PRRef;
+    head: string;
+    generation: number;
+    retryAt?: number;
+    delay?: number;
+    failure?: string;
   };
   fixingMergeConflict?: boolean;
   conflictCheckpoint?: string;
@@ -316,11 +327,23 @@ export interface Event {
   data: unknown;
   at: string;
 }
+export interface TelegramReply {
+  messageId?: number;
+  author?: string;
+  text?: string;
+  quote?: string;
+}
 export interface Message {
   needsReply?: boolean;
   phase?: 'progress' | 'final';
   /** Used to mirror a conversation without echoing a Telegram message back into its own topic. */
-  origin?: { channel: 'telegram'; chatId: number; threadId?: number };
+  origin?: {
+    channel: 'telegram';
+    chatId: number;
+    threadId?: number;
+    messageId?: number;
+    replyTo?: TelegramReply;
+  };
   workspace?: Workspace;
   id: string;
   taskId: string;
