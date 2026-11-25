@@ -23,14 +23,24 @@ export class ProviderHttp {
         redirect: 'error',
       });
     } catch (error) {
+      this.quota?.unavailable(method);
       throw new AppError(
         'provider_unreachable',
         `Provider request did not finish: ${redact(String(error))}`,
         502,
       );
     }
+    if (response.status === 204) return undefined as T;
+    const bodyText = await response.text().catch((error) => {
+      this.quota?.unavailable(method);
+      throw new AppError(
+        'provider_unreachable',
+        `Provider response did not finish: ${redact(String(error))}`,
+        502,
+      );
+    });
     if (!response.ok) {
-      const text = redact((await response.text()).slice(0, 1200));
+      const text = redact(bodyText.slice(0, 1200));
       this.quota?.observe(response, method, text);
       throw new AppError(
         `provider_${response.status}`,
@@ -38,9 +48,7 @@ export class ProviderHttp {
         response.status === 404 ? 404 : 502,
       );
     }
-    if (response.status === 204) return undefined as T;
-    const text = await response.text();
-    return text ? (JSON.parse(text) as T) : (undefined as T);
+    return bodyText ? (JSON.parse(bodyText) as T) : (undefined as T);
   }
   async pages<T>(path: string): Promise<T[]> {
     const all: T[] = [];

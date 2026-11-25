@@ -399,3 +399,33 @@ it('shares GitHub quota deadlines across provider instances and permits ordinary
     store.close();
   }
 });
+
+it('persists backoff for transient GitHub reads and does not treat a failed mutation as a safe retry', async () => {
+  const store = new Store(':memory:');
+  const calls = vi.fn(
+    () =>
+      new Response('temporarily unavailable', { status: 503, headers: { 'retry-after': '35' } }),
+  );
+  const p = new GitHubProvider('github.com', 'fake', transport(calls), store);
+  try {
+    await expect(p.http.request('POST', '/graphql', {})).rejects.toMatchObject({
+      code: 'provider_503',
+    });
+    const start = Date.now();
+    await expect(p.http.request('GET', '/repos/test/repo')).rejects.toMatchObject({
+      code: 'github_read_unavailable',
+      refusedWrite: false,
+    });
+    const deadline = store.setting<{ until: number }>('github.read-backoff:github.com')!.until;
+    expect(deadline).toBeGreaterThanOrEqual(start + 35000);
+    const afterRestart = new GitHubProvider('github.com', 'fake', transport(calls), store);
+    await expect(afterRestart.http.request('POST', '/graphql', {})).rejects.toMatchObject({
+      code: 'github_read_unavailable',
+      until: deadline,
+      refusedWrite: true,
+    });
+    expect(calls).toHaveBeenCalledTimes(2);
+  } finally {
+    store.close();
+  }
+});

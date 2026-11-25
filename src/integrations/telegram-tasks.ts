@@ -10,6 +10,7 @@ import {
 } from '../core/types.js';
 import {
   activityStatus,
+  queueDetail,
   outstandingActivity,
   profileText,
   taskReference,
@@ -100,6 +101,8 @@ export function queueCard(locale: Locale, groupId: string, activity: TaskActivit
     const number = item.assignedWorker ?? task.workerRequest?.slot;
     if (number) text.add(' · ' + t('Worker {number}', { number }));
     if (task.workerRequest?.profile) text.add(' · ' + profileText(task.workerRequest.profile));
+    const detail = queueDetail(task);
+    if (detail) text.add('\n' + clipTitle(t(redact(detail)), 240));
   }
   for (let start = 0; start < Math.min(tasks.length, 9); start += 3)
     buttons.push(tasks.slice(start, start + 3).map(({ task }) => taskButton(task)));

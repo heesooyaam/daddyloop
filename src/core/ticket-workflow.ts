@@ -1,4 +1,4 @@
-import { GitHubQuotaError } from '../providers/github-quota.js';
+import { GitHubRetryError } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -48,6 +48,22 @@ export function githubTaskIssue(
   }
 }
 
+const oldLinkFailure =
+  'The PR was created but the task changed. Submit again to reconcile and connect it.';
+const interruptedSubmission =
+  'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
+export function retryConfirmedSubmission(store: Engine['store'], task: Task) {
+  if (!isTicket(task) || !task.pendingAuthorHead || task.resumeState !== 'submitting') return false;
+  if (task.prLink) return task.state === 'submitting' && (task.prLink.retryAt ?? 0) <= Date.now();
+  if (
+    task.state !== 'needs_input' ||
+    ![oldLinkFailure, interruptedSubmission].includes(task.reason)
+  )
+    return false;
+  return !!store.db
+    .prepare("SELECT 1 FROM operations WHERE id=? AND task_id=? AND status='done'")
+    .get('ticket-submit:' + task.id, task.id);
+}
 export class TicketWorkflow {
   readonly reader: TicketReader;
   constructor(
@@ -229,10 +245,16 @@ export class TicketWorkflow {
     await this.engine.submitSavedFix(id, (task, head) => this.workspaces.pushSavedFix(task, head));
   }
 
-  async submit(id: string, expected?: ExpectedTask): Promise<Task> {
+  async submit(id: string, expected?: ExpectedTask, automatic = false): Promise<Task> {
     const result = await this.engine.lock(id, async () => {
       const task = this.engine.store.getTask(id);
       assertTaskVersion(task, expected);
+      if (
+        automatic &&
+        task.state !== 'ready_for_review' &&
+        !retryConfirmedSubmission(this.engine.store, task)
+      )
+        return;
       if (
         !isTicket(task) ||
         !task.ticketRepository ||
@@ -246,6 +268,18 @@ export class TicketWorkflow {
         );
       if (!['ready_for_review', 'needs_input', 'submitting'].includes(task.state))
         throw new AppError('implementation_required', 'Implementation is not ready for submission');
+      if (task.prLink) {
+        if (
+          task.prLink.generation !== task.generation ||
+          task.prLink.head !== task.pendingAuthorHead
+        ) {
+          task.state = 'needs_input';
+          task.reason = 'The saved submission belongs to another task revision.';
+          this.engine.store.saveTask(task);
+          throw new AppError('stale_submission', task.reason);
+        }
+        if (task.prLink.ref) return { ...task.prLink, ref: task.prLink.ref };
+      }
       const generation = task.generation,
         marker = `daddyloop:ticket:${task.id}`;
       const title = Array.from(
@@ -277,7 +311,15 @@ export class TicketWorkflow {
           throw new Error('Could not verify the PR author identity');
         // A normal Git push is idempotent for the same head and cannot replace
         // concurrent commits. Native PR creation has its own durable outbox.
-        await submission.prepare(task);
+        const prior = this.engine.store.db
+          .prepare('SELECT status FROM operations WHERE id=? AND task_id=?')
+          .get('ticket-submit:' + id, id);
+        if (task.prLink && !prior)
+          throw new AppError(
+            'submission_receipt_missing',
+            'Cannot confirm the previous PR creation without its operation record.',
+          );
+        if (!prior) await submission.prepare(task);
         const ref = await this.engine.broker.outbox.perform<PRRef>(
           id,
           `ticket-submit:${id}`,
@@ -295,32 +337,89 @@ export class TicketWorkflow {
             return value ? { found: true, value } : { found: false };
           },
         );
-        this.engine.store.event(id, 'ticket.pr_created', { ref });
+        task.prLink = { ref, generation, head: task.pendingAuthorHead };
+        this.engine.store.transaction(() => {
+          this.engine.store.saveTask(task);
+          this.engine.store.event(id, 'ticket.pr_created', { ref });
+        });
         return { ref, generation, head: task.pendingAuthorHead };
       } catch (error) {
         const latest = this.engine.store.getTask(id);
         if (latest.generation === generation && latest.state !== 'paused') {
-          latest.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
-          latest.reason = redact(String(error));
+          const operation = this.engine.store.db
+            .prepare('SELECT status FROM operations WHERE id=? AND task_id=?')
+            .get('ticket-submit:' + id, id);
+          if (
+            latest.ref.provider === 'github' &&
+            operation?.status === 'pending' &&
+            latest.pendingAuthorHead &&
+            error instanceof AppError &&
+            (error instanceof GitHubRetryError ||
+              /^(provider_(408|500|502|503|504)|provider_unreachable)$/.test(error.code) ||
+              (latest.prLink && error.code === 'ambiguous_write'))
+          ) {
+            const delay = Math.min((latest.prLink?.delay ?? 7500) * 2, 300000);
+            latest.prLink = {
+              generation,
+              head: latest.pendingAuthorHead,
+              delay,
+              retryAt: Math.max(
+                Date.now() + delay,
+                error instanceof GitHubRetryError ? error.until : 0,
+              ),
+              failure: error.code,
+            };
+            latest.state = 'submitting';
+            latest.reason = 'Checking GitHub for the result of the previous PR creation';
+          } else {
+            latest.state = error instanceof GitHubRetryError ? 'ready_for_review' : 'needs_input';
+            latest.reason = redact(String(error));
+          }
           this.engine.store.saveTask(latest);
           this.engine.store.event(id, 'task.state', { state: latest.state, reason: latest.reason });
         }
         throw error;
       }
     });
+    if (!result) return this.engine.store.getTask(id);
     try {
       return await this.engine.linkPR(id, result.ref, result.generation, result.head);
     } catch (error) {
       await this.engine.lock(id, async () => {
         const task = this.engine.store.getTask(id);
-        if (isTicket(task) && task.state === 'submitting') {
-          task.state = error instanceof GitHubQuotaError ? 'ready_for_review' : 'needs_input';
-          task.reason =
-            error instanceof GitHubQuotaError
-              ? error.message
-              : 'The PR was created but the task changed. Submit again to reconcile and connect it.';
-          this.engine.store.saveTask(task);
+        if (
+          !isTicket(task) ||
+          task.state === 'paused' ||
+          task.generation !== result.generation ||
+          task.pendingAuthorHead !== result.head ||
+          task.prLink?.ref?.url !== result.ref.url
+        )
+          return;
+        const retry =
+          error instanceof GitHubRetryError
+            ? error.until
+            : error instanceof AppError &&
+                /^(provider_(408|5\d\d)|provider_unreachable)$/.test(error.code)
+              ? Date.now() + 30000
+              : undefined;
+        const detail =
+          error instanceof GitHubRetryError
+            ? error.message
+            : error instanceof AppError && /^provider_\d+$/.test(error.code)
+              ? error.code.replace('provider_', 'HTTP ')
+              : redact(String(error));
+        if (retry) {
+          task.prLink = { ...result, retryAt: retry, failure: detail };
+          task.state = 'submitting';
+          task.reason = 'Waiting to retry the connection to the existing PR';
+        } else {
+          task.state = 'needs_input';
+          task.reason = `PR #${result.ref.number}: ${redact(String(error))}`;
         }
+        this.engine.store.transaction(() => {
+          this.engine.store.saveTask(task);
+          this.engine.store.event(id, 'task.state', { state: task.state, reason: task.reason });
+        });
       });
       throw error;
     }

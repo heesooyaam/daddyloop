@@ -973,6 +973,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                           )}
                           {t(task.statusLabel)}
                         </span>
+                        {task.queueDetail && (
+                          <small className="daddy-muted">{t(task.queueDetail)}</small>
+                        )}
                         <span className="daddy-work-meta">
                           <code>{taskReference(task)}</code>
                           <span title={workspaceName}>{workspaceName}</span>
