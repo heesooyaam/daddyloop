@@ -63,9 +63,39 @@ describe('Arcadia host authentication', () => {
       saveConfig(next);
       await expect(new ArcBridge().api(['repo', 'list'])).rejects.toMatchObject({
         code: 'arcanum_cli_missing',
+        message: expect.stringContaining(next.arcadia.arcanumCli),
         statusCode: 422,
       });
+      await expect(new ArcBridge().api(['repo', 'list'])).rejects.toThrow(
+        'Update arcadia.arcanumCli in config.json',
+      );
     } finally {
+      saveConfig(original);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('explains how to locate the default Arcanum client', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'daddyloop-default-arcanum-'));
+    const original = loadConfig();
+    const originalPath = process.env.PATH;
+    try {
+      process.env.ARC_TOKEN = 'fixture-arc-token-for-default-cli';
+      process.env.PATH = directory;
+      const next = structuredClone(original);
+      next.arcadia.arcanumCli = 'arcanum-cli';
+      saveConfig(next);
+      await expect(new ArcBridge().api(['repo', 'list'])).rejects.toMatchObject({
+        code: 'arcanum_cli_missing',
+        message: expect.stringContaining('ya tool --print-path gena-arcanum-cli'),
+        statusCode: 422,
+      });
+      await expect(new ArcBridge().api(['repo', 'list'])).rejects.toThrow(
+        'set arcadia.arcanumCli in config.json',
+      );
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
       saveConfig(original);
       rmSync(directory, { recursive: true, force: true });
     }

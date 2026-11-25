@@ -182,6 +182,7 @@ export class ArcBridge {
   }
   async api<T>(args: string[], mutation = false): Promise<T> {
     const token = credential('arcadia', 'a.yandex-team.ru');
+    const arcanumCli = loadConfig().arcadia.arcanumCli;
     const ca =
       process.env.NODE_EXTRA_CA_CERTS ??
       ['/usr/local/share/ca-certificates/Yandex/RootCA.crt', '/etc/ssl/certs/yandex-ca.pem'].find(
@@ -189,7 +190,7 @@ export class ArcBridge {
       );
     let result: Awaited<ReturnType<typeof command>>;
     try {
-      result = await command(loadConfig().arcadia.arcanumCli, ['--json', ...args], {
+      result = await command(arcanumCli, ['--json', ...args], {
         env: {
           ARC_TOKEN: token,
           DISABLE_AUTO_FETCH_TOKEN: 'true',
@@ -203,7 +204,9 @@ export class ArcBridge {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new AppError(
           'arcanum_cli_missing',
-          'Install @yandex-tools/ai-arcanum-cli so arcanum-cli is on PATH',
+          arcanumCli === 'arcanum-cli'
+            ? 'Arcanum client "arcanum-cli" was not found. Locate it with "ya tool --print-path gena-arcanum-cli", then set arcadia.arcanumCli in config.json to that absolute path.'
+            : `Configured Arcanum client ${JSON.stringify(arcanumCli)} was not found. Update arcadia.arcanumCli in config.json to the current executable path.`,
           422,
         );
       throw error;
