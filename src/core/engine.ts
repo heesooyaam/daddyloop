@@ -536,8 +536,11 @@ export class Engine {
       pr.draft === false &&
       pr.mergeable == null &&
       !pr.mergeConflict
-    )
+    ) {
+      partial.retryAt = Date.now() + 5000;
+      this.store.saveTask(task);
       return task;
+    }
     this.store.event(task.id, 'review.findings_published', {
       reviewId: partial.reviewId,
       revision: snapshot.revision,
@@ -731,7 +734,19 @@ export class Engine {
         return;
       const job = this.store.jobs(id).at(-1);
       if (!job || job.groupGeneration !== group.generation) return;
-      if (task.partialReview) return;
+      if (task.partialReview) {
+        if (
+          task.partialReview.runId === job.id &&
+          task.resumeState === 'awaiting_publication' &&
+          restartInterrupted(task, job)
+        )
+          this.state(
+            task,
+            'awaiting_publication',
+            'Publishing recorded findings from an incomplete review',
+          );
+        return;
+      }
       if (
         job.kind === 'review' &&
         job.generation === task.generation &&
