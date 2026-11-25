@@ -259,6 +259,7 @@ export interface Task {
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
+  prLink?: { ref: PRRef; head: string; generation: number; retryAt?: number; failure?: string };
   fixingMergeConflict?: boolean;
   conflictCheckpoint?: string;
   deferredWorkerInstructions?: { id: string; text: string }[];

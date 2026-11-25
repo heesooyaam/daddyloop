@@ -137,6 +137,13 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
     if (task.state !== 'paused' || task.generation !== item.generation || task.groupId !== group.id)
       continue;
     task.state = item.state;
+    if (
+      task.prLink &&
+      item.state === 'submitting' &&
+      task.prLink.generation === item.generation - 1 &&
+      task.prLink.head === task.pendingAuthorHead
+    )
+      task.prLink.generation = task.generation;
     task.reason = item.reason;
     task.resumeState = item.resumeState;
     if (task.inputRequest) task.inputRequest.generation = task.generation;
