@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
@@ -345,7 +346,11 @@ export class Worker {
           } catch (error) {
             if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
-            if (current.generation === task.generation && current.state !== 'paused') {
+            if (
+              current.generation === task.generation &&
+              current.state === 'queued' &&
+              !store.busy(current.id)
+            ) {
               current.state = 'needs_input';
               current.reason = redact(String(error));
               store.saveTask(current);
@@ -368,7 +373,11 @@ export class Worker {
           } catch (error) {
             if (error instanceof GitHubRetryError) continue;
             const current = store.getTask(task.id);
-            if (current.generation === task.generation && current.state !== 'paused') {
+            if (
+              current.generation === task.generation &&
+              current.state === 'awaiting_publication' &&
+              !store.busy(current.id)
+            ) {
               if (
                 current.partialReview &&
                 error instanceof AppError &&
@@ -688,7 +697,12 @@ export class Worker {
             : isTicket(task)
               ? dynamicTools
               : [...dynamicTools, reviewDecisionTool];
-      let reviewQuota: GitHubRetryError | undefined;
+      let unconfirmedTools: { name: string; args: unknown; error: GitHubRetryError }[] = [];
+      const forgetRetry = (name: string, args: unknown) => {
+        unconfirmedTools = unconfirmedTools.filter(
+          (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
+        );
+      };
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
@@ -754,14 +768,21 @@ export class Worker {
                 );
               return this.engine.broker.readDecisions(job, task, args);
             }
-            return await this.engine.broker.call(job, name, args, callId);
+            const value = await this.engine.broker.call(job, name, args, callId);
+            if (unconfirmedTools.length) forgetRetry(name, args);
+            return value;
           } catch (error) {
-            if (job.kind === 'review' && error instanceof GitHubRetryError) reviewQuota = error;
+            if (job.kind === 'review' && error instanceof GitHubRetryError) {
+              forgetRetry(name, args);
+              unconfirmedTools.push({ name, args: structuredClone(args), error });
+            }
             throw error;
           }
         },
       });
-      if (reviewQuota) throw reviewQuota; // An incomplete native review must be checked again.
+      // The model may already have retried the exact operation during this turn.
+      const pendingRetry = unconfirmedTools.at(-1);
+      if (pendingRetry) throw pendingRetry.error;
       // Finish recording any saved commit before considering a forced model switch.
       if (job.role === 'author') this.finalizing.add(job.id);
       task = store.getTask(job.taskId);
