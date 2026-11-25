@@ -104,9 +104,10 @@ function readReasonFragment(
     reasonOffset: reason.length,
     nextBefore: `${decision.id}:${reason.length}`,
   };
-  // Reserve room for later offsets and for a code point escaped as \uXXXX.
+  // Measure with the longest offsets. If repeated metadata takes over half
+  // the page, fragment the record so the metadata is sent only once.
   const budget = pageByteLimit - Buffer.byteLength(JSON.stringify(page));
-  if (budget < 6 || !reason.length) return undefined;
+  if (budget < pageByteLimit / 2 || !reason.length) return undefined;
   const end = fragmentEnd(reason, offset, budget);
   return {
     decisions: [{ ...decision, reason: reason.slice(offset, end) }],

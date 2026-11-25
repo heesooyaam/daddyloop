@@ -501,3 +501,47 @@ it('walks past a saved decision whose comment ID alone exceeds the page budget',
     f.store.close();
   }
 });
+
+it.each([10, 3772, 4096])(
+  'reads a long reason with a %i-character comment ID in at most 20 pages',
+  async (idLength) => {
+    const f = await fixture();
+    try {
+      const task = f.task;
+      const job = f.job();
+      await f.engine.broker.ensureReview(task);
+      f.store.saveTask(task);
+      const expected = await f.engine.broker.call(job, 'record_decision', {
+        commentId: 'x'.repeat(idLength),
+        outcome: 'verified',
+        reason: 'a'.repeat(60_000),
+      });
+
+      let before: string | undefined;
+      let pages = 0;
+      let recordJson = '';
+      let decision: Decision | undefined;
+      let reason = '';
+      do {
+        expect(++pages).toBeLessThanOrEqual(20);
+        const page = f.engine.broker.readDecisions(job, task, { before });
+        expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+        if (page.recordFragment) {
+          const { offset, json, complete } = page.recordFragment;
+          expect(offset).toBe(recordJson.length);
+          recordJson += json;
+          if (complete) decision = JSON.parse(recordJson) as Decision;
+        } else {
+          expect(page.decisions).toHaveLength(1);
+          expect(page.reasonOffset).toBe(reason.length);
+          reason += page.decisions[0].reason;
+          decision = { ...page.decisions[0], reason };
+        }
+        before = page.nextBefore ?? undefined;
+      } while (before);
+      expect(decision).toEqual(expected);
+    } finally {
+      f.store.close();
+    }
+  },
+);
