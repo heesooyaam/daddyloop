@@ -20,9 +20,11 @@ export interface ReviewProvider {
     revision: Revision,
     marker: string,
     authorId?: string,
+    reconcileOnly?: boolean,
   ): Promise<{
     authorId: string;
     existing?: ReviewHandle;
+    occupied?: boolean;
     create: () => Promise<ReviewHandle>;
   }>;
   createReview(
@@ -36,6 +38,7 @@ export interface ReviewProvider {
     ref: PRRef,
     review: ReviewHandle,
     snapshot: ReviewSnapshot,
+    checkPR?: () => Promise<void>,
   ): Promise<void>;
   createComment(
     ref: PRRef,

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { Engine } from '../src/core/engine.js';
 import { Store } from '../src/core/store.js';
+import type { PullRequest } from '../src/core/types.js';
 import { GitHubProvider } from '../src/providers/github.js';
 import { parsePR } from '../src/providers/provider.js';
 import { DemoRuntime } from '../src/runtime/demo.js';
@@ -17,7 +18,7 @@ async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'daddy-draft-'));
   const file = join(dir, 'state.sqlite');
   let store = new Store(file);
-  const pr = {
+  const pr: PullRequest = {
     ...revision,
     ...ref,
     title: 'Draft recovery',
@@ -38,14 +39,24 @@ async function fixture() {
     account: 7,
     paginate: false,
     rejectOccupiedSlot: false,
+    advanced: false,
+    createBody: undefined as string | undefined,
+    listBody: undefined as string | undefined,
+    readComments: () => Response.json([]),
   };
   const transport = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const { pathname: path, searchParams } = new URL(String(url));
     if (path === '/user') return Response.json({ id: gitHub.account });
-    if (path.endsWith('/reviews/6060947228/comments')) return Response.json([]);
+    if (path.endsWith('/reviews/6060947228/comments')) return gitHub.readComments();
+    if (path.endsWith('/reviews/6060947228') && init?.method === 'DELETE') {
+      gitHub.draft = undefined;
+      gitHub.reviews = [];
+      return new Response(null, { status: 204 });
+    }
     if (path.endsWith('/reviews/6060947228')) return Response.json(gitHub.draft);
     expect(path).toBe('/repos/acme/service/pulls/38/reviews');
     if (init?.method === 'GET') {
+      if (gitHub.listBody !== undefined) return new Response(gitHub.listBody);
       const reviews =
         gitHub.paginate && searchParams.get('page') === '1'
           ? Array.from({ length: 100 }, (_, id) => ({ id, user: { id: 8 }, state: 'COMMENTED' }))
@@ -69,12 +80,14 @@ async function fixture() {
     };
     if (gitHub.createStatus === 429)
       return Response.json({}, { status: 429, headers: { 'Retry-After': '1' } });
-    return Response.json(gitHub.draft, { status: gitHub.createStatus });
+    return gitHub.createBody === undefined
+      ? Response.json(gitHub.draft, { status: gitHub.createStatus })
+      : new Response(gitHub.createBody, { status: gitHub.createStatus });
   });
   const connect = () => {
     const provider = new GitHubProvider(ref.host, 'offline', transport, store);
     vi.spyOn(provider, 'getPR').mockImplementation(async () => ({ ...pr }));
-    vi.spyOn(provider, 'targetAdvanced').mockResolvedValue(false);
+    vi.spyOn(provider, 'targetAdvanced').mockImplementation(async () => gitHub.advanced);
     return new Engine(store, () => provider);
   };
   let engine = connect();
@@ -90,6 +103,7 @@ async function fixture() {
       return engine;
     },
     posts: () => transport.mock.calls.filter(([, init]) => init?.method === 'POST').length,
+    deletes: () => transport.mock.calls.filter(([, init]) => init?.method === 'DELETE').length,
     restart() {
       store.close();
       store = new Store(file);
@@ -258,3 +272,362 @@ it('reconciles the same draft if GitHub rejects a guarded retry before the origi
     f.close();
   }
 });
+
+it('migrates a pending create from the base version without binding it to the new account', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    const first = await f.engine.review(id);
+    const marker = first.draftStart!.marker;
+    // Before the draft-start migration the worker saved the failed task and outbox row
+    // separately, leaving the task at the previous round with no owner or draft-start data.
+    f.store.saveTask({
+      ...first,
+      state: 'needs_input',
+      reason: 'AppError: POST /repos/acme/service/pulls/38/reviews: HTTP 502 Bad Gateway',
+      round: first.round - 1,
+      draftStart: undefined,
+    });
+    f.gitHub.account = 8;
+    f.restart();
+    for (let checks = 0; checks < 3; checks++) {
+      f.ready();
+      const waiting = await f.engine.review(id);
+      expect(waiting.draftStart).toMatchObject({ marker });
+      expect(waiting.draftStart?.owner).toBeUndefined();
+      expect(waiting.state).toBe('queued');
+    }
+    expect(f.posts()).toBe(1);
+    f.gitHub.account = 7;
+    f.gitHub.reviews = [f.gitHub.draft];
+    f.ready();
+    expect((await f.engine.review(id)).review).toMatchObject({ marker, authorId: '7' });
+    expect(f.posts()).toBe(1);
+    expect(f.store.activeJobs(id)).toHaveLength(1);
+  } finally {
+    f.close();
+  }
+});
+
+it('keeps the original owner and marker when the account and PR head change together', async () => {
+  const f = await fixture();
+  try {
+    const first = await f.engine.review(f.task.id);
+    f.gitHub.account = 8;
+    f.pr.head = 'd'.repeat(40);
+    f.ready();
+    await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'draft_owner_changed' });
+    expect(f.store.getTask(f.task.id).draftStart).toMatchObject({
+      marker: first.draftStart!.marker,
+      revision,
+      owner: '7',
+    });
+    expect(f.posts()).toBe(1);
+    expect(f.deletes()).toBe(0);
+  } finally {
+    f.close();
+  }
+});
+
+it('requires two fresh empty scans after a second 502, including after restart', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    const first = await f.engine.review(id);
+    // Earlier builds persisted an empty scan without binding it to the last POST.
+    const saved = f.store.getTask(id);
+    Object.assign(saved.draftStart!, { emptyScanSeen: true });
+    f.store.saveTask(saved);
+    f.ready();
+    await f.engine.review(id);
+    expect(f.posts()).toBe(1);
+    f.ready();
+    await f.engine.review(id);
+    expect(f.posts()).toBe(2);
+    f.restart();
+    f.ready();
+    await f.engine.review(id);
+    expect(f.posts()).toBe(2);
+    f.ready();
+    f.gitHub.reviews = [f.gitHub.draft];
+    expect((await f.engine.review(id)).review).toMatchObject({ marker: first.draftStart!.marker });
+    expect(f.posts()).toBe(2);
+    expect(f.store.activeJobs(id)).toHaveLength(1);
+  } finally {
+    f.close();
+  }
+});
+
+const changes = {
+  head: (pr: PullRequest) => {
+    pr.head = 'd'.repeat(40);
+  },
+  base: (pr: PullRequest) => {
+    pr.base = 'd'.repeat(40);
+  },
+  closed: (pr: PullRequest) => {
+    pr.state = 'closed';
+  },
+  draft: (pr: PullRequest) => {
+    pr.draft = true;
+  },
+  retargeted: (pr: PullRequest) => {
+    pr.targetBranch = 'release';
+  },
+};
+
+it.each(Object.entries(changes))(
+  'keeps the intent across a late draft after PR change: %s',
+  async (change, changePR) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      const first = await f.engine.review(id);
+      const marker = first.draftStart!.marker;
+      const prBefore = { ...f.pr };
+      f.gitHub.advanced = true;
+      changePR(f.pr);
+      f.ready();
+      expect((await f.engine.review(id)).draftStart?.marker).toBe(marker);
+      f.restart();
+      f.ready();
+      f.gitHub.reviews = [f.gitHub.draft];
+      if (change !== 'head' && change !== 'base') {
+        expect((await f.engine.review(id)).draftStart?.marker).toBe(marker);
+        expect(f.store.activeJobs(id)).toHaveLength(0);
+        expect(f.deletes()).toBe(0);
+        Object.assign(f.pr, prBefore);
+        f.ready();
+      }
+      const settled = await f.engine.review(id);
+      if (change === 'head') {
+        expect(settled.state).toBe('queued');
+        expect(settled.draftStart).toBeUndefined();
+        expect(settled.revision?.head).toBe(f.pr.head);
+        expect(f.deletes()).toBe(1);
+        expect(f.store.setting(`review.archive:${id}:6060947228`)).toMatchObject({ revision });
+      } else {
+        expect(settled.review).toMatchObject({
+          marker,
+          id: '6060947228',
+          revision: { base: f.pr.base },
+        });
+        expect(f.store.activeJobs(id)).toHaveLength(1);
+      }
+      expect(f.posts()).toBe(1);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it('drops an unused intent after the base is rewritten and starts a review of the current PR', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    f.gitHub.listStatus = 502;
+    const first = await f.engine.review(id);
+    expect(f.posts()).toBe(0);
+    f.restart();
+    f.ready();
+    f.gitHub.listStatus = 200;
+    changes.base(f.pr);
+    expect((await f.engine.review(id, true)).state).toBe('queued');
+    f.gitHub.createStatus = 201;
+    const started = await f.engine.review(id);
+    expect(started.review?.marker).not.toBe(first.draftStart!.marker);
+    expect(started.review?.revision.base).toBe(f.pr.base);
+    expect(f.posts()).toBe(1);
+  } finally {
+    f.close();
+  }
+});
+
+it('preserves the old draft if the PR closes during the final retirement read', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    const initial = await f.engine.review(id);
+    changes.head(f.pr);
+    f.gitHub.reviews = [f.gitHub.draft];
+    let reads = 0;
+    f.gitHub.readComments = () => {
+      // Close during the retirement endpoint's verification, after the first PR recheck.
+      if (++reads === 3) changes.closed(f.pr);
+      return Response.json([]);
+    };
+    f.ready();
+    expect((await f.engine.review(id)).draftStart?.marker).toBe(initial.draftStart!.marker);
+    expect(f.deletes()).toBe(0);
+    expect(f.store.activeJobs(id)).toHaveLength(0);
+    f.pr.state = 'open';
+    f.ready();
+    expect((await f.engine.review(id)).draftStart).toBeUndefined();
+    expect(f.deletes()).toBe(1);
+  } finally {
+    f.close();
+  }
+});
+
+const invalidated = ['closed', 'draft', 'retargeted'] as const;
+
+it.each(invalidated)('rechecks the PR after reading the recovered draft: %s', async (change) => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    const first = await f.engine.review(id);
+    f.gitHub.advanced = true;
+    changes.base(f.pr);
+    f.gitHub.reviews = [f.gitHub.draft];
+    f.gitHub.readComments = () => {
+      changes[change](f.pr);
+      return Response.json([]);
+    };
+    f.ready();
+    const waiting = await f.engine.review(id);
+    expect(waiting.state).toBe('queued');
+    expect(waiting.draftStart?.marker).toBe(first.draftStart!.marker);
+    expect(f.store.activeJobs(id)).toHaveLength(0);
+    expect(f.deletes()).toBe(0);
+  } finally {
+    f.close();
+  }
+});
+
+it.each(invalidated)(
+  'rejects a recovered review at worker admission if the PR changes: %s',
+  async (change) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      await f.engine.review(id);
+      f.gitHub.advanced = true;
+      changes.base(f.pr);
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      const started = await f.engine.review(id);
+      expect(started.state).toBe('reviewing');
+      changes[change](f.pr);
+      const workspaces = new Workspaces('/tmp');
+      const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+      const runtime = new DemoRuntime();
+      const run = vi.spyOn(runtime, 'run');
+      const worker = new Worker(
+        f.engine,
+        workspaces,
+        runtime,
+        runtime,
+        () => ({
+          memoryAvailableGiB: 30,
+          memoryTotalGiB: 90,
+          diskAvailableGiB: 180,
+          diskUsedPercent: 77,
+          ok: true,
+          reasons: [],
+        }),
+        0,
+      );
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.jobs(id).at(-1)?.errorCode).toBe('stale_revision'));
+      } finally {
+        await worker.stop();
+      }
+      expect(prepare).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+      expect(f.store.getTask(id).review?.id).toBe('6060947228');
+      expect(f.deletes()).toBe(0);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['COMMENTED', 'APPROVED'])(
+  'ignores an unrelated %s review with a null user',
+  async (state) => {
+    const f = await fixture();
+    try {
+      f.gitHub.reviews = [{ id: 999, user: null, state }];
+      f.gitHub.createStatus = 201;
+      expect((await f.engine.review(f.task.id)).state).toBe('reviewing');
+      expect(f.posts()).toBe(1);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['PENDING', 'COMMENTED'])(
+  'keeps uncertainty when a marked %s review has no known owner',
+  async (state) => {
+    const f = await fixture();
+    try {
+      const first = await f.engine.review(f.task.id);
+      f.gitHub.reviews = [
+        { id: 999, user: null, state, body: `<!-- ${first.draftStart!.marker} -->` },
+      ];
+      f.ready();
+      const waiting = await f.engine.review(f.task.id);
+      expect(waiting.state).toBe('queued');
+      expect(waiting.draftStart?.emptyScanAfterAttempt).toBeUndefined();
+      expect(f.posts()).toBe(1);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['', '{', '{}'])(
+  'restores the draft after a successful HTTP response with unreadable body %j',
+  async (body) => {
+    const f = await fixture();
+    try {
+      f.gitHub.createStatus = 201;
+      f.gitHub.createBody = body;
+      const first = await f.engine.review(f.task.id);
+      expect(first.state).toBe('queued');
+      f.restart();
+      f.ready();
+      f.gitHub.reviews = [f.gitHub.draft];
+      expect((await f.engine.review(f.task.id)).review?.id).toBe('6060947228');
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(1);
+      expect(f.posts()).toBe(1);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['broken list JSON', 'non-array list', 'non-array comments', 'moved draft comments'])(
+  'retries after unreadable data without counting an empty scan: %s',
+  async (failure) => {
+    const f = await fixture();
+    try {
+      const first = await f.engine.review(f.task.id);
+      if (failure === 'broken list JSON') f.gitHub.listBody = '[';
+      if (failure === 'non-array list') f.gitHub.listBody = '{}';
+      if (failure.endsWith('comments')) {
+        f.gitHub.reviews = [f.gitHub.draft];
+        f.gitHub.readComments = () => Response.json({});
+      }
+      if (failure === 'moved draft comments') {
+        f.gitHub.advanced = true;
+        changes.base(f.pr);
+      }
+      f.ready();
+      const waiting = await f.engine.review(f.task.id);
+      expect(waiting.state).toBe('queued');
+      expect(waiting.draftStart?.emptyScanAfterAttempt).toBeUndefined();
+      f.ready();
+      f.gitHub.listBody = undefined;
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.gitHub.readComments = () => Response.json([]);
+      expect((await f.engine.review(f.task.id)).review?.marker).toBe(first.draftStart!.marker);
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(1);
+      expect(f.posts()).toBe(1);
+    } finally {
+      f.close();
+    }
+  },
+);

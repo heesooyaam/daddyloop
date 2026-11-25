@@ -90,6 +90,11 @@ export class Broker {
   ) {
     this.outbox = new Outbox(store);
   }
+  draftStartOperation(task: Task, marker = task.draftStart?.marker) {
+    return this.store.db
+      .prepare('SELECT status, result FROM operations WHERE task_id=? AND id=?')
+      .get(task.id, marker ?? '');
+  }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
     const marker =
@@ -106,6 +111,8 @@ export class Broker {
         if (
           latest.draftStart?.marker !== marker ||
           latest.generation !== task.generation ||
+          latest.contextVersion !== task.contextVersion ||
+          latest.state !== task.state ||
           latest.state === 'paused' ||
           group?.deletion ||
           group?.deletedAt ||
@@ -121,6 +128,16 @@ export class Broker {
         checkTask();
       };
       await checkRevision();
+      if (!intent.owner && !prepared.existing && this.draftStartOperation(task))
+        throw new AppError(
+          'draft_create_unconfirmed',
+          'The previous draft creation has no recorded GitHub account.',
+        );
+      if (prepared.occupied)
+        throw new AppError(
+          'draft_occupied',
+          'A different pending GitHub review belongs to this account. Its contents have been preserved.',
+        );
       if (!intent.owner) {
         intent.owner = prepared.authorId;
         this.store.saveTask(task);
@@ -128,14 +145,19 @@ export class Broker {
       let wrote = false;
       const write = async () => {
         if (prepared.existing) return prepared.existing;
+        // Persist this before dispatch so a restart cannot reuse evidence from the previous POST.
+        if (intent.emptyScanAfterAttempt) {
+          delete intent.emptyScanAfterAttempt;
+          this.store.saveTask(task);
+        }
         const handle = await prepared.create();
         wrote = true;
         return handle;
       };
       const review = await this.outbox.perform(task.id, marker, revision, write, async () => {
         if (prepared.existing) return { found: true, value: prepared.existing };
-        if (!intent.emptyScanSeen) {
-          intent.emptyScanSeen = true;
+        if (!intent.emptyScanAfterAttempt) {
+          intent.emptyScanAfterAttempt = true;
           this.store.saveTask(task);
           throw new AppError(
             'draft_create_unconfirmed',

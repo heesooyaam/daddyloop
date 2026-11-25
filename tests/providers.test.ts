@@ -34,7 +34,9 @@ function transport(
 describe('GitHub draft review contract', () => {
   it('does not adopt another account’s review based only on a matching marker', async () => {
     const http = transport((path) =>
-      path === '/user' ? { id: 7 } : [{ id: 44, body: tag('daddyloop:t:1'), user: { id: 999 } }],
+      path === '/user'
+        ? { id: 7 }
+        : [{ id: 44, body: tag('daddyloop:t:1'), user: { id: 999 }, state: 'PENDING' }],
     );
     expect(
       await new GitHubProvider('github.com', 'fake', http).findReview(ref, 'daddyloop:t:1'),

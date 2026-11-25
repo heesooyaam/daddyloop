@@ -262,7 +262,7 @@ export interface Task {
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
   draftStart?: {
-    emptyScanSeen?: boolean;
+    emptyScanAfterAttempt?: boolean;
     marker: string;
     owner?: string;
     revision: Revision;

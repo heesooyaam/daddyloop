@@ -279,7 +279,13 @@ export class Engine {
         );
       const provider = this.provider(prRef(task));
       if (task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
-      const pr = await provider.getPR(prRef(task));
+      let pr: PullRequest;
+      try {
+        pr = await provider.getPR(prRef(task));
+      } catch (error) {
+        if (!task.draftStart) throw error;
+        return this.handleDraftStartError(task, error);
+      }
       if (task.draftStart) {
         if (task.draftStart.retry) retry = true;
         clarification ??= task.draftStart.clarification;
@@ -289,7 +295,11 @@ export class Engine {
           pr.draft ||
           this.prAction(task, pr).kind === 'repair'
         ) {
-          return this.settleMovedDraftStart(task, pr, provider);
+          try {
+            return await this.settleMovedDraftStart(task, pr, provider);
+          } catch (error) {
+            return this.handleDraftStartError(task, error);
+          }
         }
       }
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
@@ -392,30 +402,7 @@ export class Engine {
         try {
           await this.broker.ensureReview(task);
         } catch (error) {
-          if (!this.currentReviewStart(task)) return this.store.getTask(id);
-          if (
-            error instanceof AppError &&
-            (error instanceof GitHubRetryError ||
-              /^(?:provider_(?:408|500|502|503|504)|provider_unreachable|draft_creation_race|draft_create_unconfirmed|draft_revision_changed)$/.test(
-                error.code,
-              ))
-          ) {
-            const delay = Math.min(300000, (task.draftStart.delay ?? 7500) * 2);
-            task.draftStart.delay = delay;
-            task.draftStart.retryAt = Math.max(
-              Date.now() + delay,
-              error instanceof GitHubRetryError ? error.until : 0,
-            );
-            this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
-            this.store.event(id, 'review.create_deferred', {
-              marker: task.draftStart.marker,
-              code: error.code,
-              retryAt: task.draftStart.retryAt,
-            });
-            return task;
-          }
-          this.state(task, 'needs_input', redact(String(error)));
-          throw error;
+          return this.handleDraftStartError(task, error);
         }
         if (!this.currentReviewStart(task)) return this.store.getTask(id);
         delete task.draftStart;
@@ -439,60 +426,117 @@ export class Engine {
       return task;
     });
   }
-  private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
-    // Settle the old intent before routing the new revision. Never replay an old POST.
-    const intent = task.draftStart!;
+  private handleDraftStartError(task: Task, error: unknown): Task {
+    if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
     if (
-      sameOpenTarget(task.pr, pr) &&
-      intent.revision.head === pr.head &&
-      intent.revision.base !== pr.base &&
-      !(await provider.targetAdvanced?.(prRef(task), intent.revision.base, pr.base))
+      error instanceof SyntaxError ||
+      error instanceof GitHubRetryError ||
+      (error instanceof AppError &&
+        /^(?:provider_(?:408|500|502|503|504|shape|unreachable)|draft_creation_race|draft_create_unconfirmed|draft_revision_changed)$/.test(
+          error.code,
+        ))
     ) {
-      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-      this.state(
-        task,
-        'needs_input',
-        'The target branch was rewritten during GitHub draft creation. The original intent was preserved.',
+      const intent = task.draftStart!;
+      const delay = Math.min(300000, (intent.delay ?? 7500) * 2);
+      intent.delay = delay;
+      intent.retryAt = Math.max(
+        Date.now() + delay,
+        error instanceof GitHubRetryError ? error.until : 0,
       );
+      this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
+      this.store.event(task.id, 'review.create_deferred', {
+        marker: intent.marker,
+        code: error instanceof AppError ? error.code : 'provider_shape',
+        retryAt: intent.retryAt,
+      });
       return task;
     }
-    const existing = await provider.findReview(prRef(task), intent.marker);
-    if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-    if (existing) {
+    this.state(task, 'needs_input', redact(String(error)));
+    throw error;
+  }
+  private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
+    // An intent alone has no remote draft to recover. An attempted POST keeps its
+    // marker until the original draft or a confirmed retirement can be identified.
+    const intent = task.draftStart!;
+    const operation = this.broker.draftStartOperation(task);
+    if (operation) {
+      const ref = prRef(task);
+      const receipt =
+        operation.status === 'done'
+          ? (JSON.parse(String(operation.result)) as ReviewHandle)
+          : undefined;
+      const owner = intent.owner ?? receipt?.authorId;
+      const existing = provider.prepareDraftReview
+        ? (await provider.prepareDraftReview(ref, intent.revision, intent.marker, owner, true))
+            .existing
+        : await provider.findReview(ref, intent.marker);
+      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+      const retirement =
+        receipt && this.broker.draftStartOperation(task, intent.marker + ':retire:' + receipt.id);
+      const handle = existing ?? (retirement ? receipt : undefined);
+      if (!handle)
+        throw new AppError('draft_create_unconfirmed', 'Waiting for the original GitHub draft.');
       if (
-        existing.revision.head !== intent.revision.head ||
-        (intent.owner && existing.authorId !== intent.owner)
+        handle.revision.head !== intent.revision.head ||
+        (owner && handle.authorId !== owner) ||
+        (receipt && handle.id !== receipt.id)
       )
-        throw new AppError('draft_changed', 'The marked review belongs to a different commit.');
-      const handle = { ...existing, revision: intent.revision };
-      task.review = await this.broker.outbox.perform(
+        throw new AppError('draft_changed', 'The marked review differs from the original attempt.');
+      const pinned = { ...handle, revision: intent.revision };
+      const draft = await provider.getReview(ref, pinned);
+      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+      if (
+        !(retirement && draft.status === 'missing') &&
+        (draft.status !== 'draft' ||
+          draft.authorId !== handle.authorId ||
+          draft.revision.head !== intent.revision.head ||
+          this.draftHasWork(pinned, draft))
+      )
+        throw new AppError('draft_changed', draftInspectionRequired);
+      const rewritten =
+        sameOpenTarget(task.pr, pr) &&
+        intent.revision.head === pr.head &&
+        intent.revision.base !== pr.base &&
+        !(await provider.targetAdvanced?.(ref, intent.revision.base, pr.base));
+      const checkPR = async () => {
+        const latest = await provider.getPR(ref);
+        if (
+          !sameOpenTarget(task.pr, pr) ||
+          pr.state !== 'open' ||
+          pr.draft ||
+          !sameOpenTarget(pr, latest) ||
+          latest.draft ||
+          !sameRevision(pr, latest)
+        )
+          throw new AppError('draft_revision_changed', 'The PR changed during draft recovery.');
+        if (!this.currentReviewStart(task))
+          throw new AppError('stale_task', 'The task changed during draft recovery.');
+        return latest;
+      };
+      pr = await checkPR();
+      if (rewritten) {
+        this.state(
+          task,
+          'needs_input',
+          'The target branch was rewritten during GitHub draft creation. The original intent was preserved.',
+        );
+        return task;
+      }
+      await this.broker.outbox.perform(
         task.id,
         intent.marker,
         intent.revision,
-        async () => handle,
-        async () => ({ found: true, value: handle }),
+        async () => pinned,
+        async () => ({ found: true, value: pinned }),
       );
-      task.snapshot = await provider.getReview(prRef(task), task.review);
       if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
       if (
-        task.snapshot.status !== 'draft' ||
-        task.snapshot.authorId !== existing.authorId ||
-        task.snapshot.comments.length ||
-        task.snapshot.body !== `Review in progress.\n\n<!-- ${intent.marker} -->`
-      ) {
-        delete task.draftStart;
-        task.resumeState = 'reviewing';
-        this.state(task, 'needs_input', draftInspectionRequired);
-        return task;
-      }
-      if (
-        sameOpenTarget(task.pr, pr) &&
-        pr.draft === false &&
+        draft.status === 'draft' &&
         intent.revision.head === pr.head &&
         this.prAction(task, pr).kind !== 'repair'
       ) {
-        const draft = task.snapshot;
         this.store.transaction(() => {
+          task.review = pinned;
           delete task.draftStart;
           if (intent.clarification) this.rememberClarification(task, intent.clarification);
           this.restartNativeReview(
@@ -504,21 +548,19 @@ export class Engine {
         });
         return task;
       }
-      // This verified empty placeholder may be retired using the normal guarded operation.
-      if (!(await this.retireSupersededDraft(task, provider))) return task;
+      // Only a verified empty placeholder can be retired.
+      if (!(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR)))
+        return this.store.getTask(task.id);
     }
     if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-    delete task.draftStart;
-    task.review = undefined;
-    task.snapshot = undefined;
-    if (!sameOpenTarget(task.pr, pr) || pr.draft) {
-      this.state(
-        task,
-        'needs_input',
-        'The PR is closed, a draft or its branches changed. Inspect it before starting review.',
+    if (pr.state !== 'open' || pr.draft)
+      throw new AppError('draft_revision_changed', 'Waiting for an open PR ready for review.');
+    if (!sameOpenTarget(task.pr, pr))
+      throw new AppError(
+        'stale_revision',
+        'The PR branches changed. Inspect the task before restarting review.',
       );
-      return task;
-    }
+    delete task.draftStart;
     this.invalidate(task, pr);
     this.state(task, 'queued', 'New revision is ready for review');
     return task;
@@ -528,6 +570,8 @@ export class Engine {
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
     return (
       current.generation === task.generation &&
+      current.contextVersion === task.contextVersion &&
+      current.state === task.state &&
       current.state !== 'paused' &&
       current.draftStart?.marker === task.draftStart?.marker &&
       !group?.deletedAt &&
@@ -802,7 +846,11 @@ export class Engine {
     };
   }
 
-  private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
+  private async retireSupersededDraft(
+    task: Task,
+    provider: ReviewProvider,
+    checkPR?: () => Promise<unknown>,
+  ) {
     const handle = task.review!,
       ref = prRef(task);
     const snapshot = await provider.getReview(ref, handle);
@@ -836,19 +884,33 @@ export class Engine {
           archiveKey,
         });
       });
+    let preflightFailed = false;
     await this.broker.outbox.perform(
       task.id,
       key,
       { review: handle.id, head: source.revision.head, body },
       async () => {
-        await provider.discardSupersededDraft!(ref, handle, source);
+        await provider.discardSupersededDraft!(
+          ref,
+          handle,
+          source,
+          checkPR &&
+            (async () => {
+              try {
+                await checkPR();
+              } catch (error) {
+                preflightFailed = true;
+                throw error;
+              }
+            }),
+        );
         return null;
       },
       async () => ({
         found: (await provider.getReview(ref, handle)).status === 'missing',
         value: null,
       }),
-      (error) => error instanceof AppError && error.code === 'draft_changed',
+      (error) => preflightFailed || (error instanceof AppError && error.code === 'draft_changed'),
     );
     return true;
   }

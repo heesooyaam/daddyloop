@@ -225,7 +225,7 @@ export class GitHubProvider implements ReviewProvider {
     }
     throw new AppError('pagination_limit', 'Too many check runs', 502);
   }
-  private async ownReviews(ref: PRRef) {
+  private async ownReviews(ref: PRRef, marker: string) {
     const [list, user] = await Promise.all([
       this.http.pages<GHReview>(`${path(ref)}/reviews`),
       this.http.request<{ id: number }>('GET', '/user'),
@@ -235,15 +235,27 @@ export class GitHubProvider implements ReviewProvider {
         'draft_create_unconfirmed',
         'GitHub did not confirm the authenticated review account.',
       );
-    if (list.some((r) => !r?.user || !Number.isSafeInteger(r.user.id) || r.user.id <= 0))
+    if (
+      list.some(
+        (r) => typeof r?.state !== 'string' || (r.body != null && typeof r.body !== 'string'),
+      )
+    )
+      throw new AppError('provider_shape', 'GitHub returned unreadable review data.', 502);
+    if (
+      list.some(
+        (r) =>
+          (r.state === 'PENDING' || (r.body ?? '').includes(tag(marker))) &&
+          (!Number.isSafeInteger(r.user?.id) || r.user.id <= 0),
+      )
+    )
       throw new AppError(
         'draft_create_unconfirmed',
         'GitHub did not confirm the owner of a review in the list.',
       );
-    return { owner: user.id, reviews: list.filter((r) => r.user.id === user.id) };
+    return { owner: user.id, reviews: list.filter((r) => r.user?.id === user.id) };
   }
   async findReview(ref: PRRef, marker: string) {
-    const { reviews } = await this.ownReviews(ref);
+    const { reviews } = await this.ownReviews(ref, marker);
     const matches = reviews.filter((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
     if (matches.length > 1)
       throw new AppError('draft_changed', 'Several GitHub reviews have this task marker.');
@@ -271,8 +283,14 @@ export class GitHubProvider implements ReviewProvider {
     await confirmOwner?.(prepared.authorId);
     return prepared.existing ?? prepared.create();
   }
-  async prepareDraftReview(ref: PRRef, revision: Revision, marker: string, authorId?: string) {
-    const { owner, reviews } = await this.ownReviews(ref).catch((error) => {
+  async prepareDraftReview(
+    ref: PRRef,
+    revision: Revision,
+    marker: string,
+    authorId?: string,
+    reconcileOnly = false,
+  ) {
+    const { owner, reviews } = await this.ownReviews(ref, marker).catch((error) => {
       if (error instanceof GitHubRetryError) throw error.beforeWrite();
       throw error;
     });
@@ -294,24 +312,29 @@ export class GitHubProvider implements ReviewProvider {
           'The marked review was submitted or its revision changed. Inspect it before continuing.',
         );
       const handle = this.handle(existing, marker, revision);
-      const comments = await this.http.pages<GHComment>(
-        `${path(ref)}/reviews/${handle.id}/comments`,
-      );
-      if (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
+      const comments = reconcileOnly
+        ? []
+        : await this.http.pages<GHComment>(`${path(ref)}/reviews/${handle.id}/comments`);
+      if (
+        !reconcileOnly &&
+        (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
+      )
         throw new AppError(
           'draft_changed',
           'The recovered draft has been edited. Its contents have been preserved.',
         );
       return { authorId: String(owner), existing: handle, create: async () => handle };
     }
-    if (reviews.some((r) => r.state === 'PENDING'))
-      throw new AppError(
-        'draft_occupied',
-        'A different pending GitHub review belongs to this account. Its contents have been preserved.',
-      );
+    const occupied = reviews.some((r) => r.state === 'PENDING');
     return {
       authorId: String(owner),
+      occupied,
       create: async () => {
+        if (occupied)
+          throw new AppError(
+            'draft_occupied',
+            'A different pending GitHub review belongs to this account. Its contents have been preserved.',
+          );
         // This POST creates only a draft. GitHub enforces one pending review per account and PR.
         let review: GHReview;
         try {
@@ -332,10 +355,11 @@ export class GitHubProvider implements ReviewProvider {
           throw error;
         }
         if (
-          review.user?.id !== owner ||
+          review?.user?.id !== owner ||
           review.state !== 'PENDING' ||
           review.commit_id !== revision.head ||
-          !(review.body ?? '').trimEnd().endsWith(tag(marker))
+          typeof review.body !== 'string' ||
+          !review.body.trimEnd().endsWith(tag(marker))
         )
           throw new AppError(
             'draft_create_unconfirmed',
@@ -351,6 +375,16 @@ export class GitHubProvider implements ReviewProvider {
         this.http.request<GHReview>('GET', `${path(ref)}/reviews/${review.id}`),
         this.http.pages<GHComment>(`${path(ref)}/reviews/${review.id}/comments`),
       ]);
+      if (
+        typeof value?.state !== 'string' ||
+        typeof value.commit_id !== 'string' ||
+        (value.body != null && typeof value.body !== 'string') ||
+        (value.state === 'PENDING' && !Number.isSafeInteger(value.user?.id)) ||
+        comments.some(
+          (entry) => !entry || !Number.isSafeInteger(entry.id) || typeof entry.body !== 'string',
+        )
+      )
+        throw new AppError('provider_shape', 'GitHub returned unreadable review data.', 502);
       return {
         status:
           value.state === 'PENDING'
@@ -359,7 +393,7 @@ export class GitHubProvider implements ReviewProvider {
               ? 'missing'
               : 'published',
         body: value.body ?? '',
-        authorId: String(value.user.id),
+        authorId: value.user?.id == null ? undefined : String(value.user.id),
         comments: comments.map(comment),
         url: value.html_url ?? ref.url,
         revision: { ...review.revision, head: value.commit_id },
@@ -376,7 +410,12 @@ export class GitHubProvider implements ReviewProvider {
       throw error;
     }
   }
-  async discardSupersededDraft(ref: PRRef, review: ReviewHandle, snapshot: ReviewSnapshot) {
+  async discardSupersededDraft(
+    ref: PRRef,
+    review: ReviewHandle,
+    snapshot: ReviewSnapshot,
+    checkPR?: () => Promise<void>,
+  ) {
     const url = `${path(ref)}/reviews/${review.id}`;
     const [value, user, comments] = await Promise.all([
       this.http.request<GHReview>('GET', url),
@@ -396,6 +435,7 @@ export class GitHubProvider implements ReviewProvider {
         'draft_changed',
         'The old draft changed. Inspect it before replacing the review.',
       );
+    await checkPR?.();
     await this.http.request('DELETE', url);
   }
   private async mutation<T>(query: string, input: object): Promise<T> {

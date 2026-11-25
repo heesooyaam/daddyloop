@@ -558,6 +558,16 @@ export class Worker {
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
       if (
+        job.kind === 'review' &&
+        task.ref.provider === 'github' &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) || startingPR.draft)
+      )
+        throw new AppError(
+          'stale_revision',
+          'The PR closed, became a draft or changed branches before the queued review started.',
+        );
+      if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
         !(

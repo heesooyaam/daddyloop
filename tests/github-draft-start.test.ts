@@ -156,7 +156,8 @@ it('restores a pre-upgrade 502 only for the recorded request, and preserves anot
       body: 'A human draft',
     };
     f.reviews.push(other);
-    await expect(e.review(t.id)).rejects.toMatchObject({ code: 'draft_occupied' });
+    expect((await e.review(t.id)).draftStart).toMatchObject({ marker });
+    expect(f.store.getTask(t.id).draftStart?.owner).toBeUndefined();
     expect(f.posts).toHaveLength(0);
     expect(f.reviews).toEqual([other]);
   } finally {
@@ -167,16 +168,18 @@ it('never recreates the old draft after the PR head moves', async () => {
   const f = await reviewFixture();
   try {
     const e = f.engine();
-    await e.review(f.task.id);
+    const first = await e.review(f.task.id);
     f.due();
     f.remote.head = 'e'.repeat(40);
     await e.review(f.task.id);
     expect(f.posts).toHaveLength(1);
+    f.due();
     await e.review(f.task.id);
-    expect(f.reviews).toMatchObject([{ commit_id: f.remote.head }]);
+    expect(f.posts).toHaveLength(1);
+    expect(f.reviews).toHaveLength(0);
     expect(f.store.getTask(f.task.id)).toMatchObject({
-      state: 'reviewing',
-      revision: { head: f.remote.head },
+      state: 'queued',
+      draftStart: { marker: first.draftStart!.marker, revision: first.revision },
     });
   } finally {
     f.store.close();
