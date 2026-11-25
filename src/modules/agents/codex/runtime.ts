@@ -1,3 +1,5 @@
+import { startReviewHistory } from './review-history.js';
+import { reviewDecisionTool } from '../../../core/review-decisions.js';
 import { codexExecutable } from './executable.js';
 import { z } from 'zod';
 import { CodexConnection, type RpcMessage } from './protocol.js';
@@ -97,8 +99,8 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
           ...session,
           threadId,
           onSession,
-          prompt:
-            session.prompt +
+          instructions:
+            session.instructions +
             '\nContinue the interrupted review. Inspect the saved draft or report and the current pinned revision before acting. Preserve completed work and do not duplicate findings.',
         },
         executable,
@@ -267,13 +269,19 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         else earlyCompletions.set(String(turn.id), turn);
       } else if (message.method === 'error') input.onEvent('runtime.error', params);
     });
+    let history: Awaited<ReturnType<typeof startReviewHistory>> | undefined;
+    const tools = input.tools ?? dynamicTools;
     try {
       if (input.signal.aborted) throw new AppError('run_cancelled', 'Run is already cancelled');
       await rpc.start(input.cwd, host, input.processScope?.env);
+      // Dynamic schemas are persisted in Codex rollouts. Configure the read-only
+      // MCP tool on both start and resume so older threads can discover it.
+      if (tools.some((tool) => tool.name === reviewDecisionTool.name))
+        history = await startReviewHistory(input);
       const config = {
         'features.apps': false,
         'features.multi_agent': false,
-        mcp_servers: {},
+        mcp_servers: history?.config ?? {},
         'shell_environment_policy.inherit': host ? 'all' : 'core',
         ...(input.processScope ? { 'shell_environment_policy.set': input.processScope.env } : {}),
       };
@@ -315,7 +323,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         const response = await rpc.request<{ thread: { id: string } }>('thread/start', {
           ...common,
           serviceName: 'daddyloop',
-          dynamicTools: input.tools ?? dynamicTools,
+          dynamicTools: tools.filter((tool) => tool.name !== reviewDecisionTool.name),
         });
         threadId = response.thread.id;
       }
@@ -360,6 +368,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
       clearTimeout(timer);
       input.signal.removeEventListener('abort', abort);
       rpc.close();
+      await history?.close();
     }
   }
 }

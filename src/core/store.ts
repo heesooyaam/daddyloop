@@ -86,6 +86,7 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS one_running_per_task ON jobs(task_id) WHERE status = 'running';
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS decisions_by_task ON decisions(task_id);
       CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
@@ -573,6 +574,42 @@ export class Store {
       .prepare('SELECT data FROM decisions WHERE task_id=? ORDER BY rowid')
       .all(id)
       .map((row) => JSON.parse(row.data as string));
+  }
+  decisionPage(
+    taskId: string,
+    filters: { commentId?: string; head?: string; before?: string; includeBefore?: boolean },
+    publishedIds: string[] | undefined,
+    limit: number,
+  ): { id: string; data: string }[] {
+    const where = ['task_id = ?'];
+    const args = [taskId];
+    if (filters.commentId !== undefined) {
+      where.push("json_extract(data, '$.commentId') = ?");
+      args.push(filters.commentId);
+    }
+    if (filters.head !== undefined) {
+      where.push("json_extract(data, '$.head') = ?");
+      args.push(filters.head);
+    }
+    if (publishedIds !== undefined) {
+      where.push("json_extract(data, '$.commentId') IN (SELECT value FROM json_each(?))");
+      args.push(JSON.stringify(publishedIds));
+    }
+    const predicate = where.join(' AND ');
+    const before = filters.before;
+    if (before === undefined)
+      return this.db
+        .prepare(`SELECT id, data FROM decisions WHERE ${predicate} ORDER BY rowid DESC LIMIT ?`)
+        .all(...args, limit) as { id: string; data: string }[];
+    return this.db
+      .prepare(
+        `
+        SELECT id, data FROM decisions WHERE ${predicate}
+        AND rowid ${filters.includeBefore ? '<=' : '<'} (SELECT rowid FROM decisions WHERE id = ? AND ${predicate})
+        ORDER BY rowid DESC LIMIT ?
+      `,
+      )
+      .all(...args, before, ...args, limit) as { id: string; data: string }[];
   }
   setting<T>(key: string): T | undefined {
     const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key);

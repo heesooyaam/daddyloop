@@ -15,6 +15,7 @@ import {
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
+import { readReviewDecisions, reviewDecisionQuery } from './review-decisions.js';
 import { Outbox } from './outbox.js';
 import { sameOpenTarget } from './pr-routing.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
@@ -389,6 +390,22 @@ export class Broker {
         }
       }
     });
+  }
+  readDecisions(job: Job, pinned: Task, input: unknown) {
+    const task = this.store.getTask(job.taskId);
+    if (
+      task.id !== pinned.id ||
+      pinned.generation !== job.generation ||
+      task.generation !== job.generation ||
+      task.state === 'paused' ||
+      !sameRevision(task.revision, pinned.revision) ||
+      task.pr?.mergeCommit !== pinned.pr?.mergeCommit
+    )
+      throw new AppError(
+        'stale_run',
+        'This run no longer has access to the pinned decision history',
+      );
+    return readReviewDecisions(this.store, pinned, job.role, reviewDecisionQuery.parse(input));
   }
   async call(
     job: Job,
