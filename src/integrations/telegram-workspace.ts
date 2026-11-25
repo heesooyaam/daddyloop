@@ -1978,11 +1978,20 @@ export class TelegramWorkspace {
   private queueTaskRequest(task: Task, event: Event) {
     const request = taskRequestKey(this.store, task);
     if (!request || !task.groupId) return;
+    const data = { ...(event.data as object), taskId: task.id, request } as {
+      reminder?: boolean;
+      taskId: string;
+      request: string;
+    };
+    const ownerId = this.pair()?.userId;
+    const originalId = ownerId ? `telegram:question:${ownerId}:${task.id}:${request}` : undefined;
+    if (data.reminder && originalId && this.api.delivery?.canReactivateNotification(originalId))
+      data.reminder = false;
     this.onEvent({
       ...event,
       taskId: task.groupId,
       type: 'daddy.task_question',
-      data: { ...(event.data as object), taskId: task.id, request },
+      data,
     });
   }
   onEvent(event: Event): boolean {
@@ -2302,6 +2311,7 @@ export class TelegramWorkspace {
           final: message?.phase !== 'progress',
           notificationId: id,
           reminder: question,
+          mention: !task && ping ? messageQuestion : undefined,
         });
         this.store.db
           .prepare('UPDATE notifications SET status=? WHERE id=?')

@@ -244,6 +244,69 @@ it.each([
   },
 );
 
+it.each([
+  ['en', false],
+  ['ru', true],
+] as const)(
+  'retries the first pin for an unchanged topic card after reconnect: %s, restart=%s',
+  async (locale, restart) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const f = daddyFixture();
+    const sent: { method: string; body: Record<string, any> }[] = [];
+    let nextMessageId = 500;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      sent.push({ method, body });
+      return Response.json({
+        ok: true,
+        result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+      });
+    });
+    const route = { chatId: -10042, threadId: 17, ownerId: 7 };
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.group', { chatId: route.chatId, ownerId: 7 });
+    const integration = () => {
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+      return new TelegramProgress(
+        f.store,
+        api,
+        'telegram.progress:fixture_bot:',
+        () => locale,
+        () => route,
+      );
+    };
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Unchanged card' });
+    let progress = integration();
+    try {
+      await progress.ensure(group.id);
+      f.store.setSetting('telegram.group', null);
+      await api.delivery!.flush(10);
+      expect(sent.map(({ method }) => method)).toEqual(['sendMessage']);
+      if (restart) {
+        await progress.stop();
+        await api.delivery!.stop();
+        progress = integration();
+      }
+      f.store.setSetting('telegram.group', { chatId: route.chatId, ownerId: 7 });
+      await progress.ensure(group.id);
+      await api.delivery!.flush(10);
+      expect(sent.map(({ method }) => method)).toEqual(['sendMessage', 'pinChatMessage']);
+      expect(sent[1].body).toMatchObject({
+        chat_id: route.chatId,
+        message_id: 501,
+        disable_notification: true,
+      });
+    } finally {
+      await progress.stop();
+      await api.delivery?.stop();
+      await f.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();
   const sent: { method: string; body: Record<string, any> }[] = [];

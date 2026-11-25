@@ -807,11 +807,84 @@ it.each([
 );
 
 it.each([
-  ['en', 'private chat', false, false],
-  ['ru', 'topic', true, true],
+  ['en', 'private chat after a web answer', false, 'answer'],
+  ['ru', 'topic after the next final reply', true, 'next'],
+  ['en', 'topic after notifications are disabled', true, 'notifications'],
 ] as const)(
-  'binds legacy queued task requests before sending: %s, %s, closed=%s',
-  async (locale, _route, topicRoute, closeBeforeSend) => {
+  'removes a stale owner mention from a queued agent question: %s, %s',
+  async (locale, _case, topicRoute, staleReason) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 250;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (topicRoute)
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Queued question' });
+    const question = f.store.finishDaddyReply(group.id, 'Queued question text', 'question', true);
+    f.store.saveGroup({ ...f.store.getGroup(group.id), daddyState: 'needs_input' });
+    f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const queuedMention = () =>
+      f.store.db
+        .prepare(
+          `SELECT json_extract(value,'$.options.mention.messageId') AS messageId FROM settings
+           WHERE key LIKE 'telegram.delivery:%'
+           AND json_extract(value,'$.options.notificationId') LIKE ?`,
+        )
+        .get(`telegram:dialog:%:${question.id}:final`)?.messageId;
+    try {
+      workspace.replay();
+      await vi.waitFor(() => expect(queuedMention()).toBe(question.id));
+      if (staleReason === 'answer') f.store.daddyMessage(group.id, 'user', 'Answered in web');
+      else if (staleReason === 'next')
+        f.store.finishDaddyReply(group.id, 'New final question', 'next-question', true);
+      else f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
+      clock += 60000;
+      await api.delivery.flush(20);
+      const delivered = calls.filter(
+        (call) => call.method === 'sendMessage' && call.body.text?.includes(question.text),
+      );
+      expect(delivered).toHaveLength(1);
+      expect(
+        delivered[0].body.entities?.some((entity: any) => entity.url === 'tg://user?id=7') ?? false,
+      ).toBe(false);
+    } finally {
+      await workspace.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  ['en', 'private chat', false, false, false],
+  ['ru', 'topic', true, true, false],
+  ['en', 'topic closed before replay', true, false, true],
+  ['ru', 'private chat closed before replay', false, false, true],
+] as const)(
+  'binds legacy queued task requests before sending: %s, %s',
+  async (locale, _route, topicRoute, closeBeforeSend, closeBeforeReplay) => {
     const f = daddyFixture();
     const calls: { method: string; body: Record<string, any> }[] = [];
     let clock = 1000;
@@ -887,6 +960,14 @@ it.each([
       key: planNotification,
       notificationId: planNotification,
     });
+    if (closeBeforeReplay) {
+      f.store.saveTask({
+        ...f.store.getTask(clarification.id),
+        state: 'fixing',
+        inputRequest: undefined,
+      });
+      f.store.saveTask({ ...f.store.getTask(plan.id), state: 'fixing' });
+    }
     f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
     api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
     const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
@@ -919,7 +1000,7 @@ it.each([
           call.method === 'sendMessage' &&
           (call.body.text === 'Legacy clarification' || call.body.text === 'Legacy plan approval'),
       );
-      expect(delivered).toHaveLength(closeBeforeSend ? 0 : 2);
+      expect(delivered).toHaveLength(closeBeforeSend || closeBeforeReplay ? 0 : 2);
     } finally {
       await workspace.stop();
       await api.delivery.stop();
@@ -1009,7 +1090,10 @@ it.each([
       if (suppression === 'notifications')
         f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
       else f.store.saveGroup({ ...f.store.getGroup(group.id), daddyState: 'active' });
-      workspace.replay();
+      if (suppression === 'notifications') {
+        workspace.remindOwners();
+        workspace.remindOwners();
+      } else workspace.replay();
       await vi.waitFor(() => {
         expect(
           calls.filter(

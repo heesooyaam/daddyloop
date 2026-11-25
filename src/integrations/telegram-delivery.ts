@@ -12,6 +12,7 @@ import {
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
   reminder?: OwnerQuestion;
+  mention?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
   reactionMessageId?: number;
@@ -71,7 +72,19 @@ export class TelegramDelivery {
   private historyDeferredKeys = new Set<string>();
   private deferredValues = new Map<string, Delivery>();
   private retainedDeferredKeys = new Set<string>();
-  private storedMessages = new Map<string, { id: string; runId?: string; order: number }>();
+  private storedMessages = new Map<
+    string,
+    {
+      id: string;
+      taskId: string;
+      runId?: string;
+      order: number;
+      sender?: string;
+      phase?: string;
+      needsReply: boolean;
+    }
+  >();
+  private storedTaskGroups = new Map<string, string>();
   private deliveredByRouteRun = new Map<string, Set<string>>();
   private sentNotifications = new Set<string>();
   private cancelledRouteNotifications = new Set<string>();
@@ -102,6 +115,16 @@ export class TelegramDelivery {
     );
     if (recoveryDeliveries.length)
       this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
+    const questionTasks = new Set(
+      deliveries
+        .filter(({ value }) => ['queued', 'sending'].includes(value.status))
+        .map(({ value }) => /^telegram:question:[^:]+:([^:]+):/.exec(value.options.key ?? '')?.[1])
+        .filter((id): id is string => !!id),
+    );
+    if (questionTasks.size)
+      for (const task of store.tasks())
+        if (questionTasks.has(task.id) && task.groupId)
+          this.storedTaskGroups.set(task.id, task.groupId);
     const deletedGroups = new Set(
       store
         .groups()
@@ -119,6 +142,8 @@ export class TelegramDelivery {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       value.recoveryOrder = this.messageOrder(value);
       value.queueOrder = queueOrder;
+      if (['queued', 'sending'].includes(value.status) && this.restoreQuestionOptions(value))
+        this.store.setSetting(key, value);
       if (value.status === 'cancelled' && value.cancelledForRoute && value.options.notificationId)
         this.cancelledRouteNotifications.add(value.options.notificationId);
       if (
@@ -391,6 +416,49 @@ export class TelegramDelivery {
       (!value.options.reminder || reminderOpen(this.store, value.options.reminder))
     );
   }
+  private restoreQuestionOptions(value: Delivery) {
+    let changed = false;
+    const deliveryKey = value.options.key;
+    if (!value.options.reminder && deliveryKey?.startsWith('telegram:question:')) {
+      const match = /^telegram:question:[^:]+:([^:]+):(.*)$/.exec(deliveryKey);
+      if (match) {
+        const groupId = this.storedTaskGroups.get(match[1]);
+        if (groupId) {
+          value.options.groupId = value.options.groupId ?? groupId;
+          value.options.reminder = {
+            groupId,
+            taskId: match[1],
+            request: match[2],
+          };
+          changed = true;
+        }
+      }
+    }
+    if (!value.options.mention) {
+      const messageId = this.notificationMessageId(value);
+      if (messageId) {
+        const message = this.storedMessages.get(messageId);
+        if (message) {
+          if (message.sender === 'agent' && message.phase === 'final' && message.needsReply) {
+            const groupId = value.options.groupId ?? message.taskId;
+            value.options.groupId = groupId;
+            value.options.mention = { groupId, messageId };
+            changed = true;
+          }
+        }
+      }
+    }
+    return changed;
+  }
+  private removeStaleMention(value: Delivery) {
+    const mention = value.options.mention;
+    if (!mention || reminderOpen(this.store, mention) || !('messageId' in mention)) return;
+    const message = this.store.messageById(mention.groupId, mention.messageId);
+    if (!message || message.sender !== 'agent') return;
+    value.content = new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(message.text);
+    value.options.mention = undefined;
+    value.revision++;
+  }
   private notificationMessageId(value: Delivery) {
     const notificationId = value.options.notificationId;
     if (!notificationId?.startsWith('telegram:dialog:')) return;
@@ -420,22 +488,33 @@ export class TelegramDelivery {
           groups.add(row.group_id);
     const messages = this.store.db
       .prepare(
-        "SELECT id,task_id,json_extract(data,'$.runId') AS runId FROM messages ORDER BY rowid",
+        `SELECT id,task_id,json_extract(data,'$.runId') AS runId,
+                json_extract(data,'$.sender') AS sender,
+                json_extract(data,'$.phase') AS phase,
+                json_extract(data,'$.needsReply') AS needsReply
+         FROM messages ORDER BY rowid`,
       )
       .all()
       .map((row, index) => ({
         id: String(row.id),
         taskId: String(row.task_id),
         runId: typeof row.runId === 'string' ? row.runId : undefined,
+        sender: typeof row.sender === 'string' ? row.sender : undefined,
+        phase: typeof row.phase === 'string' ? row.phase : undefined,
+        needsReply: !!row.needsReply,
         order: index + 1,
       }));
     for (const message of messages) if (needed.has(message.id)) groups.add(message.taskId);
     for (const message of messages) {
       if (!needed.has(message.id) && !groups.has(message.taskId)) continue;
-      const { id, runId, order } = message;
+      const { id, taskId, runId, order, sender, phase, needsReply } = message;
       this.storedMessages.set(id, {
         id,
+        taskId,
         ...(runId ? { runId } : {}),
+        ...(sender ? { sender } : {}),
+        ...(phase ? { phase } : {}),
+        needsReply,
         order,
       });
     }
@@ -667,6 +746,17 @@ export class TelegramDelivery {
       this.cancelledQuestionNotifications.has(notificationId)
     );
   }
+  canReactivateNotification(notificationId: string) {
+    return (
+      this.cancelledRouteNotifications.has(notificationId) ||
+      this.cancelledQuestionNotifications.has(notificationId)
+    );
+  }
+  private clearCancelledNotification(notificationId?: string) {
+    if (!notificationId) return;
+    this.cancelledRouteNotifications.delete(notificationId);
+    this.cancelledQuestionNotifications.delete(notificationId);
+  }
   private cancelAlternatePending(
     key: string,
     destination: TelegramDestination,
@@ -825,6 +915,7 @@ export class TelegramDelivery {
         (options.order && value.options.order && options.order < value.options.order)
       )
         return { status: 'superseded', deliveryId: value.id };
+      this.clearCancelledNotification(options.notificationId);
       if (
         value.status !== 'sent' &&
         options.reminder &&
@@ -872,6 +963,7 @@ export class TelegramDelivery {
       value.nextAttemptAt = this.clock();
     } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
+    this.clearCancelledNotification(options.notificationId);
     // New text also wakes the oldest buffered message for this conversation. Never bypass retry_after.
     for (const [otherKey, other] of this.pending)
       if (
@@ -946,6 +1038,7 @@ export class TelegramDelivery {
     }
   }
   private async attempt(key: string, value: Delivery) {
+    this.removeStaleMention(value);
     if (!this.valid(value)) {
       if (value.options.operation === 'pin') this.clearPinError(value.error);
       const routeValid = this.routeValid(value);
