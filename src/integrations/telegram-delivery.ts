@@ -115,16 +115,31 @@ export class TelegramDelivery {
     );
     if (recoveryDeliveries.length)
       this.loadRecoveryIndex(recoveryDeliveries.map(({ value }) => value));
+    const deliveredNotifications = new Set(
+      deliveries
+        .filter(({ value }) => value.status === 'sent' && !!value.options.notificationId)
+        .map(({ value }) => value.options.notificationId!),
+    );
     const questionTasks = new Set(
       deliveries
-        .filter(({ value }) => ['queued', 'sending'].includes(value.status))
+        .filter(
+          ({ value }) =>
+            ['queued', 'sending'].includes(value.status) &&
+            !value.options.reminder &&
+            !value.options.groupId,
+        )
         .map(({ value }) => /^telegram:question:[^:]+:([^:]+):/.exec(value.options.key ?? '')?.[1])
         .filter((id): id is string => !!id),
     );
-    if (questionTasks.size)
-      for (const task of store.tasks())
-        if (questionTasks.has(task.id) && task.groupId)
-          this.storedTaskGroups.set(task.id, task.groupId);
+    if (questionTasks.size) {
+      const taskGroup = store.db.prepare(
+        "SELECT json_extract(data,'$.groupId') AS groupId FROM tasks WHERE id=?",
+      );
+      for (const taskId of questionTasks) {
+        const groupId = taskGroup.get(taskId)?.groupId;
+        if (typeof groupId === 'string') this.storedTaskGroups.set(taskId, groupId);
+      }
+    }
     const deletedGroups = new Set(
       store
         .groups()
@@ -144,12 +159,18 @@ export class TelegramDelivery {
       value.queueOrder = queueOrder;
       if (['queued', 'sending'].includes(value.status) && this.restoreQuestionOptions(value))
         this.store.setSetting(key, value);
-      if (value.status === 'cancelled' && value.cancelledForRoute && value.options.notificationId)
+      if (
+        value.status === 'cancelled' &&
+        value.cancelledForRoute &&
+        value.options.notificationId &&
+        !deliveredNotifications.has(value.options.notificationId)
+      )
         this.cancelledRouteNotifications.add(value.options.notificationId);
       if (
         value.status === 'cancelled' &&
         value.cancelledForQuestion &&
-        value.options.notificationId
+        value.options.notificationId &&
+        !deliveredNotifications.has(value.options.notificationId)
       )
         this.cancelledQuestionNotifications.add(value.options.notificationId);
       const restoreThroughHistory =
@@ -422,7 +443,7 @@ export class TelegramDelivery {
     if (!value.options.reminder && deliveryKey?.startsWith('telegram:question:')) {
       const match = /^telegram:question:[^:]+:([^:]+):(.*)$/.exec(deliveryKey);
       if (match) {
-        const groupId = this.storedTaskGroups.get(match[1]);
+        const groupId = value.options.groupId ?? this.storedTaskGroups.get(match[1]);
         if (groupId) {
           value.options.groupId = value.options.groupId ?? groupId;
           value.options.reminder = {
@@ -670,7 +691,7 @@ export class TelegramDelivery {
       this.legacyByNotification.get(legacyKey) ??
       (includeSent ? this.sentDelivery(destination, notificationId) : undefined);
     if (!row || row.key === key) return;
-    if (!includeSent && row.value.messages.length) {
+    if (!includeSent && (row.value.messages.length || row.value.status === 'sending')) {
       const receipt = this.receiptFor(row.value.messages, row.value);
       row.value.revision++;
       row.value.status = 'cancelled';

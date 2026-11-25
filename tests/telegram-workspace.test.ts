@@ -1121,6 +1121,124 @@ it.each([
   },
 );
 
+it.each([
+  ['en', 'private chat to topic', false],
+  ['ru', 'topic to private chat', true],
+] as const)(
+  'keeps scheduled reminders after route recovery and restart: %s, %s',
+  async (locale, _route, startInTopic) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 450;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      return Response.json({
+        ok: true,
+        result:
+          method === 'createForumTopic'
+            ? { message_thread_id: 31 }
+            : method === 'sendMessage'
+              ? { message_id: ++nextMessageId }
+              : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (startInTopic)
+      f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Reminder route' });
+    const clarification = await f.daddy.createTask(group.id, {
+      requirements: 'Reminder clarification',
+      requestId: 'reminder-question',
+    });
+    f.store.saveTask({
+      ...clarification,
+      state: 'needs_input',
+      reason: 'Reminder clarification',
+      inputRequest: {
+        runId: 'reminder-question',
+        role: 'author',
+        generation: clarification.generation,
+      },
+    });
+    const plan = await f.daddy.createTask(group.id, {
+      requirements: 'Reminder plan',
+      requestId: 'reminder-plan',
+    });
+    f.store.saveTask({
+      ...plan,
+      state: 'awaiting_plan_approval',
+      reason: 'Reminder plan approval',
+    });
+    const clarificationId = `telegram:question:7:${clarification.id}:reminder-question`;
+    const planRequest = `plan:${plan.contextVersion}:${plan.revision?.head}:${plan.revision?.base}:`;
+    const planId = `telegram:question:7:${plan.id}:${planRequest}`;
+    f.store.setSetting('telegram.deliveryLimit:fixture_bot', clock + 60000);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    let workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+    const queuedAt = (chatId: number, notificationId: string) =>
+      f.store.db
+        .prepare(
+          `SELECT 1 FROM settings WHERE key LIKE 'telegram.delivery:%'
+           AND json_extract(value,'$.status')='queued'
+           AND json_extract(value,'$.destination.chatId')=?
+           AND json_extract(value,'$.options.notificationId')=?`,
+        )
+        .get(chatId, notificationId);
+    const matching = (text: string) =>
+      calls.filter(
+        (call) =>
+          call.method === 'sendMessage' &&
+          call.body.text?.includes(text) &&
+          call.body.entities?.some((entity: any) => entity.url === 'tg://user?id=7'),
+      );
+    try {
+      workspace.replay();
+      const initialChat = startInTopic ? -10042 : 7;
+      await vi.waitFor(() => {
+        expect(queuedAt(initialChat, clarificationId)).toBeDefined();
+        expect(queuedAt(initialChat, planId)).toBeDefined();
+      });
+      if (startInTopic) f.store.setSetting('telegram.group', null);
+      else f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7, title: 'Tasks' });
+      workspace.replay();
+      const activeChat = startInTopic ? 7 : -10042;
+      await vi.waitFor(() => {
+        expect(queuedAt(activeChat, clarificationId)).toBeDefined();
+        expect(queuedAt(activeChat, planId)).toBeDefined();
+      });
+      clock += 60000;
+      await api.delivery.flush(50);
+      expect(matching('Reminder clarification')).toHaveLength(1);
+      expect(matching('Reminder plan approval')).toHaveLength(1);
+      f.store.db
+        .prepare('UPDATE notifications SET at=? WHERE id IN (?,?)')
+        .run(new Date(Date.now() - 31 * 60000).toISOString(), clarificationId, planId);
+      f.store.saveTask({ ...f.store.getTask(plan.id), state: 'fixing' });
+      await workspace.stop();
+      await api.delivery.stop();
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+      workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
+      workspace.remindOwners();
+      await vi.waitFor(() => expect(matching('Reminder clarification')).toHaveLength(2));
+      await api.delivery.flush(20);
+      expect(matching('Reminder clarification')).toHaveLength(2);
+      expect(matching('Reminder plan approval')).toHaveLength(1);
+    } finally {
+      await workspace.stop();
+      await api.delivery?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('migrates a queued legacy progress delivery when the same message becomes final', async () => {
   const f = daddyFixture();
   const calls: { method: string; body: Record<string, any> }[] = [];
