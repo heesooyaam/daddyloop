@@ -501,3 +501,132 @@ it.each([false, true])(
     }
   },
 );
+
+it.each([
+  'after merge',
+  'on original base',
+  'on advanced base',
+  'rewritten',
+  'retargeted',
+] as const)('checks a saved fix merged after the target advances (%s)', async (scenario) => {
+  const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+  try {
+    const task = f.store.getTask(f.task.id);
+    const original = task.revision!;
+    const originalPR = { ...task.pr!, head: savedHead };
+    const advanced = { ...originalPR, base: 'c'.repeat(40), start: 'c'.repeat(40) };
+    const merged = {
+      ...advanced,
+      targetBranch: scenario === 'retargeted' ? 'release' : advanced.targetBranch,
+      state: 'merged' as const,
+      mergeCommit: 'merge',
+    };
+    const observed =
+      scenario === 'on advanced base'
+        ? advanced
+        : scenario === 'on original base'
+          ? originalPR
+          : task.pr!;
+    f.store.saveTask({
+      ...task,
+      ref: { ...prRef(task), provider: 'github' },
+      pr: observed,
+      revision: observed,
+      pendingAuthorFix: {
+        revision: scenario === 'on advanced base' ? advanced : original,
+        generation: task.generation,
+        sent: true,
+      },
+    });
+    f.store.setSetting('demo-pr:1', merged);
+    const targetAdvanced = vi.fn(async () => scenario !== 'rewritten');
+    Object.assign(f.provider, { targetAdvanced });
+    const queued = await f.engine.action(task.id, 'verify-merge');
+    if (scenario === 'retargeted' || scenario === 'rewritten') {
+      expect(queued.state).toBe('needs_input');
+      expect(queued.reason).toContain(savedHead);
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+    } else {
+      expect(queued).toMatchObject({
+        state: 'reviewing',
+        pendingAuthorFix: { revision: { base: advanced.base, start: advanced.start } },
+      });
+      const restarted = new Engine(f.store, () => f.provider);
+      const job = f.store.claim()!;
+      expect(job.kind).toBe('verify_merge');
+      expect(await restarted.canStartMergeVerification(job, merged)).toBe(true);
+      await restarted.completeJob(job, f.result({ checkedHead: savedHead }));
+      expect(await restarted.reconcile(task.id)).toMatchObject({
+        state: 'complete',
+        verifiedMerge: { head: savedHead, base: advanced.base },
+      });
+    }
+    expect(targetAdvanced).toHaveBeenCalledTimes(
+      scenario === 'retargeted' || scenario === 'on advanced base' ? 0 : 1,
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each([
+  ['PR read', false],
+  ['base comparison', false],
+  ['base comparison', true],
+] as const)(
+  'can resume a fix blocked before its first push (%s, already pushed: %s)',
+  async (failure, visible) => {
+    const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const observed = {
+        ...task.pr!,
+        head: visible ? savedHead : task.revision!.head,
+        base: 'c'.repeat(40),
+      };
+      f.store.saveTask({
+        ...task,
+        ref: { ...prRef(task), provider: 'github' },
+        pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+      });
+      f.store.setSetting('demo-pr:1', observed);
+      let unavailable = true;
+      Object.assign(f.provider, {
+        targetAdvanced: async () => {
+          if (failure === 'base comparison' && unavailable) throw new Error('access denied');
+          return true;
+        },
+      });
+      const getPR = f.provider.getPR.bind(f.provider);
+      vi.spyOn(f.provider, 'getPR').mockImplementation(async (ref) => {
+        if (failure === 'PR read' && unavailable) throw new Error('access denied');
+        return getPR(ref);
+      });
+      const send = vi.fn(async () => {
+        f.store.setSetting('demo-pr:1', { ...observed, head: savedHead });
+      });
+      const preparePush = vi.fn(async () => send);
+      const restarted = new Engine(f.store, () => f.provider);
+      await restarted.submitSavedFix(task.id, preparePush);
+      const held = f.store.getTask(task.id);
+      expect(held.state).toBe('needs_input');
+      expect(held.reason).toContain(savedHead);
+      expect(held.reason).toContain('access denied');
+      if (failure === 'base comparison') {
+        expect(held.reason).toContain(observed.head);
+        expect(held.reason).toContain(observed.base);
+      }
+      expect(preparePush).not.toHaveBeenCalled();
+      unavailable = false;
+      await restarted.action(task.id, 'resume');
+      await restarted.submitSavedFix(task.id, preparePush);
+      expect(send).toHaveBeenCalledTimes(visible ? 0 : 1);
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'queued',
+        revision: { head: savedHead },
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);

@@ -537,6 +537,14 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      if (
+        job.kind === 'verify_merge' &&
+        startingPR &&
+        !(await this.engine.canStartMergeVerification(job, startingPR))
+      ) {
+        job.status = 'cancelled';
+        return;
+      }
       if (job.kind === 'review' && startingPR) {
         this.engine.requireSubmittedFix(task, startingPR);
         const targetChange = reviewTargetChange(task.review, startingPR, task.pr?.targetBranch);
@@ -593,7 +601,12 @@ export class Worker {
       }
       if (
         job.kind === 'verify_merge' &&
-        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+        (startingPR?.state !== 'merged' ||
+          !task.pr ||
+          startingPR.mergeCommit !== task.pr.mergeCommit ||
+          startingPR.branch !== task.pr.branch ||
+          startingPR.targetBranch !== task.pr.targetBranch ||
+          startingPR.cloneUrl !== task.pr.cloneUrl)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;

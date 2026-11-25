@@ -2822,3 +2822,57 @@ it('requires verification on the merged result instead of accepting verification
     f.store.close();
   }
 });
+
+it.each([false, true])(
+  'only prepares a restored merge verification for the saved commit (merged fix: %s)',
+  async (mergedFix) => {
+    const f = await fixture();
+    const workspaces = new Workspaces('/tmp');
+    const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const runtime = { run: vi.fn(async () => f.result()) };
+    const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+    try {
+      const { task, saved } = await recordLegacyLostFix(f);
+      const pr = {
+        ...task.pr!,
+        head: mergedFix ? saved : task.pr!.head,
+        state: 'merged' as const,
+        mergeCommit: 'merge',
+      };
+      const queued = {
+        ...task,
+        ref: { ...prRef(task), provider: 'github' as const },
+        state: 'reviewing' as const,
+        pr,
+        revision: pr,
+      };
+      if (mergedFix) {
+        queued.pendingAuthorHead = saved;
+        queued.pendingAuthorFix = {
+          revision: task.revision!,
+          generation: task.generation,
+        };
+      }
+      f.store.saveTask(queued);
+      f.store.setSetting('demo-pr:1', pr);
+      const job = f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged PR');
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.jobs(task.id).find((run) => run.id === job.id)?.status).toBe(
+          mergedFix ? 'completed' : 'cancelled',
+        ),
+      );
+      expect(prepare).toHaveBeenCalledTimes(mergedFix ? 1 : 0);
+      expect(runtime.run).toHaveBeenCalledTimes(mergedFix ? 1 : 0);
+      if (!mergedFix) {
+        const held = f.store.getTask(task.id);
+        expect(held.state).toBe('needs_input');
+        expect(held.reason).toContain(saved);
+        expect(held.reason).toContain(pr.head);
+      }
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);

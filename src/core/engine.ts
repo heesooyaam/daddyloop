@@ -1240,12 +1240,22 @@ export class Engine {
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
-  private queueMergeVerification(task: Task, pr: PullRequest) {
+  private async queueMergeVerification(task: Task, pr: PullRequest) {
     if (task.state !== 'needs_input' || this.store.busy(task.id))
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
     if (pr.state !== 'merged')
       throw new AppError('merge_unconfirmed', 'The provider must confirm the merge');
-    if (this.stopReviewBeforeSavedFix(task, pr, true)) return task;
+    const head = this.pendingFixHead(task, pr);
+    const pending = task.pendingAuthorFix;
+    const check =
+      pr.mergeCommit && head === pr.head && pending?.generation === task.generation
+        ? await this.checkSavedFixForSubmission(task, { ...pr, state: 'open' }, head)
+        : undefined;
+    if (check?.status === 'blocked') {
+      this.holdLostFix(task, pr.head, check.reason);
+      return task;
+    }
+    if (check?.status !== 'confirmed' && this.stopReviewBeforeSavedFix(task, pr, true)) return task;
     if (pr.head !== task.revision?.head && pr.head !== task.pendingAuthorHead)
       throw new AppError(
         'merge_unconfirmed',
@@ -1262,7 +1272,10 @@ export class Engine {
         task.checksWaivedAt = undefined;
       }
       task.generation++;
-      if (task.pendingAuthorFix) task.pendingAuthorFix.generation = task.generation;
+      if (pending) {
+        pending.generation = task.generation;
+        if (check?.status === 'confirmed') pending.revision = check.original;
+      }
       task.revision = revisionOf(pr);
       task.pr = pr;
       task.verifiedMerge = undefined;
@@ -1934,6 +1947,13 @@ export class Engine {
     return true;
   }
 
+  async canStartMergeVerification(job: Job, pr: PullRequest): Promise<boolean> {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      return job.generation === task.generation && !this.stopReviewBeforeSavedFix(task, pr, true);
+    });
+  }
+
   private stopReviewBeforeSavedFix(task: Task, pr: PullRequest, merged = false): boolean {
     const pending = this.pendingFixHead(task, pr);
     if (merged && pr.state === 'merged' && pr.mergeCommit && pending === pr.head) {
@@ -2084,7 +2104,7 @@ export class Engine {
       return await this.provider(ref).getPR(ref);
     } catch (error) {
       const until = task.pendingAuthorFix?.confirmUntil;
-      if (until === undefined || Date.now() < until) throw error;
+      if (until !== undefined && Date.now() < until) throw error;
       this.blockSavedFix(task, head, `Could not confirm the PR revision. ${redact(String(error))}`);
     }
   }
@@ -2147,7 +2167,7 @@ export class Engine {
       if (!(await this.provider(ref).targetAdvanced?.(ref, pending.revision.base, pr.base)))
         return check;
     } catch (error) {
-      if (pending.confirmUntil === undefined || Date.now() < pending.confirmUntil) throw error;
+      if (pending.confirmUntil !== undefined && Date.now() < pending.confirmUntil) throw error;
       return {
         status: 'blocked',
         reason: `Could not confirm the PR base at ${pr.head} (base ${pr.base}, start ${pr.start}). ${redact(String(error))}`,
@@ -2829,6 +2849,7 @@ export class Engine {
           pr.state !== 'merged' ||
           !sameRevision(task.revision, pr) ||
           pr.mergeCommit !== task.pr?.mergeCommit ||
+          !samePullRequestBranches(task.pr, { ...pr, state: 'open' }) ||
           result.checkedHead !== pr.head
         ) {
           this.state(task, 'needs_input', 'The merged revision changed during verification');
