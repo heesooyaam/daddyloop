@@ -41,7 +41,7 @@ export function outstandingActivity(item: TaskActivity) {
 export function taskActivity(
   tasks: Task[],
   jobs: Job[],
-  mergeStatus?: (task: Task) => string | undefined,
+  mergeStatus?: (task: Task, job?: Job) => string | undefined,
   slots: WorkerSlot[] = [],
 ): TaskActivity[] {
   const byId = new Map<string, TaskActivity>(
@@ -49,7 +49,6 @@ export function taskActivity(
       task.id,
       {
         task,
-        mergeStatus: mergeStatus?.(task),
         assignedWorker: slots.find((slot) => slot.taskId === task.id)?.number,
       },
     ]),
@@ -61,6 +60,8 @@ export function taskActivity(
     if (!item.job || job.status === 'running') item.job = job;
     ordered.add(item);
   }
+  if (mergeStatus)
+    for (const item of byId.values()) item.mergeStatus = mergeStatus(item.task, item.job);
   return [...new Set([...ordered, ...byId.values()])];
 }
 

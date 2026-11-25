@@ -515,11 +515,12 @@ export class TelegramWorkspace {
     const tasks = taskActivity(
       this.store.tasks(groupId).reverse(),
       this.store.activeJobs(),
-      (task) =>
+      (task, job) =>
         githubActivityStatus(
           task,
           autoMergeSettings(this.store, group, task),
           githubBackoff(this.store, task.ref),
+          job,
         ),
       slots,
     );
@@ -529,7 +530,7 @@ export class TelegramWorkspace {
       view === 'queue'
         ? queueCard(locale, groupId, tasks, {
             page,
-            firstStarts: this.store.firstTaskStarts(groupId),
+            readFirstStarts: (ids) => this.store.firstTaskStarts(ids),
           })
         : workersCard(
             locale,
@@ -1127,16 +1128,17 @@ export class TelegramWorkspace {
       await this.api.send(destination, sessionSettings(this.locale(), board));
       return true;
     }
-    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)$/.exec(data);
+    const taskMerge = /^dad:tm:([a-f0-9-]{36}):(on|off|inherit)(?::(\d{1,10}))?$/.exec(data);
     if (taskMerge) {
       const task = this.store.getTask(taskMerge[1]!);
       if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
       this.authorize(destination, task.groupId);
       this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
-      await this.showTask(task.groupId, task.id, destination);
+      await this.showTask(task.groupId, task.id, destination, Number(taskMerge[3] ?? 0));
       return true;
     }
-    const merge = data.match(/^dad:merge:([a-f0-9-]{36}):([0-9]+)$/);
+    const mergeFromQueue = /^dad:vm:([a-f0-9-]{36}):([0-9a-z]{1,11}):([0-9a-z]{1,7})$/.exec(data);
+    const merge = mergeFromQueue ?? /^dad:merge:([a-f0-9-]{36}):(\d+)$/.exec(data);
     if (merge) {
       const item = this.store.getTask(merge[1]!);
       if (!item.groupId || !item.revision)
@@ -1145,9 +1147,14 @@ export class TelegramWorkspace {
       await this.daddy.engine.action(item.id, 'verify-merge', '', {
         groupId: item.groupId,
         head: item.revision.head,
-        generation: Number(merge[2]),
+        generation: Number.parseInt(merge[2]!, mergeFromQueue ? 36 : 10),
       });
-      await this.showTask(item.groupId, item.id, destination);
+      await this.showTask(
+        item.groupId,
+        item.id,
+        destination,
+        mergeFromQueue ? Number.parseInt(mergeFromQueue[3]!, 36) : 0,
+      );
       return true;
     }
     const task = data.match(/^dad:task:([a-f0-9-]{36})(?::(\d{1,10}))?$/);

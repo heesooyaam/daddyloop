@@ -62,6 +62,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS event_task ON events(task_id,id);
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS job_status ON jobs(status);
+      CREATE INDEX IF NOT EXISTS jobs_by_task ON jobs(task_id);
       CREATE UNIQUE INDEX IF NOT EXISTS one_running_per_task ON jobs(task_id) WHERE status = 'running';
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, data TEXT NOT NULL);
@@ -234,18 +235,18 @@ export class Store {
       : this.db.prepare(`${active} ${jobOrder('jobs')}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
-  firstTaskStarts(groupId: string): Map<string, string> {
+  firstTaskStarts(taskIds: string[]): Map<string, string> {
+    if (!taskIds.length) return new Map();
     const rows = this.db
       .prepare(
         `SELECT jobs.task_id AS taskId, min(json_extract(jobs.data,'$.startedAt')) AS startedAt
-         FROM jobs JOIN tasks ON tasks.id=jobs.task_id
-         WHERE json_extract(tasks.data,'$.groupId')=?
-           AND json_extract(jobs.data,'$.kind')!='chat'
+         FROM jobs
+         WHERE jobs.task_id IN (${taskIds.map(() => '?').join(',')})
            AND jobs.status!='queued'
            AND json_extract(jobs.data,'$.startedAt') IS NOT NULL
          GROUP BY jobs.task_id`,
       )
-      .all(groupId);
+      .all(...taskIds);
     return new Map(rows.map((row) => [String(row.taskId), String(row.startedAt)]));
   }
   claim(

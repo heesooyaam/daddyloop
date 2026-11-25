@@ -7,6 +7,7 @@ import {
   prRef,
   sameRevision,
   type AutoMergeMode,
+  type Job,
   type ReviewGroup,
   type PullRequest,
   type ReviewSnapshot,
@@ -43,20 +44,23 @@ export function githubActivityStatus(
   task: Task,
   settings: ReturnType<typeof autoMergeSettings>,
   backoff?: ReturnType<typeof githubBackoff>,
+  job?: Job,
 ) {
   if (
     backoff &&
-    [
-      'queued',
-      'fixing',
-      'reviewing',
-      'awaiting_publication',
-      'awaiting_checks',
-      'awaiting_push',
-      'awaiting_merge',
-      'ready_for_review',
-      'submitting',
-    ].includes(task.state)
+    job?.status !== 'running' &&
+    (job?.status === 'queued' ||
+      [
+        'queued',
+        'fixing',
+        'reviewing',
+        'awaiting_publication',
+        'awaiting_checks',
+        'awaiting_push',
+        'awaiting_merge',
+        'ready_for_review',
+        'submitting',
+      ].includes(task.state))
   ) {
     const time = new Date(backoff.until).toISOString().slice(11, 19);
     if (task.prLink?.ref && backoff.kind === 'read')

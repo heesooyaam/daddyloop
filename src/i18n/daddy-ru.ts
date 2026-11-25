@@ -673,6 +673,7 @@ export const daddyRu: Record<string, string> = {
   'Next page': 'Следующая',
   'Waiting to start': 'Ждёт запуска',
   'Waiting for GitHub quota': 'Ждёт квоту GitHub',
+  'Task discussion in progress': 'Обсуждает задачу',
   'GitHub auto-merge': 'Автослияние в GitHub',
   '{minutes} min since work began': '{minutes} мин с начала работы',
   '<1 min since work began': 'меньше минуты с начала работы',

@@ -174,6 +174,38 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     });
     await bot.handle(click(backToQueue));
     expect(lastText()).toContain('Task queue · 2/2\n\nQueue task 10');
+    const withPr: Task = {
+      ...tenth,
+      state: 'needs_input',
+      ref: { ...tenth.ref, kind: 'pull_request', number: 10 },
+      revision: { head: 'b'.repeat(40), base: 'a'.repeat(40), start: 'a'.repeat(40) },
+    };
+    f.store.saveTask(withPr);
+    const action = vi.spyOn(f.engine, 'action').mockResolvedValueOnce(withPr);
+    await bot.handle(click(openTenth));
+    const callbacks = () => {
+      const last = sent.filter(({ method }) => method === 'sendMessage').at(-1)?.body;
+      return (
+        last?.reply_markup as { inline_keyboard: { callback_data: string }[][] }
+      ).inline_keyboard
+        .flat()
+        .map(({ callback_data }) => callback_data);
+    };
+    for (const mode of ['on', 'off', 'inherit']) {
+      const button = callbacks().find((data) => data.startsWith(`dad:tm:${tenth.id}:${mode}`))!;
+      await bot.handle(click(button));
+      expect(callbacks()).toContain(backToQueue);
+    }
+    const verifyButton = callbacks().find((data) => data.startsWith('dad:vm:'))!;
+    expect(Buffer.byteLength(verifyButton)).toBeLessThanOrEqual(64);
+    await bot.handle(click(verifyButton));
+    expect(action).toHaveBeenCalledWith(withPr.id, 'verify-merge', '', {
+      groupId: group.id,
+      head: withPr.revision!.head,
+      generation: withPr.generation,
+    });
+    expect(callbacks()).toContain(backToQueue);
+    action.mockRestore();
     f.store.saveTask({ ...tenth, state: 'complete' });
     await bot.handle(click(backToQueue));
     expect(lastText()).toContain('Task queue\n\nFix search');
@@ -190,20 +222,62 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const started = (minutes: number) =>
       new Date(Date.now() - (minutes * 60 + 20) * 1000).toISOString();
     const [firstRun] = f.store.jobs(task!.id);
+    f.store.saveJob({ ...firstRun!, status: 'cancelled' });
+    const discussing = { ...task!, state: 'discussing' } as const;
+    f.store.saveTask(discussing);
+    await f.engine.chat(task!.id, 'author', 'Inspect the filters and propose a plan.');
+    const [chat] = f.store.activeJobs(task!.id);
+    const until = Date.now() + 60_000;
+    for (const backoff of [
+      {
+        key: 'github.quota:',
+        setting: { until, delay: 60_000 },
+        expected: 'Waiting for GitHub quota',
+      },
+      {
+        key: 'github.read-backoff:',
+        setting: { until, delay: 60_000, status: 503 },
+        expected: 'GitHub HTTP 503',
+      },
+    ]) {
+      const key = backoff.key + task!.ref.host;
+      f.store.setSetting(key, backoff.setting);
+      for (const state of [
+        'implementing',
+        'discussing',
+        'needs_input',
+        'awaiting_plan_approval',
+      ] as const) {
+        f.store.saveTask({ ...discussing, state });
+        await bot.handle(message('/queue'));
+        expect(lastText()).toContain(`${id} · ${backoff.expected}`);
+        expect(lastText()).toContain('UTC');
+        expect(lastText()).not.toContain('since work began');
+      }
+      f.store.saveTask(discussing);
+      f.store.saveJob({ ...chat!, status: 'running', startedAt: started(95) });
+      await bot.handle(message('/queue'));
+      expect(lastText()).toContain(`${id} · Task discussion in progress · 95 min since work began`);
+      f.store.saveJob(chat!);
+      f.store.setSetting(key, null);
+    }
+    f.store.saveJob({ ...chat!, status: 'completed', startedAt: started(95) });
     f.store.saveJob({ ...firstRun!, status: 'completed', startedAt: started(90) });
     const reviewing = { ...task!, state: 'reviewing', generation: task!.generation + 1 } as const;
     f.store.saveTask(reviewing);
     const review = f.store.enqueue(reviewing, 'reviewer', 'review', '');
     f.store.saveJob({ ...review, status: 'running', startedAt: started(5) });
+    f.store.setSetting('github.quota:' + task!.ref.host, { until, delay: 60_000 });
     await bot.handle(message('/queue'));
     expect(lastText()).toContain(
-      'Reviewing the changes · 90 min since work began\nShared reviewer · 5 min elapsed · Requested author worker 2',
+      'Reviewing the changes · 95 min since work began\nShared reviewer · 5 min elapsed · Requested author worker 2',
     );
+    f.store.setSetting('github.quota:' + task!.ref.host, null);
     f.store.saveJob({ ...review, status: 'completed', startedAt: started(5) });
     for (const state of ['awaiting_checks', 'awaiting_merge', 'needs_input', 'paused'] as const) {
       f.store.saveTask({ ...reviewing, state });
       await bot.handle(message('/queue'));
-      expect(lastText()).toContain('90 min since work began');
+      expect(lastText()).toContain('95 min since work began');
       expect(lastText()).not.toContain('5 min elapsed');
     }
   } finally {

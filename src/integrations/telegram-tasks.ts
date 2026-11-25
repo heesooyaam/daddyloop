@@ -90,6 +90,8 @@ export function queueButtons(groupId: string, locale: Locale, page = 0) {
 
 function queueStatus(item: TaskActivity) {
   const { task, job, assignedWorker, mergeStatus } = item;
+  if (job?.kind === 'chat' && job.status === 'running')
+    return { label: 'Task discussion in progress' };
   const label = activityStatus(item);
   const detail = queueDetail(task);
   if (mergeStatus) {
@@ -132,11 +134,11 @@ export function queueCard(
   {
     page: requestedPage = 0,
     now = Date.now(),
-    firstStarts,
+    readFirstStarts,
   }: {
     page?: number;
     now?: number;
-    firstStarts?: ReadonlyMap<string, string>;
+    readFirstStarts?: (taskIds: string[]) => ReadonlyMap<string, string>;
   } = {},
 ): TelegramCard {
   const t = translator(locale);
@@ -145,6 +147,7 @@ export function queueCard(
   const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
   const page = Math.min(requestedPage, pageCount - 1);
   const visible = tasks.slice(page * pageSize, (page + 1) * pageSize);
+  const firstStarts = readFirstStarts?.(visible.map(({ task }) => task.id));
   const text = new TelegramText().add(t('Task queue'), 'bold');
   if (pageCount > 1) text.add(` · ${page + 1}/${pageCount}`);
   const buttons: NonNullable<TelegramCard['buttons']> = [];
@@ -268,13 +271,18 @@ export function taskCard(
         text:
           (merge.mode === mode ? '✓ ' : '') +
           t(mode === 'inherit' ? 'Session default' : mode === 'on' ? 'On' : 'Off'),
-        callback_data: `dad:tm:${task.id}:${mode}`,
+        callback_data: `dad:tm:${task.id}:${mode}${queuePage ? `:${queuePage}` : ''}`,
       })),
     );
   }
   if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
     buttons.unshift([
-      { text: t('Verify merge'), callback_data: `dad:merge:${task.id}:${task.generation}` },
+      {
+        text: t('Verify merge'),
+        callback_data: queuePage
+          ? `dad:vm:${task.id}:${task.generation.toString(36)}:${queuePage.toString(36)}`
+          : `dad:merge:${task.id}:${task.generation}`,
+      },
     ]);
   return { ...text, buttons };
 }
