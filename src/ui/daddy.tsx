@@ -77,6 +77,8 @@ function safeUrl(value: string) {
 }
 const isLimitsPage = () => location.pathname === '/limits' || location.pathname === '/limits/';
 const sessionFromHash = () => (location.hash.startsWith('#session/') ? location.hash.slice(9) : '');
+const sessionFromHistory = () =>
+  (isLimitsPage() && (history.state?.limitsSessionId as string | undefined)) || sessionFromHash();
 
 export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const { t, locale, adopt, local } = useLocale();
@@ -92,7 +94,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [deleteTarget, setDeleteTarget] =
     useState<Pick<DaddyBoard['group'], 'id' | 'generation' | 'title'>>();
   const formVersion = useRef(0);
-  const [model] = useState(() => new DaddyClient(api, sessionFromHash()));
+  const [model] = useState(() => new DaddyClient(api, sessionFromHistory()));
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
   const [modal, updateModal] = useState<
@@ -148,11 +150,25 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   }, [state.status?.preferences?.version]);
   const sessionHash = state.selected ? `#session/${state.selected}` : '';
   const limitsHash = limitsPage ? location.hash : sessionHash;
-  const chatHref = '/' + limitsHash;
+  const limitsReference = limitsPage ? sessionFromHash() : '';
+  const limitsSessionId = limitsPage
+    ? ((history.state?.limitsSessionId as string | undefined) ??
+      (limitsReference &&
+      /^[a-f0-9-]{36}$/.test(state.selected) &&
+      state.selected.startsWith(limitsReference)
+        ? state.selected
+        : undefined))
+    : undefined;
+  const chatHref = limitsSessionId ? `/#session/${limitsSessionId}` : '/' + limitsHash;
   const limitsHref = '/limits' + limitsHash;
+  useLayoutEffect(() => {
+    // Keep the original URL and pin the resolved conversation to this entry.
+    if (isLimitsPage() && limitsSessionId && !history.state?.limitsSessionId)
+      history.replaceState({ ...history.state, limitsSessionId }, '');
+  }, [limitsSessionId, limitsHash]);
   useEffect(() => {
     const syncPage = () => {
-      const id = sessionFromHash();
+      const id = sessionFromHistory();
       flushSync(() => {
         setModal(null);
         setDeleteTarget(undefined);
@@ -227,7 +243,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       setModal(null);
       setReturnToNew(false);
       history.pushState(null, '', event.currentTarget.href);
-      model.selectFromReference(sessionFromHash());
+      model.selectFromReference(sessionFromHistory());
     }
     setLimitsPage(isLimitsPage());
     setMenu(false);

@@ -511,3 +511,48 @@ for (const route of ['Forward', 'workspace link'] as const) {
     await expect(page.getByLabel('Message daddy')).toBeEditable();
   });
 }
+
+for (const removeOriginal of [false, true]) {
+  test(`pins the short limits link before an ID collision (original removed: ${removeOriginal})`, async ({
+    page,
+  }) => {
+    await login(page);
+    const a = await createFixtureSession(page, 'Pinned short chat');
+    const b = await createFixtureSession(page, 'Other chat with matching prefix');
+    const prefix = a.id.slice(0, 8);
+    let collide = false;
+    await page.route('**/api/daddy/sessions', async (route) => {
+      const response = await route.fetch();
+      const sessions = (await response.json()) as { id: string }[];
+      const visible =
+        collide && removeOriginal ? sessions.filter(({ id }) => id !== a.id) : sessions;
+      await route.fulfill({
+        response,
+        json: visible.map((entry) =>
+          entry.id === b.id && collide ? { ...entry, id: prefix + b.id.slice(8) } : entry,
+        ),
+      });
+    });
+    await page.goto(`/limits#session/${prefix}`);
+    const back = page.getByRole('link', { name: 'Back to workspace', exact: true });
+    await expect(back).toHaveAttribute('href', `/#session/${a.id}`);
+    collide = true;
+    const updated = await page.waitForResponse(
+      async (response) =>
+        response.url().endsWith('/api/daddy/sessions') &&
+        ((await response.json()) as { id: string }[]).some(
+          ({ id }) => id === prefix + b.id.slice(8),
+        ),
+    );
+    await updated.finished();
+    await back.click();
+    await expect(page).toHaveURL(`/#session/${a.id}`);
+    if (removeOriginal) {
+      await expect(page.getByRole('alert').filter({ hasText: a.id })).toBeVisible();
+      await expect(page.getByLabel('Message daddy')).toHaveCount(0);
+    } else {
+      await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+      await expect(page.getByLabel('Message daddy')).toBeEditable();
+    }
+  });
+}

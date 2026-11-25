@@ -197,6 +197,12 @@ export const daddyRu: Record<string, string> = {
   'No quota readings yet': 'Нет данных о лимитах',
   'Session {id} is unavailable. Choose a session from the list.':
     'Сессия {id} недоступна. Выберите сессию из списка.',
+  'Session {id} is unavailable. Choose a session with Ctrl+T.':
+    'Сессия {id} недоступна. Нажмите Ctrl+T, чтобы выбрать сессию.',
+  'Ctrl+T sessions · Ctrl+J newline · /help · Ctrl+Q exit':
+    'Ctrl+T — сессии · Ctrl+J — новая строка · /help · Ctrl+Q — выход',
+  'Refresh limits for this provider before confirming the reset.':
+    'Обновите лимиты этого провайдера перед подтверждением сброса.',
   'Reading agent limits…': 'Загружаем лимиты агентов…',
   'Could not read agent limits: {reason}': 'Не удалось загрузить лимиты агентов: {reason}',
   'Failed to fetch': 'Не удалось связаться с сервером',

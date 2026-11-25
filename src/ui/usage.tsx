@@ -294,26 +294,56 @@ export function UsagePanel({
 }) {
   const { t, locale } = useLocale();
   const [engine, setEngine] = useState<string>(),
-    [plan, setPlan] = useState<ResetPlan>();
-  const usage = overview?.agents.find((agent) => agent.engine === engine) ?? overview?.agents[0];
+    [confirmation, setConfirmation] = useState<{
+      plan: ResetPlan;
+      engine: string;
+      provider: string;
+      uncertain?: boolean;
+    }>();
+  const usage = confirmation
+    ? overview?.agents.find((agent) => agent.engine === confirmation.engine)
+    : (overview?.agents.find((agent) => agent.engine === engine) ?? overview?.agents[0]);
+  const plan = confirmation?.plan;
+  const isRetry = confirmation?.uncertain || plan?.status === 'pending';
+  const canStartReset = () =>
+    !!usage?.available &&
+    !usageError &&
+    !isStale(usage) &&
+    usage.resets.canUse &&
+    usage.resets.availableCount !== 0;
+  const canConfirm = () => isRetry || canStartReset();
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [notice, setNotice] = useState('');
   const action = async (kind: 'refresh' | 'prepare' | 'consume') => {
-    if (busy) return;
+    if (busy || (kind === 'consume' && !canConfirm())) return;
     setBusy(true);
     setError('');
     setNotice('');
     try {
       if (kind === 'refresh') await onRefresh();
-      if (kind === 'prepare')
-        setPlan(await api<ResetPlan>('/usage/reset/prepare', { engine: usage?.engine }));
+      if (kind === 'prepare' && usage) {
+        const prepared = await api<ResetPlan>('/usage/reset/prepare', { engine: usage.engine });
+        setConfirmation({ plan: prepared, engine: usage.engine, provider: usage.name });
+      }
       if (kind === 'consume' && plan) {
         const result = await onConsume(plan.id);
         setNotice(t(resetOutcomeText[result.outcome!]));
-        setPlan(undefined);
+        setConfirmation(undefined);
       }
     } catch (error) {
+      if (
+        kind === 'consume' &&
+        confirmation &&
+        !(
+          error instanceof Error &&
+          'status' in error &&
+          typeof error.status === 'number' &&
+          error.status >= 400 &&
+          error.status < 500
+        )
+      )
+        setConfirmation({ ...confirmation, uncertain: true });
       setError((error as Error).message);
     } finally {
       setBusy(false);
@@ -383,7 +413,14 @@ export function UsagePanel({
       {notice && <p role="status">{notice}</p>}
       {plan ? (
         <div className="daddy-usage-confirm">
-          <strong>{t(plan.title)}</strong>
+          <strong>
+            {confirmation.provider} · {t(plan.title)}
+          </strong>
+          {!canConfirm() && (
+            <p role="status">
+              {t('Refresh limits for this provider before confirming the reset.')}
+            </p>
+          )}
           <p>
             {t(
               'Use one available reset for the selected provider account? Existing conversations and files are kept.',
@@ -391,12 +428,16 @@ export function UsagePanel({
           </p>
           <button
             className="daddy-button primary"
-            disabled={busy}
+            disabled={busy || !canConfirm()}
             onClick={() => void action('consume')}
           >
             {t('Confirm: use one reset')}
           </button>
-          <button className="daddy-button quiet" disabled={busy} onClick={() => setPlan(undefined)}>
+          <button
+            className="daddy-button quiet"
+            disabled={busy}
+            onClick={() => setConfirmation(undefined)}
+          >
             {t('Cancel')}
           </button>
           <p className="daddy-muted">
@@ -408,7 +449,7 @@ export function UsagePanel({
       ) : (
         <button
           className="daddy-button primary"
-          disabled={busy || !usage?.resets.canUse || (isStale(usage) && !usage.resets.pending)}
+          disabled={busy || (!canStartReset() && !usage?.resets.pending)}
           onClick={() => void action('prepare')}
         >
           {t(usage?.resets.pending ? 'Resolve pending reset' : 'Use a reset')}

@@ -476,3 +476,65 @@ for (const latest of ['refresh', 'reset'] as const) {
     }
   });
 }
+
+test('binds reset confirmation to fresh readings from its provider and retries the same plan', async ({
+  page,
+}) => {
+  await login(page);
+  const initial = (await (await page.request.get('/api/usage')).json()) as UsageView;
+  const codex = { ...initial.agents[0], retrievedAt: undefined, stale: false };
+  const claude = { ...codex, engine: 'claude', name: 'Claude' };
+  const plan = { id: crypto.randomUUID(), status: 'ready', title: 'Full reset', availableCount: 3 };
+  let response: UsageView | undefined = { agents: [codex, claude] };
+  const writes: string[] = [];
+  await page.route('**/api/usage*', (route) =>
+    response
+      ? route.fulfill({ json: response })
+      : route.fulfill({ status: 503, json: { error: { message: 'Fixture read failed' } } }),
+  );
+  await page.route('**/api/usage/reset/prepare', (route) => route.fulfill({ json: plan }));
+  await page.route('**/api/usage/reset/' + plan.id, (route) => {
+    writes.push(new URL(route.request().url()).pathname);
+    return writes.length === 1
+      ? route.abort()
+      : route.fulfill({
+          json: { plan: { ...plan, status: 'done', outcome: 'reset' }, usage: initial },
+        });
+  });
+  await page.getByRole('link', { name: 'Limits', exact: true }).click();
+  const refresh = page.getByRole('button', { name: 'Refresh limits' });
+  await refresh.click();
+  await page.getByRole('button', { name: 'Use a reset', exact: true }).click();
+  const confirm = page.getByRole('button', { name: 'Confirm: use one reset' });
+  const provider = page.getByLabel('Agent usage');
+  await expect(confirm).toBeEnabled();
+  response = { agents: [claude, codex] };
+  await refresh.click();
+  await expect(provider.locator('option').first()).toHaveText('Claude');
+  await expect(provider).toHaveValue('codex');
+  for (const unavailable of [
+    { agents: [claude] },
+    { agents: [] },
+    undefined,
+    { agents: [{ ...codex, retrievedAt: new Date(0).toISOString() }] },
+    { agents: [{ ...codex, stale: true }] },
+    { agents: [{ ...codex, resets: { ...codex.resets, availableCount: 0, canUse: false } }] },
+  ]) {
+    response = unavailable;
+    await refresh.click();
+    await expect(confirm).toBeDisabled();
+    await expect(page.getByText('Codex · Full reset')).toBeVisible();
+  }
+  expect(writes).toEqual([]);
+  response = { agents: [claude, codex] };
+  await refresh.click();
+  await confirm.click();
+  await expect(page.getByRole('alert')).toBeVisible();
+  response = { agents: [] };
+  await refresh.click();
+  await expect(provider).toHaveCount(0);
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(confirm).toHaveCount(0);
+  expect(writes).toEqual(Array(2).fill('/api/usage/reset/' + plan.id));
+});

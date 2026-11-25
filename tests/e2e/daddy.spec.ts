@@ -1088,3 +1088,28 @@ test('changes the host cleanup schedule from the web sidebar', async ({ page }) 
   await panel.getByRole('button', { name: 'Save settings' }).click();
   await expect(panel.getByRole('status')).toHaveText('Cleanup settings saved');
 });
+
+test('keeps a newly created chat selected when another client deletes it', async ({ page }) => {
+  await login(page);
+  const a = await sessionFixture(page, 'Before creating the removed chat');
+  await page.goto(`/limits#session/${a.id}`);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill('New chat removed externally');
+  const created = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/api/daddy/sessions'),
+  );
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  const { group } = (await (await created).json()) as DaddyBoard;
+  await expect(page.getByRole('heading', { name: group.title, exact: true })).toBeVisible();
+  await page.route('**/api/daddy/sessions', async (route) => {
+    const response = await route.fetch();
+    const sessions = (await response.json()) as { id: string }[];
+    await route.fulfill({ response, json: sessions.filter(({ id }) => id !== group.id) });
+  });
+  await expect(page.getByRole('alert').filter({ hasText: group.id })).toBeVisible();
+  await expect(page).toHaveURL(`/#session/${group.id}`);
+  await expect(page.getByLabel('Message daddy')).toHaveCount(0);
+  await page.getByRole('button', { name: new RegExp(a.title) }).click();
+  await expect(page.getByRole('heading', { name: a.title, exact: true })).toBeVisible();
+});

@@ -115,8 +115,8 @@ export class DaddyClient {
   error(message: string) {
     this.update({ error: message });
   }
-  async select(id: string) {
-    this.explicitSelection = false;
+  async select(id: string, explicit = false) {
+    this.explicitSelection = explicit;
     this.sequence++;
     this.update({
       selected: id,
@@ -295,7 +295,7 @@ export class DaddyClient {
       this.refreshGeneration++;
       this.refreshPending = undefined;
       options.onCreated?.();
-      if (options.selectOnSuccess?.() ?? true) await this.select(board.group.id);
+      if (options.selectOnSuccess?.() ?? true) await this.select(board.group.id, true);
       await this.refresh();
       return board.group.id;
     } catch (error) {
