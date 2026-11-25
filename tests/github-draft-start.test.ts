@@ -220,7 +220,24 @@ it.each(['accepted', 'not accepted', 'edited'] as const)(
         ...(await f.provider.getReview(prRef(task), inReview.review!)),
         authorId: '12',
       });
-      await f.run();
+      if (outcome === 'not accepted') {
+        const job = f.store.claim()!;
+        vi.spyOn(f.provider, 'createComment').mockRejectedValueOnce(
+          new AppError('provider_502', 'Lost add'),
+        );
+        await expect(
+          f.engine.broker.call(job, 'add_comment', { key: 'absent', body: 'Unconfirmed add' }),
+        ).rejects.toThrow();
+        vi.spyOn(f.provider, 'updateSummary').mockRejectedValueOnce(
+          new AppError('provider_500', 'Lost edit'),
+        );
+        await expect(
+          f.engine.broker.call(job, 'set_summary', { body: 'Unconfirmed summary' }),
+        ).rejects.toThrow();
+        await f.engine.broker.call(job, 'set_summary', { body: 'Final verified summary' });
+        await f.engine.completeJob(job, f.result());
+        f.store.saveJob({ ...job, status: 'completed' });
+      } else await f.run();
       const publish = f.provider.publish.bind(f.provider);
       const calls = vi.spyOn(f.provider, 'publish').mockImplementationOnce(async (ref, handle) => {
         if (outcome === 'accepted') await publish(ref, handle);

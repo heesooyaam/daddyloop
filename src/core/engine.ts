@@ -816,18 +816,7 @@ export class Engine {
     const handle = task.review!;
     if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
     this.broker.reconcileDraftEdits(task, draft);
-    const publishKey = handle.marker + ':publish';
-    if (
-      this.store
-        .pendingReviewWrites(task.id, handle.marker)
-        .some(
-          (row) =>
-            row.id !== publishKey ||
-            draft.status !== 'draft' ||
-            this.broker.outbox.isActive(publishKey),
-        )
-    )
-      return draftSyncPending;
+    if (this.broker.hasUnsettledDraftWrites(task, draft)) return draftSyncPending;
     if (!this.draftHasWork(handle, draft)) return;
     if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (

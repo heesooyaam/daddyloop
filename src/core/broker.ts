@@ -67,6 +67,20 @@ export const dynamicTools = Object.entries(schemas).map(([name, schema]) => ({
   inputSchema: z.toJSONSchema(schema, { target: 'draft-7' }),
 }));
 
+const draftFingerprint = (s: ReviewSnapshot) =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        s.authorId,
+        s.revision.head,
+        s.body,
+        s.comments
+          .map((c) => [c.id, c.body, c.location])
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      ]),
+    )
+    .digest('hex');
+
 export class Broker {
   readonly outbox: Outbox;
   constructor(
@@ -360,6 +374,50 @@ export class Broker {
     );
     return { summaryUpdated: true };
   }
+  hasUnsettledDraftWrites(task: Task, draft: ReviewSnapshot, publishing = false) {
+    const marker = task.review!.marker,
+      publish = marker + ':publish';
+    const reviewed =
+      task.reviewFinished &&
+      task.snapshot?.status === 'draft' &&
+      task.review?.authorId &&
+      task.review.authorId === draft.authorId &&
+      draftFingerprint(task.snapshot) === draftFingerprint(draft);
+    // An absent add is never replayed. A later confirmed summary can supersede an
+    // earlier uncertain edit. Keep both operation receipts for the audit trail.
+    return this.store.pendingReviewWrites(task.id, marker).some((row) => {
+      const id = String(row.id);
+      if (id === publish && draft.status === 'draft')
+        return !publishing && this.outbox.isActive(id);
+      if (this.outbox.isActive(id)) return true;
+      if (!reviewed) return true;
+      if (id.startsWith(marker + ':comment:'))
+        return draft.comments.some((c) => c.body.includes(tag(id)));
+      const suffix = '\n\n' + tag(marker);
+      if (
+        !String(id)
+          .slice(marker.length + 1)
+          .split(':')
+          .includes('set_summary') ||
+        !draft.body.endsWith(suffix)
+      )
+        return true;
+      const digest = createHash('sha256')
+        .update(JSON.stringify({ body: draft.body.slice(0, -suffix.length) }))
+        .digest('hex');
+      return !this.store.db
+        .prepare(
+          `
+        SELECT 1 FROM operations o JOIN events e ON o.id=json_extract(e.data,'$.operationId') AND e.task_id=o.task_id
+        WHERE o.task_id=? AND o.id GLOB ? AND o.status='done' AND o.request=?
+          AND e.type IN ('operation.completed','operation.recovered')
+          AND e.id>(SELECT MAX(id) FROM events WHERE task_id=? AND type IN ('operation.started','operation.uncertain')
+            AND json_extract(data,'$.operationId')=?) LIMIT 1
+      `,
+        )
+        .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
+    });
+  }
   async publish(
     task: Task,
     verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
@@ -403,19 +461,6 @@ export class Broker {
     assertDraft(draft);
     const baselineKey =
       'review.publish-content:' + key + ':' + handle.revision.head + ':' + handle.revision.base;
-    const fingerprint = (s: ReviewSnapshot) =>
-      createHash('sha256')
-        .update(
-          JSON.stringify([
-            s.authorId,
-            s.revision.head,
-            s.body,
-            s.comments
-              .map((c) => [c.id, c.body, c.location])
-              .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
-          ]),
-        )
-        .digest('hex');
     const send = async () => {
       await provider.publish(ref, handle);
       return null;
@@ -425,7 +470,7 @@ export class Broker {
       key,
       { review: handle.id },
       async () => {
-        if (ref.provider === 'github') this.store.setSetting(baselineKey, fingerprint(draft));
+        if (ref.provider === 'github') this.store.setSetting(baselineKey, draftFingerprint(draft));
         return send();
       },
       async () => {
@@ -439,7 +484,7 @@ export class Broker {
           this.store.setting<string>(baselineKey) ??
           (task.snapshot?.status === 'draft' &&
           sameRevision(task.snapshot.revision, handle.revision)
-            ? fingerprint(task.snapshot)
+            ? draftFingerprint(task.snapshot)
             : undefined);
         if (
           latest.generation !== task.generation ||
@@ -453,8 +498,8 @@ export class Broker {
           handle.authorId !== current.authorId ||
           current.revision.head !== handle.revision.head ||
           !expected ||
-          expected !== fingerprint(current) ||
-          this.store.pendingReviewWrites(task.id, handle.marker).some((r) => r.id !== key)
+          expected !== draftFingerprint(current) ||
+          this.hasUnsettledDraftWrites(task, current, true)
         )
           throw new AppError(
             'draft_changed',
