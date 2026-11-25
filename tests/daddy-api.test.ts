@@ -773,6 +773,44 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       ).toEqual([presetB.id, presetC.id, presetA.id, presetE.id, presetD.id]);
     }
 
+    // The inserted preset stays after the entire independently reordered prefix.
+    const beforePrefixMove = [presetA, presetB, presetC, presetD].map((preset) => preset.id);
+    const movePrefix = [
+      {
+        target: 'preset-order',
+        before: beforePrefixMove,
+        after: [presetB.id, presetC.id, presetA.id, presetD.id],
+      },
+    ];
+    const insertAfterPrefix = [
+      { target: 'preset', id: presetE.id, before: null, after: state(presetE) },
+      {
+        target: 'preset-order',
+        before: beforePrefixMove,
+        after: [presetA.id, presetB.id, presetC.id, presetE.id, presetD.id],
+      },
+    ];
+    for (const changesInOrder of [
+      [movePrefix, insertAfterPrefix],
+      [insertAfterPrefix, movePrefix],
+    ]) {
+      const ranges = f.daddy.create({
+        workspaceId: f.workspace.id,
+        instructions: {
+          daddy: {},
+          worker: {},
+          presets: [presetA, presetB, presetC, presetD].map((preset) => selected(preset)),
+        },
+      });
+      for (const changes of changesInOrder) {
+        const saved = await patchInstructions(ranges.id, changes);
+        expect(saved.statusCode, saved.body).toBe(200);
+      }
+      expect(
+        f.daddy.group(ranges.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual([presetB.id, presetC.id, presetA.id, presetE.id, presetD.id]);
+    }
+
     for (const { base, firstOrder, secondOrder, addition } of [
       {
         base: [presetA, presetB, presetC],

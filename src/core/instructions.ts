@@ -187,8 +187,109 @@ const commonSubsequence = (left: string[], right: string[]) => {
   }
   return result;
 };
-const relativePosition = (order: string[], id: string, anchors: string[]) =>
-  anchors.map((anchor) => order.indexOf(id) < order.indexOf(anchor));
+/** Combine the two editors' relative-order constraints on the small preset list. */
+function mergePresetOrder(
+  before: string[],
+  after: string[],
+  actual: string[],
+  selected: AppliedPreset[],
+) {
+  const entries = new Map(selected.map((entry) => [entry.preset.id, entry]));
+  const ids = [...entries.keys()];
+  const baseIds = new Set(before);
+  const common = before.filter(
+    (id) => entries.has(id) && actual.includes(id) && after.includes(id),
+  );
+  const commonIds = new Set(common);
+  const edited = after.filter((id) => commonIds.has(id));
+  const existing = actual.filter((id) => commonIds.has(id));
+  for (const [requested, observed] of [
+    [edited, existing],
+    [existing, edited],
+  ] as const) {
+    const anchors = commonSubsequence(common, requested);
+    for (const id of common.filter((id) => !anchors.includes(id))) {
+      const samePosition = (left: string[], right: string[]) =>
+        anchors.every(
+          (anchor) =>
+            left.indexOf(id) < left.indexOf(anchor) === right.indexOf(id) < right.indexOf(anchor),
+        );
+      if (!samePosition(observed, common) && !samePosition(observed, requested))
+        throw new Error('instruction_conflict');
+    }
+  }
+  const predecessors = new Map(ids.map((id) => [id, new Set<string>()]));
+  for (let i = 0; i < common.length; i++) {
+    for (let j = i + 1; j < common.length; j++) {
+      const left = common[i]!,
+        right = common[j]!;
+      if (
+        edited.indexOf(left) > edited.indexOf(right) ||
+        existing.indexOf(left) > existing.indexOf(right)
+      )
+        predecessors.get(left)!.add(right);
+      else predecessors.get(right)!.add(left);
+    }
+  }
+  // A new block stays between its nearest surviving neighbors, even when both moved.
+  for (const order of [after, actual]) {
+    const present = order.filter((id) => entries.has(id));
+    for (let i = 1; i < present.length; i++) {
+      const left = present[i - 1]!,
+        right = present[i]!;
+      if (!baseIds.has(left) || !baseIds.has(right)) predecessors.get(right)!.add(left);
+    }
+  }
+  // Preserve the wider placement of an insertion whenever it is compatible with
+  // the edits to its immediate neighbors (for example, moving an entire block).
+  const preferences = new Map<string, { left: string; right: string; distance: number }>();
+  for (const order of [actual, after]) {
+    const present = order.filter((id) => entries.has(id));
+    for (let i = 0; i < present.length; i++) {
+      for (let j = i + 2; j < present.length; j++) {
+        const left = present[i]!,
+          right = present[j]!;
+        if (baseIds.has(left) && baseIds.has(right)) continue;
+        const key = left + right,
+          distance = j - i;
+        if (distance < (preferences.get(key)?.distance ?? Infinity))
+          preferences.set(key, { left, right, distance });
+      }
+    }
+  }
+  const dependsOn = (start: string, target: string) => {
+    const pending = [start],
+      seen = new Set<string>();
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (id === target) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      pending.push(...predecessors.get(id)!);
+    }
+    return false;
+  };
+  for (const edge of [...preferences.values()].sort(
+    (a, b) =>
+      a.distance - b.distance || a.left.localeCompare(b.left) || a.right.localeCompare(b.right),
+  )) {
+    if (!dependsOn(edge.left, edge.right)) predecessors.get(edge.right)!.add(edge.left);
+  }
+  const result: AppliedPreset[] = [];
+  while (predecessors.size) {
+    // Independent additions at the same position get the same order whichever editor saved first.
+    const ready = [...predecessors]
+      .filter(([, pred]) => !pred.size)
+      .map(([id]) => id)
+      .sort();
+    const next = ready[0];
+    if (!next) throw new Error('instruction_conflict');
+    result.push(entries.get(next)!);
+    predecessors.delete(next);
+    for (const pred of predecessors.values()) pred.delete(next);
+  }
+  return result;
+}
 export function applyInstructionChanges(
   current: SessionInstructions | undefined,
   changes: SessionInstructionChange[],
@@ -212,9 +313,7 @@ export function applyInstructionChanges(
     const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
-  let orderMoves = new Set<string>(),
-    orderActual: string[] = [],
-    orderTarget: string[] = [];
+  let orderActual: string[] = [];
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
@@ -222,65 +321,25 @@ export function applyInstructionChanges(
   }
   const order = changes.find((change) => change.target === 'preset-order');
   if (order) {
-    const actualOrder = value(order) as string[],
-      presetChanges = new Map(
-        changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
-      ),
-      shared = order.before.filter((id) => order.after.includes(id)),
-      beforeShared = order.before.filter((id) => shared.includes(id)),
-      afterShared = order.after.filter((id) => shared.includes(id)),
-      anchors = commonSubsequence(beforeShared, afterShared),
-      presentAnchors = anchors.filter((id) => actualOrder.includes(id));
-    orderActual = actualOrder;
-    orderTarget = [...order.after];
-    orderMoves = new Set(
-      order.after.filter((id) => !order.before.includes(id) && !actualOrder.includes(id)),
+    orderActual = value(order) as string[];
+    const presetChanges = new Map(
+      changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
     );
-    for (const id of shared.filter((id) => !anchors.includes(id) && actualOrder.includes(id))) {
-      const before = relativePosition(order.before, id, presentAnchors),
-        after = relativePosition(order.after, id, presentAnchors),
-        actual = relativePosition(actualOrder, id, presentAnchors);
-      if (sameValue(actual, after)) continue;
-      if (!sameValue(actual, before)) throw new Error('instruction_conflict');
-      orderMoves.add(id);
-    }
-    for (const id of order.after.filter((id) => !order.before.includes(id))) {
-      if (!actualOrder.includes(id)) {
-        if (!presetChanges.get(id)?.after) throw new Error('instruction_conflict');
-      }
-    }
-    for (const id of order.before.filter((id) => !order.after.includes(id)))
-      if (actualOrder.includes(id) && presetChanges.get(id)?.after !== null)
+    if (
+      new Set(order.before).size !== order.before.length ||
+      new Set(order.after).size !== order.after.length
+    )
+      throw new Error('instruction_conflict');
+    for (const id of order.after)
+      if (!order.before.includes(id) && !orderActual.includes(id) && !presetChanges.get(id)?.after)
         throw new Error('instruction_conflict');
-    const base = new Set(order.before),
-      added = new Set(order.after.filter((id) => !base.has(id))),
-      concurrent = (id: string) => !base.has(id) && !added.has(id);
-    for (let start = 0; start < actualOrder.length;) {
-      if (!concurrent(actualOrder[start]!)) {
-        start++;
-        continue;
-      }
-      let end = start;
-      while (end + 1 < actualOrder.length && concurrent(actualOrder[end + 1]!)) end++;
-      const previous = actualOrder
-          .slice(0, start)
-          .reverse()
-          .find((id) => base.has(id)),
-        following = actualOrder.slice(end + 1).find((id) => base.has(id));
+    for (const id of order.before)
       if (
-        previous &&
-        following &&
-        orderMoves.has(previous) &&
-        orderMoves.has(following) &&
-        order.after.indexOf(previous) < order.after.indexOf(following)
-      ) {
-        const carried = actualOrder.slice(start, end + 1),
-          at = orderTarget.indexOf(following);
-        carried.forEach((id) => orderMoves.add(id));
-        orderTarget.splice(at, 0, ...carried);
-      }
-      start = end + 1;
-    }
+        !order.after.includes(id) &&
+        orderActual.includes(id) &&
+        presetChanges.get(id)?.after !== null
+      )
+        throw new Error('instruction_conflict');
   }
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     if (sameValue(value(change), change.after)) continue;
@@ -318,106 +377,8 @@ export function applyInstructionChanges(
       next[role].skills = change.after as SkillSnapshot[];
     else delete next[role].skills;
   }
-  if (order) {
-    const presets = next.presets ?? [],
-      byId = new Map(presets.map((entry) => [entry.preset.id, entry])),
-      current = presets.filter((entry) => !orderMoves.has(entry.preset.id));
-    for (const id of orderTarget.filter((id) => orderMoves.has(id))) {
-      const entry = byId.get(id);
-      if (!entry) continue;
-      const at = orderTarget.indexOf(id),
-        preceding = orderTarget
-          .slice(0, at)
-          .reverse()
-          .find((candidate) => current.some((preset) => preset.preset.id === candidate)),
-        precedingIndex = preceding
-          ? current.findIndex((preset) => preset.preset.id === preceding)
-          : -1,
-        following = new Set(orderTarget.slice(at + 1)),
-        followingIndexes = current.flatMap((preset, index) =>
-          following.has(preset.preset.id) && index > precedingIndex ? [index] : [],
-        ),
-        followingIndex = followingIndexes.length ? Math.min(...followingIndexes) : -1,
-        insertion =
-          at === 0
-            ? 0
-            : at === orderTarget.length - 1
-              ? current.length
-              : followingIndex >= 0 && (precedingIndex < 0 || precedingIndex < followingIndex)
-                ? followingIndex
-                : precedingIndex >= 0
-                  ? precedingIndex + 1
-                  : current.length;
-      current.splice(insertion, 0, entry);
-    }
-    const candidate = current.map((entry) => entry.preset.id),
-      shared = order.before.filter(
-        (id) => order.after.includes(id) && orderActual.includes(id) && candidate.includes(id),
-      ),
-      precedes = (items: string[], left: string, right: string) =>
-        items.indexOf(left) < items.indexOf(right);
-    for (let left = 0; left < shared.length; left++)
-      for (let right = left + 1; right < shared.length; right++) {
-        const a = shared[left]!,
-          b = shared[right]!,
-          before = precedes(order.before, a, b),
-          after = precedes(order.after, a, b),
-          expected = before === after ? precedes(orderActual, a, b) : after;
-        if (precedes(candidate, a, b) !== expected) throw new Error('instruction_conflict');
-      }
-    const added = new Set(order.after.filter((id) => !order.before.includes(id)));
-    for (let start = 0; start < order.after.length;) {
-      if (!added.has(order.after[start]!)) {
-        start++;
-        continue;
-      }
-      let end = start;
-      while (end + 1 < order.after.length && added.has(order.after[end + 1]!)) end++;
-      const chain = [
-        ...order.after
-          .slice(0, start)
-          .reverse()
-          .filter((id) => !added.has(id))
-          .slice(0, 1),
-        ...order.after.slice(start, end + 1),
-        ...order.after
-          .slice(end + 1)
-          .filter((id) => !added.has(id))
-          .slice(0, 1),
-      ].filter((id) => candidate.includes(id));
-      for (let index = 1; index < chain.length; index++)
-        if (!precedes(candidate, chain[index - 1]!, chain[index]!))
-          throw new Error('instruction_conflict');
-      start = end + 1;
-    }
-    const base = new Set(order.before),
-      concurrent = (id: string) => !base.has(id) && !added.has(id);
-    for (let start = 0; start < orderActual.length;) {
-      if (!concurrent(orderActual[start]!)) {
-        start++;
-        continue;
-      }
-      let end = start;
-      while (end + 1 < orderActual.length && concurrent(orderActual[end + 1]!)) end++;
-      const chain = [
-        ...orderActual
-          .slice(0, start)
-          .reverse()
-          .filter((id) => base.has(id))
-          .slice(0, 1),
-        ...orderActual.slice(start, end + 1),
-        ...orderActual
-          .slice(end + 1)
-          .filter((id) => base.has(id))
-          .slice(0, 1),
-      ].filter((id) => candidate.includes(id));
-      for (let index = 1; index < chain.length; index++)
-        if (!precedes(candidate, chain[index - 1]!, chain[index]!))
-          throw new Error('instruction_conflict');
-      start = end + 1;
-    }
-    next.presets = current;
-  }
+  if (order && next.presets?.length)
+    next.presets = mergePresetOrder(order.before, order.after, orderActual, next.presets);
   return sessionInstructionsSchema.parse(next);
 }
 export function flattenInstructions(value: SessionInstructions) {
