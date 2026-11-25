@@ -538,13 +538,12 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
-      if (
-        job.kind === 'verify_merge' &&
-        startingPR &&
-        !(await this.engine.canStartMergeVerification(job, startingPR))
-      ) {
-        job.status = 'cancelled';
-        return;
+      if (job.kind === 'verify_merge' && startingPR) {
+        if (!(await this.engine.canStartMergeVerification(job, startingPR))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
       }
       if (job.kind === 'review' && startingPR) {
         this.engine.requireSubmittedFix(task, startingPR);

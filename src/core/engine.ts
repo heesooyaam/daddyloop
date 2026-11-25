@@ -1237,7 +1237,9 @@ export class Engine {
     const head = this.pendingFixHead(task, pr);
     const pending = task.pendingAuthorFix;
     const check =
-      pr.mergeCommit && head === pr.head && pending?.generation === task.generation
+      this.hasMergedFixEvidence(task, pr) &&
+      head === pr.head &&
+      pending?.generation === task.generation
         ? await this.checkSavedFixForSubmission(task, { ...pr, state: 'open' }, head)
         : undefined;
     if (check?.status === 'blocked') {
@@ -1256,14 +1258,7 @@ export class Engine {
         'unsubmitted_changes',
         'Inspect the saved worker changes before verifying this merge',
       );
-    const recovered = task.review ?? pending?.staleDraft;
-    if (task.pendingAuthorHead === pr.head) {
-      if (recovered?.revision.head === pr.head)
-        this.trackRecoveredReview(task, recovered, task.review ? task.snapshot : undefined);
-      if (task.ref.provider === 'github' && !(await this.recoverReviewBeforeMerge(task, pr)))
-        return task;
-    }
-    if (!(await this.refreshRetiredReviewFeedback(task))) return task;
+    if (!(await this.prepareMergeVerificationFeedback(task, pr))) return task;
     this.store.transaction(() => {
       if (!sameRevision(task.revision, pr)) {
         task.approvedAt = undefined;
@@ -1289,6 +1284,24 @@ export class Engine {
     });
     return task;
   }
+  private async prepareMergeVerificationFeedback(task: Task, pr: PullRequest): Promise<boolean> {
+    if (task.pendingAuthorHead === pr.head) {
+      if (task.review?.revision.head === pr.head)
+        this.trackRecoveredReview(task, task.review, task.snapshot);
+      const stale = task.pendingAuthorFix?.staleDraft;
+      if (stale) {
+        this.trackRecoveredReview(task, stale);
+        task.review ??= stale;
+      }
+      if (
+        (task.ref.provider === 'github' || task.ref.provider === 'gitlab') &&
+        !(await this.recoverReviewBeforeMerge(task, pr))
+      )
+        return false;
+    }
+    return this.refreshRetiredReviewFeedback(task);
+  }
+
   private async recoverReviewBeforeMerge(task: Task, pr: PullRequest): Promise<boolean> {
     const attempt = await this.broker.findAttemptedReview(task);
     if (!attempt) return true;
@@ -2020,7 +2033,11 @@ export class Engine {
   async canStartMergeVerification(job: Job, pr: PullRequest): Promise<boolean> {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
-      return job.generation === task.generation && !(await this.stopMergeBeforeSavedFix(task, pr));
+      return (
+        job.generation === task.generation &&
+        !(await this.stopMergeBeforeSavedFix(task, pr)) &&
+        (await this.prepareMergeVerificationFeedback(task, pr))
+      );
     });
   }
 
@@ -2087,9 +2104,32 @@ export class Engine {
     return false;
   }
 
+  private hasMergedFixEvidence(task: Task, pr: PullRequest): boolean {
+    if (pr.state !== 'merged') return false;
+    if (pr.mergeCommit) return true;
+    // GitLab can omit the merge SHA, and Arcanum identifies the delivered diff instead.
+    return (
+      (task.ref.provider === 'gitlab' || (task.ref.provider === 'arcadia' && !!pr.revisionId)) &&
+      !!pr.base &&
+      !!pr.start &&
+      !!pr.branch &&
+      !!pr.targetBranch &&
+      sameRevision(task.revision, pr) &&
+      samePullRequestBranches(task.pr, { ...pr, state: 'open' })
+    );
+  }
+
   private stopReviewBeforeSavedFix(task: Task, pr: PullRequest, merged = false): boolean {
     const pending = this.pendingFixHead(task, pr);
-    if (merged && pr.state === 'merged' && pr.mergeCommit && pending === pr.head) {
+    if (merged && pr.state === 'merged' && pending === pr.head) {
+      if (!this.hasMergedFixEvidence(task, pr)) {
+        this.holdLostFix(
+          task,
+          pending,
+          `The provider did not return a merge commit or a matching confirmed revision and branches (observed ${pr.head}, base ${pr.base}, target ${pr.targetBranch}). Check the delivered revision on the provider and retry after it can be confirmed.`,
+        );
+        return true;
+      }
       const pinned = task.pendingAuthorFix;
       if (
         pinned &&
@@ -3045,6 +3085,8 @@ export class Engine {
           result.checkedHead !== pr.head
         ) {
           this.state(task, 'needs_input', 'The merged revision changed during verification');
+        } else if (!(await this.prepareMergeVerificationFeedback(task, pr))) {
+          return;
         } else if (result.status !== 'completed') {
           this.state(
             task,

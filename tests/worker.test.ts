@@ -2979,3 +2979,63 @@ it.each([
     }
   },
 );
+
+it.each(['published', 'draft', 'result after restart'] as const)(
+  'recovers native review findings for an already queued merge verification (%s)',
+  async (scenario) => {
+    const f = await fixture();
+    const workspaces = new Workspaces('/tmp');
+    const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const task = f.store.getTask(f.task.id);
+    const ref = { ...prRef(task), provider: 'github' as const };
+    const saved = 'f'.repeat(40);
+    const pr = { ...task.pr!, state: 'merged' as const, head: saved, mergeCommit: 'merge' };
+    const queued = {
+      ...task,
+      ref,
+      state: 'reviewing' as const,
+      revision: revisionOf(pr),
+      pr,
+      pendingAuthorHead: saved,
+      pendingAuthorFix: { revision: task.revision!, generation: task.generation },
+    };
+    const runtime = { run: vi.fn(async (_input: AgentInput) => f.result()) };
+    const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
+    try {
+      const review = await f.engine.broker.ensureReview({ ...queued, round: queued.round + 1 });
+      if (!review) throw new Error('Expected the earlier native review');
+      const finding = await f.provider.createComment(
+        ref,
+        review,
+        'Recovered finding',
+        review.marker + ':comment:R1',
+      );
+      if (scenario !== 'draft') await f.provider.publish(ref, review);
+      f.store.saveTask(queued);
+      f.store.setSetting('demo-pr:1', pr);
+      const job = f.store.enqueue(queued, 'reviewer', 'verify_merge', 'Verify the merged PR');
+      if (scenario === 'result after restart')
+        f.store.saveJob({ ...job, deferredResult: f.result() });
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.jobs(task.id).find(({ id }) => id === job.id)?.status).toBe(
+          scenario === 'draft' ? 'cancelled' : 'completed',
+        ),
+      );
+      expect(prepare).toHaveBeenCalledTimes(scenario === 'published' ? 1 : 0);
+      expect(runtime.run).toHaveBeenCalledTimes(scenario === 'published' ? 1 : 0);
+      if (scenario === 'published')
+        expect(
+          runtime.run.mock.calls[0]?.[0].task.feedback?.comments.map(({ id }) => id),
+        ).toContain(finding.id);
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        review: { id: review.id },
+        reason: expect.stringContaining(scenario === 'draft' ? 'draft notes' : 'not verified'),
+      });
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);

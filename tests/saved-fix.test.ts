@@ -777,3 +777,149 @@ it.each(['advance', 'rollback', 'divergence'] as const)(
     }
   },
 );
+
+it.each([
+  ['gitlab', 'matching'],
+  ['gitlab', 'changed base'],
+  ['arcadia', 'matching'],
+  ['arcadia', 'changed diff'],
+  ['arcadia', 'missing diff'],
+] as const)(
+  'verifies a confirmed %s merge without a separate merge SHA (%s)',
+  async (provider, scenario) => {
+    const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const revisionId = provider === 'arcadia' ? 'diff-2' : undefined;
+      const confirmed = { ...task.pr!, head: savedHead, revisionId };
+      const merged = {
+        ...confirmed,
+        state: 'merged' as const,
+        base: scenario === 'changed base' ? 'c'.repeat(40) : confirmed.base,
+        revisionId:
+          scenario === 'changed diff'
+            ? 'diff-3'
+            : scenario === 'missing diff'
+              ? undefined
+              : revisionId,
+      };
+      f.store.saveTask({
+        ...task,
+        ref: { ...prRef(task), provider },
+        pr: confirmed,
+        revision: confirmed,
+        pendingAuthorFix: {
+          revision: { ...task.revision!, revisionId: revisionId && 'diff-1' },
+          generation: task.generation,
+        },
+      });
+      f.store.setSetting('demo-pr:1', merged);
+      const queued = await f.engine.action(task.id, 'verify-merge');
+      if (scenario !== 'matching') {
+        expect(queued.state).toBe('needs_input');
+        expect(queued.reason).toContain(savedHead);
+        expect(queued.reason).toContain('matching confirmed revision');
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        return;
+      }
+      const job = f.store.claim()!;
+      expect(job.kind).toBe('verify_merge');
+      expect(await f.engine.canStartMergeVerification(job, merged)).toBe(true);
+      await f.engine.completeJob(job, f.result({ checkedHead: savedHead }));
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'complete',
+        verifiedMerge: { head: savedHead },
+      });
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([
+  ['gitlab', 'published'],
+  ['gitlab', 'draft'],
+  ['gitlab', 'partial'],
+  ['gitlab', 'stale draft'],
+  ['github', 'stale draft'],
+  ['gitlab', 'stale published'],
+  ['github', 'stale published'],
+  ['gitlab', 'stale removed'],
+  ['github', 'stale removed'],
+] as const)(
+  'recovers %s review findings before merge verification (%s)',
+  async (provider, scenario) => {
+    const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const ref = { ...prRef(task), provider };
+      const original = task.revision!;
+      const confirmed = { ...task.pr!, head: savedHead };
+      const merged = { ...confirmed, state: 'merged' as const, mergeCommit: 'merge' };
+      const next = { ...task, ref, revision: confirmed, pr: confirmed };
+      const stale = scenario.startsWith('stale');
+      const attempt = {
+        ...next,
+        round: next.round + 1,
+        revision: stale ? original : confirmed,
+      };
+      const review = await f.engine.broker.ensureReview(attempt);
+      if (!review) throw new Error('The native review was not created');
+      const finding = await f.provider.createComment(
+        ref,
+        review,
+        'Recovered finding',
+        review.marker + ':comment:R2',
+      );
+      if (scenario === 'published' || scenario === 'stale published')
+        await f.provider.publish(ref, review);
+      if (scenario === 'partial' || scenario === 'stale removed') {
+        const snapshot = await f.provider.getReview(ref, review);
+        f.store.setSetting('demo-review:' + review.id, {
+          ...snapshot,
+          status: scenario === 'partial' ? 'partial' : 'missing',
+          comments: scenario === 'partial' ? snapshot.comments : [],
+        });
+      }
+      f.store.saveTask({
+        ...next,
+        round: stale ? attempt.round : next.round,
+        feedback: {
+          status: 'published',
+          revision: original,
+          url: ref.url,
+          body: '',
+          comments: [{ id: 'earlier', body: 'Earlier finding', url: ref.url }],
+        },
+        pendingAuthorFix: {
+          revision: original,
+          generation: task.generation,
+          staleDraft: stale ? review : undefined,
+        },
+      });
+      f.store.setSetting('demo-pr:1', merged);
+      if (scenario === 'draft' || scenario === 'partial' || scenario === 'stale draft') {
+        const held = await f.engine.action(task.id, 'verify-merge');
+        expect(held).toMatchObject({ state: 'needs_input', review: { id: review.id } });
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        await f.provider.publish(ref, review);
+      }
+      const queued = await f.engine.action(task.id, 'verify-merge');
+      expect(queued.state).toBe('reviewing');
+      expect(queued.feedback?.comments.map(({ id }) => id)).toEqual(
+        scenario === 'stale removed' ? ['earlier'] : ['earlier', finding.id],
+      );
+      const job = f.store.claim()!;
+      expect(job.kind).toBe('verify_merge');
+      await f.engine.completeJob(
+        job,
+        f.result({ checkedHead: savedHead, verifiedCommentIds: ['earlier'] }),
+      );
+      expect(f.store.getTask(task.id).state).toBe(
+        scenario === 'stale removed' ? 'complete' : 'needs_input',
+      );
+    } finally {
+      f.store.close();
+    }
+  },
+);
