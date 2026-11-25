@@ -17,7 +17,7 @@ import { once } from 'node:events';
 import { ManagedArcMounts, type NativeArcMount } from '../src/integrations/arc-managed.js';
 import type { command } from '../src/ops/process.js';
 
-export function managedFixture() {
+export function managedFixture(lockTimeoutMs = 120000) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'daddy-arc-managed-')));
   const shared = join(dir, 'shared'),
     leaseRoot = join(dir, 'leases');
@@ -98,7 +98,13 @@ export function managedFixture() {
     throw new Error('Unexpected helper command');
   });
   const resources = vi.fn();
-  const manager = new ManagedArcMounts(dir, run, resources, () => '/fake/arcadia-mount-lease');
+  const manager = new ManagedArcMounts(
+    dir,
+    run,
+    resources,
+    () => '/fake/arcadia-mount-lease',
+    lockTimeoutMs,
+  );
   return {
     dir,
     shared,
@@ -236,12 +242,35 @@ it('serializes setup validation with session journal creation', async () => {
       await gate;
     });
     await entered;
+    const controller = new AbortController();
+    const cancelled = f.manager.ensure(randomUUID(), randomUUID(), 'reviewer', controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
     const creation = f.manager.ensure(randomUUID(), randomUUID(), 'author');
     await Promise.resolve();
     expect(f.run.mock.calls.some(([, args]) => args[0] === 'mount')).toBe(false);
     release();
     await validation;
     await expect(creation).resolves.toHaveProperty('lease.mount');
+  } finally {
+    f.close();
+  }
+});
+it('starts each flock timeout after its local queue turn', async () => {
+  const f = managedFixture(150);
+  try {
+    const order: string[] = [];
+    await Promise.all(
+      [1, 2, 3].map((id) =>
+        f.manager.withJournalLock(async () => {
+          order.push(`start-${id}`);
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          order.push(`end-${id}`);
+        }),
+      ),
+    );
+    expect(order).toEqual(['start-1', 'end-1', 'start-2', 'end-2', 'start-3', 'end-3']);
   } finally {
     f.close();
   }

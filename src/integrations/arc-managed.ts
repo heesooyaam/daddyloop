@@ -64,8 +64,33 @@ const configSchema = z.object({
 });
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
+async function waitForTurn(turn: Promise<void>, signal?: AbortSignal) {
+  if (!signal) return turn;
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      fn();
+    };
+    const abort = () =>
+      finish(() =>
+        reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError')),
+      );
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    turn.then(
+      () => finish(resolve),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /** Only paths with an owned journal under this data directory can be created or removed. */
 export class ManagedArcMounts {
+  private static locks = new Map<string, Promise<void>>();
   readonly root: string;
   constructor(
     readonly dataDir = defaultDataDir(),
@@ -75,21 +100,43 @@ export class ManagedArcMounts {
       if (!status.ok) throw new AppError('resource_limit', status.reasons.join('; '), 422);
     },
     private helper: () => string = leaseHelper,
+    private lockTimeoutMs = 120000,
   ) {
     this.root = join(resolve(dataDir), 'arcadia-sessions');
   }
   private async lock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
-    const release = await acquireFileLock(
-      join(this.dataDir, 'arcadia-session-journals.lock'),
-      120000,
-      signal,
-    );
+    const before = ManagedArcMounts.locks.get(this.root) ?? Promise.resolve();
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    ManagedArcMounts.locks.set(this.root, turn);
+    const finishTurn = () => {
+      releaseTurn();
+      if (ManagedArcMounts.locks.get(this.root) === turn) ManagedArcMounts.locks.delete(this.root);
+    };
     try {
+      await waitForTurn(before, signal);
+    } catch (error) {
+      void before.then(finishTurn, finishTurn);
+      throw error;
+    }
+    let releaseFile: (() => Promise<void>) | undefined;
+    try {
+      releaseFile = await acquireFileLock(
+        join(this.dataDir, 'arcadia-session-journals.lock'),
+        this.lockTimeoutMs,
+        signal,
+      );
       signal?.throwIfAborted();
       return await fn();
     } finally {
-      await release();
+      try {
+        await releaseFile?.();
+      } finally {
+        finishTurn();
+      }
     }
   }
   async withJournalLock<T>(fn: () => Promise<T>) {
