@@ -631,6 +631,9 @@ export const daddyRu: Record<string, string> = {
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',
+  'Checking GitHub for the result of the previous PR creation':
+    'daddy проверяет, создался ли PR при прошлой попытке',
+  'GitHub · retry at {time} UTC': 'GitHub · повтор в {time} UTC',
   'PR #{number} · GitHub {failure} · retry at {time} UTC':
     'PR #{number} · GitHub {failure} · повтор в {time} UTC',
   'Waiting to retry the connection to the existing PR':

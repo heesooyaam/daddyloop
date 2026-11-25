@@ -195,6 +195,72 @@ it('recovers a lost PR-create response once, verifies the owner and binds the ex
   }
 });
 
+it('looks up an uncertain GitHub create on the retry queue without sending a second POST', async () => {
+  const store = new Store(':memory:'),
+    provider = new DemoProvider(store),
+    engine = new Engine(store, () => provider),
+    ws = new Workspaces('/tmp');
+  try {
+    const task = await engine.createTicket(ticketInput());
+    store.cancelJobs(task.id);
+    task.pendingAuthorHead = 'e'.repeat(40);
+    task.state = 'ready_for_review';
+    store.saveTask(task);
+    let visible = false,
+      creates = 0;
+    const reader = new TicketReader(
+      async (url, opts) => {
+        if (String(url).endsWith('/user')) return response({ id: 7 });
+        if (opts?.method === 'POST') {
+          creates++;
+          return new Response('unavailable', { status: 503 });
+        }
+        return response(
+          visible
+            ? [
+                {
+                  number: 20,
+                  html_url: 'https://github.com/test/repo/pull/20',
+                  user: { id: 7 },
+                  head: { ref: task.ticketRepository!.branch, repo: { full_name: task.ref.repo } },
+                  body: '<!-- daddyloop:ticket:' + task.id + ' -->',
+                },
+              ]
+            : [],
+        );
+      },
+      () => '',
+      () => 'token',
+    );
+    const native = await provider.getPR({ ...task.ref, kind: undefined });
+    vi.spyOn(provider, 'getPR').mockResolvedValue({
+      ...native,
+      head: task.pendingAuthorHead,
+      branch: task.ticketRepository!.branch,
+      targetBranch: task.ticketRepository!.baseBranch,
+    });
+    const push = vi.spyOn(ws, 'pushTicket').mockResolvedValue(undefined),
+      flow = new TicketWorkflow(engine, ws, reader);
+    await expect(flow.submit(task.id)).rejects.toMatchObject({ code: 'provider_503' });
+    const expire = () => {
+      const t = store.getTask(task.id);
+      expect(t.state).toBe('submitting');
+      t.prLink!.retryAt = 0;
+      store.saveTask(t);
+    };
+    expire();
+    await expect(flow.submit(task.id, undefined, true)).rejects.toMatchObject({
+      code: 'ambiguous_write',
+    });
+    visible = true;
+    expire();
+    expect((await flow.submit(task.id, undefined, true)).ref.number).toBe(20);
+    expect(creates).toBe(1);
+    expect(push).toHaveBeenCalledOnce();
+  } finally {
+    store.close();
+  }
+});
 it('runs ticket discussion, isolated implementation, PR creation and automatic review to completion', async () => {
   const { Worker } = await import('../src/runtime/worker.js');
   const { healthy } = await import('./planning-fixture.js');

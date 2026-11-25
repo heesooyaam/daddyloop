@@ -54,13 +54,7 @@ const interruptedSubmission =
   'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
 export function retryConfirmedSubmission(store: Engine['store'], task: Task) {
   if (!isTicket(task) || !task.pendingAuthorHead || task.resumeState !== 'submitting') return false;
-  if (task.prLink)
-    return (
-      task.state === 'submitting' &&
-      task.prLink.generation === task.generation &&
-      task.prLink.head === task.pendingAuthorHead &&
-      (task.prLink.retryAt ?? 0) <= Date.now()
-    );
+  if (task.prLink) return task.state === 'submitting' && (task.prLink.retryAt ?? 0) <= Date.now();
   if (
     task.state !== 'needs_input' ||
     ![oldLinkFailure, interruptedSubmission].includes(task.reason)
@@ -278,12 +272,13 @@ export class TicketWorkflow {
         if (
           task.prLink.generation !== task.generation ||
           task.prLink.head !== task.pendingAuthorHead
-        )
-          throw new AppError(
-            'stale_submission',
-            'The saved submission belongs to another task revision.',
-          );
-        return task.prLink;
+        ) {
+          task.state = 'needs_input';
+          task.reason = 'The saved submission belongs to another task revision.';
+          this.engine.store.saveTask(task);
+          throw new AppError('stale_submission', task.reason);
+        }
+        if (task.prLink.ref) return { ...task.prLink, ref: task.prLink.ref };
       }
       const generation = task.generation,
         marker = `daddyloop:ticket:${task.id}`;
@@ -319,6 +314,11 @@ export class TicketWorkflow {
         const prior = this.engine.store.db
           .prepare('SELECT status FROM operations WHERE id=? AND task_id=?')
           .get('ticket-submit:' + id, id);
+        if (task.prLink && !prior)
+          throw new AppError(
+            'submission_receipt_missing',
+            'Cannot confirm the previous PR creation without its operation record.',
+          );
         if (!prior) await submission.prepare(task);
         const ref = await this.engine.broker.outbox.perform<PRRef>(
           id,
@@ -342,12 +342,39 @@ export class TicketWorkflow {
           this.engine.store.saveTask(task);
           this.engine.store.event(id, 'ticket.pr_created', { ref });
         });
-        return task.prLink;
+        return { ref, generation, head: task.pendingAuthorHead };
       } catch (error) {
         const latest = this.engine.store.getTask(id);
         if (latest.generation === generation && latest.state !== 'paused') {
-          latest.state = error instanceof GitHubRetryError ? 'ready_for_review' : 'needs_input';
-          latest.reason = redact(String(error));
+          const operation = this.engine.store.db
+            .prepare('SELECT status FROM operations WHERE id=? AND task_id=?')
+            .get('ticket-submit:' + id, id);
+          if (
+            latest.ref.provider === 'github' &&
+            operation?.status === 'pending' &&
+            latest.pendingAuthorHead &&
+            error instanceof AppError &&
+            (error instanceof GitHubRetryError ||
+              /^(provider_(408|500|502|503|504)|provider_unreachable)$/.test(error.code) ||
+              (latest.prLink && error.code === 'ambiguous_write'))
+          ) {
+            const delay = Math.min((latest.prLink?.delay ?? 7500) * 2, 300000);
+            latest.prLink = {
+              generation,
+              head: latest.pendingAuthorHead,
+              delay,
+              retryAt: Math.max(
+                Date.now() + delay,
+                error instanceof GitHubRetryError ? error.until : 0,
+              ),
+              failure: error.code,
+            };
+            latest.state = 'submitting';
+            latest.reason = 'Checking GitHub for the result of the previous PR creation';
+          } else {
+            latest.state = error instanceof GitHubRetryError ? 'ready_for_review' : 'needs_input';
+            latest.reason = redact(String(error));
+          }
           this.engine.store.saveTask(latest);
           this.engine.store.event(id, 'task.state', { state: latest.state, reason: latest.reason });
         }
@@ -365,7 +392,7 @@ export class TicketWorkflow {
           task.state === 'paused' ||
           task.generation !== result.generation ||
           task.pendingAuthorHead !== result.head ||
-          task.prLink?.ref.url !== result.ref.url
+          task.prLink?.ref?.url !== result.ref.url
         )
           return;
         const retry =

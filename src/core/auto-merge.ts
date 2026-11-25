@@ -59,7 +59,7 @@ export function githubActivityStatus(
     ].includes(task.state)
   ) {
     const time = new Date(backoff.until).toISOString().slice(11, 19);
-    if (task.prLink && backoff.kind === 'read')
+    if (task.prLink?.ref && backoff.kind === 'read')
       return `PR #${task.prLink.ref.number} · GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;
     if (backoff.kind === 'read')
       return `GitHub ${backoff.status ? 'HTTP ' + backoff.status : 'offline'} · retry at ${time} UTC`;

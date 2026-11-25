@@ -2803,6 +2803,11 @@ export class Engine {
           'repository_mismatch',
           'The PR must belong to this task’s configured repository',
         );
+      if (expectedHead && task.pendingAuthorHead !== expectedHead)
+        throw new AppError(
+          'submitted_head_changed',
+          'The task now has a different saved commit. Inspect the submission before connecting.',
+        );
       const pr = await this.provider(ref).getPR(ref);
       if (expectedHead && pr.head !== expectedHead)
         throw new AppError(

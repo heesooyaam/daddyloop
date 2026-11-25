@@ -65,6 +65,8 @@ export function taskActivity(
 }
 
 export function queueDetail(task: Task): string | undefined {
+  if (task.prLink && task.state === 'submitting' && !task.prLink.ref)
+    return 'Checking GitHub for the result of the previous PR creation';
   if (task.prLink && task.state === 'submitting')
     return 'The PR already exists. daddy will connect it automatically.';
   if (task.state !== 'needs_input') return;
@@ -74,7 +76,9 @@ export function queueDetail(task: Task): string | undefined {
 }
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
   if (mergeStatus) return mergeStatus;
-  if (task.state === 'submitting' && task.prLink?.retryAt)
+  if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
+    return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
+  if (task.state === 'submitting' && task.prLink?.ref && task.prLink.retryAt)
     return `PR #${task.prLink.ref.number} · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;
   if (task.state === 'needs_input') {
     if (task.inputRequest?.generation === task.generation) return 'Waiting for your answer';
