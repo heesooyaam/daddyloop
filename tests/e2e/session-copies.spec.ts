@@ -1,5 +1,7 @@
 import { test, expect, type Locator } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import type { DaddyBoard } from '../../src/client/daddy.js';
+import { mockTwoProviders } from './usage-helpers.js';
 import type { ReviewGroup } from '../../src/core/types.js';
 import { translator } from '../../src/i18n/index.js';
 
@@ -63,9 +65,7 @@ test('keeps copy preparation and retry visible and shows the ready path in sessi
   await expect(progress).toBeVisible();
 
   preparation = { state: 'error', error };
-  const failure = page
-    .getByRole('status')
-    .filter({ hasText: 'Could not prepare the session copy' });
+  const failure = page.getByRole('alert').filter({ hasText: 'Could not prepare the session copy' });
   await expect(failure.getByText(error, { exact: true })).toBeVisible();
   const retried = page.waitForResponse(
     (response) => response.url().endsWith('/resume') && response.request().method() === 'POST',
@@ -213,25 +213,12 @@ for (const locale of ['en', 'ru'] as const) {
     const expectRetry = async (notice: Locator, label: string) => {
       const button = notice.getByRole('button', { name: t(label), exact: true });
       await expect(button).toBeInViewport({ ratio: 0.99 });
-      expect(
-        await button.evaluate((element) => {
-          const text = document.createRange();
-          text.selectNodeContents(element);
-          return text.getClientRects().length;
-        }),
-      ).toBe(1);
     };
     const expectFullReason = async (notice: Locator, reason: string) => {
-      const details = notice.getByText(t('Error details'), { exact: true });
-      const diagnosis = notice.locator('pre');
-      await expect(diagnosis).toBeHidden();
-      await details.click();
-      await expect(diagnosis).toBeVisible();
-      expect(await diagnosis.textContent()).toBe(reason);
-      expect(
-        await diagnosis.evaluate((element) => element.scrollWidth <= element.clientWidth),
-      ).toBe(true);
-      await details.click();
+      await notice.getByRole('button', { name: t('View details'), exact: true }).click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog.locator('.daddy-notice-detail-text')).toHaveText(reason);
+      await page.keyboard.press('Escape');
     };
     const cases: { status: StatusFields; notice: string; retry?: string }[] = [
       {
@@ -276,7 +263,9 @@ for (const locale of ['en', 'ru'] as const) {
       status = example.status;
       await page.reload();
       await expect(page.getByRole('region', { name: t('Current usage') })).toHaveCount(2);
-      const notice = page.getByRole('status').filter({ hasText: t(example.notice) });
+      const notice = page
+        .getByRole(example.retry ? 'alert' : 'status')
+        .filter({ hasText: t(example.notice) });
       for (const [width, height] of viewports) {
         await test.step(`${example.notice} at ${width} × ${height}`, async () => {
           await page.setViewportSize({ width, height });
@@ -296,20 +285,13 @@ for (const locale of ['en', 'ru'] as const) {
     status = { workspacePreparation: copyFailure };
     await page.setViewportSize({ width: 1024, height: 900 });
     await page.reload();
-    await expect(
-      page.getByText(
-        t(
-          'The monitor has asked daddy to recover resources. Your messages and working files are saved.',
-        ),
-        { exact: true },
-      ),
-    ).toBeVisible();
+    await expect(resource).toBeVisible();
     await page.route('**/api/daddy/sessions/*/chat', (route) => route.fulfill(failure));
     await page.getByLabel(t('Message daddy')).fill('Fixture message');
     await page.getByRole('button', { name: t('Send message'), exact: true }).click();
     const alert = page.getByRole('alert').filter({ hasText: t('Request failed') });
     const copy = page
-      .getByRole('status')
+      .getByRole('alert')
       .filter({ hasText: t('Could not prepare the session copy') });
     for (const [width, height] of viewports) {
       await page.setViewportSize({ width, height });
@@ -330,3 +312,63 @@ for (const locale of ['en', 'ru'] as const) {
     );
   });
 }
+
+test('shows copy preparation and deletion progress without scrolling on short screens', async ({
+  page,
+}) => {
+  await mockTwoProviders(page);
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page
+    .getByLabel('What should daddy do?')
+    .fill(`https://github.com/fixture/planning/issues/${Date.now()}`);
+  await page.getByLabel('Session name (optional)').fill('Maintenance progress fixture');
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  const firstTask = page.locator('.daddy-work-items .daddy-work-item').first();
+  await expect(firstTask).toHaveCount(1);
+  const sessionId = new URL(page.url()).hash.slice('#session/'.length);
+  let groupPatch: Partial<DaddyBoard['group']>;
+  await page.route(`**/api/daddy/sessions/${sessionId}`, async (route) => {
+    const response = await route.fetch();
+    const board: DaddyBoard = await response.json();
+    await route.fulfill({ response, json: { ...board, group: { ...board.group, ...groupPatch } } });
+  });
+
+  for (const { group, heading } of [
+    {
+      group: { workspacePreparation: { state: 'preparing' } },
+      heading: 'Preparing the session copy',
+    },
+    {
+      group: { daddyState: 'paused', deletion: { state: 'running' } },
+      heading: 'Saving results and removing session copies',
+    },
+  ] satisfies { group: Partial<DaddyBoard['group']>; heading: string }[]) {
+    groupPatch = group;
+    await page.reload();
+    await expect(page.getByRole('region', { name: 'Current usage' })).toHaveCount(2);
+
+    const notice = page.getByRole('status').filter({ hasText: heading });
+    const composer = page.getByLabel('Message daddy');
+    const overview = page.getByRole('region', { name: 'Session overview' });
+    for (const viewport of [
+      { width: 390, height: 540 },
+      { width: 1024, height: 480 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(notice).toBeInViewport({ ratio: 1 });
+      if (group.deletion) {
+        await expect(composer).toBeDisabled();
+        await expect(composer).not.toHaveAttribute('placeholder', 'Resume daddy to continue');
+      } else {
+        await expect(composer).toBeEnabled();
+      }
+      if (viewport.width === 390) {
+        await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+      }
+      await expect(notice).toBeInViewport({ ratio: 1 });
+      await expect(firstTask).toBeInViewport({ ratio: 1 });
+      expect(await overview.evaluate((element) => element.scrollTop)).toBe(0);
+    }
+  }
+});

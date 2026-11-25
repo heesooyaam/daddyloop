@@ -382,6 +382,8 @@ export const daddyRu: Record<string, string> = {
   'Close menu': 'Закрыть меню',
   'What are we building?': 'Что будем делать?',
   'Session settings': 'Настройки сессии',
+  'Session overview': 'Сведения о сессии',
+  'Session status': 'Состояние сессии',
   'Conversation with daddy': 'Разговор с daddy',
   'Leave the job with daddy. I’ll get it moving and check the result myself.':
     'Оставь дело папочке. Запущу работу и сам проверю результат.',
@@ -660,6 +662,8 @@ export const daddyRu: Record<string, string> = {
   'This worker has changed tasks. Open its settings again.':
     'Воркер уже сменил задачу. Открой его настройки заново.',
   'Queue task': 'Поставить в очередь',
+  Queue: 'В очередь',
+  'Queue a task': 'В очередь',
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',
@@ -845,6 +849,13 @@ export const daddyRu: Record<string, string> = {
   'The service prepares the copies and removes them when the session is deleted.':
     'Сервис подготовит копии и удалит их вместе с сессией.',
   'Session copy ready': 'Копия для сессии готова',
+  'Copy failed': 'Ошибка копии',
+  'Deletion failed': 'Ошибка удаления',
+  'Awaiting resources': 'Ждём ресурсы',
+  'Low memory': 'Мало памяти',
+  'Low disk space': 'Мало места',
+  'Deleting session': 'Удаляю сессию',
+  'Preparing copy': 'Готовлю копию',
   'Preparing the session copy': 'Готовлю копию для сессии',
   'Could not prepare the session copy': 'Не удалось подготовить копию для сессии',
   'Error details': 'Подробности ошибки',

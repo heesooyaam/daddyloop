@@ -38,10 +38,17 @@ test('records a microphone phrase and leaves the transcript in the editable chat
   const stop = page.getByRole('button', { name: 'Stop recording and transcribe' });
   await expect(stop).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled();
+  const submissions: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/chat'))
+      submissions.push(request.url());
+  });
+  await input.press('Enter');
   // MediaRecorder needs actual samples from the synthetic microphone.
   await page.waitForTimeout(1200);
   await stop.click();
   await expect(input).toHaveValue('My draft: Dictated phrase');
+  expect(submissions).toHaveLength(0);
   expect(bytes).toBeGreaterThan(44);
   await input.fill('Edited before sending');
   await expect(input).toHaveValue('Edited before sending');
