@@ -57,7 +57,11 @@ export class TelegramDelivery {
   private pendingByNotification = new Map<string, { key: string; value: Delivery }>();
   private redirectedKeys = new Map<string, string>();
   private deferredKeys = new Set<string>();
+  private historyDeferredKeys = new Set<string>();
   private legacyDeliveredSibling = new Set<string>();
+  private storedMessages = new Map<string, { id: string; runId?: string }>();
+  private deliveredByRouteRun = new Map<string, Set<string>>();
+  private recovering = false;
   private running?: Promise<void>;
   private controller?: AbortController;
   private timer?: NodeJS.Timeout;
@@ -70,20 +74,29 @@ export class TelegramDelivery {
     private bot: string,
     private clock = Date.now,
   ) {
-    for (const row of store.db
+    this.loadRecoveryIndex();
+    const deliveries = store.db
       .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%' ORDER BY rowid")
-      .all()) {
-      const value = JSON.parse(String(row.value)) as Delivery;
-      if (!value || value.bot !== bot) continue;
-      const key = String(row.key);
+      .all()
+      .map((row) => ({ key: String(row.key), value: JSON.parse(String(row.value)) as Delivery }))
+      .filter(({ value }) => value?.bot === bot);
+    this.recovering = deliveries.some(
+      ({ value }) =>
+        ['queued', 'sending'].includes(value.status) &&
+        value.options.notificationId?.startsWith('telegram:dialog:') &&
+        this.storedMessage(value) !== undefined,
+    );
+    for (const { key, value } of deliveries) {
       this.lastCreatedAt = Math.max(this.lastCreatedAt, Number(value.createdAt) || 0);
       const restoreThroughHistory =
         value.options.notificationId?.startsWith('telegram:dialog:') &&
         this.storedMessage(value) !== undefined;
       if (['queued', 'sending'].includes(value.status)) {
         value.status = 'queued';
-        if (restoreThroughHistory) this.deferredKeys.add(key);
-        else this.pending.set(key, value);
+        if (this.recovering && !isIndependent(value)) {
+          this.deferredKeys.add(key);
+          if (restoreThroughHistory) this.historyDeferredKeys.add(key);
+        } else this.pending.set(key, value);
       }
       if (
         value.status !== 'cancelled' &&
@@ -115,6 +128,24 @@ export class TelegramDelivery {
     }, 1000);
     this.timer.unref();
     void this.flush();
+  }
+  async finishRecovery() {
+    if (!this.recovering) return;
+    for (const key of this.deferredKeys) {
+      const value = this.store.setting<Delivery>(key);
+      if (!value) continue;
+      if (this.historyDeferredKeys.has(key)) {
+        value.status = 'cancelled';
+        this.save(key, value);
+      } else this.remember(key, value);
+    }
+    this.deferredKeys.clear();
+    this.historyDeferredKeys.clear();
+    this.recovering = false;
+    await this.flush();
+  }
+  needsRecovery() {
+    return this.recovering;
   }
   private resolveKey(key: string) {
     const visited: string[] = [];
@@ -179,30 +210,35 @@ export class TelegramDelivery {
     if (!notificationId?.startsWith('telegram:dialog:')) return;
     return notificationIdentity(notificationId).split(':').at(-1);
   }
+  private loadRecoveryIndex() {
+    for (const row of this.store.db.prepare('SELECT data FROM messages').all()) {
+      const message = JSON.parse(String(row.data)) as { id: string; runId?: string };
+      this.storedMessages.set(message.id, message);
+    }
+    for (const row of this.store.db
+      .prepare("SELECT id FROM notifications WHERE status='sent' AND id LIKE 'telegram:dialog:%'")
+      .all()) {
+      const identity = notificationIdentity(String(row.id));
+      const parts = identity.split(':');
+      const messageId = parts.at(-1);
+      const message = messageId ? this.storedMessages.get(messageId) : undefined;
+      if (!message?.runId) continue;
+      const routeRun = parts.slice(0, 4).join(':') + ':' + message.runId;
+      const delivered = this.deliveredByRouteRun.get(routeRun) ?? new Set<string>();
+      delivered.add(message.id);
+      this.deliveredByRouteRun.set(routeRun, delivered);
+    }
+  }
   private storedMessage(value: Delivery) {
     const id = this.notificationMessageId(value);
-    if (!id) return;
-    const row = this.store.db.prepare('SELECT data FROM messages WHERE id=?').get(id);
-    return row ? (JSON.parse(String(row.data)) as { id: string; runId?: string }) : undefined;
+    return id ? this.storedMessages.get(id) : undefined;
   }
   private hasDeliveredSibling(value: Delivery) {
     const message = this.storedMessage(value);
     if (!message?.runId) return false;
-    const currentId = message.id;
-    const siblings = this.store.db
-      .prepare(
-        "SELECT data FROM messages WHERE json_extract(data,'$.runId')=? AND json_extract(data,'$.sender')='agent'",
-      )
-      .all(message.runId)
-      .map((row) => JSON.parse(String(row.data)) as { id: string })
-      .filter((entry) => entry.id !== currentId);
-    return siblings.some((entry) =>
-      this.store.db
-        .prepare("SELECT 1 FROM notifications WHERE status='sent' AND id LIKE ? LIMIT 1")
-        .get(
-          `telegram:dialog:${value.destination.chatId}:${value.destination.threadId ?? 0}:${entry.id}%`,
-        ),
-    );
+    const routeRun = `telegram:dialog:${value.destination.chatId}:${value.destination.threadId ?? 0}:${message.runId}`;
+    const delivered = this.deliveredByRouteRun.get(routeRun);
+    return !!delivered && (delivered.size > 1 || !delivered.has(message.id));
   }
   private messageBody(
     destination: TelegramDestination,
@@ -231,29 +267,61 @@ export class TelegramDelivery {
           digest(this.messageBody(value.destination, value.content, chunks, index)),
     );
   }
+  private receiptFor(messages: Delivery['messages'], value: Delivery) {
+    if (!messages.length) return;
+    let groupId = value.options.groupId;
+    if (!groupId && value.options.key?.startsWith('turn:')) {
+      const job = this.store.db
+        .prepare('SELECT group_id FROM daddy_jobs WHERE id=?')
+        .get(value.options.key.slice(5));
+      if (typeof job?.group_id === 'string') groupId = job.group_id;
+    }
+    const receipt = {
+      ...structuredClone(value),
+      id: randomUUID(),
+      options: { ...structuredClone(value.options), groupId },
+      status: 'sent' as const,
+      messages: structuredClone(messages),
+      error: undefined,
+    };
+    return {
+      key: prefix + digest([this.bot, 'receipt', value.destination, messages.map(({ id }) => id)]),
+      value: receipt,
+    };
+  }
   private migrateByNotification(
     key: string,
     destination: TelegramDestination,
     notificationId: string,
     deliveryKey?: string,
+    groupId?: string,
   ) {
     const legacyKey = digest([destination, notificationIdentity(notificationId)]);
     const row =
       this.pendingByNotification.get(legacyKey) ?? this.legacyByNotification.get(legacyKey);
     if (!row || row.key === key) return;
     if (row.value.status === 'sending') row.value.status = 'queued';
+    let receipt: ReturnType<TelegramDelivery['receiptFor']>;
     if (row.value.options.key?.startsWith('turn:')) {
-      if (this.legacyDeliveredSibling.has(row.key) || !this.acknowledgedPartsMatch(row.value))
+      const partsMatch = this.acknowledgedPartsMatch(row.value);
+      const allPartsAcknowledged =
+        row.value.messages.length === splitTelegramText(row.value.content).length;
+      if (!partsMatch || (this.legacyDeliveredSibling.has(row.key) && allPartsAcknowledged)) {
+        receipt = this.receiptFor(row.value.messages, row.value);
         row.value.messages = [];
+      }
       row.value.createdAt = this.createdAt();
     }
     row.value.options.key = deliveryKey;
+    row.value.options.groupId = groupId ?? row.value.options.groupId;
     this.store.transaction(() => {
+      if (receipt) this.store.setSetting(receipt.key, receipt.value);
       this.store.setSetting(key, row.value);
       this.store.db.prepare('DELETE FROM settings WHERE key=?').run(row.key);
     });
     this.pending.delete(row.key);
     this.deferredKeys.delete(row.key);
+    this.historyDeferredKeys.delete(row.key);
     this.legacyDeliveredSibling.delete(row.key);
     this.pendingByNotification.delete(legacyKey);
     this.legacyByNotification.delete(legacyKey);
@@ -285,6 +353,11 @@ export class TelegramDelivery {
         .get(key.slice(5));
       if (typeof job?.group_id === 'string') return job.group_id;
     }
+  }
+  hasAcknowledgedParts(destination: TelegramDestination, notificationId: string) {
+    const key = digest([destination, notificationIdentity(notificationId)]);
+    const row = this.pendingByNotification.get(key) ?? this.legacyByNotification.get(key);
+    return !!row?.value.messages.length;
   }
   private createDelivery(
     destination: TelegramDestination,
@@ -346,8 +419,15 @@ export class TelegramDelivery {
     key = this.resolveKey(key);
     let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
     if (!value && options.notificationId?.startsWith('telegram:dialog:'))
-      value = this.migrateByNotification(key, destination, options.notificationId, options.key);
+      value = this.migrateByNotification(
+        key,
+        destination,
+        options.notificationId,
+        options.key,
+        options.groupId,
+      );
     if (value && this.deferredKeys.delete(key)) {
+      this.historyDeferredKeys.delete(key);
       value.createdAt = this.createdAt();
       this.remember(key, value);
     }
@@ -392,8 +472,8 @@ export class TelegramDelivery {
         other.nextAttemptAt = this.clock();
         this.save(otherKey, other);
       }
-    if (!this.running && !this.stopped) await this.flush(1);
-    else if (this.running && !this.stopped)
+    if (!this.recovering && !this.running && !this.stopped) await this.flush(1);
+    else if (!this.recovering && this.running && !this.stopped)
       void this.running.then(() => {
         if (!this.stopped) return this.flush(1);
       });
@@ -434,11 +514,15 @@ export class TelegramDelivery {
         if (this.clock() < this.rateLimitUntil) break;
         const seen = new Set<string>();
         const ready = [...this.pending.entries()]
-          .sort(
-            (a, b) =>
-              Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin') ||
-              a[1].createdAt - b[1].createdAt,
-          )
+          .sort((a, b) => {
+            const pinOrder =
+              Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin');
+            if (pinOrder) return pinOrder;
+            const aOrder = a[1].options.order;
+            const bOrder = b[1].options.order;
+            if (aOrder && bOrder && aOrder !== bOrder) return aOrder.localeCompare(bOrder);
+            return a[1].createdAt - b[1].createdAt;
+          })
           .filter(([key, value]) => {
             const route = isIndependent(value) ? key : digest(value.destination);
             if (seen.has(route)) return false;

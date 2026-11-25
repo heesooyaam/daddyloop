@@ -321,6 +321,173 @@ it.each([
   },
 );
 
+it('indexes legacy recovery with a constant number of SQLite queries', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    for (let i = 0; i < 100; i++) {
+      const runId = `legacy-${i}`;
+      const message = f.store.daddyMessage('group', 'agent', `Answer ${i}`, runId, undefined, {
+        phase: 'final',
+      });
+      await f.queue.send({ chatId: 7 }, text(message.text), {
+        key: `turn:${runId}`,
+        replace: true,
+        final: true,
+        notificationId: `telegram:dialog:7:0:${message.id}:final`,
+      });
+    }
+    const prepare = vi.spyOn(f.store.db, 'prepare');
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    expect(prepare.mock.calls.length).toBeLessThan(10);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('preserves acknowledged final chunks despite an older delivered sibling', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    const destination = { chatId: -10042, threadId: 4 };
+    const progress = f.store.daddyMessage('group', 'agent', 'Progress.', 'legacy-run', undefined, {
+      phase: 'progress',
+    });
+    const content = 'A'.repeat(4096) + 'B'.repeat(4096) + 'C'.repeat(808);
+    const final = f.store.daddyMessage('group', 'agent', content, 'legacy-run', undefined, {
+      phase: 'final',
+    });
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(`telegram:dialog:-10042:4:${progress.id}:progress`, 'sent', progress.at);
+    f.call.mockResolvedValueOnce({ message_id: 41 }).mockRejectedValueOnce(new Error('offline'));
+    await f.queue.send(destination, text(content), {
+      key: 'turn:legacy-run',
+      replace: true,
+      final: true,
+      notificationId: `telegram:dialog:-10042:4:${final.id}:final`,
+    });
+    await f.queue.stop();
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    f.advance(1000);
+    await restored.send(destination, text(content), {
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: `telegram:dialog:-10042:4:${final.id}:final`,
+    });
+    await restored.flush();
+    expect(f.call).toHaveBeenCalledTimes(4);
+    expect(f.call.mock.calls.slice(2).map(([, body]) => body.text)).not.toContain(
+      f.call.mock.calls[0][1].text,
+    );
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('restores one private-chat queue by saved order across sessions', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const a1 = f.store.daddyMessage('group-a', 'agent', 'A1');
+    const b1 = f.store.daddyMessage('group-b', 'agent', 'B1');
+    const a2 = f.store.daddyMessage('group-a', 'agent', 'A2');
+    const enqueue = (message: typeof a1, groupId: string, order: string) =>
+      f.queue.send({ chatId: 7 }, text(message.text), {
+        groupId,
+        key: `message:${message.id}`,
+        replace: true,
+        order,
+        final: true,
+        notificationId: `telegram:dialog:7:0:${message.id}`,
+      });
+    await enqueue(a1, 'group-a', '2026-01-01T00:00:01.000Z');
+    await enqueue(b1, 'group-b', '2026-01-01T00:00:02.000Z');
+    await enqueue(a2, 'group-a', '2026-01-01T00:00:03.000Z');
+    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 10000);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send({ chatId: 7 }, text(a1.text), {
+      groupId: 'group-a',
+      key: `message:${a1.id}`,
+      replace: true,
+      order: '2026-01-01T00:00:01.000Z',
+      final: true,
+      notificationId: `telegram:dialog:7:0:${a1.id}`,
+    });
+    await restored.send({ chatId: 7 }, text(a2.text), {
+      groupId: 'group-a',
+      key: `message:${a2.id}`,
+      replace: true,
+      order: '2026-01-01T00:00:03.000Z',
+      final: true,
+      notificationId: `telegram:dialog:7:0:${a2.id}`,
+    });
+    await restored.send({ chatId: 7 }, text(b1.text), {
+      groupId: 'group-b',
+      key: `message:${b1.id}`,
+      replace: true,
+      order: '2026-01-01T00:00:02.000Z',
+      final: true,
+      notificationId: `telegram:dialog:7:0:${b1.id}`,
+    });
+    await restored.finishRecovery();
+    f.advance(10000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual(['A1', 'B1', 'A2']);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
+it('keeps an older dialog reply ahead of a queued resource notice', async () => {
+  const f = fixture();
+  let restored: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    const reply = f.store.daddyMessage('group', 'agent', 'Agent reply');
+    const destination = { chatId: -10042, threadId: 4 };
+    await f.queue.send(destination, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      order: '2026-01-01T00:00:01.000Z',
+      final: true,
+      notificationId: `telegram:dialog:-10042:4:${reply.id}`,
+    });
+    await f.queue.send(destination, text('Resources restored'), {
+      key: 'resources:group',
+      replace: true,
+      order: '2026-01-01T00:00:02.000Z',
+    });
+    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 10000);
+    restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    await restored.send(destination, text(reply.text), {
+      groupId: 'group',
+      key: `message:${reply.id}`,
+      replace: true,
+      order: '2026-01-01T00:00:01.000Z',
+      final: true,
+      notificationId: `telegram:dialog:-10042:4:${reply.id}`,
+    });
+    await restored.finishRecovery();
+    f.advance(10000);
+    await restored.flush();
+    expect(f.call.mock.calls.map(([, body]) => body.text)).toEqual([
+      'Agent reply',
+      'Resources restored',
+    ]);
+  } finally {
+    await restored?.stop();
+    await f.close();
+  }
+});
+
 it('keeps one canonical delivery across repeated owner-mention changes', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -374,6 +541,9 @@ it.each([
     const firstNotification = `telegram:dialog:-10042:4:${first.id}:progress`;
     const secondNotification = `telegram:dialog:-10042:4:${second.id}:final`;
     f.store.db
+      .prepare('INSERT INTO daddy_jobs VALUES(?,?,?,?)')
+      .run('legacy-run', 'group-a', 'completed', '{}');
+    f.store.db
       .prepare('INSERT INTO notifications VALUES(?,?,?)')
       .run(firstNotification, 'pending', first.at);
     await f.queue.send(destination, text('First reply'), {
@@ -393,6 +563,7 @@ it.each([
     await restored.flush();
     expect(f.call).toHaveBeenCalledTimes(1);
     await restored.send(destination, text(secondReply), {
+      groupId: 'group-a',
       key: `message:${second.id}`,
       replace: true,
       final: true,
@@ -405,6 +576,8 @@ it.each([
         ['sendMessage', secondReply, undefined],
       ],
     );
+    expect(restored.replySession(-10042, 1, 7)).toBe('group-a');
+    expect(restored.replySession(-10042, 2, 7)).toBe('group-a');
   } finally {
     await restored?.stop();
     await f.close();

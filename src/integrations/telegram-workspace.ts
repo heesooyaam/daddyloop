@@ -2283,18 +2283,16 @@ export class TelegramWorkspace {
         : undefined;
     const deliveredFinalRuns = new Set(
       messages
-        .filter(
-          (message) =>
-            message.phase === 'final' &&
-            message.runId &&
-            destination &&
-            this.store.db
+        .filter((message) => {
+          if (message.phase !== 'final' || !message.runId || !destination) return false;
+          const notificationId = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:final`;
+          return (
+            !!this.store.db
               .prepare('SELECT 1 FROM notifications WHERE status=? AND id=?')
-              .get(
-                'sent',
-                `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:final`,
-              ),
-        )
+              .get('sent', notificationId) ||
+            !!this.api.delivery?.hasAcknowledgedParts(destination, notificationId)
+          );
+        })
         .map((message) => message.runId),
     );
     for (const message of messages.filter(
@@ -2312,6 +2310,10 @@ export class TelegramWorkspace {
   }
   replay() {
     for (const group of this.daddy.sessions()) this.replayGroup(group);
+    if (this.api.delivery?.needsRecovery())
+      this.pending = this.pending.then(async () => {
+        await this.api.delivery?.finishRecovery();
+      });
   }
   async stop() {
     this.stopped = true;
