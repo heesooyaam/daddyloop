@@ -79,6 +79,16 @@ export class GitHubProvider implements ReviewProvider {
       mergeable_state?: string;
       merge_commit_sha?: string;
     }>('GET', path(ref));
+    if (
+      typeof pr?.head?.sha !== 'string' ||
+      typeof pr.head.ref !== 'string' ||
+      typeof pr.base?.sha !== 'string' ||
+      typeof pr.base.ref !== 'string' ||
+      !['open', 'closed'].includes(pr.state) ||
+      typeof pr.merged !== 'boolean' ||
+      typeof pr.draft !== 'boolean'
+    )
+      throw new AppError('provider_shape', 'GitHub returned incomplete PR data.', 502);
     const [status, checks, base] = await Promise.all([
       this.http.request<{
         statuses: { context: string; state: string; target_url?: string }[];
@@ -86,6 +96,8 @@ export class GitHubProvider implements ReviewProvider {
       this.getChecks(ref, pr.head.sha),
       pr.state === 'open' && !pr.merged ? this.targetHead(ref, pr.base.ref) : pr.base.sha,
     ]);
+    if (!Array.isArray(status?.statuses))
+      throw new AppError('provider_shape', 'GitHub returned incomplete commit statuses.', 502);
     // The combined status endpoint only exposes one page of contexts. Read all statuses
     // and keep the latest status per context, including reruns of previously failed jobs.
     const statuses =
@@ -97,6 +109,10 @@ export class GitHubProvider implements ReviewProvider {
             target_url?: string;
           }>(`/repos/${ref.repo}/commits/${pr.head.sha}/statuses`);
     const latest = new Map<string, { name: string; status: string; url?: string }>();
+    if (
+      statuses.some((item) => typeof item?.context !== 'string' || typeof item.state !== 'string')
+    )
+      throw new AppError('provider_shape', 'GitHub returned incomplete commit statuses.', 502);
     for (const item of statuses)
       if (!latest.has(`status:${item.context}`))
         latest.set(`status:${item.context}`, {
@@ -149,8 +165,14 @@ export class GitHubProvider implements ReviewProvider {
       `/repos/${ref.repo}/git/ref/heads/${name}`,
     );
     if (
+      typeof value?.ref !== 'string' ||
+      typeof value.object?.type !== 'string' ||
+      typeof value.object.sha !== 'string'
+    )
+      throw new AppError('provider_shape', 'GitHub returned incomplete target branch data.', 502);
+    if (
       value.ref !== 'refs/heads/' + branch ||
-      value.object?.type !== 'commit' ||
+      value.object.type !== 'commit' ||
       !/^[a-f0-9]{40,64}$/.test(value.object.sha)
     )
       throw new AppError('invalid_target_ref', 'GitHub did not confirm the target branch commit');
@@ -162,6 +184,11 @@ export class GitHubProvider implements ReviewProvider {
       status: string;
       merge_base_commit: { sha: string };
     }>('GET', `/repos/${ref.repo}/compare/${before}...${after}?per_page=1`);
+    if (
+      !['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status) ||
+      typeof comparison.merge_base_commit?.sha !== 'string'
+    )
+      throw new AppError('provider_shape', 'GitHub returned an incomplete commit comparison.', 502);
     return comparison.status === 'ahead' && comparison.merge_base_commit?.sha === before;
   }
   async prepareMerge(ref: PRRef) {
@@ -220,6 +247,13 @@ export class GitHubProvider implements ReviewProvider {
         'GET',
         `/repos/${ref.repo}/commits/${head}/check-runs?filter=latest&per_page=100&page=${page}`,
       );
+      if (
+        !Array.isArray(value?.check_runs) ||
+        value.check_runs.some(
+          (run) => typeof run?.name !== 'string' || typeof run.status !== 'string',
+        )
+      )
+        throw new AppError('provider_shape', 'GitHub returned incomplete check runs.', 502);
       result.push(...value.check_runs);
       if (value.check_runs.length < 100) return result;
     }
@@ -280,6 +314,8 @@ export class GitHubProvider implements ReviewProvider {
     confirmOwner?: (owner: string) => Promise<void>,
   ) {
     const prepared = await this.prepareDraftReview(ref, revision, marker);
+    if (prepared.requiresInspection)
+      throw new AppError('draft_changed', 'The recovered review needs inspection.');
     await confirmOwner?.(prepared.authorId);
     return prepared.existing ?? prepared.create();
   }
@@ -302,28 +338,33 @@ export class GitHubProvider implements ReviewProvider {
     const matches = reviews.filter((r) => (r.body ?? '').includes(tag(marker)));
     const existing = matches[0];
     if (existing) {
-      if (
-        matches.length !== 1 ||
-        existing.commit_id !== revision.head ||
-        existing.state !== 'PENDING'
-      )
+      if (!existing.commit_id)
+        throw new AppError(
+          'provider_shape',
+          'GitHub returned no commit for the marked review.',
+          502,
+        );
+      if (matches.length !== 1 || existing.commit_id !== revision.head)
         throw new AppError(
           'draft_changed',
           'The marked review was submitted or its revision changed. Inspect it before continuing.',
         );
       const handle = this.handle(existing, marker, revision);
-      const comments = reconcileOnly
-        ? []
-        : await this.http.pages<GHComment>(`${path(ref)}/reviews/${handle.id}/comments`);
-      if (
+      const comments =
+        reconcileOnly || existing.state !== 'PENDING'
+          ? []
+          : await this.reviewComments(`${path(ref)}/reviews/${handle.id}`);
+      const requiresInspection =
         !reconcileOnly &&
-        (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
-      )
-        throw new AppError(
-          'draft_changed',
-          'The recovered draft has been edited. Its contents have been preserved.',
-        );
-      return { authorId: String(owner), existing: handle, create: async () => handle };
+        (existing.state !== 'PENDING' ||
+          comments.length > 0 ||
+          existing.body !== `Review in progress.\n\n${tag(marker)}`);
+      return {
+        authorId: String(owner),
+        existing: handle,
+        requiresInspection,
+        create: async () => handle,
+      };
     }
     const occupied = reviews.some((r) => r.state === 'PENDING');
     return {
@@ -369,74 +410,97 @@ export class GitHubProvider implements ReviewProvider {
       },
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  private async readReview(url: string) {
+    let value: GHReview;
     try {
-      const [value, comments] = await Promise.all([
-        this.http.request<GHReview>('GET', `${path(ref)}/reviews/${review.id}`),
-        this.http.pages<GHComment>(`${path(ref)}/reviews/${review.id}/comments`),
-      ]);
-      if (
-        typeof value?.state !== 'string' ||
-        typeof value.commit_id !== 'string' ||
-        (value.body != null && typeof value.body !== 'string') ||
-        (value.state === 'PENDING' && !Number.isSafeInteger(value.user?.id)) ||
-        comments.some(
-          (entry) => !entry || !Number.isSafeInteger(entry.id) || typeof entry.body !== 'string',
-        )
-      )
-        throw new AppError('provider_shape', 'GitHub returned unreadable review data.', 502);
-      return {
-        status:
-          value.state === 'PENDING'
-            ? 'draft'
-            : value.state === 'DISMISSED'
-              ? 'missing'
-              : 'published',
-        body: value.body ?? '',
-        authorId: value.user?.id == null ? undefined : String(value.user.id),
-        comments: comments.map(comment),
-        url: value.html_url ?? ref.url,
-        revision: { ...review.revision, head: value.commit_id },
-      };
+      value = await this.http.request<GHReview>('GET', url);
     } catch (error) {
-      if (error instanceof AppError && error.code === 'provider_404')
-        return {
-          status: 'missing',
-          body: '',
-          comments: [],
-          url: ref.url,
-          revision: review.revision,
-        };
+      if (error instanceof AppError && error.code === 'provider_404') return undefined;
       throw error;
     }
+    if (
+      !['PENDING', 'COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(
+        value?.state,
+      ) ||
+      !Number.isSafeInteger(value.id) ||
+      !url.endsWith('/' + value.id) ||
+      typeof value.commit_id !== 'string' ||
+      (value.body !== null && typeof value.body !== 'string') ||
+      (value.state === 'PENDING' && !Number.isSafeInteger(value.user?.id))
+    )
+      throw new AppError('provider_shape', 'GitHub returned unreadable review data.', 502);
+    return value;
   }
-  async discardSupersededDraft(
+  private async reviewComments(url: string) {
+    const comments = await this.http.pages<GHComment>(url + '/comments').catch((error) => {
+      if (error instanceof AppError && error.code === 'provider_404')
+        throw new AppError(
+          'provider_shape',
+          'GitHub review comments are temporarily unavailable.',
+          502,
+        );
+      throw error;
+    });
+    if (
+      comments.some((entry) => !Number.isSafeInteger(entry?.id) || typeof entry.body !== 'string')
+    )
+      throw new AppError('provider_shape', 'GitHub returned unreadable review comments.', 502);
+    return comments;
+  }
+  async reviewDeleted(ref: PRRef, review: ReviewHandle) {
+    return (await this.readReview(`${path(ref)}/reviews/${review.id}`)) === undefined;
+  }
+  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+    const url = `${path(ref)}/reviews/${review.id}`;
+    const value = await this.readReview(url);
+    if (!value)
+      return { status: 'missing', body: '', comments: [], url: ref.url, revision: review.revision };
+    return {
+      status:
+        value.state === 'PENDING' ? 'draft' : value.state === 'DISMISSED' ? 'missing' : 'published',
+      body: value.body ?? '',
+      authorId: value.user?.id == null ? undefined : String(value.user.id),
+      comments: (await this.reviewComments(url)).map(comment),
+      url: value.html_url ?? ref.url,
+      revision: { ...review.revision, head: value.commit_id },
+    };
+  }
+  async prepareDraftDeletion(
     ref: PRRef,
     review: ReviewHandle,
     snapshot: ReviewSnapshot,
     checkPR?: () => Promise<void>,
   ) {
     const url = `${path(ref)}/reviews/${review.id}`;
-    const [value, user, comments] = await Promise.all([
-      this.http.request<GHReview>('GET', url),
-      this.http.request<{ id: number }>('GET', '/user'),
-      this.http.pages<GHComment>(url + '/comments'),
-    ]);
-    if (
-      value.state !== 'PENDING' ||
-      String(user.id) !== review.authorId ||
-      value.user.id !== user.id ||
-      value.commit_id !== review.revision.head ||
-      value.body !== snapshot.body ||
-      !value.body.endsWith(tag(review.marker)) ||
-      comments.length
-    )
-      throw new AppError(
-        'draft_changed',
-        'The old draft changed. Inspect it before replacing the review.',
-      );
-    await checkPR?.();
-    await this.http.request('DELETE', url);
+    const user = await this.http.request<{ id: number }>('GET', '/user');
+    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
+      throw new AppError('provider_shape', 'GitHub returned no account for draft deletion.', 502);
+    const checkContents = async () => {
+      const comments = await this.reviewComments(url);
+      const value = await this.readReview(url);
+      if (
+        value?.state !== 'PENDING' ||
+        String(user.id) !== review.authorId ||
+        value.user.id !== user.id ||
+        value.commit_id !== review.revision.head ||
+        value.body !== snapshot.body ||
+        !value.body.endsWith(tag(review.marker)) ||
+        comments.length
+      )
+        throw new AppError(
+          'draft_changed',
+          'The old draft changed. Inspect it before replacing the review.',
+        );
+    };
+    await checkContents();
+    if (checkPR) {
+      await checkPR();
+      // PR verification may have taken long enough for an edit to arrive.
+      await checkContents();
+    }
+    return async () => {
+      await this.http.request('DELETE', url);
+    };
   }
   private async mutation<T>(query: string, input: object): Promise<T> {
     const base = this.http.baseUrl.replace(/\/api\/v3$/, '/api');

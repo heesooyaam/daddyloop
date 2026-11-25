@@ -1295,7 +1295,7 @@ describe('opt-in GitHub merging', () => {
         expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
         f.store.setSetting(key, { ...draft, status: 'missing' });
       });
-      Object.assign(f.provider, { discardSupersededDraft: discard });
+      Object.assign(f.provider, { prepareDraftDeletion: async () => discard });
       f.store.saveTask(t);
       f.store.setSetting(key, { ...draft, body: 'Human edit' });
       await f.engine.review(t.id, true);

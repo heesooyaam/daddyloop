@@ -24,6 +24,7 @@ export interface ReviewProvider {
   ): Promise<{
     authorId: string;
     existing?: ReviewHandle;
+    requiresInspection?: boolean;
     occupied?: boolean;
     create: () => Promise<ReviewHandle>;
   }>;
@@ -34,12 +35,13 @@ export interface ReviewProvider {
     confirmOwner?: (owner: string) => Promise<void>,
   ): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
-  discardSupersededDraft?(
+  reviewDeleted?(ref: PRRef, review: ReviewHandle): Promise<boolean>;
+  prepareDraftDeletion?(
     ref: PRRef,
     review: ReviewHandle,
     snapshot: ReviewSnapshot,
     checkPR?: () => Promise<void>,
-  ): Promise<void>;
+  ): Promise<() => Promise<void>>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,

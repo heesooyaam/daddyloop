@@ -695,6 +695,20 @@ export class Worker {
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }
+      if (job.kind === 'review' && !isTicket(task) && task.ref.provider === 'github') {
+        const latest = await this.engine.provider(prRef(task)).getPR(prRef(task));
+        if (
+          !sameOpenTarget(task.pr, latest) ||
+          latest.draft ||
+          !sameRevision(task.revision, latest)
+        )
+          throw new AppError(
+            'stale_revision',
+            'The PR changed while the review workspace was being prepared.',
+          );
+        if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed before the reviewer started.');
+      }
       const tools =
         job.kind === 'verify_merge'
           ? [reviewDecisionTool]

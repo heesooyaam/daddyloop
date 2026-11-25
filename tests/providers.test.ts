@@ -179,9 +179,11 @@ describe('GitHub draft review contract', () => {
       const http = transport((path) => {
         if (path.includes('/pulls/'))
           return {
-            head: { sha: revision.head },
+            head: { sha: revision.head, ref: 'topic' },
             base: { sha: revision.base, ref: 'main' },
             state: 'open',
+            draft: false,
+            merged: false,
             mergeable,
             mergeable_state: state,
           };
@@ -200,9 +202,10 @@ describe('GitHub draft review contract', () => {
     const http = transport((path) => {
       if (path.includes('/pulls/'))
         return {
-          head: { sha: revision.head },
+          head: { sha: revision.head, ref: 'topic' },
           base: { ref: 'release/v1', sha: revision.base },
           state,
+          draft: false,
           merged: state === 'closed',
         };
       if (path.endsWith('/git/ref/heads/release/v1'))
@@ -223,9 +226,11 @@ describe('GitHub draft review contract', () => {
     const http = transport((path) => {
       if (path.includes('/pulls/'))
         return {
-          head: { sha: revision.head },
+          head: { sha: revision.head, ref: 'topic' },
           base: { sha: revision.base, ref: 'main' },
           state: 'open',
+          draft: false,
+          merged: false,
         };
       if (path === '/repos/acme/service/git/ref/heads/main')
         return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };
@@ -254,6 +259,8 @@ describe('GitHub draft review contract', () => {
           },
           base: { sha: revision.base, ref: 'main' },
           state: 'open',
+          draft: false,
+          merged: false,
         };
       if (path === '/repos/acme/service/git/ref/heads/main')
         return { ref: 'refs/heads/main', object: { type: 'commit', sha: revision.base } };

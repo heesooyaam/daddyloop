@@ -287,16 +287,18 @@ export class Engine {
         return this.handleDraftStartError(task, error);
       }
       if (task.draftStart) {
+        const explicitRetry = retry;
         if (task.draftStart.retry) retry = true;
         clarification ??= task.draftStart.clarification;
         if (
           !sameRevision(task.draftStart.revision, pr) ||
           !sameOpenTarget(task.pr, pr) ||
           pr.draft ||
+          (explicitRetry && this.broker.draftStartOperation(task)?.status === 'done') ||
           this.prAction(task, pr).kind === 'repair'
         ) {
           try {
-            return await this.settleMovedDraftStart(task, pr, provider);
+            return await this.settleMovedDraftStart(task, pr, provider, explicitRetry);
           } catch (error) {
             return this.handleDraftStartError(task, error);
           }
@@ -454,13 +456,32 @@ export class Engine {
     this.state(task, 'needs_input', redact(String(error)));
     throw error;
   }
-  private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
-    // An intent alone has no remote draft to recover. An attempted POST keeps its
-    // marker until the original draft or a confirmed retirement can be identified.
+  private async settleMovedDraftStart(
+    task: Task,
+    pr: PullRequest,
+    provider: ReviewProvider,
+    explicitRetry: boolean,
+  ) {
     const intent = task.draftStart!;
     const operation = this.broker.draftStartOperation(task);
+    const sameTarget = sameOpenTarget(task.pr, pr);
+    const ref = prRef(task);
+    const checkPR = async () => {
+      const latest = await provider.getPR(ref);
+      if (
+        (!sameTarget && !explicitRetry) ||
+        pr.state !== 'open' ||
+        pr.draft ||
+        !sameOpenTarget(pr, latest) ||
+        latest.draft ||
+        !sameRevision(pr, latest)
+      )
+        throw new AppError('draft_revision_changed', 'The PR changed during draft recovery.');
+      if (!this.currentReviewStart(task))
+        throw new AppError('stale_task', 'The task changed during draft recovery.');
+    };
+
     if (operation) {
-      const ref = prRef(task);
       const receipt =
         operation.status === 'done'
           ? (JSON.parse(String(operation.result)) as ReviewHandle)
@@ -471,57 +492,18 @@ export class Engine {
             .existing
         : await provider.findReview(ref, intent.marker);
       if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-      const retirement =
-        receipt && this.broker.draftStartOperation(task, intent.marker + ':retire:' + receipt.id);
-      const handle = existing ?? (retirement ? receipt : undefined);
+      const handle = receipt ?? existing;
       if (!handle)
         throw new AppError('draft_create_unconfirmed', 'Waiting for the original GitHub draft.');
       if (
         handle.revision.head !== intent.revision.head ||
         (owner && handle.authorId !== owner) ||
-        (receipt && handle.id !== receipt.id)
+        (existing && handle.id !== existing.id)
       )
         throw new AppError('draft_changed', 'The marked review differs from the original attempt.');
       const pinned = { ...handle, revision: intent.revision };
-      const draft = await provider.getReview(ref, pinned);
-      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-      if (
-        !(retirement && draft.status === 'missing') &&
-        (draft.status !== 'draft' ||
-          draft.authorId !== handle.authorId ||
-          draft.revision.head !== intent.revision.head ||
-          this.draftHasWork(pinned, draft))
-      )
-        throw new AppError('draft_changed', draftInspectionRequired);
-      const rewritten =
-        sameOpenTarget(task.pr, pr) &&
-        intent.revision.head === pr.head &&
-        intent.revision.base !== pr.base &&
-        !(await provider.targetAdvanced?.(ref, intent.revision.base, pr.base));
-      const checkPR = async () => {
-        const latest = await provider.getPR(ref);
-        if (
-          !sameOpenTarget(task.pr, pr) ||
-          pr.state !== 'open' ||
-          pr.draft ||
-          !sameOpenTarget(pr, latest) ||
-          latest.draft ||
-          !sameRevision(pr, latest)
-        )
-          throw new AppError('draft_revision_changed', 'The PR changed during draft recovery.');
-        if (!this.currentReviewStart(task))
-          throw new AppError('stale_task', 'The task changed during draft recovery.');
-        return latest;
-      };
-      pr = await checkPR();
-      if (rewritten) {
-        this.state(
-          task,
-          'needs_input',
-          'The target branch was rewritten during GitHub draft creation. The original intent was preserved.',
-        );
-        return task;
-      }
+      // Keep the ID even when an edited draft needs manual inspection. It may
+      // disappear from the list once its owner has published or removed it.
       await this.broker.outbox.perform(
         task.id,
         intent.marker,
@@ -530,38 +512,89 @@ export class Engine {
         async () => ({ found: true, value: pinned }),
       );
       if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+      const draft = await provider.getReview(ref, pinned);
+      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
+      const retirement = this.broker.draftStartOperation(
+        task,
+        intent.marker + ':retire:' + pinned.id,
+      );
       if (
-        draft.status === 'draft' &&
-        intent.revision.head === pr.head &&
-        this.prAction(task, pr).kind !== 'repair'
-      ) {
-        this.store.transaction(() => {
-          task.review = pinned;
-          delete task.draftStart;
-          if (intent.clarification) this.rememberClarification(task, intent.clarification);
-          this.restartNativeReview(
-            task,
-            pr,
-            draft,
-            'The target branch advanced. Reviewing the updated change.',
+        draft.status !== 'missing' &&
+        (draft.authorId !== pinned.authorId || draft.revision.head !== intent.revision.head)
+      )
+        throw new AppError('draft_changed', draftInspectionRequired);
+      if (draft.status === 'published' || draft.status === 'missing') {
+        if (draft.status === 'missing' && !retirement && existing)
+          throw new AppError(
+            'draft_create_unconfirmed',
+            'The listed draft could not be read by ID.',
           );
-        });
-        return task;
+        if (!explicitRetry && !(retirement && draft.status === 'missing'))
+          throw new AppError('draft_changed', draftInspectionRequired);
+        await checkPR();
+        if (
+          retirement &&
+          draft.status === 'missing' &&
+          !(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR))
+        )
+          return this.store.getTask(task.id);
+        if (draft.status === 'published' && draft.comments.length)
+          task.feedback = {
+            ...draft,
+            comments: [
+              ...new Map(
+                [...(task.feedback?.comments ?? []), ...draft.comments].map((comment) => [
+                  comment.id,
+                  comment,
+                ]),
+              ).values(),
+            ],
+          };
+      } else {
+        if (draft.status !== 'draft' || this.draftHasWork(pinned, draft))
+          throw new AppError('draft_changed', draftInspectionRequired);
+        const rewritten =
+          sameTarget &&
+          intent.revision.head === pr.head &&
+          intent.revision.base !== pr.base &&
+          !(await provider.targetAdvanced?.(ref, intent.revision.base, pr.base));
+        await checkPR();
+        if (rewritten) {
+          this.state(
+            task,
+            'needs_input',
+            'The target branch was rewritten during GitHub draft creation. The original intent was preserved.',
+          );
+          return task;
+        }
+        if (
+          !retirement &&
+          intent.revision.head === pr.head &&
+          this.prAction(task, pr).kind !== 'repair'
+        ) {
+          this.store.transaction(() => {
+            task.review = pinned;
+            delete task.draftStart;
+            if (intent.clarification) this.rememberClarification(task, intent.clarification);
+            this.restartNativeReview(
+              task,
+              pr,
+              draft,
+              'The PR is ready. Reviewing the current revision.',
+            );
+          });
+          return task;
+        }
+        if (!(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR)))
+          return this.store.getTask(task.id);
       }
-      // Only a verified empty placeholder can be retired.
-      if (!(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR)))
-        return this.store.getTask(task.id);
+    } else {
+      await checkPR();
     }
     if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-    if (pr.state !== 'open' || pr.draft)
-      throw new AppError('draft_revision_changed', 'Waiting for an open PR ready for review.');
-    if (!sameOpenTarget(task.pr, pr))
-      throw new AppError(
-        'stale_revision',
-        'The PR branches changed. Inspect the task before restarting review.',
-      );
     delete task.draftStart;
     this.invalidate(task, pr);
+    if (intent.clarification) this.rememberClarification(task, intent.clarification);
     this.state(task, 'queued', 'New revision is ready for review');
     return task;
   }
@@ -849,7 +882,7 @@ export class Engine {
   private async retireSupersededDraft(
     task: Task,
     provider: ReviewProvider,
-    checkPR?: () => Promise<unknown>,
+    checkPR?: () => Promise<void>,
   ) {
     const handle = task.review!,
       ref = prRef(task);
@@ -858,7 +891,33 @@ export class Engine {
     const archiveKey = 'review.archive:' + task.id + ':' + handle.id;
     const archived = this.store.setting<typeof snapshot>(archiveKey);
     const key = handle.marker + ':retire:' + handle.id;
-    const pending = this.store.db.prepare('SELECT status FROM operations WHERE id=?').get(key);
+    let pending = this.broker.draftStartOperation(task, key);
+    if (
+      pending?.status === 'pending' &&
+      provider.prepareDraftDeletion &&
+      !this.broker.outbox.isActive(key)
+    ) {
+      // Older versions recorded the intent before their preflight reads. A
+      // recorded read failure proves that version never sent the DELETE.
+      const latest = this.store.db
+        .prepare(
+          "SELECT type, json_extract(data,'$.error') AS error FROM events WHERE task_id=? AND type GLOB 'operation.*' AND json_extract(data,'$.operationId')=? ORDER BY id DESC LIMIT 1",
+        )
+        .get(task.id, key);
+      if (
+        latest?.type === 'operation.uncertain' &&
+        typeof latest.error === 'string' &&
+        /^AppError: (?:GET \/\S+: HTTP |GitHub read failed \(|GitHub API quota is unavailable until )/.test(
+          latest.error,
+        )
+      ) {
+        this.store.db
+          .prepare("DELETE FROM operations WHERE id=? AND task_id=? AND status='pending'")
+          .run(key, task.id);
+        this.store.event(task.id, 'operation.refused', { operationId: key, error: latest.error });
+        pending = undefined;
+      }
+    }
     if (snapshot.status === 'missing' && !pending) return true;
     const source = snapshot.status === 'missing' ? archived : snapshot;
     const body = source?.body ?? '';
@@ -869,7 +928,7 @@ export class Engine {
       !handle.authorId ||
       source.comments.length ||
       !this.knownDraftSummary(task.id, handle, body) ||
-      !provider.discardSupersededDraft ||
+      !provider.prepareDraftDeletion ||
       (archived && archived.body !== body)
     ) {
       this.state(task, 'needs_input', draftInspectionRequired);
@@ -884,34 +943,35 @@ export class Engine {
           archiveKey,
         });
       });
-    let preflightFailed = false;
+    const remove = pending
+      ? undefined
+      : await provider.prepareDraftDeletion(ref, handle, source, checkPR);
     await this.broker.outbox.perform(
       task.id,
       key,
       { review: handle.id, head: source.revision.head, body },
       async () => {
-        await provider.discardSupersededDraft!(
-          ref,
-          handle,
-          source,
-          checkPR &&
-            (async () => {
-              try {
-                await checkPR();
-              } catch (error) {
-                preflightFailed = true;
-                throw error;
-              }
-            }),
-        );
+        if (!remove)
+          throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
+        await remove();
         return null;
       },
-      async () => ({
-        found: (await provider.getReview(ref, handle)).status === 'missing',
-        value: null,
-      }),
-      (error) => preflightFailed || (error instanceof AppError && error.code === 'draft_changed'),
+      async () => {
+        const deleted = provider.reviewDeleted
+          ? await provider.reviewDeleted(ref, handle)
+          : (await provider.getReview(ref, handle)).status === 'missing';
+        if (!deleted && checkPR)
+          throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
+        return deleted ? { found: true, value: null } : { found: false };
+      },
     );
+    if (
+      checkPR &&
+      pending?.status !== 'pending' &&
+      provider.reviewDeleted &&
+      !(await provider.reviewDeleted(ref, handle))
+    )
+      throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
     return true;
   }
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {

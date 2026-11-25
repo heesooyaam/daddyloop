@@ -175,6 +175,8 @@ export class Broker {
           'draft_create_unconfirmed',
           'GitHub has not confirmed the recorded draft.',
         );
+      if (prepared.requiresInspection)
+        throw new AppError('draft_changed', 'The recovered review needs inspection.');
       task.review = review;
       return review;
     }
