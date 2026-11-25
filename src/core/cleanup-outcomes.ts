@@ -35,12 +35,29 @@ export function cleanupReportLines(locale: Locale, report: CleanupReport): strin
           t('Younger than the retention period: {count}.', { count: action.counts.tooRecent }),
         );
     }
-    if (action.id.startsWith('daddyloop-cleanup-') && !action.error)
-      lines.push(
-        t(action.skipped ? 'Host cleanup {unit} was skipped.' : 'Host cleanup {unit} completed.', {
-          unit: action.id,
-        }),
-      );
+    if (action.id.startsWith('daddyloop-cleanup-') && !action.error) {
+      const message =
+        action.unitResult === 'completed'
+          ? 'Host cleanup {unit} completed.'
+          : action.unitResult === 'condition'
+            ? 'Host cleanup {unit} was skipped by a systemd condition.'
+            : action.unitResult === 'threshold'
+              ? 'Host cleanup {unit} was skipped because disk usage fell below the threshold.'
+              : action.unitResult === 'busy'
+                ? 'Host cleanup {unit} was skipped because the cache was busy.'
+                : action.skipped
+                  ? 'Host cleanup {unit} was skipped.'
+                  : 'The old report did not record whether {unit} ran.';
+      lines.push(t(message, { unit: action.id }));
+      if (action.unitResult === 'completed' && action.freeSpaceChangeGiB !== undefined) {
+        const change = action.freeSpaceChangeGiB.toFixed(2);
+        lines.push(
+          t('Free space on the volume during this operation: {change} GiB.', {
+            change: action.freeSpaceChangeGiB > 0 ? '+' + change : change,
+          }),
+        );
+      }
+    }
     if (action.error) lines.push(action.id + ' · ' + t(action.error).slice(0, 300));
   }
   if (report.error) lines.push(t(report.error).slice(0, 300));

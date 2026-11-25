@@ -78,6 +78,8 @@ daddy restart
 
 For native garbage collection of a large host cache, an administrator can install a system service such as daddyloop-cleanup-example.service with Type=oneshot and RemainAfterExit=no. Set DADDYLOOP_CLEANUP_UNITS to the comma-separated allowed names in the daddy service environment. After restart, cleanup settings list these services and the skill can select their IDs without the .service suffix. The service user needs permission to run sudo -n /usr/bin/systemctl start for each exact name. The unit defines the commands, cache owner and busy checks. Exit status 75 with SuccessExitStatus=75 indicates a skip. daddy checks the threshold again before the next operation.
 
+To retain the exit information for an inactive oneshot, list its unit name in After= in the [Unit] section of the running daddy service. This orders the units; the schedule still starts cleanup only above the threshold. Use the host name from uname -n in AssertHost=. The report distinguishes a skipped condition from an unconfirmed execution when process metadata is unavailable. It shows the change in free volume space during each confirmed run.
+
 ### Recovery instead of a silent queue
 
 ```mermaid

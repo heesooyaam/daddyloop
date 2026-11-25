@@ -1024,6 +1024,18 @@ Object.assign(ru, {
     'Копии ревью и временные загрузки: проверено {checked}, подходят для удаления {eligible}, удалено {removed}.',
   'Younger than the retention period: {count}.': 'Ещё не достигли срока хранения: {count}.',
   'Host cleanup services': 'Службы уборки хоста',
+  'Host cleanup {unit} was skipped by a systemd condition.':
+    'Служба {unit} пропущена по условию запуска systemd.',
+  'Host cleanup {unit} was skipped because disk usage fell below the threshold.':
+    'Служба {unit} пропущена: заполнение диска уже в пределах порога.',
+  'Host cleanup {unit} was skipped because the cache was busy.':
+    'Служба {unit} пропустила занятый кеш.',
+  'The old report did not record whether {unit} ran.':
+    'В старом отчёте нет подтверждения запуска {unit}.',
+  'Free space on the volume during this operation: {change} GiB.':
+    'Изменение свободного места на разделе за время операции: {change} ГиБ.',
+  'Error: systemd did not retain a confirmed execution result for this cleanup.':
+    'systemd не подтвердил выполнение процесса уборки.',
   'Host cleanup {unit} was skipped.': 'Обслуживание хоста {unit} пропущено.',
   'Host cleanup {unit} completed.': 'Обслуживание хоста {unit} завершено.',
   'Scheduled cleanup ended with an error.': 'Уборка завершилась с ошибкой.',
