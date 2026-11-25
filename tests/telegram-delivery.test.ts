@@ -426,6 +426,72 @@ it.each([
   },
 );
 
+it.each([
+  ['current message receipt', 'message', { chatId: 7 }, 100],
+  ['legacy turn receipt', 'turn', { chatId: -10042, threadId: 4 }, 5000],
+])(
+  'reuses a fully sent progress receipt after its owner question closes: %s',
+  async (_case, sourceFormat, destination, size) => {
+    const f = fixture();
+    let restored: TelegramDelivery | undefined;
+    try {
+      const body = 'A'.repeat(size);
+      const message = f.store.daddyMessage('group', 'agent', body, 'run', undefined, {
+        phase: 'progress',
+      });
+      const progressNotification = `telegram:dialog:${destination.chatId}:${
+        'threadId' in destination ? destination.threadId : 0
+      }:${message.id}:progress`;
+      const agentText = new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(body);
+      await f.queue.send(destination, agentText, {
+        groupId: 'group',
+        key: sourceFormat === 'turn' ? 'turn:run' : `message:${message.id}`,
+        replace: true,
+        notificationId: progressNotification,
+      });
+      const progressCalls = f.call.mock.calls.length;
+      await f.queue.stop();
+      f.store.finishDaddyReply('group', body, 'run', true);
+      const finalNotification = progressNotification.replace(/:progress$/, ':final');
+      await f.queue.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
+        groupId: 'group',
+        key: finalNotification,
+        replacePending: true,
+        final: true,
+        notificationId: finalNotification,
+        mention: { groupId: 'group', messageId: message.id },
+      });
+      if (sourceFormat === 'turn') {
+        const row = f.store.db
+          .prepare(
+            `SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'
+             AND json_extract(value,'$.options.notificationId')=?`,
+          )
+          .get(finalNotification)!;
+        const saved = JSON.parse(String(row.value));
+        saved.options.questionSourceKey = undefined;
+        f.store.setSetting(String(row.key), saved);
+      }
+      restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+      await restored.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
+        groupId: 'group',
+        key: finalNotification,
+        replacePending: true,
+        final: true,
+        notificationId: finalNotification,
+        mention: { groupId: 'group', messageId: message.id },
+      });
+      await restored.finishRecovery();
+      await restored.flush(10);
+      expect(f.call).toHaveBeenCalledTimes(progressCalls);
+      expect(f.call.mock.calls.some(([, request]) => request.text?.includes('@Owner'))).toBe(false);
+    } finally {
+      await restored?.stop();
+      await f.close();
+    }
+  },
+);
+
 it('reuses a sent legacy progress receipt when the same message becomes final', async () => {
   const f = fixture();
   let restored: TelegramDelivery | undefined;
@@ -664,6 +730,32 @@ it('recovers task questions by primary key without reading unrelated task JSON',
     expect(taskQueries[0]).toMatch(/WHERE id=\?/i);
   } finally {
     await restored?.stop();
+    await f.close();
+  }
+});
+
+it('persists a ready retry_after backlog with one write per new reply', async () => {
+  const f = fixture();
+  let queue: TelegramDelivery | undefined;
+  try {
+    await f.queue.stop();
+    f.store.setSetting('telegram.deliveryLimit:test_bot', f.clock() + 60000);
+    queue = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+    const save = vi.spyOn(f.store, 'setSetting');
+    for (let i = 0; i < 512; i++)
+      await queue.send({ chatId: 7 }, text(`Reply ${i}`), {
+        key: `message:${i}`,
+        notificationId: `telegram:dialog:7:0:message-${i}`,
+      });
+    expect(save).toHaveBeenCalledTimes(512);
+    expect(f.call).not.toHaveBeenCalled();
+    f.advance(60000);
+    await queue.flush(10);
+    expect(f.call.mock.calls.map(([, request]) => request.text)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `Reply ${i}`),
+    );
+  } finally {
+    await queue?.stop();
     await f.close();
   }
 });

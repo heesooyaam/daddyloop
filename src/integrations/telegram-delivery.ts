@@ -68,6 +68,8 @@ export class TelegramDelivery {
   // Keep a one-time lookup so replay can move that durable state to message:<messageId>.
   private legacyByNotification = new Map<string, { key: string; value: Delivery }>();
   private pendingByNotification = new Map<string, { key: string; value: Delivery }>();
+  private legacyIdentityByKey = new Map<string, string>();
+  private pendingIdentityByKey = new Map<string, string>();
   private redirectedKeys = new Map<string, string>();
   private deferredKeys = new Set<string>();
   private historyDeferredKeys = new Set<string>();
@@ -91,6 +93,7 @@ export class TelegramDelivery {
   private cancelledRouteNotifications = new Set<string>();
   private cancelledQuestionNotifications = new Set<string>();
   private detachedQuestionSources = new Map<string, string>();
+  private storedQuestionSources = new Map<string, string>();
   private acknowledgedCurrent = new Set<string>();
   private recovering = false;
   private running?: Promise<void>;
@@ -172,6 +175,21 @@ export class TelegramDelivery {
         }
     }
     const deliveryKeys = new Set(deliveries.map(({ key }) => key));
+    for (const { key, value } of deliveries) {
+      if (
+        !value.messages.length ||
+        !value.options.notificationId ||
+        (!value.options.key?.startsWith('message:') && !value.options.key?.startsWith('turn:'))
+      )
+        continue;
+      const identity = digest([
+        value.destination,
+        notificationIdentity(value.options.notificationId),
+      ]);
+      const existing = this.storedQuestionSources.get(identity);
+      if (!existing || value.options.key.startsWith('message:'))
+        this.storedQuestionSources.set(identity, key);
+    }
     const recoveryDeliveries = deliveries.filter(
       ({ value }) =>
         ['queued', 'sending'].includes(value.status) &&
@@ -294,10 +312,7 @@ export class TelegramDelivery {
         value.options?.key?.startsWith('turn:') &&
         value.options.notificationId
       )
-        this.legacyByNotification.set(
-          digest([value.destination, notificationIdentity(value.options.notificationId)]),
-          { key, value },
-        );
+        this.indexLegacyNotification(key, value);
       if (
         ['queued', 'sending'].includes(value.status) &&
         value.messages.length &&
@@ -311,10 +326,7 @@ export class TelegramDelivery {
         ['queued', 'sending'].includes(value.status) &&
         value.options.notificationId?.startsWith('telegram:dialog:')
       )
-        this.pendingByNotification.set(
-          digest([value.destination, notificationIdentity(value.options.notificationId)]),
-          { key, value },
-        );
+        this.indexPendingNotification(key, value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -476,30 +488,47 @@ export class TelegramDelivery {
     this.store.setSetting(key, value);
     this.remember(key, value);
   }
+  private forgetNotificationIndexes(key: string) {
+    const pendingIdentity = this.pendingIdentityByKey.get(key);
+    if (pendingIdentity) this.pendingByNotification.delete(pendingIdentity);
+    this.pendingIdentityByKey.delete(key);
+    const legacyIdentity = this.legacyIdentityByKey.get(key);
+    if (legacyIdentity) this.legacyByNotification.delete(legacyIdentity);
+    this.legacyIdentityByKey.delete(key);
+  }
+  private indexPendingNotification(key: string, value: Delivery) {
+    const notificationId = value.options.notificationId;
+    if (!notificationId) return;
+    const identity = digest([value.destination, notificationIdentity(notificationId)]);
+    const previous = this.pendingByNotification.get(identity);
+    if (previous && previous.key !== key) this.pendingIdentityByKey.delete(previous.key);
+    this.pendingByNotification.set(identity, { key, value });
+    this.pendingIdentityByKey.set(key, identity);
+  }
+  private indexLegacyNotification(key: string, value: Delivery) {
+    const notificationId = value.options.notificationId;
+    if (!notificationId) return;
+    const identity = digest([value.destination, notificationIdentity(notificationId)]);
+    const previous = this.legacyByNotification.get(identity);
+    if (previous && previous.key !== key) this.legacyIdentityByKey.delete(previous.key);
+    this.legacyByNotification.set(identity, { key, value });
+    this.legacyIdentityByKey.set(key, identity);
+  }
   private remember(key: string, value: Delivery) {
-    for (const [identity, row] of this.pendingByNotification)
-      if (row.key === key) this.pendingByNotification.delete(identity);
-    for (const [identity, row] of this.legacyByNotification)
-      if (row.key === key) this.legacyByNotification.delete(identity);
+    this.forgetNotificationIndexes(key);
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
     if (
       ['queued', 'sending'].includes(value.status) &&
       value.options.notificationId?.startsWith('telegram:dialog:')
     )
-      this.pendingByNotification.set(
-        digest([value.destination, notificationIdentity(value.options.notificationId)]),
-        { key, value },
-      );
+      this.indexPendingNotification(key, value);
     if (
       value.status !== 'cancelled' &&
       value.options.key?.startsWith('turn:') &&
       value.options.notificationId
     )
-      this.legacyByNotification.set(
-        digest([value.destination, notificationIdentity(value.options.notificationId)]),
-        { key, value },
-      );
+      this.indexLegacyNotification(key, value);
   }
   private createdAt() {
     this.lastCreatedAt = Math.max(this.clock(), this.lastCreatedAt + 1);
@@ -566,8 +595,17 @@ export class TelegramDelivery {
       !value.options.questionSourceKey &&
       value.options.key !== `message:${messageId}`
     ) {
-      const sourceKey = prefix + digest([this.bot, value.destination, `message:${messageId}`]);
-      if (sourceKey !== key && deliveryKeys.has(sourceKey)) {
+      const messageSourceKey =
+        prefix + digest([this.bot, value.destination, `message:${messageId}`]);
+      const identity = value.options.notificationId
+        ? digest([value.destination, notificationIdentity(value.options.notificationId)])
+        : undefined;
+      const sourceKey = deliveryKeys.has(messageSourceKey)
+        ? messageSourceKey
+        : identity
+          ? this.storedQuestionSources.get(identity)
+          : undefined;
+      if (sourceKey && sourceKey !== key) {
         value.options.questionSourceKey = sourceKey;
         changed = true;
       }
@@ -788,6 +826,15 @@ export class TelegramDelivery {
     )
       return { key, value };
   }
+  private questionSource(destination: TelegramDestination, notificationId: string) {
+    const messageId = notificationIdentity(notificationId).split(':').at(-1);
+    if (messageId) {
+      const key = prefix + digest([this.bot, destination, `message:${messageId}`]);
+      const value = this.store.setting<Delivery>(key);
+      if (value?.messages.length) return { key, value };
+    }
+    return this.sentDelivery(destination, notificationId);
+  }
   private migrateByNotification(
     key: string,
     destination: TelegramDestination,
@@ -842,8 +889,7 @@ export class TelegramDelivery {
     this.deferredKeys.delete(row.key);
     const wasHistory = this.historyDeferredKeys.delete(row.key);
     this.deferredValues.delete(row.key);
-    this.pendingByNotification.delete(legacyKey);
-    this.legacyByNotification.delete(legacyKey);
+    this.forgetNotificationIndexes(row.key);
     this.redirectedKeys.set(row.key, key);
     this.remember(key, row.value);
     if (wasHistory) this.releaseUnblocked(row.value.destination);
@@ -1010,6 +1056,15 @@ export class TelegramDelivery {
     key = this.resolveKey(key);
     let value =
       this.pending.get(key) ?? this.deferredValues.get(key) ?? this.store.setting<Delivery>(key);
+    if (
+      !value &&
+      !options.replace &&
+      !options.questionSourceKey &&
+      options.notificationId?.startsWith('telegram:dialog:')
+    ) {
+      const source = this.questionSource(destination, options.notificationId);
+      if (source) options = { ...options, questionSourceKey: source.key };
+    }
     if (!value && options.notificationId?.startsWith('telegram:dialog:'))
       value = this.migrateByNotification(
         key,
@@ -1105,16 +1160,25 @@ export class TelegramDelivery {
     } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
     this.clearCancelledNotification(options.notificationId);
-    // New text also wakes the oldest buffered message for this conversation. Never bypass retry_after.
-    for (const [otherKey, other] of this.pending)
-      if (
-        !isIndependent(other) &&
-        digest(other.destination) === digest(destination) &&
-        other.status === 'queued'
-      ) {
-        other.nextAttemptAt = this.clock();
-        this.save(otherKey, other);
+    // A new reply may wake one delayed predecessor, but never rewrite a ready backlog
+    // or bypass the route-wide retry_after.
+    const currentTime = this.clock();
+    if (currentTime >= this.rateLimitUntil) {
+      const delayed = [...this.pending.entries()]
+        .filter(
+          ([otherKey, other]) =>
+            otherKey !== key &&
+            !isIndependent(other) &&
+            this.route(other.destination) === this.route(destination) &&
+            other.status === 'queued' &&
+            other.nextAttemptAt > currentTime,
+        )
+        .sort((a, b) => this.compareDeliveries(a[1], b[1]))[0];
+      if (delayed) {
+        delayed[1].nextAttemptAt = currentTime;
+        this.save(...delayed);
       }
+    }
     await this.kick();
     return {
       status: value.status === 'sent' ? 'sent' : 'queued',
