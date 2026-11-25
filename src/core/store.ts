@@ -227,6 +227,20 @@ export class Store {
       : this.db.prepare(`${active} ${jobOrder}`).all();
     return rows.map((row) => JSON.parse(row.data as string));
   }
+  firstTaskStarts(groupId: string): Map<string, string> {
+    const rows = this.db
+      .prepare(
+        `SELECT jobs.task_id AS taskId, min(json_extract(jobs.data,'$.startedAt')) AS startedAt
+         FROM jobs JOIN tasks ON tasks.id=jobs.task_id
+         WHERE json_extract(tasks.data,'$.groupId')=?
+           AND json_extract(jobs.data,'$.kind')!='chat'
+           AND jobs.status!='queued'
+           AND json_extract(jobs.data,'$.startedAt') IS NOT NULL
+         GROUP BY jobs.task_id`,
+      )
+      .all(groupId);
+    return new Map(rows.map((row) => [String(row.taskId), String(row.startedAt)]));
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,

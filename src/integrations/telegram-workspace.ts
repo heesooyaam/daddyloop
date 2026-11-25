@@ -482,7 +482,10 @@ export class TelegramWorkspace {
     await this.api.send(
       destination,
       view === 'queue'
-        ? queueCard(locale, groupId, tasks, page)
+        ? queueCard(locale, groupId, tasks, {
+            page,
+            firstStarts: this.store.firstTaskStarts(groupId),
+          })
         : workersCard(
             locale,
             groupId,
@@ -492,7 +495,7 @@ export class TelegramWorkspace {
           ),
     );
   }
-  private async showTask(groupId: string, taskId: string, destination: Destination) {
+  private async showTask(groupId: string, taskId: string, destination: Destination, queuePage = 0) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
     const slots = workerSlots(this.store, group);
@@ -512,7 +515,7 @@ export class TelegramWorkspace {
       group.workspace?.provider === 'github' && task.ref.provider === 'github'
         ? autoMergeSettings(this.store, group, task)
         : undefined;
-    await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge));
+    await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge, queuePage));
   }
   private async taskCommand(
     command: string,
@@ -1090,11 +1093,11 @@ export class TelegramWorkspace {
       await this.showTask(item.groupId, item.id, destination);
       return true;
     }
-    const task = data.match(/^dad:task:([a-f0-9-]{36})$/);
+    const task = data.match(/^dad:task:([a-f0-9-]{36})(?::(\d{1,10}))?$/);
     if (task) {
       const { groupId } = this.store.getTask(task[1]!);
       if (!groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
-      await this.showTask(groupId, task[1]!, destination);
+      await this.showTask(groupId, task[1]!, destination, Number(task[2] ?? 0));
       return true;
     }
     const repo = data.match(/^dad:repository:([a-f0-9-]{36})$/);

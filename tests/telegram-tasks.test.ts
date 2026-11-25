@@ -79,7 +79,8 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(sent.filter(({ body }) => String(body.text).startsWith('Task queued'))).toHaveLength(1);
 
     await bot.handle(message('/queue'));
-    expect(lastText()).toContain(`Fix search\n${id} · Waiting for a worker · Requested worker 2`);
+    expect(lastText()).toContain(`Fix search\n${id} · Waiting for a worker\nRequested worker 2`);
+    expect(lastText()).not.toContain('since work began');
     await bot.handle(message(`/task ${id}`));
     expect(lastText()).toContain('Worker 2\ncodex · gpt-5.6-sol · medium');
     await bot.handle(message('/worker 1 gpt-6-astra max'));
@@ -151,18 +152,30 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(lastText()).not.toContain('Queue task 10');
     await bot.handle(click(`dad:queue:${group.id}:1`));
     expect(lastText()).toContain('Task queue · 2/2\n\nQueue task 10');
+    const tenth = f.store.tasks(group.id).find((task) => task.title === 'Queue task 10')!;
+    const openTenth = `dad:task:${tenth.id}:1`;
     const lastCard = sent.filter(({ method }) => method === 'sendMessage').at(-1)?.body;
     expect(lastCard?.reply_markup).toMatchObject({
       inline_keyboard: [
-        [
-          {
-            callback_data: `dad:task:${f.store.tasks(group.id).find((task) => task.title === 'Queue task 10')!.id}`,
-          },
-        ],
+        [{ callback_data: openTenth }],
         [{ callback_data: `dad:queue:${group.id}:0` }],
         [{ callback_data: `dad:open:${group.id}` }],
       ],
     });
+    await bot.handle(click(openTenth));
+    expect(lastText()).toContain(`${taskReference(tenth)}  Queue task 10`);
+    const detailCard = sent.filter(({ method }) => method === 'sendMessage').at(-1)?.body;
+    const backToQueue = `dad:queue:${group.id}:1`;
+    expect(detailCard?.reply_markup).toMatchObject({
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([expect.objectContaining({ callback_data: backToQueue })]),
+      ]),
+    });
+    await bot.handle(click(backToQueue));
+    expect(lastText()).toContain('Task queue · 2/2\n\nQueue task 10');
+    f.store.saveTask({ ...tenth, state: 'complete' });
+    await bot.handle(click(backToQueue));
+    expect(lastText()).toContain('Task queue\n\nFix search');
 
     const configured = await app.inject({
       method: 'POST',
@@ -172,6 +185,26 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(configured.statusCode).toBe(200);
     await bot.handle(message('/workers'));
     expect(lastText()).toContain('Worker 1 · codex · gpt-5.6-sol · medium\nFree');
+
+    const started = (minutes: number) =>
+      new Date(Date.now() - (minutes * 60 + 20) * 1000).toISOString();
+    const [firstRun] = f.store.jobs(task!.id);
+    f.store.saveJob({ ...firstRun!, status: 'completed', startedAt: started(90) });
+    const reviewing = { ...task!, state: 'reviewing', generation: task!.generation + 1 } as const;
+    f.store.saveTask(reviewing);
+    const review = f.store.enqueue(reviewing, 'reviewer', 'review', '');
+    f.store.saveJob({ ...review, status: 'running', startedAt: started(5) });
+    await bot.handle(message('/queue'));
+    expect(lastText()).toContain(
+      'Reviewing the changes · 90 min since work began\nShared reviewer · 5 min elapsed · Requested author worker 2',
+    );
+    f.store.saveJob({ ...review, status: 'completed', startedAt: started(5) });
+    for (const state of ['awaiting_checks', 'awaiting_merge', 'needs_input', 'paused'] as const) {
+      f.store.saveTask({ ...reviewing, state });
+      await bot.handle(message('/queue'));
+      expect(lastText()).toContain('90 min since work began');
+      expect(lastText()).not.toContain('5 min elapsed');
+    }
   } finally {
     await app.close();
     await bot.stop();
@@ -189,10 +222,10 @@ it('shows the current run time and keeps status details on their own line', () =
     workerRequest: { slot: 2 },
   } as Task;
   const job = { status: 'running', role: 'author', startedAt: '2026-11-25T12:00:00Z' } as Job;
-  const card = queueCard('ru', 'session', [{ task, job, assignedWorker: 2 }], 0, now);
+  const card = queueCard('ru', 'session', [{ task, job, assignedWorker: 2 }], { now });
   expect(card.text).toBe(
     'Очередь задач\n\nПочинить поиск\n' +
-      'DADDY-12345678 · Конфликт слияния · Воркер 2 · 4 мин с запуска\n' +
+      'DADDY-12345678 · Конфликт слияния\nВоркер 2 · 4 мин с запуска\n' +
       'Воркер разрешает конфликт слияния',
   );
   expect(
@@ -206,7 +239,72 @@ it('shows the current run time and keeps status details on their own line', () =
     ['code', 'DADDY-12345678'],
     ['italic', 'Воркер разрешает конфликт слияния'],
   ]);
-  const waiting = queueCard('en', 'session', [{ task, job: { ...job, status: 'queued' } }], 0, now);
-  expect(waiting.text).toContain('Merge conflict · Requested worker 2\n');
+  const waiting = queueCard('en', 'session', [{ task, job: { ...job, status: 'queued' } }], {
+    now,
+  });
+  expect(waiting.text).toContain('Waiting for a worker\nRequested worker 2\n');
   expect(waiting.text).not.toContain('elapsed');
 });
+
+it.each([
+  [
+    'en',
+    'Waiting to start',
+    'Waiting for GitHub quota',
+    'Syncing the GitHub draft',
+    'Checking GitHub auto-merge',
+    'Shared reviewer · 5 min elapsed',
+  ],
+  [
+    'ru',
+    'Ждёт запуска',
+    'Ждёт квоту GitHub',
+    'Сверяет черновик с GitHub',
+    'Проверяется автослияние PR',
+    'Общий ревьюер · 5 мин с запуска',
+  ],
+] as const)(
+  'shows the effective queue status and the current reviewer in %s',
+  (locale, assigned, quota, sync, merge, reviewer) => {
+    const now = Date.parse('2026-11-25T12:05:30Z');
+    const task = { id: randomUUID(), title: 'Search', state: 'implementing', reason: '' } as Task;
+    const job = { status: 'queued', role: 'author' } as Job;
+    const render = (item: Parameters<typeof queueCard>[2][number]) =>
+      queueCard(locale, 'session', [item], { now }).text;
+    const line = taskReference(task) + ' · ';
+    expect(render({ task, job, assignedWorker: 2 })).toContain(line + assigned + '\n');
+    expect(
+      render({ task, job, mergeStatus: 'Waiting for GitHub API quota until 12:34 UTC' }),
+    ).toContain(line + quota + '\n');
+    expect(
+      render({
+        task: {
+          ...task,
+          state: 'needs_input',
+          reason:
+            'Waiting to confirm the GitHub draft or its target branch before restarting review.',
+        },
+      }),
+    ).toContain(line + sync);
+    expect(
+      render({
+        task: { ...task, state: 'complete', pr: { state: 'open' } as Task['pr'] },
+        mergeStatus: 'Checking GitHub auto-merge',
+      }),
+    ).toContain(line + merge);
+    const reviewJob = {
+      ...job,
+      status: 'running',
+      role: 'reviewer',
+      startedAt: '2026-11-25T12:00:00Z',
+    } as const;
+    const reviewingTask = { ...task, state: 'reviewing' } as const;
+    for (const item of [
+      { task: reviewingTask },
+      { task: reviewingTask, assignedWorker: 2 },
+      { task: { ...reviewingTask, workerRequest: { slot: 2 } } },
+    ]) {
+      expect(render({ ...item, job: reviewJob })).toContain('\n' + reviewer);
+    }
+  },
+);

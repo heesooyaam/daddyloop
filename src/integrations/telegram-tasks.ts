@@ -13,7 +13,6 @@ import {
   outstandingActivity,
   profileText,
   taskReference,
-  taskStatus,
   type TaskActivity,
 } from '../core/task-activity.js';
 import { translator, type Locale } from '../i18n/index.js';
@@ -73,24 +72,73 @@ export function parseWorkerInput(args: string) {
   }
 }
 
-function taskButton(task: Task) {
-  return { text: taskReference(task), callback_data: `dad:task:${task.id}` };
+function taskButton(task: Task, page = 0) {
+  return {
+    text: taskReference(task),
+    callback_data: `dad:task:${task.id}${page ? `:${page}` : ''}`,
+  };
 }
 
-export function queueButtons(groupId: string, locale: Locale) {
+export function queueButtons(groupId: string, locale: Locale, page = 0) {
   const t = translator(locale);
   return [
-    { text: t('Task queue'), callback_data: `dad:queue:${groupId}` },
+    { text: t('Task queue'), callback_data: `dad:queue:${groupId}${page ? `:${page}` : ''}` },
     { text: t('Workers'), callback_data: `dad:workers:${groupId}` },
   ];
+}
+
+function queueStatus(item: TaskActivity) {
+  const { task, job, assignedWorker, mergeStatus } = item;
+  const label = activityStatus(item);
+  if (mergeStatus) {
+    if (label.startsWith('Waiting for GitHub API quota until '))
+      return { label: 'Waiting for GitHub quota', detail: label };
+    if (label === 'Draft PR: mark it ready for review on GitHub')
+      return { label: 'Action needed', detail: label };
+    if (label !== 'Checking GitHub auto-merge' && label !== 'Merged on GitHub')
+      return { label: 'GitHub auto-merge', detail: label };
+    return { label };
+  }
+  if (task.state === 'needs_input') {
+    if (
+      label === 'Checking the GitHub draft' ||
+      task.reason ===
+        'Waiting to confirm the GitHub draft or its target branch before restarting review.'
+    )
+      return { label: 'Syncing the GitHub draft' };
+    return { label: 'Action needed', detail: label === 'Action needed' ? task.reason : label };
+  }
+  if (task.state === 'paused') return { label: 'Paused' };
+  if (task.state === 'fixing' && task.fixingMergeConflict) {
+    if (job?.status === 'running') return { label: 'Merge conflict', detail: label };
+    return {
+      label: assignedWorker === undefined ? 'Waiting for a worker' : 'Waiting to start',
+      detail: label,
+    };
+  }
+  if (assignedWorker !== undefined && job?.role === 'author' && job.status === 'queued')
+    return { label: 'Waiting to start' };
+  return { label };
+}
+
+function elapsedMinutes(startedAt: string | undefined, now: number) {
+  const minutes = Math.floor((now - Date.parse(startedAt ?? '')) / 60_000);
+  return Number.isFinite(minutes) ? Math.max(0, minutes) : undefined;
 }
 
 export function queueCard(
   locale: Locale,
   groupId: string,
   activity: TaskActivity[],
-  requestedPage = 0,
-  now = Date.now(),
+  {
+    page: requestedPage = 0,
+    now = Date.now(),
+    firstStarts,
+  }: {
+    page?: number;
+    now?: number;
+    firstStarts?: ReadonlyMap<string, string>;
+  } = {},
 ): TelegramCard {
   const t = translator(locale);
   const tasks = activity.filter(outstandingActivity);
@@ -104,42 +152,47 @@ export function queueCard(
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
   for (const item of visible) {
     const { task, job, assignedWorker } = item;
-    const status = t(
-      task.state === 'fixing' && task.fixingMergeConflict
-        ? 'Merge conflict'
-        : taskStatus(task.state, job?.status === 'queued', job?.role),
-    );
-    const metadata = [status];
-    if (assignedWorker !== undefined)
-      metadata.push(t('Worker {number}', { number: assignedWorker }));
+    const { label, detail } = queueStatus(item);
+    const status = t(label);
+    const running = job?.status === 'running';
+    const reviewing = running && job.role === 'reviewer';
+    const run = [];
+    if (reviewing) run.push(t('Shared reviewer'));
+    else if (assignedWorker !== undefined)
+      run.push(t('Worker {number}', { number: assignedWorker }));
+    else if (running) run.push(t('Worker'));
     else if (task.workerRequest?.slot !== undefined)
-      metadata.push(t('Requested worker {number}', { number: task.workerRequest.slot }));
-    else if (job?.status === 'running' && job.role === 'reviewer')
-      metadata.push(t('Shared reviewer'));
-    if (job?.status === 'running' && job.startedAt) {
-      const minutes = Math.floor((now - Date.parse(job.startedAt)) / 60_000);
-      if (Number.isFinite(minutes))
-        metadata.push(minutes > 0 ? t('{minutes} min elapsed', { minutes }) : t('<1 min elapsed'));
-    }
+      run.push(t('Requested worker {number}', { number: task.workerRequest.slot }));
+    const runMinutes = running ? elapsedMinutes(job.startedAt, now) : undefined;
+    if (runMinutes !== undefined)
+      run.push(
+        runMinutes ? t('{minutes} min elapsed', { minutes: runMinutes }) : t('<1 min elapsed'),
+      );
+    if (reviewing && assignedWorker !== undefined)
+      run.push(t('Author worker {number}', { number: assignedWorker }));
+    else if (running && task.workerRequest?.slot !== undefined && assignedWorker === undefined)
+      run.push(t('Requested author worker {number}', { number: task.workerRequest.slot }));
+    const taskMinutes = elapsedMinutes(firstStarts?.get(task.id), now);
     text
       .add('\n\n')
       .add(clipTitle(task.title.replace(/\s+/g, ' ').trim(), 90), 'bold')
       .add('\n')
       .add(taskReference(task), 'code')
-      .add(' · ' + metadata.join(' · '));
-    const activityLabel = t(activityStatus(item));
-    const detail =
-      activityLabel !== status
-        ? activityLabel
-        : task.state === 'needs_input'
-          ? t(redact(task.reason))
-          : '';
-    const line = detail.replace(/\s+/g, ' ').trim();
+      .add(' · ' + status);
+    if (taskMinutes !== undefined)
+      text.add(
+        ' · ' +
+          (taskMinutes
+            ? t('{minutes} min since work began', { minutes: taskMinutes })
+            : t('<1 min since work began')),
+      );
+    if (run.length) text.add('\n' + run.join(' · '));
+    const line = detail ? t(redact(detail)).replace(/\s+/g, ' ').trim() : '';
     if (line && line !== status)
       text.add('\n').add(line.length > 140 ? clipTitle(line, 139) + '…' : line, 'italic');
   }
   for (let start = 0; start < visible.length; start += 3)
-    buttons.push(visible.slice(start, start + 3).map(({ task }) => taskButton(task)));
+    buttons.push(visible.slice(start, start + 3).map(({ task }) => taskButton(task, page)));
   const pages = [];
   if (page > 0)
     pages.push({ text: t('Previous page'), callback_data: `dad:queue:${groupId}:${page - 1}` });
@@ -189,6 +242,7 @@ export function taskCard(
   item: TaskActivity,
   slot?: WorkerSlot,
   merge?: ReturnType<typeof import('../core/auto-merge.js').autoMergeSettings>,
+  queuePage = 0,
 ): TelegramCard {
   const t = translator(locale);
   const { task } = item;
@@ -205,7 +259,7 @@ export function taskCard(
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
-  const buttons = [queueButtons(task.groupId!, locale)];
+  const buttons = [queueButtons(task.groupId!, locale, queuePage)];
   if (merge) {
     text.add('\n\n' + t('Auto-merge GitHub PRs') + ' · ' + t(merge.enabled ? 'On' : 'Off'));
     if (merge.result && (merge.enabled || merge.result.state !== 'waiting'))
