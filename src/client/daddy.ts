@@ -65,6 +65,7 @@ export class DaddyClient {
   private sequence = 0;
   private messageRequests = new Map<string, { text: string; key: string; id: string }>();
   private creation?: { key: string; id: string };
+  private readonly createdSessionIds = new Set<string>();
   constructor(
     readonly api: DaddyApi,
     selected = '',
@@ -117,7 +118,9 @@ export class DaddyClient {
     await this.detail();
   }
   selectFromReference(reference: string) {
-    const id = resolveSessionId(this.value.sessions, reference);
+    const id = this.createdSessionIds.has(reference)
+      ? reference
+      : resolveSessionId(this.value.sessions, reference);
     if (id && id !== this.value.selected) void this.select(id);
   }
   private async detail() {
@@ -151,6 +154,7 @@ export class DaddyClient {
           this.api<DaddyStatus>('/status', undefined, this.controller.signal),
         ]);
         if (!current()) return;
+        this.createdSessionIds.clear();
         const selected = resolveSessionId(sessions, this.value.selected) ?? sessions[0]?.id ?? '';
         if (selected !== this.value.selected) this.sequence++;
         this.update({
@@ -232,7 +236,7 @@ export class DaddyClient {
     title?: string,
     repository?: RepositorySelection,
     instructions?: SessionInstructions,
-    selectOnSuccess: () => boolean = () => true,
+    options: { onCreated?: () => void; selectOnSuccess?: () => boolean } = {},
   ) {
     if (this.value.busy) return;
     const input = {
@@ -252,10 +256,12 @@ export class DaddyClient {
         this.controller.signal,
       );
       this.creation = undefined;
+      this.createdSessionIds.add(board.group.id);
       // A session list requested before creation may omit the new session.
       this.refreshGeneration++;
       this.refreshPending = undefined;
-      if (selectOnSuccess()) await this.select(board.group.id);
+      options.onCreated?.();
+      if (options.selectOnSuccess?.() ?? true) await this.select(board.group.id);
       await this.refresh();
       return board.group.id;
     } catch (error) {

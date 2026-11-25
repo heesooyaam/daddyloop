@@ -1,6 +1,13 @@
 import { sameAgentProfile } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';
 import { flushSync } from 'react-dom';
 import Markdown from 'react-markdown';
@@ -84,11 +91,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   const [tasksCollapsed, setTasksCollapsed] = useState(false);
   const [deleteTarget, setDeleteTarget] =
     useState<Pick<DaddyBoard['group'], 'id' | 'generation' | 'title'>>();
-  const historyVersion = useRef(0);
+  const formVersion = useRef(0);
   const [model] = useState(() => new DaddyClient(api, sessionFromHash()));
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot),
     board = state.board;
-  const [modal, setModal] = useState<
+  const [modal, updateModal] = useState<
       | 'new'
       | 'workspaces'
       | 'settings'
@@ -102,6 +109,10 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     >(null),
     [menu, setMenu] = useState(false),
     [pane, setPane] = useState<'chat' | 'tasks'>('chat');
+  const setModal = useCallback((next: typeof modal) => {
+    formVersion.current++;
+    updateModal(next);
+  }, []);
   const [narrowLayout, setNarrowLayout] = useState(() => matchMedia(sidebarMedia).matches);
   const menuButton = useRef<HTMLButtonElement>(null);
   const firstMenuItem = useRef<HTMLButtonElement>(null);
@@ -140,7 +151,6 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
   useEffect(() => {
     const syncPage = () => {
       const id = sessionFromHash();
-      historyVersion.current++;
       flushSync(() => {
         setModal(null);
         setDeleteTarget(undefined);
@@ -153,7 +163,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     };
     window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
-  }, [model]);
+  }, [model, setModal]);
   useEffect(() => {
     // Keep the limits history entry tied to its original chat while a new session is selected.
     if (!isLimitsPage() && location.hash !== sessionHash)
@@ -202,6 +212,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     setPane('chat');
   };
   const choose = (id: string) => {
+    setModal(null);
+    setReturnToNew(false);
     openChat(id);
     void model.select(id);
   };
@@ -210,6 +222,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       return;
     event.preventDefault();
     if (event.currentTarget.href !== location.href) {
+      setModal(null);
+      setReturnToNew(false);
       history.pushState(null, '', event.currentTarget.href);
       model.selectFromReference(sessionFromHash());
     }
@@ -225,8 +239,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
     }
   };
   const paused = board?.group.daddyState === 'paused';
-  const currentHistoryVersion = historyVersion.current;
-  const isCurrentHistory = () => currentHistoryVersion === historyVersion.current;
+  const currentFormVersion = formVersion.current;
+  const isCurrentForm = (sessionId = state.selected) =>
+    currentFormVersion === formVersion.current && model.snapshot().selected === sessionId;
   const sessionsToggleLabel = t(sessionsCollapsed ? 'Show sessions panel' : 'Hide sessions panel');
   const tasksToggleLabel = t(
     tasksCollapsed ? 'Show workers and tasks panel' : 'Hide workers and tasks panel',
@@ -839,16 +854,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onDraft={setNewDraft}
             api={model.api}
             onCreate={async (workspaceId, message, title, repository, instructions) => {
-              const id = await model.create(
-                workspaceId,
-                message,
-                title,
-                repository,
-                instructions,
-                isCurrentHistory,
-              );
-              if (!id || !isCurrentHistory()) return;
-              setNewDraft({});
+              const id = await model.create(workspaceId, message, title, repository, instructions, {
+                onCreated: () => setNewDraft((draft) => (draft === newDraft ? {} : draft)),
+                selectOnSuccess: isCurrentForm,
+              });
+              if (!id || !isCurrentForm(id)) return;
               setModal(null);
               openChat(id);
             }}
@@ -869,7 +879,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             workspaces={state.workspaces}
             onSaved={async (workspace) => {
               await model.refresh();
-              if (returnToNew && isCurrentHistory()) {
+              if (returnToNew && isCurrentForm()) {
                 setNewDraft((draft) => ({
                   ...draft,
                   workspaceId: workspace.id,
@@ -899,7 +909,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 },
                 board.group.id,
               );
-              if (isCurrentHistory() && !model.snapshot().error) setModal(null);
+              if (isCurrentForm() && !model.snapshot().error) setModal(null);
             }}
           />
         </Dialog>
@@ -911,7 +921,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             onQueued={(taskId) => {
-              if (isCurrentHistory()) {
+              if (isCurrentForm()) {
                 setModal(null);
                 setInspect(taskId);
               }
