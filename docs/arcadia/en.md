@@ -4,16 +4,21 @@
 
 Arc, Arcanum CLI and the corporate lease helper must be installed and authenticated on the server.
 
-The newest published release, [v0.20.3](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.3), predates the [setup fixes from PR #37](https://github.com/heesooyaam/daddyloop/pull/37). To use this guide today, build from a verified source revision containing those fixes. In that checkout, use Node 24, run `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --include=dev` and `npm run build`, and use `scripts/daddy.mjs` from that checkout as `daddy`. If you already use a source wrapper, keep it and update the checkout it runs.
+The newest published release, [v0.20.3](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.3), predates the [setup fixes from PR #37](https://github.com/heesooyaam/daddyloop/pull/37). To use this guide today, build from a verified source revision containing both those setup fixes and the [fix for launching executable lease helpers with their own interpreter](https://github.com/heesooyaam/daddyloop/pull/128). In that checkout, use Node 24, run `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --include=dev` and `npm run build`, and use `scripts/daddy.mjs` from that checkout as `daddy`. If you already use a source wrapper, keep it and update the checkout it runs.
 
-For an existing managed installation, wait for a [release](https://github.com/heesooyaam/daddyloop/releases) that includes the setup fixes. Then pause work, set `release_tag` to that release's actual tag, and use the full current module list plus `arcadia`. For example, for an installation with Codex and GitHub:
+For an existing managed installation, wait for a [release](https://github.com/heesooyaam/daddyloop/releases) that includes both fixes. Then pause work, set `release_tag` to that release's actual tag, and use the full current module list plus `arcadia`. For example, for an installation with Codex and GitHub:
 
 ```bash
-curl -fsSL "https://github.com/heesooyaam/daddyloop/releases/download/${release_tag:?set a supported release tag}/install.sh" \
-  | bash -s -- --no-setup --modules codex,github,arcadia
+(
+  installer="$(mktemp)" || exit 1
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL "https://github.com/heesooyaam/daddyloop/releases/download/${release_tag:?set a supported release tag}/install.sh" \
+    -o "$installer" &&
+    bash "$installer" --no-setup --modules codex,github,arcadia
+)
 ```
 
-For either installation path, enable the complete module set without restarting the service:
+After successfully building from source or running the installer, enable the complete module set without restarting the service:
 
 ```bash
 daddy init --yes --no-service --modules codex,github,arcadia

@@ -4,16 +4,21 @@
 
 На сервере должны быть установлены и авторизованы Arc, Arcanum CLI и корпоративный helper для аренды копий.
 
-Последний опубликованный выпуск [v0.20.3](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.3) вышел до [исправлений setup из PR #37](https://github.com/heesooyaam/daddyloop/pull/37). Для подключения по этой инструкции сейчас собери проверенную ревизию исходников с этими исправлениями. В каталоге исходников используй Node 24, выполни `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --include=dev` и `npm run build` и запускай `scripts/daddy.mjs` из этого каталога как `daddy`. Если уже есть пользовательский скрипт запуска из исходников, сохрани его и обнови исходники, которые он запускает.
+Последний опубликованный выпуск [v0.20.3](https://github.com/heesooyaam/daddyloop/releases/tag/v0.20.3) вышел до [исправлений setup из PR #37](https://github.com/heesooyaam/daddyloop/pull/37). Для подключения по этой инструкции сейчас собери проверенную ревизию исходников, в которую вошли и исправления setup, и [исправление запуска исполняемых обработчиков аренды с собственным интерпретатором](https://github.com/heesooyaam/daddyloop/pull/128). В каталоге исходников используй Node 24, выполни `ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --include=dev` и `npm run build` и запускай `scripts/daddy.mjs` из этого каталога как `daddy`. Если уже есть пользовательский скрипт запуска из исходников, сохрани его и обнови исходники, которые он запускает.
 
-Для существующей управляемой установки дождись [выпуска](https://github.com/heesooyaam/daddyloop/releases), содержащего исправления setup. Затем приостанови работу, запиши фактический тег этого выпуска в `release_tag` и передай установщику полный список текущих модулей плюс `arcadia`. Например, для установки с Codex и GitHub:
+Для существующей управляемой установки дождись [выпуска](https://github.com/heesooyaam/daddyloop/releases) с обоими исправлениями. Затем приостанови работу, запиши фактический тег этого выпуска в `release_tag` и передай установщику полный список текущих модулей плюс `arcadia`. Например, для установки с Codex и GitHub:
 
 ```bash
-curl -fsSL "https://github.com/heesooyaam/daddyloop/releases/download/${release_tag:?укажи тег подходящего выпуска}/install.sh" \
-  | bash -s -- --no-setup --modules codex,github,arcadia
+(
+  installer="$(mktemp)" || exit 1
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fsSL "https://github.com/heesooyaam/daddyloop/releases/download/${release_tag:?укажи тег подходящего выпуска}/install.sh" \
+    -o "$installer" &&
+    bash "$installer" --no-setup --modules codex,github,arcadia
+)
 ```
 
-В обоих случаях включи полный набор модулей без перезапуска службы:
+После успешной сборки из исходников или запуска установщика включи полный набор модулей без перезапуска службы:
 
 ```bash
 daddy init --yes --no-service --modules codex,github,arcadia

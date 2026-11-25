@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { registerOperations } from '../src/ops/commands.js';
 import { loadConfig, saveConfig } from '../src/ops/config.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
@@ -187,6 +187,58 @@ fi
     }
   },
 );
+
+it('resolves a symlink before traversing the parent of a lease helper path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+  try {
+    const target = join(directory, 'target');
+    mkdirSync(join(target, 'bin'), { recursive: true });
+    symlinkSync(join(target, 'bin'), join(directory, 'current'));
+    writeFileSync(join(directory, 'helper'), '#!/bin/sh\nexit 7\n', { mode: 0o700 });
+    const response = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/target-pool' }] },
+    });
+    writeFileSync(
+      join(target, 'helper'),
+      `#!/usr/bin/env node\nconsole.log(${JSON.stringify(response)});\n`,
+      {
+        mode: 0o700,
+      },
+    );
+    const bridge = new ArcBridge(directory, `${directory}/current/../helper`);
+    await expect(bridge.mounts()).resolves.toMatchObject([{ path: '/target-pool' }]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('skips directories in PATH when looking for a named lease helper', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-helper-'));
+  try {
+    const name = 'fixture-arcadia-mount-lease';
+    const first = join(directory, 'first');
+    const second = join(directory, 'second');
+    mkdirSync(join(first, name), { recursive: true });
+    mkdirSync(second);
+    const response = JSON.stringify({
+      status: 'success',
+      data: { mounts: [{ path: '/path-pool' }] },
+    });
+    const script = join(directory, 'helper');
+    writeFileSync(script, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(response)});\n`, {
+      mode: 0o700,
+    });
+    symlinkSync(script, join(second, name));
+    vi.stubEnv('PATH', [first, second, process.env.PATH].join(delimiter));
+    await expect(new ArcBridge(directory, name).mounts()).resolves.toMatchObject([
+      { path: '/path-pool' },
+    ]);
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 it('validates helper config before the first session journal exists', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'daddyloop-arcadia-config-'));
