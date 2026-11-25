@@ -34,6 +34,25 @@ describe('Arcadia host authentication', () => {
     }
   });
 
+  it.each([false, true])(
+    'uses nonblank ARC_OAUTH_TOKEN when ARC_TOKEN is whitespace (file: %s)',
+    (withFile) => {
+      const home = mkdtempSync(join(tmpdir(), 'daddyloop-arc-env-auth-'));
+      try {
+        if (withFile) {
+          mkdirSync(join(home, '.arc'));
+          writeFileSync(join(home, '.arc/token'), 'fixture-file-token\n', { mode: 0o600 });
+        }
+        process.env.HOME = home;
+        process.env.ARC_TOKEN = '  \n ';
+        process.env.ARC_OAUTH_TOKEN = ' fixture-oauth-token \n';
+        expect(credential('arcadia', 'a.yandex-team.ru')).toBe('fixture-oauth-token');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('reports the missing Arcanum CLI before attempting a review request', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'daddyloop-missing-arcanum-'));
     const original = loadConfig();

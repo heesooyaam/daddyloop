@@ -48,7 +48,9 @@ export function credential(provider: ProviderName, host: string): string {
         422,
       );
     const files = [join(homedir(), '.tokens/arcadia'), join(homedir(), '.arc/token')],
-      token = (process.env.ARC_TOKEN || process.env.ARC_OAUTH_TOKEN)?.trim();
+      token = [process.env.ARC_TOKEN, process.env.ARC_OAUTH_TOKEN]
+        .map((value) => value?.trim())
+        .find((value) => value);
     if (token) return rememberSecret(token);
     for (const path of files)
       if (existsSync(path)) {
