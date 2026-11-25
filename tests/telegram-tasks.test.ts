@@ -10,6 +10,7 @@ import { registerDaddy } from '../src/server/daddy.js';
 import { draftSyncPending, taskReference } from '../src/core/task-activity.js';
 import { githubActivityStatus } from '../src/core/auto-merge.js';
 import { queueCard } from '../src/integrations/telegram-tasks.js';
+import { translate } from '../src/i18n/index.js';
 import type { Job, Task } from '../src/core/types.js';
 
 it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
@@ -83,7 +84,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(lastText()).toContain(`Fix search\n${id} · Waiting for a worker\nRequested worker 2`);
     expect(lastText()).not.toContain('since work began');
     await bot.handle(message(`/task ${id}`));
-    expect(lastText()).toContain('Worker 2\ncodex · gpt-5.6-sol · medium');
+    expect(lastText()).toContain('Requested worker 2\ncodex · gpt-5.6-sol · medium');
     await bot.handle(message('/worker 1 gpt-6-astra max'));
     await bot.handle(message('/workers'));
     expect(lastText()).toContain('Worker 1 · codex · gpt-6-astra · max\nFree');
@@ -233,11 +234,13 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         key: 'github.quota:',
         setting: { until, delay: 60_000 },
         expected: 'Waiting for GitHub quota',
+        reason: 'Waiting for GitHub API quota until',
       },
       {
         key: 'github.read-backoff:',
         setting: { until, delay: 60_000, status: 503 },
         expected: 'GitHub HTTP 503',
+        reason: 'GitHub HTTP 503',
       },
     ]) {
       const key = backoff.key + task!.ref.host;
@@ -253,16 +256,33 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         expect(lastText()).toContain(`${id} · ${backoff.expected}`);
         expect(lastText()).toContain('UTC');
         expect(lastText()).not.toContain('since work began');
+        await bot.handle(click(`dad:task:${task!.id}`));
+        expect(lastText()).toContain(`Fix search\n${backoff.expected}`);
+        expect(lastText()).toContain(backoff.reason);
+        expect(lastText()).toContain('UTC');
       }
+      setLocale(f.store, 'ru');
+      const waiting = translate('ru', backoff.expected);
+      await bot.handle(message('/queue'));
+      expect(lastText()).toContain(`${id} · ${waiting}`);
+      await bot.handle(click(`dad:task:${task!.id}`));
+      expect(lastText()).toContain(`Fix search\n${waiting}`);
+      expect(lastText()).toContain('UTC');
+      setLocale(f.store, 'en');
       f.store.saveTask(discussing);
       f.store.saveJob({ ...chat!, status: 'running', startedAt: started(95) });
       await bot.handle(message('/queue'));
       expect(lastText()).toContain(`${id} · Task discussion in progress · 95 min since work began`);
+      await bot.handle(click(`dad:task:${task!.id}`));
+      expect(lastText()).toContain('Fix search\nTask discussion in progress\nWorker');
       f.store.saveJob(chat!);
       f.store.setSetting(key, null);
     }
     f.store.saveJob({ ...chat!, status: 'completed', startedAt: started(95) });
     f.store.saveJob({ ...firstRun!, status: 'completed', startedAt: started(90) });
+    for (const item of f.store.tasks(group.id))
+      if (item.id !== task!.id && item.id !== webTask.id)
+        f.store.saveTask({ ...item, state: 'complete' });
     const reviewing = { ...task!, state: 'reviewing', generation: task!.generation + 1 } as const;
     f.store.saveTask(reviewing);
     const review = f.store.enqueue(reviewing, 'reviewer', 'review', '');
@@ -272,6 +292,25 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(lastText()).toContain(
       'Reviewing the changes · 95 min since work began\nShared reviewer · 5 min elapsed · Requested author worker 2',
     );
+    for (const locale of ['en', 'ru'] as const) {
+      setLocale(f.store, locale);
+      const stage = translate(locale, 'Reviewing the changes');
+      const reviewer = translate(locale, 'Shared reviewer');
+      const author = translate(locale, 'Requested author worker {number}', { number: 2 });
+      await bot.handle(message('/queue'));
+      expect(lastText()).toContain(`${id} · ${stage}`);
+      expect(lastText()).toContain(reviewer);
+      expect(lastText()).toContain(author);
+      await bot.handle(click(`dad:task:${task!.id}`));
+      expect(lastText()).toContain(`Fix search\n${stage}\n${reviewer} · `);
+      expect(lastText()).toContain(author);
+      await bot.handle(message('/status'));
+      expect(lastText()).toContain(`${id} Fix search · ${stage}`);
+    }
+    expect((await app.inject(session)).json().tasks).toContainEqual(
+      expect.objectContaining({ id: task!.id, statusLabel: 'Reviewing the changes' }),
+    );
+    setLocale(f.store, 'en');
     f.store.setSetting('github.quota:' + task!.ref.host, null);
     f.store.saveJob({ ...review, status: 'completed', startedAt: started(5) });
     for (const state of ['awaiting_checks', 'awaiting_merge', 'needs_input', 'paused'] as const) {

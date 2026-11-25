@@ -369,6 +369,7 @@ export interface Job {
   turnId?: string;
   error?: string;
   startedAt?: string;
+  firstStartedAt?: string;
   finishedAt?: string;
   createdAt: string;
   actionId?: string;

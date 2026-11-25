@@ -237,7 +237,7 @@ export class Daddy {
           title: task.title,
           state: task.state,
           statusLabel:
-            githubActivityStatus(task, autoMerge, githubBackoff(this.store, task.ref)) ??
+            githubActivityStatus(task, autoMerge, githubBackoff(this.store, task.ref), item.job) ??
             activityStatus(item),
           autoMerge,
           reason: task.reason,

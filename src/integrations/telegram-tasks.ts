@@ -90,9 +90,8 @@ export function queueButtons(groupId: string, locale: Locale, page = 0) {
 
 function queueStatus(item: TaskActivity) {
   const { task, job, assignedWorker, mergeStatus } = item;
-  if (job?.kind === 'chat' && job.status === 'running')
-    return { label: 'Task discussion in progress' };
   const label = activityStatus(item);
+  if (label === 'Task discussion in progress') return { label };
   const detail = queueDetail(task);
   if (mergeStatus) {
     if (label.startsWith('Waiting for GitHub API quota until '))
@@ -127,6 +126,28 @@ function elapsedMinutes(startedAt: string | undefined, now: number) {
   return Number.isFinite(minutes) ? Math.max(0, minutes) : undefined;
 }
 
+function taskRunLine(t: ReturnType<typeof translator>, item: TaskActivity, now: number) {
+  const { task, job, assignedWorker } = item;
+  const running = job?.status === 'running';
+  const reviewing = running && job.role === 'reviewer';
+  const requestedWorker = task.workerRequest?.slot;
+  const parts = [];
+  if (reviewing) parts.push(t('Shared reviewer'));
+  else if (assignedWorker !== undefined)
+    parts.push(t('Worker {number}', { number: assignedWorker }));
+  else if (running) parts.push(t('Worker'));
+  else if (requestedWorker !== undefined)
+    parts.push(t('Requested worker {number}', { number: requestedWorker }));
+  const minutes = running ? elapsedMinutes(job.startedAt, now) : undefined;
+  if (minutes !== undefined)
+    parts.push(minutes ? t('{minutes} min elapsed', { minutes }) : t('<1 min elapsed'));
+  if (reviewing && assignedWorker !== undefined)
+    parts.push(t('Author worker {number}', { number: assignedWorker }));
+  else if (running && requestedWorker !== undefined && assignedWorker === undefined)
+    parts.push(t('Requested author worker {number}', { number: requestedWorker }));
+  return parts.join(' · ');
+}
+
 export function queueCard(
   locale: Locale,
   groupId: string,
@@ -153,27 +174,10 @@ export function queueCard(
   const buttons: NonNullable<TelegramCard['buttons']> = [];
   if (!tasks.length) text.add('\n\n' + t('No unfinished tasks.'));
   for (const item of visible) {
-    const { task, job, assignedWorker } = item;
+    const { task } = item;
     const { label, detail } = queueStatus(item);
     const status = t(label);
-    const running = job?.status === 'running';
-    const reviewing = running && job.role === 'reviewer';
-    const run = [];
-    if (reviewing) run.push(t('Shared reviewer'));
-    else if (assignedWorker !== undefined)
-      run.push(t('Worker {number}', { number: assignedWorker }));
-    else if (running) run.push(t('Worker'));
-    else if (task.workerRequest?.slot !== undefined)
-      run.push(t('Requested worker {number}', { number: task.workerRequest.slot }));
-    const runMinutes = running ? elapsedMinutes(job.startedAt, now) : undefined;
-    if (runMinutes !== undefined)
-      run.push(
-        runMinutes ? t('{minutes} min elapsed', { minutes: runMinutes }) : t('<1 min elapsed'),
-      );
-    if (reviewing && assignedWorker !== undefined)
-      run.push(t('Author worker {number}', { number: assignedWorker }));
-    else if (running && task.workerRequest?.slot !== undefined && assignedWorker === undefined)
-      run.push(t('Requested author worker {number}', { number: task.workerRequest.slot }));
+    const run = taskRunLine(t, item, now);
     const taskMinutes = elapsedMinutes(firstStarts?.get(task.id), now);
     text
       .add('\n\n')
@@ -188,7 +192,7 @@ export function queueCard(
             ? t('{minutes} min since work began', { minutes: taskMinutes })
             : t('<1 min since work began')),
       );
-    if (run.length) text.add('\n' + run.join(' · '));
+    if (run) text.add('\n' + run);
     const line = detail ? t(redact(detail)).replace(/\s+/g, ' ').trim() : '';
     if (line && line !== status)
       text.add('\n').add(line.length > 140 ? clipTitle(line, 139) + '…' : line, 'italic');
@@ -247,16 +251,25 @@ export function taskCard(
   queuePage = 0,
 ): TelegramCard {
   const t = translator(locale);
-  const { task } = item;
-  const worker = slot?.number ?? task.workerRequest?.slot;
-  const profile = slot ? task.agents?.worker : task.workerRequest?.profile;
+  const { task, job } = item;
+  const { label, detail } = queueStatus(item);
+  const status = t(label);
+  const run = taskRunLine(t, item, Date.now());
+  const profile =
+    job?.status === 'running'
+      ? (job.profile ?? (job.role === 'author' ? task.agents?.worker : undefined))
+      : slot
+        ? task.agents?.worker
+        : task.workerRequest?.profile;
   const text = new TelegramText()
     .add(taskReference(task), 'code')
     .add('  ' + task.title, 'bold')
-    .add('\n' + t(activityStatus(item)));
-  if (worker !== undefined) text.add('\n' + t('Worker {number}', { number: worker }));
+    .add('\n' + status);
+  if (run) text.add('\n' + run);
   if (profile) text.add('\n' + profileText(profile));
-  if (task.reason) text.add('\n\n' + clipTitle(t(redact(task.reason)), 1000));
+  const reason = detail ?? (job?.status !== 'running' && !item.mergeStatus ? task.reason : '');
+  const explanation = t(redact(reason)).trim();
+  if (explanation && explanation !== status) text.add('\n\n' + clipTitle(explanation, 1000));
   if (task.state === 'complete' && task.ref.kind === 'ticket' && task.summary)
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);

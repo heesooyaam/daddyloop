@@ -548,11 +548,12 @@ export class TelegramWorkspace {
     const [activity] = taskActivity(
       [task],
       this.store.activeJobs(taskId),
-      (t) =>
+      (t, job) =>
         githubActivityStatus(
           t,
           autoMergeSettings(this.store, group, t),
           githubBackoff(this.store, t.ref),
+          job,
         ),
       slots,
     );

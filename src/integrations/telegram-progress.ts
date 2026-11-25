@@ -74,11 +74,12 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
   const outstanding = taskActivity(
     [...tasks].reverse(),
     workers,
-    (task) =>
+    (task, job) =>
       githubActivityStatus(
         task,
         autoMergeSettings(store, group, task),
         githubBackoff(store, task.ref),
+        job,
       ),
     workerSlots(store, group),
   ).filter(outstandingActivity);

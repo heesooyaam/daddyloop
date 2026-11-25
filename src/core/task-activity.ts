@@ -76,6 +76,7 @@ export function queueDetail(task: Task): string | undefined {
     return task.reason;
 }
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
+  if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
   if (mergeStatus) return mergeStatus;
   if (task.state === 'submitting' && task.prLink?.retryAt && !task.prLink.ref)
     return `GitHub · retry at ${new Date(task.prLink.retryAt).toISOString().slice(11, 19)} UTC`;

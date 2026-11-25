@@ -239,12 +239,13 @@ export class Store {
     if (!taskIds.length) return new Map();
     const rows = this.db
       .prepare(
-        `SELECT jobs.task_id AS taskId, min(json_extract(jobs.data,'$.startedAt')) AS startedAt
+        `SELECT jobs.task_id AS taskId,
+                min(coalesce(json_extract(jobs.data,'$.firstStartedAt'),
+                             json_extract(jobs.data,'$.startedAt'))) AS startedAt
          FROM jobs
          WHERE jobs.task_id IN (${taskIds.map(() => '?').join(',')})
-           AND jobs.status!='queued'
-           AND json_extract(jobs.data,'$.startedAt') IS NOT NULL
-         GROUP BY jobs.task_id`,
+         GROUP BY jobs.task_id
+         HAVING startedAt IS NOT NULL`,
       )
       .all(...taskIds);
     return new Map(rows.map((row) => [String(row.taskId), String(row.startedAt)]));
@@ -282,7 +283,9 @@ export class Store {
           continue;
         job.status = 'running';
         onClaim?.(job);
-        job.startedAt = now();
+        const startedAt = now();
+        job.firstStartedAt ??= job.startedAt ?? startedAt;
+        job.startedAt = startedAt;
         this.saveJob(job);
         return job;
       }

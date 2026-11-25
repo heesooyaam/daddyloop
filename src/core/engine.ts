@@ -2560,6 +2560,7 @@ export class Engine {
       profile,
       status: 'queued',
       startedAt: undefined,
+      firstStartedAt: undefined,
       finishedAt: undefined,
       threadId: undefined,
       turnId: undefined,
