@@ -322,3 +322,40 @@ it.each(['review', 'publication'] as const)(
     }
   },
 );
+
+it.each([true, false])(
+  'only repeats a review when a native tool operation remains unconfirmed (same retry: %s)',
+  async (same) => {
+    const f = await fixture({ state: 'queued' }),
+      runtime = new DemoRuntime();
+    const worker = new Worker(f.engine, new Workspaces('/tmp'), runtime, runtime, healthy, 0);
+    const run = vi.spyOn(runtime, 'run').mockImplementation(async (input) => {
+      const error = new GitHubQuotaError(Date.now() + 30000);
+      const call = vi.spyOn(f.engine.broker, 'call');
+      call.mockRejectedValueOnce(error);
+      await expect(
+        input.onTool('add_comment', { key: 'R1', body: 'First finding' }, 'first'),
+      ).rejects.toBe(error);
+      // This unrelated successful read does not confirm a write.
+      await input.onTool('read_review', {}, 'read');
+      await input.onTool(
+        'add_comment',
+        same ? { body: 'First finding', key: 'R1' } : { key: 'R2', body: 'Second finding' },
+        'retry',
+      );
+      return f.result();
+    });
+    try {
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.jobs(f.task.id).at(-1)?.finishedAt).toBeDefined());
+      expect(run).toHaveBeenCalledOnce();
+      const job = f.store.jobs(f.task.id).at(-1)!;
+      expect(job.status).toBe(same ? 'completed' : 'queued');
+      if (same) expect(f.store.getTask(f.task.id).state).toBe('awaiting_publication');
+      else expect(job.notBefore).toBeDefined();
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
