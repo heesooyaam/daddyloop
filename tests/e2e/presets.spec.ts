@@ -23,6 +23,7 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   for (const [name, daddy, worker] of [
     ['Brief fixture', 'Brief decisions.', 'Skip this worker prompt.'],
     ['Careful fixture', 'Explain the reason.', 'Check edge cases.'],
+    ['Extra fixture', 'Keep the extra context.', 'Check the extra context.'],
   ]) {
     await page.getByRole('button', { name: 'Create preset', exact: true }).click();
     await page.getByLabel('Preset name', { exact: true }).fill(name);
@@ -83,7 +84,26 @@ test('creates reusable presets, selects multiple sets and components, and keeps 
   await expect(
     settings.locator('.daddy-preset-choice strong').filter({ hasText: /Brief|Careful/ }),
   ).toHaveText(['Careful fixture', 'Brief fixture']);
-  await settings.getByRole('button', { name: 'Close', exact: true }).click();
+  await settings.getByRole('button', { name: 'Add presets', exact: true }).click();
+  await settings
+    .getByRole('button', {
+      name: 'Remove preset Careful fixture from this session',
+      exact: true,
+    })
+    .click();
+  await settings.getByRole('checkbox', { name: 'Use preset Extra fixture', exact: true }).check();
+  await settings.getByRole('checkbox', { name: 'Use preset Careful fixture', exact: true }).check();
+  await expect(
+    settings.locator('.daddy-preset-choice strong').filter({ hasText: /Brief|Careful|Extra/ }),
+  ).toHaveText(['Brief fixture', 'Extra fixture', 'Careful fixture']);
+  await settings.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(settings).toHaveCount(0);
+  selected = (await board(page)).group.instructions.presets;
+  expect(selected.map((entry: any) => entry.preset.name)).toEqual([
+    'Brief fixture',
+    'Extra fixture',
+    'Careful fixture',
+  ]);
   await page.getByRole('button', { name: 'Presets', exact: true }).click();
   await page.getByRole('button', { name: 'Edit preset Brief fixture', exact: true }).click();
   await page.getByRole('button', { name: 'daddy', exact: true }).click();

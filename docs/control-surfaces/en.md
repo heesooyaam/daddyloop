@@ -22,7 +22,7 @@ This page records current coverage. A check means that the capability is availab
 
 Telegram action buttons contain only a short-lived reference to service state. The saved reference binds the paired owner, chat, topic, session, task, revision and generation. The confirmation calls the same service method as the website. The coordinator’s ordinary reply never grants permission.
 
-Session, workspace, discovered repository, server folder, task and preset lists have in-chat page controls. Task cards render every reported CI check; safe private links stay attached to their corresponding check. These lists do not require a known item name, website or laptop to reach the final entry. Paging during `/new` or a private repository choice keeps the original chat route and typed request.
+Session, workspace, discovered repository, task and preset lists have in-chat page controls and do not require a known item name to reach the final entry. Server-folder browsing shows up to the first 150 entries returned by the service; when that result is truncated, Telegram says so and asks for a more specific `/repo` path. Task cards render every reported CI check, and safe private links stay attached to their corresponding check. Paging during `/new` or a private repository choice keeps the original chat route and typed request.
 
 The shared preset library can be browsed without selecting a session. Applying a preset remains bound to the session that produced the card; after a session switch the bot asks the user to reopen the library.
 

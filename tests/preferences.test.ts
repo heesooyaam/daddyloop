@@ -7,6 +7,12 @@ it('translates UI templates in both directions while preserving inserted content
   expect(translate('ru', 'Tasks')).toBe('Задачи');
   expect(translate('en', 'Задачи')).toBe('Tasks');
   expect(translate('ru', 'Round 2 of 5')).toBe('Раунд 2 из 5');
+  expect(
+    translate(
+      'ru',
+      'These instructions changed in another client. Review the latest value and try again.',
+    ),
+  ).toBe('Эти инструкции изменены в другом клиенте. Проверь актуальное значение и попробуй снова.');
   expect(translate('en', '✅ Задача завершена')).toBe('✅ Task complete');
   expect(
     translate('ru', '{v0}\n\nShared reviewer: {v1}\n\n{v2}', {

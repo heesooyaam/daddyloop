@@ -189,9 +189,22 @@ export function applyInstructionChanges(
     const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
     return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
   };
-  for (const change of changes) {
+  for (const change of changes.filter((change) => change.target !== 'preset-order')) {
     const actual = value(change);
     if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
+      throw new Error('instruction_conflict');
+  }
+  const order = changes.find((change) => change.target === 'preset-order');
+  if (order) {
+    const shared = order.before.filter((id) => order.after.includes(id)),
+      beforeShared = order.before.filter((id) => shared.includes(id)),
+      afterShared = order.after.filter((id) => shared.includes(id)),
+      actualShared = (value(order) as string[]).filter((id) => shared.includes(id));
+    if (
+      !sameValue(beforeShared, afterShared) &&
+      !sameValue(actualShared, beforeShared) &&
+      !sameValue(actualShared, afterShared)
+    )
       throw new Error('instruction_conflict');
   }
   for (const change of changes.filter((change) => change.target !== 'preset-order')) {
@@ -230,13 +243,16 @@ export function applyInstructionChanges(
       next[role].skills = change.after as SkillSnapshot[];
     else delete next[role].skills;
   }
-  const order = changes.find((change) => change.target === 'preset-order');
-  if (order && !sameValue(value(order), order.after)) {
+  if (order) {
+    const shared = order.before.filter((id) => order.after.includes(id)),
+      beforeShared = order.before.filter((id) => shared.includes(id)),
+      afterShared = order.after.filter((id) => shared.includes(id));
+    if (sameValue(beforeShared, afterShared)) return sessionInstructionsSchema.parse(next);
     const presets = next.presets ?? [],
       byId = new Map(presets.map((entry) => [entry.preset.id, entry]));
-    if (order.after.length !== presets.length || order.after.some((id) => !byId.has(id)))
-      throw new Error('instruction_conflict');
-    next.presets = order.after.map((id) => byId.get(id)!);
+    if (order.after.some((id) => !byId.has(id))) throw new Error('instruction_conflict');
+    const unknown = presets.filter((entry) => !order.after.includes(entry.preset.id));
+    next.presets = [...order.after.map((id) => byId.get(id)!), ...unknown];
   }
   return sessionInstructionsSchema.parse(next);
 }

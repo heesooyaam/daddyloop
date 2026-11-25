@@ -570,7 +570,7 @@ it('browses through a plain server directory before offering repository confirma
     directories: path
       ? [{ name: 'Nested repository', path: '/root/repo' }]
       : [{ name: 'Plain root', path: '/root' }],
-    truncated: false,
+    truncated: path === '/root',
   }));
   vi.spyOn(f.workspaces, 'selection').mockImplementation(async (workspace, input) => {
     if (input?.path === '/root') throw new Error('Not a repository');
@@ -611,9 +611,58 @@ it('browses through a plain server directory before offering repository confirma
     await bot.handle(click(button('Plain root').callback_data));
     expect(button('Nested repository')).toBeTruthy();
     expect(button('Use this folder once')).toBeUndefined();
+    expect(sent.at(-1).text).toContain('Only the first 150 folders are shown');
     await bot.handle(click(button('Nested repository').callback_data));
     expect(button('Use this folder once')).toBeTruthy();
     expect(sent.at(-1).text).toContain('/root/repo');
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+it('stores literal workspace defaults and clears them only with an explicit value', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  vi.spyOn(f.workspaces, 'register').mockImplementation(async (input, id) => {
+    const saved = {
+      ...f.workspace,
+      id: id ?? f.workspace.id,
+      scope: input.scope ?? '',
+      base: input.base,
+    };
+    f.store.saveWorkspace(saved);
+    return saved;
+  });
+  let id = 560;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  try {
+    await bot.handle(message(`/workspace ${f.workspace.id} base default`));
+    await bot.handle(message(`/workspace ${f.workspace.id} scope root`));
+    expect(f.workspaces.get(f.workspace.id)).toMatchObject({ base: 'default', scope: 'root' });
+    await bot.handle(message(`/workspace ${f.workspace.id} base clear`));
+    await bot.handle(message(`/workspace ${f.workspace.id} scope clear`));
+    expect(f.workspaces.get(f.workspace.id).base).toBeUndefined();
+    expect(f.workspaces.get(f.workspace.id).scope).toBe('');
+    await bot.handle(message(`/workspace ${f.workspace.id}`));
+    expect(sent.at(-1).text).toContain('Use clear to remove scope or base');
   } finally {
     await bot.stop();
     await f.close();

@@ -905,8 +905,12 @@ export const daddyRu: Record<string, string> = {
   Scope: 'Scope',
   'Base branch': 'Базовая ветка',
   'Working copies': 'Рабочие копии',
-  'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use root or default to clear scope or base.':
-    'Измени одно сохранённое значение командой /workspace <ID> name|path|scope|base|provider|copies <значение>. root и default очищают scope и базовую ветку.',
+  'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use clear to remove scope or base.':
+    'Измени одно сохранённое значение командой /workspace <ID> name|path|scope|base|provider|copies <значение>. clear очищает scope или базовую ветку.',
+  'Send /repo followed by the exact server path to continue.':
+    'Чтобы продолжить, отправь /repo с точным путём на сервере.',
+  'These instructions changed in another client. Review the latest value and try again.':
+    'Эти инструкции изменены в другом клиенте. Проверь актуальное значение и попробуй снова.',
   'Send a value to save.': 'Пришли значение для сохранения.',
   'Choose session or pool copy mode.': 'Выбери режим копий session или pool.',
   'Local instruction paths are accepted only in the paired private chat.':

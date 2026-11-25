@@ -2342,6 +2342,13 @@ export class TelegramWorkspace {
       ];
       if (navigation.length) buttons.push(navigation);
       if (pages > 1) title.add('\n' + this.t('Page {page} of {pages}', { page: page + 1, pages }));
+      if (listing!.truncated)
+        title.add(
+          '\n\n' +
+            this.t('Only the first 150 folders are shown. Enter a more specific path above.') +
+            ' ' +
+            this.t('Send /repo followed by the exact server path to continue.'),
+        );
       title.add(
         '\n\n' + this.t('You can also send /repo followed by a repository URL or server path.'),
       );
@@ -2556,7 +2563,7 @@ export class TelegramWorkspace {
       .add(
         '\n\n' +
           this.t(
-            'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use root or default to clear scope or base.',
+            'Edit one saved value with /workspace <ID> name|path|scope|base|provider|copies <value>. Use clear to remove scope or base.',
           ),
       );
     await this.api.send(destination, {
@@ -2583,8 +2590,8 @@ export class TelegramWorkspace {
       {
         name: field === 'name' ? value : workspace.name,
         path: field === 'path' ? value : workspace.repoPath,
-        scope: field === 'scope' ? (value === 'root' ? '' : value) : workspace.scope,
-        base: field === 'base' ? (value === 'default' ? undefined : value) : workspace.base,
+        scope: field === 'scope' ? (value === 'clear' ? '' : value) : workspace.scope,
+        base: field === 'base' ? (value === 'clear' ? undefined : value) : workspace.base,
         copyMode:
           field === 'copies'
             ? value === 'session' || value === 'pool'
