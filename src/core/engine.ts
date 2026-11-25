@@ -56,6 +56,7 @@ const clarifiedReviewPrefix =
   reviewRetryInstruction +
   '\nClarification from the session coordinator; verify it against the task: ';
 const resumedProviderState = 'Resumed by the user; current provider state will be reconciled';
+const mismatchedDraftRevision = 'Review points to a different revision';
 const staleNativeDraft =
   'PR changed while a draft existed. Inspect or discard the stale native draft before starting the next review.';
 const oldReviewStartLimit = 'Review round limit reached';
@@ -252,6 +253,7 @@ export class Engine {
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
         throw new AppError('task_paused', 'Resume this task before starting a review');
+      if (this.reviewWaitingForResources(task)) return task;
       if (task.draftStart && !this.currentReviewStart(task)) return task;
       if (task.partialReview && task.state === 'awaiting_publication')
         throw new AppError('publication_pending', 'The recorded findings are being published.');
@@ -556,6 +558,79 @@ export class Engine {
       ),
     );
   }
+  private matchesLatestDraftWrites(task: Task, draft: ReviewSnapshot) {
+    const handle = task.review!;
+    if (!handle.authorId || draft.authorId !== handle.authorId) return false;
+    const prefix = handle.marker + ':';
+    const writes = this.store.db
+      .prepare(
+        `SELECT o.id, o.request, o.result, MAX(e.id) AS confirmed
+         FROM operations o LEFT JOIN events e ON e.task_id=o.task_id
+           AND e.type IN ('operation.completed','operation.recovered')
+           AND json_extract(e.data,'$.operationId')=o.id
+         WHERE o.task_id=? AND o.status='done' AND
+           (o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ? OR o.id GLOB ?)
+         GROUP BY o.id ORDER BY confirmed`,
+      )
+      .all(
+        task.id,
+        prefix + 'comment:*',
+        prefix + '*:edit_comment:*',
+        prefix + '*:remove_comment:*',
+        prefix + '*:set_summary:*',
+      );
+    const comments = new Map<string, string>();
+    let summaryRequest: string | undefined;
+    let legacyRemovals: Map<string, string> | undefined;
+    for (const write of writes) {
+      if (write.confirmed == null) return false;
+      const [scope, tool] = String(write.id).slice(prefix.length).split(':');
+      if (scope !== 'comment' && tool === 'set_summary') {
+        summaryRequest = String(write.request);
+        continue;
+      }
+      const result = JSON.parse(String(write.result)) as { id: string; body?: string } | null;
+      if (scope !== 'comment' && tool === 'remove_comment') {
+        // Older removal receipts only stored null. Match the confirmed request to its decision.
+        legacyRemovals ??= new Map(
+          this.store.decisions(task.id).flatMap(({ commentId, reason, outcome }) =>
+            commentId && ['withdrawn', 'deferred', 'rejected'].includes(outcome)
+              ? [
+                  [
+                    createHash('sha256')
+                      .update(JSON.stringify({ id: commentId, reason, outcome }))
+                      .digest('hex'),
+                    commentId,
+                  ],
+                ]
+              : [],
+          ),
+        );
+        const id = result?.id ?? legacyRemovals.get(String(write.request));
+        if (!id || !comments.delete(id)) return false;
+      } else {
+        if (!result?.id || typeof result.body !== 'string') return false;
+        if (comments.has(result.id) !== (scope !== 'comment')) return false;
+        comments.set(result.id, result.body);
+      }
+    }
+    for (const { id, body } of draft.comments) {
+      if (comments.get(id) !== body) return false;
+      comments.delete(id);
+    }
+    if (comments.size) return false;
+    const suffix = `
+
+<!-- ${handle.marker} -->`;
+    if (!summaryRequest) return draft.body === 'Review in progress.' + suffix;
+    return (
+      draft.body.endsWith(suffix) &&
+      createHash('sha256')
+        .update(JSON.stringify({ body: draft.body.slice(0, -suffix.length) }))
+        .digest('hex') === summaryRequest
+    );
+  }
+
   private draftRechecked(task: Task, runId: string, snapshot: ReviewSnapshot) {
     if (!task.draftRecheck) return true;
     const key = task.review!.marker + ':' + runId;
@@ -817,20 +892,12 @@ export class Engine {
       draft.comments.length > 0 || draft.body !== `Review in progress.\n\n<!-- ${handle.marker} -->`
     );
   }
-  private async draftCarryProblem(
-    task: Task,
-    pr: PullRequest,
-    draft: ReviewSnapshot,
-    requireConfirmedAdvance = false,
-  ) {
+  private async draftCarryProblem(task: Task, pr: PullRequest, draft: ReviewSnapshot) {
     const handle = task.review!;
     if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
     this.broker.reconcileDraftEdits(task, draft);
-    const unsettled = requireConfirmedAdvance
-      ? this.store.pendingReviewWrites(task.id, handle.marker).length > 0
-      : this.broker.hasUnsettledDraftWrites(task, draft);
-    if (unsettled) return draftSyncPending;
-    if (!requireConfirmedAdvance && !this.draftHasWork(handle, draft)) return;
+    if (this.broker.hasUnsettledDraftWrites(task, draft)) return draftSyncPending;
+    if (!this.draftHasWork(handle, draft)) return;
     if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (
       !sameRevision(handle.revision, pr) &&
@@ -842,6 +909,83 @@ export class Engine {
     )
       return draftSyncPending;
   }
+  private reviewWaitingForResources(task: Task) {
+    return (
+      task.ref.provider === 'github' &&
+      task.state === 'needs_input' &&
+      task.resumeState === 'reviewing' &&
+      !!task.review &&
+      task.resourcePause?.generation === task.generation
+    );
+  }
+
+  private resourceReviewBases(task: Task, job: Job, original: Revision) {
+    const history = this.store.db
+      .prepare(
+        `SELECT type, data FROM events
+         WHERE task_id=? AND type IN ('resource.pause','task.state','revision.changed')
+           AND id>(SELECT id FROM events WHERE task_id=? AND run_id=? AND type='job.queued')
+         ORDER BY id`,
+      )
+      .all(task.id, task.id, job.id);
+    const pauseIndex = history.findIndex((event) => event.type === 'resource.pause');
+    const stopped = history[pauseIndex - 1];
+    if (stopped?.type !== 'task.state') return;
+    const pause = JSON.parse(String(history[pauseIndex].data)) as { reason: string };
+    const before = JSON.parse(String(stopped.data));
+    if (
+      before.state !== 'needs_input' ||
+      before.generation !== job.generation + 1 ||
+      before.head !== original.head ||
+      before.reason !== pause.reason
+    )
+      return;
+
+    let generation = before.generation;
+    let revision = original;
+    let resumed = false;
+    let awaitingStaleState = false;
+    const bases = [original.base];
+    for (const event of history.slice(pauseIndex + 1)) {
+      const data = JSON.parse(String(event.data));
+      if (event.type === 'revision.changed') {
+        if (
+          awaitingStaleState ||
+          data.generation !== generation + 1 ||
+          data.revision?.head !== original.head ||
+          !data.revision.base ||
+          data.revision.base === revision.base
+        )
+          return;
+        generation = data.generation;
+        revision = data.revision;
+        bases.push(revision.base);
+        awaitingStaleState = true;
+      } else if (
+        event.type !== 'task.state' ||
+        data.state !== 'needs_input' ||
+        data.generation !== generation ||
+        data.head !== original.head
+      ) {
+        return;
+      } else if (awaitingStaleState) {
+        if (data.reason !== staleNativeDraft) return;
+        awaitingStaleState = false;
+      } else if (data.reason === resumedProviderState) {
+        resumed = true;
+      } else if (data.reason !== mismatchedDraftRevision || bases.length === 1) {
+        return;
+      }
+    }
+    if (
+      resumed &&
+      !awaitingStaleState &&
+      generation === task.generation &&
+      sameRevision(revision, task.revision)
+    )
+      return bases;
+  }
+
   private async resumeReviewAfterResourcePause(
     task: Task,
     observed?: PullRequest,
@@ -860,12 +1004,13 @@ export class Engine {
       task.snapshot?.status === 'published' ||
       !task.revision ||
       task.revision.head !== handle.revision.head ||
+      this.reviewWaitingForResources(task) ||
       this.store.busy(task.id)
     )
       return false;
 
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-    const job = this.store.jobs(task.id).at(-1);
+    const job = this.store.jobs(task.id).findLast((run) => run.kind !== 'chat');
     if (
       job?.kind !== 'review' ||
       job.status !== 'cancelled' ||
@@ -878,30 +1023,8 @@ export class Engine {
     )
       return false;
 
-    // Older runs could advance the task pin once and leave the review handle on its old base.
-    const repinned = !sameRevision(task.revision, handle.revision);
-    if (
-      task.generation !== job.generation + (repinned ? 2 : 1) ||
-      task.reason !== (repinned ? staleNativeDraft : resumedProviderState)
-    )
-      return false;
-    const resumed = this.store.db
-      .prepare(
-        `SELECT 1 FROM events AS resumed
-         JOIN events AS paused ON paused.task_id=resumed.task_id AND paused.id<resumed.id
-         JOIN events AS stopped ON stopped.task_id=paused.task_id AND stopped.id<paused.id
-         WHERE resumed.task_id=? AND resumed.type='task.state'
-           AND json_extract(resumed.data,'$.reason')=?
-           AND json_extract(resumed.data,'$.generation')=?
-           AND paused.type='resource.pause' AND stopped.type='task.state'
-           AND json_extract(stopped.data,'$.state')='needs_input'
-           AND json_extract(stopped.data,'$.generation')=json_extract(resumed.data,'$.generation')
-           AND json_extract(stopped.data,'$.reason')=json_extract(paused.data,'$.reason')
-           AND json_extract(stopped.data,'$.head')=?
-         LIMIT 1`,
-      )
-      .get(task.id, resumedProviderState, job.generation + 1, handle.revision.head);
-    if (!resumed) return false;
+    const bases = this.resourceReviewBases(task, job, handle.revision);
+    if (!bases) return false;
 
     const ref = prRef(task),
       provider = this.provider(ref);
@@ -915,11 +1038,16 @@ export class Engine {
       return false;
     const action = this.prAction(task, pr);
     if (action.kind !== 'refresh' && action.kind !== 'continue') return false;
+    // Check each persisted base change as well as any advance since the last reconciliation.
+    if (bases.at(-1) !== pr.base) bases.push(pr.base);
+    for (let i = 1; i < bases.length; i++)
+      if (!(await provider.targetAdvanced?.(ref, bases[i - 1], bases[i]))) return false;
     const draft = await provider.getReview(ref, handle);
+    if (draft.status !== 'draft' || draft.revision.head !== pr.head) return false;
+    this.broker.reconcileDraftEdits(task, draft);
     if (
-      draft.status !== 'draft' ||
-      draft.revision.head !== pr.head ||
-      (await this.draftCarryProblem(task, pr, draft, /* requireConfirmedAdvance */ true))
+      this.store.pendingReviewWrites(task.id, handle.marker).length ||
+      !this.matchesLatestDraftWrites(task, draft)
     )
       return false;
 
@@ -942,6 +1070,7 @@ export class Engine {
       return false;
     this.store.transaction(() => {
       if (clarification?.trim()) this.rememberClarification(task, clarification);
+      delete task.resourcePause;
       this.restartNativeReview(
         task,
         currentPR,
@@ -969,6 +1098,8 @@ export class Engine {
         group.daddyState === 'archived'
       )
         return;
+      if (this.reviewWaitingForResources(task) || (await this.resumeReviewAfterResourcePause(task)))
+        return;
       const job = this.store.jobs(id).at(-1);
       if (!job || job.groupGeneration !== group.generation) return;
       if (task.partialReview) {
@@ -984,7 +1115,6 @@ export class Engine {
           );
         return;
       }
-      if (await this.resumeReviewAfterResourcePause(task)) return;
       if (
         job.kind === 'review' &&
         job.generation === task.generation &&
@@ -1514,7 +1644,8 @@ export class Engine {
   private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
     let task = this.store.getTask(id);
     if (task.draftStart) return task; // Draft creation reconciles its own outstanding native write.
-    if (task.state === 'paused' || isTicket(task)) return task;
+    if (task.state === 'paused' || isTicket(task) || this.reviewWaitingForResources(task))
+      return task;
     if (task.state === 'awaiting_publication' && task.partialReview) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
@@ -1632,7 +1763,7 @@ export class Engine {
       });
     task.snapshot = snapshot;
     if (!sameRevision(snapshot.revision, task.revision)) {
-      this.state(task, 'needs_input', 'Review points to a different revision');
+      this.state(task, 'needs_input', mismatchedDraftRevision);
       return task;
     }
     if (snapshot.status === 'partial' || snapshot.status === 'missing') {
@@ -2657,6 +2788,14 @@ export class Engine {
               ? 'awaiting_push'
               : 'awaiting_publication'
           : 'queued';
+        if (this.reviewWaitingForResources(task)) {
+          this.store.transaction(() => {
+            delete task.resourcePause;
+            this.state(task, target, resumedProviderState);
+            this.store.event(id, 'human.resume', { reason });
+          });
+          return task;
+        }
         this.state(task, target, resumedProviderState);
       } else if (action === 'approve-plan') {
         if (task.state !== 'awaiting_plan_approval' || task.kind !== 'plan')

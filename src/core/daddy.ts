@@ -943,7 +943,7 @@ export class Daddy {
               generation: task.generation,
               head: task.revision?.head ?? '',
             });
-            if (resumed) {
+            if (resumed?.resourcePause) {
               delete resumed.resourcePause;
               this.store.saveTask(resumed);
             }

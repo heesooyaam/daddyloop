@@ -634,10 +634,17 @@ describe('opt-in GitHub merging', () => {
     }
   });
 
-  it.each(['empty', 'findings'] as const)(
-    'recovers a resource-paused %s GitHub draft after the target advances',
-    async (contents) => {
-      const legacy = contents === 'findings';
+  it.each([
+    {
+      scenario: 'empty draft, reconcile before resource resume',
+      legacy: false,
+      ownerPaused: false,
+    },
+    { scenario: 'findings after multiple legacy base changes', legacy: true, ownerPaused: false },
+    { scenario: 'owner pause during resource wait', legacy: false, ownerPaused: true },
+  ])(
+    'handles a target-branch advance with a resource-paused GitHub review ($scenario)',
+    async ({ legacy, ownerPaused }) => {
       const previousBase = 'b9fd4147112ca77d3d76a9cf5924ae2bce5a0590';
       const f = await setup(daddyFixture(), {
         head: legacy
@@ -668,19 +675,66 @@ describe('opt-in GitHub merging', () => {
               body: 'Check layout',
             })) as { id: string })
           : undefined;
-        if (finding) await f.engine.broker.call(job, 'set_summary', { body: 'Old summary' });
+        const earlier = await f.provider.getReview(prRef(old), handle);
+        let restoredDeletion = earlier.comments;
+        if (finding) {
+          await f.engine.broker.call(job, 'set_summary', { body: 'Earlier summary' });
+          earlier.body = (await f.provider.getReview(prRef(old), handle)).body;
+          await f.engine.broker.call(job, 'edit_comment', {
+            id: finding.id,
+            body: 'Check spacing',
+          });
+          await f.engine.broker.call(job, 'set_summary', { body: 'Current summary' });
+          const removed = (await f.engine.broker.call(job, 'add_comment', {
+            key: 'removed',
+            body: 'Resolved finding',
+          })) as { id: string };
+          restoredDeletion = (await f.provider.getReview(prRef(old), handle)).comments;
+          await f.engine.broker.call(job, 'remove_comment', {
+            id: removed.id,
+            reason: 'Already resolved',
+            outcome: 'withdrawn',
+          });
+        }
         const draft = await f.provider.getReview(prRef(old), handle);
+        await f.engine.chat(old.id, legacy ? 'reviewer' : 'author', 'Queued during review');
         await f.engine.interruptTask(old.id, 'Disk threshold', 'resource.pause');
+        expect(f.store.jobs(old.id).at(-1)).toMatchObject({ kind: 'chat', status: 'cancelled' });
+        expect(f.store.jobs(old.id).find(({ id }) => id === job.id)?.status).toBe('cancelled');
+        const base = '9bf00a4f8ca1bb3ae882ed58da1a0186aaac73e7';
+        const targetAdvanced = vi.fn(async () => false);
+        Object.assign(f.provider, { targetAdvanced });
+        if (!legacy) {
+          f.setRemote({ base, start: base });
+          await f.engine.reconcile(old.id);
+          await f.engine.retryInterruptedStep(old.id);
+          await f.engine.review(old.id, true);
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            revision: { base: previousBase },
+            resourcePause: { generation: generation + 1 },
+          });
+        }
+        if (ownerPaused) {
+          await f.engine.action(old.id, 'pause');
+          f.daddy.tick();
+          await f.engine.reconcile(old.id);
+          await f.engine.retryInterruptedStep(old.id);
+          await expect(f.engine.review(old.id, true)).rejects.toMatchObject({
+            code: 'task_paused',
+          });
+          expect(f.store.getTask(old.id).state).toBe('paused');
+          expect(f.store.activeJobs(old.id)).toHaveLength(0);
+          return;
+        }
         f.daddy.tick();
         await vi.waitFor(() => expect(f.store.getTask(old.id).resourcePause).toBeUndefined());
         expect(f.store.getTask(old.id)).toMatchObject({
           state: 'needs_input',
           generation: generation + 1,
         });
-        const base = '9bf00a4f8ca1bb3ae882ed58da1a0186aaac73e7';
-        const targetAdvanced = vi.fn(async () => false);
-        Object.assign(f.provider, { targetAdvanced });
         f.setRemote({ base, start: base });
+        const currentBase = legacy ? 'd'.repeat(40) : base;
         if (legacy) {
           // Reach the persisted stale-draft state while the native draft cannot be carried.
           f.store.setSetting(key, { ...draft, body: 'Unrecognized native edit' });
@@ -691,7 +745,18 @@ describe('opt-in GitHub merging', () => {
             revision: { base },
             review: { revision: old.revision },
           });
+          await f.engine.action(old.id, 'resume');
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id).reason).toBe('Review points to a different revision');
+          f.setRemote({ base: currentBase, start: currentBase });
+          await f.engine.reconcile(old.id);
+          expect(f.store.getTask(old.id)).toMatchObject({
+            generation: generation + 3,
+            revision: { base: currentBase },
+          });
+          await f.engine.action(old.id, 'resume');
           f.store.setSetting(key, draft);
+          await f.engine.reconcile(old.id);
         }
         await f.engine.retryInterruptedStep(old.id);
         expect(f.store.activeJobs(old.id)).toHaveLength(0);
@@ -706,11 +771,24 @@ describe('opt-in GitHub merging', () => {
           f.setRemote(patch);
           await f.engine.retryInterruptedStep(old.id);
           expect(f.store.activeJobs(old.id)).toHaveLength(0);
-          f.setRemote({ ...old.pr!, base, start: base });
+          f.setRemote({ ...old.pr!, base: currentBase, start: currentBase });
         }
         for (const patch of [
           { authorId: 'another-reviewer' },
           { body: 'Unrecognized native edit' },
+          ...(finding
+            ? [
+                { comments: [] },
+                { comments: earlier.comments },
+                { comments: restoredDeletion },
+                { body: earlier.body },
+                {
+                  body: `Review in progress.
+
+<!-- ${handle.marker} -->`,
+                },
+              ]
+            : []),
         ]) {
           f.store.setSetting(key, { ...draft, ...patch });
           await f.engine.retryInterruptedStep(old.id);
@@ -725,13 +803,20 @@ describe('opt-in GitHub merging', () => {
         expect(f.store.activeJobs(old.id)).toHaveLength(0);
         f.store.db.prepare('DELETE FROM operations WHERE id=?').run(pending);
 
-        if (legacy) await f.engine.review(old.id, true);
-        else await f.engine.retryInterruptedStep(old.id);
-        expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), old.revision!.base, base);
+        if (legacy) {
+          // Confirm that older removal receipts are still useful when their decision was saved.
+          f.store.db
+            .prepare("UPDATE operations SET result='null' WHERE task_id=? AND id GLOB ?")
+            .run(old.id, handle.marker + ':*:remove_comment:*');
+          await f.engine.review(old.id, true);
+          expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), base, currentBase);
+        } else await f.engine.retryInterruptedStep(old.id);
+        await f.engine.retryInterruptedStep(old.id);
+        expect(targetAdvanced).toHaveBeenCalledWith(prRef(old), previousBase, base);
         const recovered = f.store.getTask(old.id);
         expect(recovered).toMatchObject({
           state: 'reviewing',
-          review: { id: handle.id, marker: handle.marker, revision: { base } },
+          review: { id: handle.id, marker: handle.marker, revision: { base: currentBase } },
           reviewFinished: false,
         });
         expect(recovered.draftRecheck).toEqual(finding ? { commentIds: [finding.id] } : undefined);
