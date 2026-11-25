@@ -28,22 +28,22 @@ The shared preset library can be browsed without selecting a session. Applying a
 
 ## Configuration and service controls
 
-| Capability                                       | Web                                               | Telegram                        | Remaining gap                                                   |
-| ------------------------------------------------ | ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------- |
-| Add repositories and choose one for a request    | Yes                                               | Yes                             | None                                                            |
-| Choose daddy and worker models and effort        | Yes                                               | Yes                             | None                                                            |
-| Inspect and resize the worker pool               | Yes                                               | Yes                             | None                                                            |
-| Set role instructions and attach a skill         | Yes                                               | Yes                             | None                                                            |
-| Select and manage shared presets                 | Yes                                               | Yes                             | None                                                            |
-| Import or export an instruction set              | Yes                                               | Yes, in private chat            | None                                                            |
-| View usage and confirm an available reset        | Yes                                               | Yes                             | None                                                            |
-| Configure notifications and language             | Yes                                               | Yes                             | None                                                            |
-| Check, install and roll back agent CLIs          | Yes                                               | Yes, in private chat            | None                                                            |
-| View enabled modules                             | Yes                                               | Yes                             | None                                                            |
-| Connect a Telegram forum and repair a topic link | Explains the Telegram step                        | Yes                             | This is a Telegram transport operation, not a workflow decision |
-| Voice input                                      | Yes, in chat and new-task forms                   | Yes                             | Browser speech support depends on the device and permission     |
-| Scheduled disk cleanup                           | Yes; schedule, threshold, skill and latest report | Yes; `/cleanup` in private chat | Same service settings and report                                |
-| Theme and layout                                 | Yes                                               | Telegram-controlled             | Presentation does not need identical controls                   |
+| Capability                                       | Web                                               | Telegram                                    | Remaining gap                                                   |
+| ------------------------------------------------ | ------------------------------------------------- | ------------------------------------------- | --------------------------------------------------------------- |
+| Add repositories and choose one for a request    | Yes, including a one-off branch and subfolder     | Yes, including `/repo --base` and `--scope` | None                                                            |
+| Choose daddy and worker models and effort        | Yes                                               | Yes                                         | None                                                            |
+| Inspect and resize the worker pool               | Yes                                               | Yes                                         | None                                                            |
+| Set role instructions and attach a skill         | Yes                                               | Yes                                         | None                                                            |
+| Select and manage shared presets                 | Yes                                               | Yes                                         | None                                                            |
+| Import or export an instruction set              | Yes                                               | Yes, in private chat                        | None                                                            |
+| View usage and confirm an available reset        | Yes                                               | Yes                                         | None                                                            |
+| Configure notifications and language             | Yes                                               | Yes                                         | None                                                            |
+| Check, install and roll back agent CLIs          | Yes                                               | Yes, in private chat                        | None                                                            |
+| View enabled modules                             | Yes                                               | Yes                                         | None                                                            |
+| Connect a Telegram forum and repair a topic link | Explains the Telegram step                        | Yes                                         | This is a Telegram transport operation, not a workflow decision |
+| Voice input                                      | Yes, in chat and new-task forms                   | Yes                                         | Browser speech support depends on the device and permission     |
+| Scheduled disk cleanup                           | Yes; schedule, threshold, skill and latest report | Yes; `/cleanup` in private chat             | Same service settings and report                                |
+| Theme and layout                                 | Yes                                               | Telegram-controlled                         | Presentation does not need identical controls                   |
 
 Secrets and account credentials are never rendered in a group. CLI updates, browser login links and group connection stay in the paired private chat. A group command that needs a private step links to that chat instead of asking for a token.
 

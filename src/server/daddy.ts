@@ -3,7 +3,10 @@ import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
 import { workspaceSchema, repositorySelectionSchema } from '../core/workspace-registry.js';
 import { profileSchema, profilesSchema } from '../core/agents.js';
-import { sessionInstructionsPatchSchema, sessionInstructionsSchema } from '../core/instructions.js';
+import {
+  sessionInstructionChangesSchema,
+  sessionInstructionsSchema,
+} from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
   const workerNumber = z.number().int().min(1).max(8);
@@ -113,11 +116,19 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
             forceDaddy: z.boolean().optional(),
             applyWorkers: z.boolean().optional(),
             autoMerge: z.boolean().optional(),
-            instructions: sessionInstructionsPatchSchema.optional(),
+            instructions: sessionInstructionsSchema.optional(),
           })
           .strict()
           .parse(request.body),
       ),
+  );
+  app.post<{ Params: { id: string } }>(
+    '/api/daddy/sessions/:id/instructions-patch',
+    { bodyLimit: 1048576 },
+    async (request) => {
+      const input = sessionInstructionChangesSchema.parse(request.body);
+      return daddy.changeInstructions(id.parse(request.params.id), input.changes);
+    },
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/pause', async (request) =>
     daddy.pause(id.parse(request.params.id)),

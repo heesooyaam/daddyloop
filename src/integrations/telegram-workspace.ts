@@ -1146,6 +1146,19 @@ export class TelegramWorkspace {
       return this.daddy.group(groupId);
     throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
   }
+  private authorizeModelControl(destination: Destination, groupId: string) {
+    const group = this.authorize(destination, groupId);
+    if (
+      destination.chatId === this.pair()?.chatId &&
+      this.store.setting<string>('telegram.currentDaddy') !== groupId
+    )
+      throw new AppError(
+        'stale_model_session',
+        'The selected session changed. Open Models again.',
+        409,
+      );
+    return group;
+  }
   private groupText(destination: Destination, value: string) {
     return destination.chatId === this.pair()?.chatId ? value : redact(value);
   }
@@ -1438,6 +1451,11 @@ export class TelegramWorkspace {
         .add('\n\n' + (this.locale() === 'ru' ? 'Сводка' : 'Summary'), 'bold')
         .add('\n')
         .markdown(task.summary.slice(0, 3000));
+    if (destination.chatId === this.pair()?.chatId)
+      text
+        .add('\n\n' + this.t('Original requirements'), 'bold')
+        .add('\n')
+        .markdown(task.requirements);
     const buttons: TelegramButton[][] = this.availableTaskActions(task).map((action) => [
       {
         text: this.taskActionLabel(action),
@@ -1455,6 +1473,13 @@ export class TelegramWorkspace {
     ]);
     const reviewUrl = task.ref.kind !== 'ticket' ? this.safeUrl(task.ref.url) : undefined;
     if (reviewUrl) buttons.push([{ text: this.t('Open native review'), url: reviewUrl }]);
+    if (destination.chatId !== this.pair()?.chatId)
+      buttons.push([
+        {
+          text: this.t('View original requirements'),
+          url: `https://t.me/${this.username}?start=task_${task.id}`,
+        },
+      ]);
     buttons.push([
       {
         text: this.locale() === 'ru' ? 'К задачам' : 'Back to tasks',
@@ -1722,6 +1747,15 @@ export class TelegramWorkspace {
         : undefined;
     this.store.setSetting(this.selectedTaskKey(destination, groupId), task.id);
     const card = activityTaskCard(this.locale(), activity!, slot, merge);
+    if (destination.chatId === this.pair()?.chatId) {
+      const withRequirements = new TelegramText()
+        .append(card)
+        .add('\n\n' + this.t('Original requirements'), 'bold')
+        .add('\n')
+        .markdown(original.requirements);
+      card.text = withRequirements.text;
+      card.entities = withRequirements.entities;
+    }
     const version = this.taskVersion(task);
     card.buttons = [
       ...this.availableTaskActions(task).map((action) => [
@@ -1741,6 +1775,13 @@ export class TelegramWorkspace {
       ]),
       ...(card.buttons ?? []),
     ];
+    if (destination.chatId !== this.pair()?.chatId)
+      card.buttons.push([
+        {
+          text: this.t('View original requirements'),
+          url: `https://t.me/${this.username}?start=task_${task.id}`,
+        },
+      ]);
     await this.api.send(destination, card);
   }
   private async taskCommand(
@@ -2024,6 +2065,28 @@ export class TelegramWorkspace {
   private repoInputKey(destination: Destination) {
     return `telegram.repoInput:${this.pair()!.userId}:${destination.chatId}`;
   }
+  private repositoryInput(value: string, current?: RepositorySelection): RepositorySelection {
+    const input = value.trim();
+    let options = '',
+      path: string | undefined;
+    const separator = input.match(/^([\s\S]*?)\s+--\s+([\s\S]+)$/);
+    if (separator) {
+      options = separator[1].trim();
+      path = separator[2].trim();
+    } else if (input.startsWith('--base ') || input.startsWith('--scope ')) options = input;
+    else path = input;
+    const next = { ...current, ...(path ? { path } : {}) };
+    const parts = options ? options.split(/\s+/) : [];
+    for (let index = 0; index < parts.length; index += 2) {
+      const option = parts[index],
+        selected = parts[index + 1];
+      if (!selected || !['--base', '--scope'].includes(option))
+        throw new Error(this.t('Use --base BRANCH and --scope SUBFOLDER before -- REPOSITORY.'));
+      const key = option === '--base' ? 'base' : 'scope';
+      next[key] = selected === 'default' ? undefined : selected;
+    }
+    return next;
+  }
   private registrationKey(destination: Destination) {
     return `telegram.addWorkspace:${this.pair()!.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
   }
@@ -2119,6 +2182,12 @@ export class TelegramWorkspace {
             'This selection applies only to this request. Workspace defaults and existing tasks stay as saved.',
           ),
       );
+    title.add(
+      '\n\n' +
+        this.t(
+          'For one branch or subfolder, send /repo --base BRANCH --scope SUBFOLDER -- REPOSITORY. Omit either option when it is not needed.',
+        ),
+    );
     const buttons = [
       [
         button(
@@ -2675,7 +2744,7 @@ export class TelegramWorkspace {
         action.expiresAt <= now()
       )
         throw new Error(this.t('This model selection expired. Open Models again.'));
-      const group = this.authorize(destination, action.groupId),
+      const group = this.authorizeModelControl(destination, action.groupId),
         role = action.role,
         profile = {
           engine:
@@ -2687,6 +2756,7 @@ export class TelegramWorkspace {
         await this.api.send(destination, {
           ...new TelegramText()
             .add(this.t('Use engine defaults'), 'bold')
+            .add('\n' + this.groupText(destination, group.title))
             .add('\n\n' + this.t('Model') + ': ' + this.t('Engine configuration'))
             .add('\n' + this.t('Reasoning effort') + ': ' + this.t('Default')),
           buttons: [
@@ -2747,10 +2817,11 @@ export class TelegramWorkspace {
         action.expiresAt <= now()
       )
         throw new Error(this.t('This model selection expired. Open Models again.'));
-      const group = this.authorize(destination, action.groupId);
+      const group = this.authorizeModelControl(destination, action.groupId);
       if (modelAction[2] === undefined) {
         const text = new TelegramText()
           .add(action.model.name, 'bold')
+          .add('\n' + this.groupText(destination, group.title))
           .add('\n\n' + this.t('Reasoning effort'));
         await this.api.send(destination, {
           ...text,
@@ -3050,7 +3121,10 @@ export class TelegramWorkspace {
       const topic = await this.ensureTopic(this.daddy.group(id));
       if (topic)
         await this.api.send(destination, {
-          ...new TelegramText().add(this.daddy.group(id).title, 'bold'),
+          ...new TelegramText().add(
+            this.groupText(destination, this.daddy.group(id).title),
+            'bold',
+          ),
           buttons: [[{ text: this.t('Open session topic'), url: this.link(topic) }]],
         });
       return true;
@@ -3186,6 +3260,14 @@ export class TelegramWorkspace {
       const repositoryStart = privateChat
         ? /^\/start\s+repo_([A-Za-z0-9_-]{16})$/.exec(text)
         : undefined;
+      const taskStart = privateChat ? /^\/start\s+task_([a-f0-9-]{36})$/.exec(text) : undefined;
+      if (taskStart) {
+        const task = this.store.getTask(taskStart[1]);
+        if (!task.groupId) throw new Error(this.t('Task not found in this session'));
+        this.selectPrivateSession(destination, task.groupId);
+        await this.taskCard(task, destination);
+        return true;
+      }
       if (repositoryStart) {
         const key = `telegram.repo:${repositoryStart[1]}`,
           choice = this.store.setting<RepoChoice>(key);
@@ -3479,7 +3561,7 @@ export class TelegramWorkspace {
                   ? contextual.choice.input
                   : repo[1] === 'default'
                     ? undefined
-                    : { path: repo[1] },
+                    : this.repositoryInput(repo[1], contextual.choice.input),
             });
             return true;
           }
@@ -3503,7 +3585,7 @@ export class TelegramWorkspace {
           workspace: creating
             ? this.daddy.workspaces.get(creating)
             : this.daddy.board(groupId!).workspace!,
-          input: repo[1] && repo[1] !== 'default' ? { path: repo[1] } : undefined,
+          input: repo[1] && repo[1] !== 'default' ? this.repositoryInput(repo[1]) : undefined,
           creationExpiresAt: creating ? pending!.expiresAt : undefined,
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         });

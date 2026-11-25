@@ -81,18 +81,6 @@ export type AppliedPreset = z.infer<typeof appliedPresetSchema>;
 export type SessionInstructions = z.infer<typeof baseInstructionsSchema> & {
   presets?: AppliedPreset[];
 };
-export const sessionInstructionsPatchSchema = z
-  .object({
-    daddy: agentInstructionsSchema.optional(),
-    worker: agentInstructionsSchema.optional(),
-    presets: z.array(appliedPresetSchema).max(16).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (Buffer.byteLength(JSON.stringify(value)) > 786432)
-      context.addIssue({ code: 'custom', message: 'The saved instruction set exceeds 768 KiB' });
-  });
-export type SessionInstructionsPatch = z.infer<typeof sessionInstructionsPatchSchema>;
 export const sessionInstructionsSchema = baseInstructionsSchema
   .extend({
     presets: z.array(appliedPresetSchema).max(16).optional(),
@@ -110,6 +98,104 @@ export const sessionInstructionsSchema = baseInstructionsSchema
           context.addIssue({ code: 'custom', path: [role], message: issue.message });
     }
   });
+const promptChangeSchema = z
+  .object({
+    target: z.enum(['daddy.prompt', 'worker.prompt']),
+    before: text.nullable(),
+    after: text.nullable(),
+  })
+  .strict();
+const skillsChangeSchema = z
+  .object({
+    target: z.enum(['daddy.skills', 'worker.skills']),
+    before: z.array(skillSnapshotSchema).max(12),
+    after: z.array(skillSnapshotSchema).max(12),
+  })
+  .strict();
+const presetChangeSchema = z
+  .object({
+    target: z.literal('preset'),
+    id: z.string().uuid(),
+    before: appliedPresetSchema.nullable(),
+    after: appliedPresetSchema.nullable(),
+  })
+  .strict()
+  .refine(
+    (change) => change.before?.preset.id === change.id || change.before === null,
+    'The original preset ID does not match the target',
+  )
+  .refine(
+    (change) => change.after?.preset.id === change.id || change.after === null,
+    'The updated preset ID does not match the target',
+  );
+export const sessionInstructionChangesSchema = z
+  .object({
+    changes: z
+      .array(
+        z.discriminatedUnion('target', [
+          promptChangeSchema,
+          skillsChangeSchema,
+          presetChangeSchema,
+        ]),
+      )
+      .min(1)
+      .max(20),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const keys = value.changes.map((change) =>
+      change.target === 'preset' ? `preset:${change.id}` : change.target,
+    );
+    if (new Set(keys).size !== keys.length)
+      context.addIssue({
+        code: 'custom',
+        message: 'Each instruction element can change only once',
+      });
+  });
+export type SessionInstructionChange = z.infer<
+  typeof sessionInstructionChangesSchema
+>['changes'][number];
+
+const sameValue = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
+export function applyInstructionChanges(
+  current: SessionInstructions | undefined,
+  changes: SessionInstructionChange[],
+): SessionInstructions {
+  const next = structuredClone(current ?? { daddy: {}, worker: {} });
+  const value = (change: SessionInstructionChange) => {
+    if (change.target === 'preset')
+      return next.presets?.find((entry) => entry.preset.id === change.id) ?? null;
+    const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
+    return field === 'prompt' ? (next[role].prompt ?? null) : (next[role].skills ?? []);
+  };
+  for (const change of changes) {
+    const actual = value(change);
+    if (!sameValue(actual, change.before) && !sameValue(actual, change.after))
+      throw new Error('instruction_conflict');
+  }
+  for (const change of changes) {
+    if (sameValue(value(change), change.after)) continue;
+    if (change.target === 'preset') {
+      const presets = next.presets ?? [],
+        index = presets.findIndex((entry) => entry.preset.id === change.id);
+      if (change.after === null) {
+        if (index >= 0) presets.splice(index, 1);
+      } else if (index >= 0) presets[index] = change.after;
+      else presets.push(change.after);
+      if (presets.length) next.presets = presets;
+      else delete next.presets;
+      continue;
+    }
+    const [role, field] = change.target.split('.') as ['daddy' | 'worker', 'prompt' | 'skills'];
+    if (field === 'prompt') {
+      if (change.after === null) delete next[role].prompt;
+      else next[role].prompt = change.after as string;
+    } else if ((change.after as SkillSnapshot[]).length)
+      next[role].skills = change.after as SkillSnapshot[];
+    else delete next[role].skills;
+  }
+  return sessionInstructionsSchema.parse(next);
+}
 export function flattenInstructions(value: SessionInstructions) {
   sessionInstructionsSchema.parse(value);
   return {

@@ -464,6 +464,11 @@ export const daddyRu: Record<string, string> = {
   'Open native review': 'Открыть ревью',
   'Approve plan': 'Подтвердить план',
   'Original requirements': 'Исходные требования',
+  'View original requirements': 'Открыть исходные требования',
+  'Use --base BRANCH and --scope SUBFOLDER before -- REPOSITORY.':
+    'Укажи --base ВЕТКА и --scope ПОДПАПКА перед -- РЕПОЗИТОРИЙ.',
+  'For one branch or subfolder, send /repo --base BRANCH --scope SUBFOLDER -- REPOSITORY. Omit either option when it is not needed.':
+    'Для разовой ветки или подпапки отправь /repo --base ВЕТКА --scope ПОДПАПКА -- РЕПОЗИТОРИЙ. Ненужный параметр можно пропустить.',
   'Read-only worker reports': 'Отчёты воркеров — только чтение',
   'Discuss changes with daddy in the main conversation. He will send the instructions to the right worker.':
     'Обсуждай изменения с daddy в основном разговоре. Он передаст инструкции нужному воркеру.',

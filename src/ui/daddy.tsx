@@ -56,7 +56,7 @@ import { WorkspaceFields } from './workspace-fields.js';
 import { FolderBrowser } from './folder-browser.js';
 import { InstructionFields } from './instructions.js';
 import { PresetLibrary } from './preset-library.js';
-import type { SessionInstructions, SessionInstructionsPatch } from '../core/instructions.js';
+import type { SessionInstructionChange, SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
@@ -1112,20 +1112,27 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
-            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers, title) => {
-              await model.action(
-                'settings',
-                {
-                  profiles,
-                  instructions,
-                  autoMerge,
-                  forceDaddy,
-                  applyWorkers,
-                },
-                board.group.id,
-              );
-              if (title && !model.snapshot().error)
+            onSave={async (profiles, changes, autoMerge, forceDaddy, applyWorkers, title) => {
+              const ensureSaved = () => {
+                const error = model.snapshot().error;
+                if (error) throw new Error(error);
+              };
+              if (changes?.length) {
+                await model.action('instructions-patch', { changes }, board.group.id);
+                ensureSaved();
+              }
+              if (profiles || autoMerge !== undefined || forceDaddy || applyWorkers) {
+                await model.action(
+                  'settings',
+                  { profiles, autoMerge, forceDaddy, applyWorkers },
+                  board.group.id,
+                );
+                ensureSaved();
+              }
+              if (title) {
                 await model.action('rename', { title }, board.group.id);
+                ensureSaved();
+              }
               if (isCurrentForm() && !model.snapshot().error) setModal(null);
             }}
           />
@@ -1787,7 +1794,7 @@ function SessionSettings({
   board: DaddyBoard;
   onSave: (
     profiles?: Partial<AgentProfiles>,
-    instructions?: SessionInstructionsPatch,
+    instructionChanges?: SessionInstructionChange[],
     autoMerge?: boolean,
     forceDaddy?: boolean,
     applyWorkers?: boolean,
@@ -1837,21 +1844,40 @@ function SessionSettings({
           JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
         )
           changed.worker = profiles.worker;
-        const changedInstructions: SessionInstructionsPatch = {};
-        for (const role of ['daddy', 'worker'] as const)
-          if (
-            JSON.stringify(instructions?.[role] ?? {}) !==
-            JSON.stringify(originalInstructions.current?.[role] ?? {})
-          )
-            changedInstructions[role] = instructions?.[role] ?? {};
-        if (
-          JSON.stringify(instructions?.presets ?? []) !==
-          JSON.stringify(originalInstructions.current?.presets ?? [])
-        )
-          changedInstructions.presets = instructions?.presets ?? [];
+        const before = originalInstructions.current ?? { daddy: {}, worker: {} },
+          after = instructions ?? { daddy: {}, worker: {} },
+          instructionChanges: SessionInstructionChange[] = [];
+        for (const role of ['daddy', 'worker'] as const) {
+          const originalPrompt = before[role].prompt ?? null,
+            nextPrompt = after[role].prompt ?? null;
+          if (originalPrompt !== nextPrompt)
+            instructionChanges.push({
+              target: `${role}.prompt`,
+              before: originalPrompt,
+              after: nextPrompt,
+            });
+          const originalSkills = before[role].skills ?? [],
+            nextSkills = after[role].skills ?? [];
+          if (JSON.stringify(originalSkills) !== JSON.stringify(nextSkills))
+            instructionChanges.push({
+              target: `${role}.skills`,
+              before: originalSkills,
+              after: nextSkills,
+            });
+        }
+        const originalPresets = new Map(
+            (before.presets ?? []).map((preset) => [preset.preset.id, preset]),
+          ),
+          nextPresets = new Map((after.presets ?? []).map((preset) => [preset.preset.id, preset]));
+        for (const id of new Set([...originalPresets.keys(), ...nextPresets.keys()])) {
+          const original = originalPresets.get(id) ?? null,
+            next = nextPresets.get(id) ?? null;
+          if (JSON.stringify(original) !== JSON.stringify(next))
+            instructionChanges.push({ target: 'preset', id, before: original, after: next });
+        }
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          Object.keys(changedInstructions).length ? changedInstructions : undefined,
+          instructionChanges.length ? instructionChanges : undefined,
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
           forceDaddy || undefined,
           applyWorkers || undefined,

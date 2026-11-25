@@ -1,5 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DaddyBoard } from '../../src/client/daddy.js';
@@ -309,7 +309,16 @@ test('saves only fields changed in an open session settings form', async ({ page
     data: {
       instructions: {
         daddy: { prompt: 'Instructions from another client' },
-        worker: {},
+        worker: {
+          skills: [
+            {
+              name: 'Concurrent skill',
+              text: '# Concurrent skill',
+              checksum: createHash('sha256').update('# Concurrent skill').digest('hex'),
+              source: { kind: 'text' },
+            },
+          ],
+        },
       },
     },
   });
@@ -327,8 +336,40 @@ test('saves only fields changed in an open session settings form', async ({ page
   expect(board.group.title).toBe('Only the local name changed');
   expect(board.group.instructions?.daddy.prompt).toBe('Instructions from another client');
   expect(board.group.instructions?.worker.prompt).toBe('Worker instructions from this form');
+  expect(board.group.instructions?.worker.skills?.[0].name).toBe('Concurrent skill');
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Only the local name changed' })).toBeVisible();
+});
+test('keeps the settings draft and rejects a conflicting instruction element', async ({ page }) => {
+  await login(page);
+  const title = `Conflicting settings ${Date.now()}`;
+  await create(page, title, Date.now());
+  const sessions = (await (await page.request.get('/api/daddy/sessions')).json()) as {
+    id: string;
+    title: string;
+  }[];
+  const id = sessions.find((session) => session.title === title)!.id;
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Session settings' });
+  await dialog.getByText('Style and skills for this session').click();
+  const prompt = dialog.getByLabel('Your instructions for daddy');
+  await prompt.fill('Local conflicting prompt');
+  const remote = await page.request.post(`/api/daddy/sessions/${id}/settings`, {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: {
+      instructions: {
+        daddy: { prompt: 'Remote conflicting prompt' },
+        worker: {},
+      },
+    },
+  });
+  expect(remote.status()).toBe(200);
+  await dialog.getByRole('button', { name: 'Save settings' }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('alert')).toContainText('changed in another client');
+  await expect(prompt).toHaveValue('Local conflicting prompt');
+  const board = (await (await page.request.get(`/api/daddy/sessions/${id}`)).json()) as DaddyBoard;
+  expect(board.group.instructions?.daddy.prompt).toBe('Remote conflicting prompt');
 });
 test('omits an unavailable effort and can keep engine model defaults', async ({ page }) => {
   await page.route('**/api/agents*', async (route) => {

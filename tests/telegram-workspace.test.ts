@@ -429,6 +429,92 @@ it('keeps repository paths private for topic, general-group and new-session choi
     await f.close();
   }
 });
+it('applies a one-task branch and subfolder without changing workspace defaults', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  const selection = vi
+    .spyOn(f.workspaces, 'selection')
+    .mockImplementation(async (workspace, input) => ({
+      ...workspace,
+      repoPath: input?.path ?? workspace.repoPath,
+      scope: input?.scope ?? workspace.scope,
+      base: input?.base ?? workspace.base,
+    }));
+  vi.mocked(f.checkouts.describeTicket).mockImplementation(async (path, ref, base) => ({
+    repoPath: path,
+    ref,
+    repository: {
+      baseHead: 'a'.repeat(40),
+      baseBranch: base ?? 'main',
+      branch: '',
+      cloneUrl: 'https://github.com/test/repo.git',
+    },
+  }));
+  let id = 430;
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const click = (data: string): Update => ({
+    update_id: id++,
+    callback_query: {
+      id: String(id),
+      data,
+      from: { id: 7 },
+      message: { chat: { id: 7, type: 'private' } },
+    },
+  });
+  try {
+    await bot.handle(
+      message('/repo --base release-candidate --scope apps/mobile -- https://example.test/one.git'),
+    );
+    expect(sent.at(-1).text).toContain('--base BRANCH');
+    await bot.handle(click(sent.at(-1).buttons[0][0].callback_data));
+    expect(selection).toHaveBeenCalledWith(
+      f.workspace,
+      expect.objectContaining({
+        path: 'https://example.test/one.git',
+        base: 'release-candidate',
+        scope: 'apps/mobile',
+      }),
+    );
+    await bot.handle(message('/task One-off repository selection'));
+    const first = f.store.tasks(group.id).at(-1)!;
+    expect(first).toMatchObject({
+      repoPath: 'https://example.test/one.git',
+      scope: 'apps/mobile',
+      ticketRepository: { baseBranch: 'release-candidate' },
+    });
+
+    await bot.handle(message('/task Workspace defaults again'));
+    const second = f.store
+      .tasks(group.id)
+      .find((task) => task.title.includes('Workspace defaults'))!;
+    expect(second.repoPath).toBe(f.workspace.repoPath);
+    expect(second.scope).toBe(f.workspace.scope);
+    expect(f.workspaces.get(f.workspace.id)).toMatchObject(f.workspace);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
 it('expires, cancels and isolates private repository input for its original route', async () => {
   const f = daddyFixture(),
     sent: { destination: any; card: any }[] = [];
@@ -1509,6 +1595,85 @@ it('pages through every model and supports profiles without effort and engine de
       model: 'codex-1',
     });
     expect(f.daddy.group(group.id).worker?.effort).toBeUndefined();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('rejects model buttons from a previously selected private session', async () => {
+  const f = daddyFixture(),
+    sent: any[] = [];
+  const api = {
+    replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
+    send: vi.fn(async (_to, card) => {
+      sent.push(card);
+      return { message_id: sent.length };
+    }),
+    call: vi.fn(async () => ({})),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7 });
+  const first = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session A' }),
+    second = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session B' });
+  f.store.setSetting('telegram.currentDaddy', first.id);
+  vi.spyOn(f.daddy.catalogue, 'list').mockResolvedValue([
+    {
+      id: 'fixture-model',
+      engine: 'codex',
+      name: 'Fixture model',
+      efforts: ['medium'],
+      defaultEffort: 'medium',
+      isDefault: true,
+    },
+  ]);
+  let id = 1700;
+  const press = (data: string) =>
+    bot.handle({
+      update_id: id++,
+      callback_query: {
+        id: String(id),
+        data,
+        from: { id: 7 },
+        message: { chat: { id: 7, type: 'private' } },
+      },
+    });
+  const message = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const button = (text: string) =>
+    sent
+      .at(-1)
+      .buttons.flat()
+      .find((item: any) => item.text.includes(text));
+  try {
+    const beforeDaddy = structuredClone(first.daddy),
+      beforeWorker = structuredClone(first.worker);
+    await press(`dad:models:${first.id}:daddy`);
+    const oldDefault = button('Use engine defaults').callback_data;
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await press(oldDefault);
+    expect(f.daddy.group(first.id).daddy).toEqual(beforeDaddy);
+
+    await bot.handle(message(`/session ${first.id.slice(0, 8)}`));
+    await press(`dad:models:${first.id}:worker`);
+    await press(button('Fixture model').callback_data);
+    expect(sent.at(-1).text).toContain('Session A');
+    const oldEffort = button('medium').callback_data;
+    await bot.handle(message(`/session ${second.id.slice(0, 8)}`));
+    await press(oldEffort);
+    expect(f.daddy.group(first.id).worker).toEqual(beforeWorker);
+
+    await press(`dad:models:${second.id}:worker`);
+    await press(button('Fixture model').callback_data);
+    await press(button('medium').callback_data);
+    expect(f.daddy.group(second.id).worker).toMatchObject({ model: 'fixture-model' });
   } finally {
     await bot.stop();
     await f.close();

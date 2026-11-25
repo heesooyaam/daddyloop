@@ -93,6 +93,8 @@ it('redacts registered secrets from every group task card and button', async () 
     locale = 'ru';
     await bot.handle(message(`/session ${group.id.slice(0, 8)}`));
     safe();
+    await bot.handle(click(`dad:open:${group.id}`));
+    safe();
     await bot.handle(message('/tasks'));
     safe();
     messages.mockClear();
@@ -108,6 +110,54 @@ it('redacts registered secrets from every group task card and button', async () 
     });
     expect(JSON.stringify(telegram.sent.at(-1)!.card)).toContain(secret);
     expect(messages).not.toHaveBeenCalled();
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
+
+it('opens complete local task requirements from a group through the paired private chat', async () => {
+  const f = daddyFixture(),
+    telegram = telegramFixture(),
+    bot = new TelegramWorkspace(f.daddy, telegram.api, 'fixture_bot', () => 'en');
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id }),
+    topic = await bot.ensureTopic(group),
+    requirements = 'Short title\n\nAcceptance criterion only visible in the full requirements.',
+    task = await f.tickets.local({
+      workspace: f.workspace,
+      groupId: group.id,
+      groupGeneration: group.generation,
+      title: 'Short title',
+      requirements,
+      createdByAction: 'requirements-fixture',
+    });
+  let id = 1500;
+  const message = (text: string, chatId: number, threadId?: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: chatId, type: chatId === 7 ? 'private' : 'supergroup' },
+      message_thread_id: threadId,
+    },
+  });
+  try {
+    await bot.handle(message(`/task DADDY-${task.id.slice(0, 8)}`, -10042, topic!.threadId));
+    const groupCard = telegram.sent.at(-1)!.card;
+    expect(groupCard.text).not.toContain('Acceptance criterion');
+    const open = groupCard.buttons
+      .flat()
+      .find((button: any) => button.text === 'View original requirements');
+    expect(open.url).toContain(`start=task_${task.id}`);
+
+    await bot.handle(message(`/start task_${task.id}`, 7));
+    expect(telegram.sent.at(-1)!.card.text).toContain(
+      'Acceptance criterion only visible in the full requirements.',
+    );
+    expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
   } finally {
     await bot.stop();
     await f.close();
@@ -402,14 +452,16 @@ it('shows the same GitHub retry status when a task is opened from tasks or queue
     number: 77,
     url: 'https://github.com/test/repo/pull/77',
   };
-  task.state = 'queued';
+  task.state = 'submitting';
+  const taskUntil = Date.now() + 60_000;
   task.prLink = {
     ref: task.ref,
     head: task.revision!.head,
     generation: task.generation,
+    retryAt: taskUntil,
   };
   f.store.saveTask(task);
-  const until = Date.now() + 60_000;
+  const until = Date.now() + 24 * 60 * 60_000;
   f.store.setSetting('github.read-backoff:github.com', {
     until,
     delay: 15_000,
@@ -436,6 +488,9 @@ it('shows the same GitHub retry status when a task is opened from tasks or queue
     },
   });
   const retry = `PR #77 · GitHub HTTP 503 · retry at ${new Date(until).toISOString().slice(11, 19)} UTC`;
+  const taskRetry = `PR #77 · retry at ${new Date(taskUntil).toISOString().slice(11, 19)} UTC`;
+  const webStatus = () =>
+    f.daddy.board(group.id).tasks.find((item) => item.id === task.id)!.statusLabel;
   const openFromTasks = async () => {
     await bot.handle(message('/tasks'));
     await bot.handle(click(telegram.sent.at(-1)!.card.buttons[0][0].callback_data));
@@ -445,11 +500,18 @@ it('shows the same GitHub retry status when a task is opened from tasks or queue
     expect(await openFromTasks()).toContain(retry);
     await bot.handle(message('/queue'));
     expect(telegram.sent.at(-1)!.card.text).toContain(retry);
+    expect(webStatus()).toBe(retry);
 
     f.store.setSetting('github.read-backoff:github.com', null);
-    expect(await openFromTasks()).not.toContain('retry at');
+    expect(await openFromTasks()).toContain(taskRetry);
     await bot.handle(message('/queue'));
-    expect(telegram.sent.at(-1)!.card.text).not.toContain('retry at');
+    expect(telegram.sent.at(-1)!.card.text).toContain(taskRetry);
+    expect(webStatus()).toBe(taskRetry);
+
+    delete task.prLink.retryAt;
+    f.store.saveTask(task);
+    expect(await openFromTasks()).not.toContain('retry at');
+    expect(webStatus()).not.toContain('retry at');
   } finally {
     await bot.stop();
     await f.close();

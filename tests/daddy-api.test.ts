@@ -1,10 +1,11 @@
 import { expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { buildApp } from '../src/server/app.js';
 import { registerDaddy } from '../src/server/daddy.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { healthy, catalogue } from './planning-fixture.js';
+import { InstructionPresets } from '../src/core/instruction-presets.js';
 
 it('lists session counts and running roles without reading job or conversation history', async () => {
   const f = daddyFixture(),
@@ -206,6 +207,146 @@ it('accepts and discards legacy manual workflow fields when creating a session',
     expect(create.mock.calls[0]![0]).not.toHaveProperty('autoPush');
     expect(create.mock.calls[0]![0]).not.toHaveProperty('publication');
     expect(response.json().group).not.toHaveProperty('defaultPolicy');
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
+it('keeps settings instructions as a complete replacement for existing import clients', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  const preset = new InstructionPresets(f.store).save({
+    name: 'Preset A',
+    instructions: { daddy: { prompt: 'A' }, worker: {} },
+  });
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    instructions: {
+      daddy: {},
+      worker: {},
+      presets: [{ preset, enabled: true, omit: [] }],
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/settings`,
+      payload: {
+        instructions: {
+          daddy: { prompt: 'Imported daddy prompt' },
+          worker: { prompt: 'Imported worker prompt' },
+        },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().group.instructions).toEqual({
+      daddy: { prompt: 'Imported daddy prompt' },
+      worker: { prompt: 'Imported worker prompt' },
+    });
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
+it('merges independent instruction elements and rejects an overlapping patch atomically', async () => {
+  const f = daddyFixture(),
+    app = Fastify();
+  registerDaddy(app, f.daddy);
+  const library = new InstructionPresets(f.store),
+    makePreset = (name: string) =>
+      library.save({ name, instructions: { daddy: { prompt: name }, worker: {} } }),
+    presetA = makePreset('Preset A'),
+    presetB = makePreset('Preset B'),
+    presetC = makePreset('Preset C'),
+    selected = (preset: typeof presetA, enabled = true) => ({ preset, enabled, omit: [] }),
+    skill = (name: string) => ({
+      name,
+      text: `# ${name}`,
+      checksum: createHash('sha256').update(`# ${name}`).digest('hex'),
+      source: { kind: 'text' as const },
+    }),
+    firstSkill = skill('First'),
+    secondSkill = skill('Second');
+  const group = f.daddy.create({
+    workspaceId: f.workspace.id,
+    instructions: {
+      daddy: {},
+      worker: { prompt: 'Original worker', skills: [firstSkill] },
+      presets: [selected(presetA), selected(presetB)],
+    },
+  });
+  try {
+    const first = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'worker.prompt', before: 'Original worker', after: 'Changed prompt' },
+          {
+            target: 'preset',
+            id: presetA.id,
+            before: selected(presetA),
+            after: selected(presetA, false),
+          },
+        ],
+      },
+    });
+    expect(first.statusCode).toBe(200);
+    const second = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/instructions-patch`,
+      payload: {
+        changes: [
+          {
+            target: 'worker.skills',
+            before: [firstSkill],
+            after: [firstSkill, secondSkill],
+          },
+          {
+            target: 'preset',
+            id: presetB.id,
+            before: selected(presetB),
+            after: selected(presetB, false),
+          },
+          {
+            target: 'preset',
+            id: presetC.id,
+            before: null,
+            after: selected(presetC),
+          },
+        ],
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().group.instructions).toMatchObject({
+      worker: { prompt: 'Changed prompt', skills: [firstSkill, secondSkill] },
+      presets: [
+        { preset: { id: presetA.id }, enabled: false },
+        { preset: { id: presetB.id }, enabled: false },
+        { preset: { id: presetC.id }, enabled: true },
+      ],
+    });
+
+    const conflict = await app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/instructions-patch`,
+      payload: {
+        changes: [
+          { target: 'worker.prompt', before: 'Original worker', after: 'Conflicting prompt' },
+          {
+            target: 'preset',
+            id: presetA.id,
+            before: selected(presetA, false),
+            after: selected(presetA, true),
+          },
+        ],
+      },
+    });
+    expect(conflict.statusCode).toBe(409);
+    const saved = f.daddy.group(group.id).instructions!;
+    expect(saved.worker.prompt).toBe('Changed prompt');
+    expect(saved.presets?.find((entry) => entry.preset.id === presetA.id)?.enabled).toBe(false);
   } finally {
     await app.close();
     await f.close();

@@ -342,7 +342,7 @@ export class DaddyClient {
     }
   }
   async action(
-    action: 'pause' | 'resume' | 'settings' | 'delete' | 'rename',
+    action: 'pause' | 'resume' | 'settings' | 'instructions-patch' | 'delete' | 'rename',
     body: unknown = {},
     id = this.value.selected,
   ) {
