@@ -138,20 +138,38 @@ export class TelegramDelivery {
           store.setSetting(key, value);
         }
       }
-      const messageGroups = new Map<number, string>();
+      const messageGroups = new Map<string, string>();
       for (const { value } of deliveries)
         if (value.options.groupId && value.options.key?.startsWith('progress:'))
           for (const message of value.messages)
-            messageGroups.set(message.id, value.options.groupId);
+            messageGroups.set(`${value.destination.chatId}:${message.id}`, value.options.groupId);
       for (const { key, value } of deliveries) {
         const groupId = value.options.pinMessageId
-          ? messageGroups.get(value.options.pinMessageId)
+          ? messageGroups.get(`${value.destination.chatId}:${value.options.pinMessageId}`)
           : undefined;
         if (groupId && !value.options.groupId) {
           value.options.groupId = groupId;
           store.setSetting(key, value);
         }
       }
+      const orphanStatusMessages = new Set<string>();
+      for (const { value } of deliveries)
+        if (!value.options.groupId && value.options.key?.startsWith('progress:'))
+          for (const message of value.messages)
+            orphanStatusMessages.add(`${value.destination.chatId}:${message.id}`);
+      for (const { key, value } of unboundProgress)
+        if (
+          !value.options.groupId &&
+          ['queued', 'sending'].includes(value.status) &&
+          (value.options.key?.startsWith('progress:') ||
+            (!!value.options.pinMessageId &&
+              orphanStatusMessages.has(
+                `${value.destination.chatId}:${value.options.pinMessageId}`,
+              )))
+        ) {
+          value.status = 'cancelled';
+          store.setSetting(key, value);
+        }
     }
     const deliveryKeys = new Set(deliveries.map(({ key }) => key));
     const recoveryDeliveries = deliveries.filter(
@@ -530,29 +548,28 @@ export class TelegramDelivery {
         }
       }
     }
-    if (!value.options.mention) {
-      const messageId = this.notificationMessageId(value);
-      if (messageId) {
-        const message = this.storedMessages.get(messageId);
-        if (message) {
-          if (message.sender === 'agent' && message.phase === 'final' && message.needsReply) {
-            const groupId = value.options.groupId ?? message.taskId;
-            value.options.groupId = groupId;
-            value.options.mention = { groupId, messageId };
-            changed = true;
-          }
+    const messageId = this.notificationMessageId(value);
+    if (!value.options.mention && messageId) {
+      const message = this.storedMessages.get(messageId);
+      if (message) {
+        if (message.sender === 'agent' && message.phase === 'final' && message.needsReply) {
+          const groupId = value.options.groupId ?? message.taskId;
+          value.options.groupId = groupId;
+          value.options.mention = { groupId, messageId };
+          changed = true;
         }
-        if (
-          value.options.mention &&
-          !value.options.questionSourceKey &&
-          value.options.key !== `message:${messageId}`
-        ) {
-          const sourceKey = prefix + digest([this.bot, value.destination, `message:${messageId}`]);
-          if (sourceKey !== key && deliveryKeys.has(sourceKey)) {
-            value.options.questionSourceKey = sourceKey;
-            changed = true;
-          }
-        }
+      }
+    }
+    if (
+      messageId &&
+      value.options.mention &&
+      !value.options.questionSourceKey &&
+      value.options.key !== `message:${messageId}`
+    ) {
+      const sourceKey = prefix + digest([this.bot, value.destination, `message:${messageId}`]);
+      if (sourceKey !== key && deliveryKeys.has(sourceKey)) {
+        value.options.questionSourceKey = sourceKey;
+        changed = true;
       }
     }
     return changed;
@@ -1077,6 +1094,7 @@ export class TelegramDelivery {
       value.content = structuredClone(content);
       value.options = {
         ...options,
+        questionSourceKey: options.questionSourceKey ?? value.options.questionSourceKey,
         deletePrevious: value.options.deletePrevious ?? options.deletePrevious,
       };
       value.revision++;

@@ -4,6 +4,7 @@ import { TelegramApi } from '../src/integrations/telegram.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
 import { TelegramProgress } from '../src/integrations/telegram-progress.js';
+import { TelegramText } from '../src/integrations/telegram-text.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -373,6 +374,169 @@ it.each([
     }
   },
 );
+
+it.each([false, true])(
+  'migrates equal pin message IDs by chat regardless of setting order: reversed=%s',
+  async (reversed) => {
+    const f = daddyFixture();
+    const sent: { method: string; body: Record<string, any> }[] = [];
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      sent.push({ method, body });
+      return Response.json({ ok: true, result: true });
+    });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+    const live = f.daddy.create({ workspaceId: f.workspace.id, title: 'Live topic' });
+    const deleted = f.daddy.create({ workspaceId: f.workspace.id, title: 'Deleted private' });
+    f.store.saveGroup({ ...deleted, deletedAt: new Date().toISOString() });
+    const cards = [
+      {
+        groupId: live.id,
+        cardId: 'live-card',
+        route: { chatId: -10042, threadId: 17, ownerId: 7 },
+      },
+      {
+        groupId: deleted.id,
+        cardId: 'deleted-card',
+        route: { chatId: 7, ownerId: 7 },
+      },
+    ];
+    for (const card of cards)
+      f.store.setSetting(`telegram.progress:fixture_bot:${card.groupId}`, {
+        cards: [{ id: card.cardId, route: card.route }],
+      });
+    const delivery = (
+      id: string,
+      destination: { chatId: number; threadId?: number },
+      options: Record<string, unknown>,
+      status: 'queued' | 'sent',
+      messages: { id: number; fingerprint: string }[] = [],
+    ) => ({
+      id,
+      bot: 'fixture_bot',
+      ownerId: 7,
+      destination,
+      content: { text: '', entities: [] },
+      options,
+      revision: 1,
+      createdAt: 1000,
+      status,
+      attempts: 0,
+      nextAttemptAt: 1000,
+      messages,
+    });
+    const rows = cards.flatMap(
+      (card) =>
+        [
+          [
+            `telegram.delivery:${card.cardId}:status`,
+            delivery(
+              `${card.cardId}:status`,
+              card.route,
+              { key: `progress:${card.cardId}`, pin: true, final: true },
+              'sent',
+              [{ id: 81, fingerprint: 'status' }],
+            ),
+          ],
+          [
+            `telegram.delivery:${card.cardId}:pin`,
+            delivery(
+              `${card.cardId}:pin`,
+              card.route,
+              { operation: 'pin', pinMessageId: 81 },
+              'queued',
+            ),
+          ],
+        ] as const,
+    );
+    for (const [key, value] of reversed ? [...rows].reverse() : rows)
+      f.store.setSetting(key, value);
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => 1000);
+    try {
+      await api.delivery.flush(10);
+      expect(sent).toEqual([
+        {
+          method: 'pinChatMessage',
+          body: { chat_id: -10042, message_id: 81, disable_notification: true },
+        },
+      ]);
+    } finally {
+      await api.delivery.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  ['private chat', { chatId: 7 }],
+  ['topic', { chatId: -10042, threadId: 17 }],
+])('retires orphaned status work and continues the %s queue', async (_route, destination) => {
+  const f = daddyFixture();
+  const sent: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 700;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    sent.push({ method, body });
+    return Response.json({
+      ok: true,
+      result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  if ('threadId' in destination)
+    f.store.setSetting('telegram.group', { chatId: destination.chatId, ownerId: 7 });
+  const delivery = (
+    id: string,
+    content: string,
+    options: Record<string, unknown>,
+    messages: { id: number; fingerprint: string }[] = [],
+  ) => ({
+    id,
+    bot: 'fixture_bot',
+    ownerId: 7,
+    destination,
+    content: new TelegramText().add(content),
+    options,
+    revision: 1,
+    createdAt: 1000,
+    status: 'queued',
+    attempts: 0,
+    nextAttemptAt: 1000,
+    messages,
+  });
+  f.store.setSetting(
+    'telegram.delivery:orphan-status',
+    delivery('orphan-status', 'Old status', { key: 'progress:orphan', pin: true, final: true }, [
+      { id: 81, fingerprint: 'old-status' },
+    ]),
+  );
+  f.store.setSetting(
+    'telegram.delivery:orphan-pin',
+    delivery('orphan-pin', '', { operation: 'pin', pinMessageId: 81 }),
+  );
+  f.store.setSetting(
+    'telegram.delivery:next',
+    delivery('next', 'Next session', { key: 'next-session' }),
+  );
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => 1000);
+  try {
+    await api.delivery.flush(10);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      method: 'sendMessage',
+      body: {
+        chat_id: destination.chatId,
+        text: 'Next session',
+      },
+    });
+  } finally {
+    await api.delivery.stop();
+    await f.close();
+  }
+});
 
 it('updates the initial private-chat card after /new as well', async () => {
   const f = daddyFixture();

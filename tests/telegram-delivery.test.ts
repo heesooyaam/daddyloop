@@ -336,12 +336,18 @@ it.each([
 );
 
 it.each([
-  ['short private reply', { chatId: 7 }, 100],
-  ['long topic reply', { chatId: -10042, threadId: 4 }, 5000],
+  ['short private reply after owner rename', { chatId: 7 }, 100, false],
+  [
+    'long topic reply restored without source metadata',
+    { chatId: -10042, threadId: 4 },
+    5000,
+    true,
+  ],
 ])(
   'reuses an in-flight progress receipt after its owner question closes: %s',
-  async (_case, destination, size) => {
+  async (_case, destination, size, restart) => {
     const f = fixture();
+    let restored: TelegramDelivery | undefined;
     let finishFirst = () => {};
     try {
       const body = 'A'.repeat(size);
@@ -368,23 +374,53 @@ it.each([
       await vi.waitFor(() => expect(f.call).toHaveBeenCalledOnce());
       f.store.finishDaddyReply('group', body, 'run', true);
       const finalNotification = progressNotification.replace(/:progress$/, ':final');
-      await f.queue.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
-        groupId: 'group',
-        key: finalNotification,
-        replacePending: true,
-        final: true,
-        notificationId: finalNotification,
-        mention: { groupId: 'group', messageId: message.id },
-      });
-      finishFirst();
-      await progress;
+      const sendQuestion = (owner: string) =>
+        f.queue.send(destination, new TelegramText().add(`@${owner} · `).append(agentText), {
+          groupId: 'group',
+          key: finalNotification,
+          replacePending: true,
+          final: true,
+          notificationId: finalNotification,
+          mention: { groupId: 'group', messageId: message.id },
+        });
+      await sendQuestion('Owner');
+      if (!restart) await sendQuestion('RenamedOwner');
+      if (restart) {
+        const stopping = f.queue.stop();
+        finishFirst();
+        await progress;
+        await stopping;
+        const row = f.store.db
+          .prepare(
+            `SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'
+             AND json_extract(value,'$.options.notificationId')=?`,
+          )
+          .get(finalNotification)!;
+        const saved = JSON.parse(String(row.value));
+        saved.options.questionSourceKey = undefined;
+        f.store.setSetting(String(row.key), saved);
+        restored = new TelegramDelivery(f.store, f.transport, 'test_bot', f.clock);
+        await restored.send(destination, new TelegramText().add('@Owner · ').append(agentText), {
+          groupId: 'group',
+          key: finalNotification,
+          replacePending: true,
+          final: true,
+          notificationId: finalNotification,
+          mention: { groupId: 'group', messageId: message.id },
+        });
+        await restored.finishRecovery();
+      } else {
+        finishFirst();
+        await progress;
+      }
       await new Promise((resolve) => setImmediate(resolve));
-      await f.queue.flush(10);
+      await (restored ?? f.queue).flush(10);
       expect(f.call.mock.calls.every(([method]) => method === 'sendMessage')).toBe(true);
-      expect(f.call.mock.calls.some(([, request]) => request.text?.includes('@Owner'))).toBe(false);
+      expect(f.call.mock.calls.some(([, request]) => request.text?.includes('@'))).toBe(false);
       expect(f.call).toHaveBeenCalledTimes(size > 3800 ? 2 : 1);
     } finally {
       finishFirst();
+      await restored?.stop();
       await f.close();
     }
   },
