@@ -155,6 +155,10 @@ Code: [AgentRegistry](../../src/modules/agents/registry.ts), [Broker](../../src/
 
 ## 4. How the review loop closes
 
+The scheduler publishes a finished native review and pushes a saved worker commit. These steps do not need an extra coordinator turn. If automatic publication or push enters a state that needs a decision, the coordinator receives that transition. Independent review still runs on the resulting revision.
+
+For a correction, the worker checks the behavior behind the published finding across affected entry points. A repeat reviewer can reuse verified coverage from the same target and an ancestor commit. The correction prompt includes related tasks and plans, the published feedback and the requested change. A full review is needed if the earlier baseline cannot be verified.
+
 Work such as filing issues can produce a report with links and other evidence. When the task branch is still at its starting base, the service saves the report and queues an independent check by daddy. The task completes after the reviewer verifies the result against the original requirements. The run generation and pinned revision guard the result. daddy can then use the report to queue follow-up work.
 
 When the task branch has saved changes relative to that base, the service sends them to a PR through `TicketWorkflow`. This includes commits preserved from an earlier run. You can also attach an existing PR directly. Both paths use the same review loop.

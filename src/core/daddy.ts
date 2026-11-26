@@ -16,6 +16,7 @@ import {
   AppError,
   now,
   prRef,
+  isTicket,
   sameRevision,
   type DaddyJob,
   type TelegramReply,
@@ -808,8 +809,32 @@ export class Daddy {
     if (!task?.groupId) return;
     const group = this.store.getGroup(task.groupId);
     if (!group.orchestrated || group.daddyState !== 'active') return;
-    if (event.type === 'task.state' && !['complete', 'awaiting_plan_approval'].includes(task.state))
-      return;
+    const transition = (event.data ?? {}) as {
+      state?: string;
+      previousState?: string;
+      kind?: Job['kind'];
+    };
+    if (
+      event.type === 'task.state' &&
+      !['complete', 'awaiting_plan_approval'].includes(task.state)
+    ) {
+      const automaticStepFailed =
+        task.state === 'needs_input' &&
+        transition.state === 'needs_input' &&
+        (transition.previousState === 'awaiting_publication' ||
+          transition.previousState === 'awaiting_push');
+      if (!automaticStepFailed) return;
+    }
+    if (event.type === 'job.completed' && !isTicket(task)) {
+      if (transition.kind === 'review' && task.state === 'awaiting_publication') return;
+      if (
+        transition.kind === 'fix' &&
+        task.state === 'awaiting_push' &&
+        task.pendingAuthorHead &&
+        this.worker.autoSubmit
+      )
+        return;
+    }
     if (
       event.type === 'job.completed' &&
       task.workerReport &&

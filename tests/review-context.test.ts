@@ -9,6 +9,7 @@ import type { Decision } from '../src/core/types.js';
 import { CodexRuntime } from '../src/modules/agents/codex/runtime.js';
 import { buildContext } from '../src/runtime/context.js';
 import { fixture } from './helpers.js';
+import { daddyFixture } from './daddy-fixture.js';
 
 it.each([3, 2968])('prepares a Codex review with %i recorded decisions', async (count) => {
   const f = await fixture();
@@ -545,3 +546,40 @@ it.each([10, 3772, 4096])(
     }
   },
 );
+
+it('keeps linked task context and published findings on a correction without repeating unrelated sessions tasks', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 41,
+        url: 'https://demo.local/pull/41',
+      },
+      repoPath: f.dir,
+      groupId: group.id,
+      requirements: 'Fix the returned state.',
+    });
+    f.store.saveTask({ ...task, id: 'linked', title: 'Linked prerequisite name' });
+    f.store.saveTask({ ...task, id: 'other', title: 'An unrelated backlog item' });
+    task.dependsOn = ['linked'];
+    const job = f.store.enqueue(task, 'reviewer', 'review', 'Review the pinned head');
+    expect(buildContext(f.store, task, job)).toContain('An unrelated backlog item');
+    task.feedback = {
+      status: 'published',
+      body: 'Published note on the previous head',
+      comments: [],
+      revision: task.revision!,
+      url: task.ref.url,
+    };
+    const context = buildContext(f.store, task, job);
+    expect(context).toContain('Linked prerequisite name');
+    expect(context).toContain('Published note on the previous head');
+    expect(context).not.toContain('An unrelated backlog item');
+  } finally {
+    await f.close();
+  }
+});

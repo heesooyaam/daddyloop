@@ -35,6 +35,49 @@ it('imports the declared sub-issue and keeps unrelated links as references', asy
     await f.close();
   }
 });
+it('lets the scheduler publish PR work and wakes daddy when that automatic step needs a decision', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 45,
+        url: 'https://demo.local/pull/45',
+      },
+      repoPath: f.dir,
+      groupId: group.id,
+      requirements: 'Fix the published findings.',
+    });
+    f.worker.autoSubmit = vi.fn(async () => {});
+    f.daddy.start();
+    for (const [state, kind] of [
+      ['awaiting_publication', 'review'],
+      ['awaiting_push', 'fix'],
+    ] as const) {
+      f.store.saveTask({ ...task, state, pendingAuthorHead: task.revision!.head });
+      f.store.event(task.id, 'job.completed', { kind });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(f.store.daddyJobs(group.id)).toHaveLength(0);
+    }
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      reason: 'The saved commit belongs to a different target.',
+    });
+    f.store.event(task.id, 'task.state', { state: 'needs_input', previousState: 'awaiting_push' });
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id)).toMatchObject([
+        { trigger: 'worker', waitingTaskId: task.id },
+      ]),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 it('keeps other tasks active while a worker question awaits a reply', async () => {
   const f = daddyFixture();
   try {
