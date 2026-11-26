@@ -271,6 +271,8 @@ export interface Task {
   reviewAdmission?: string;
   /** Original GitHub review bound to a read-only merge verification until completion. */
   mergedReviewId?: string;
+  /** A queued or verified merge awaiting its final outcome, even when no review was created. */
+  mergeVerificationActive?: true;
   draftStart?: {
     marker: string;
     ref?: PRRef;
@@ -280,6 +282,7 @@ export interface Task {
     retry: boolean;
     clarification?: string;
     mergeVerification?: Revision & { mergeCommit?: string };
+    mergeVerificationRequested?: 'verify' | 'retry';
     retryAt?: number;
     delay?: number;
   };

@@ -11,18 +11,20 @@ export class Outbox {
   isActive(id: string) {
     return this.active.has(id);
   }
-  wasRefused(taskId: string, id: string) {
-    const last = this.store.db
+  writeEvidence(taskId: string, id: string): 'not_started' | 'refused' | 'unknown' {
+    const evidence = this.store.db
       .prepare(
-        `SELECT type FROM events WHERE task_id=?
-       AND type IN ('operation.started', 'operation.refused', 'operation.completed',
-                    'operation.uncertain', 'operation.recovered')
-       AND json_extract(data, '$.operationId')=?
-       AND NOT EXISTS (SELECT 1 FROM operations WHERE id=?)
-       ORDER BY id DESC LIMIT 1`,
+        `SELECT EXISTS (SELECT 1 FROM operations WHERE id=?) AS receipt,
+              (SELECT type FROM events WHERE task_id=?
+               AND type IN ('operation.started', 'operation.refused', 'operation.completed',
+                            'operation.uncertain', 'operation.recovered')
+               AND json_extract(data, '$.operationId')=?
+               ORDER BY id DESC LIMIT 1) AS lastEvent`,
       )
-      .get(taskId, id, id);
-    return last?.type === 'operation.refused';
+      .get(id, taskId, id);
+    if (evidence?.receipt) return 'unknown';
+    if (evidence?.lastEvent === 'operation.refused') return 'refused';
+    return evidence?.lastEvent ? 'unknown' : 'not_started';
   }
   async perform<T>(
     taskId: string,
