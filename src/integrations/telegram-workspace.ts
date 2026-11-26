@@ -174,9 +174,11 @@ export class TelegramWorkspace {
         const group = this.daddy.sessions().find((group) => group.id === retry.groupId);
         if (group) {
           this.api.delivery?.beginRecoveryAttempt();
-          this.replayGroup(group, true);
+          const recovery = this.replayGroup(group, true);
           this.pending = this.pending.then(async () => {
             await this.api.delivery?.finishRecovery();
+            if (recovery)
+              this.completeDeferred(group.id, recovery.attempts, recovery.messageSnapshot);
           });
         } else this.api.delivery?.discardGroup(retry.groupId);
       }
@@ -1947,12 +1949,43 @@ export class TelegramWorkspace {
     });
     this.store.setSetting('telegram.error', redact(String(error)));
   }
-  private clearDeferred(groupId: string) {
+  private clearDeferred(groupId: string, force = false) {
     const key = `telegram.eventRetry:${groupId}`;
     const retry = this.store.setting<{ error?: string }>(key);
+    if (retry && !force) return;
     if (retry?.error && this.store.setting('telegram.error') === retry.error)
       this.store.setSetting('telegram.error', null);
     this.store.setSetting(key, null);
+  }
+  private messageSnapshot(groupId: string) {
+    const messages = this.store
+      .messages(groupId)
+      .filter((message) => ['user', 'agent'].includes(message.sender));
+    const last = messages.at(-1);
+    return JSON.stringify({
+      count: messages.length,
+      last: last
+        ? { id: last.id, text: last.text, phase: last.phase, needsReply: last.needsReply }
+        : undefined,
+    });
+  }
+  private completeDeferred(groupId: string, attempts: number, messageSnapshot: string) {
+    const key = `telegram.eventRetry:${groupId}`;
+    const retry = this.store.setting<{
+      attempts: number;
+      blockedUntil?: number;
+      nextAt: number;
+    }>(key);
+    if (!retry || retry.attempts !== attempts) return;
+    if (this.messageSnapshot(groupId) !== messageSnapshot) {
+      this.store.setSetting(key, {
+        ...retry,
+        blockedUntil: 0,
+        nextAt: Date.now(),
+      });
+      return;
+    }
+    this.clearDeferred(groupId, true);
   }
   private async ownerMention(pair: Pair) {
     let label = pair.ownerLabel;
@@ -2380,6 +2413,7 @@ export class TelegramWorkspace {
         data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
+    const messageSnapshot = this.messageSnapshot(group.id);
     const pair = this.pair();
     const room = this.room();
     const topic = room ? this.topic(room, group.id) : undefined;
@@ -2403,6 +2437,15 @@ export class TelegramWorkspace {
         })
         .map((message) => message.runId),
     );
+    const independentlyDeliveredFinalRuns = new Set(
+      messages
+        .filter((message) => {
+          if (message.phase !== 'final' || !message.runId || !destination) return false;
+          const notificationId = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:final`;
+          return !!this.api.delivery?.hasAcknowledgedMessage(destination, notificationId);
+        })
+        .map((message) => message.runId),
+    );
     const pendingNotification = this.store.db.prepare(
       "SELECT 1 FROM notifications WHERE status='pending' AND id=?",
     );
@@ -2410,6 +2453,7 @@ export class TelegramWorkspace {
       if (!['user', 'agent'].includes(message.sender)) return false;
       if (message.phase !== 'progress' || !deliveredFinalRuns.has(message.runId) || !destination)
         return true;
+      if (independentlyDeliveredFinalRuns.has(message.runId)) return true;
       const notificationId = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:progress`;
       return !!pendingNotification.get(notificationId);
     })) {
@@ -2430,6 +2474,7 @@ export class TelegramWorkspace {
         this.api.delivery?.retainDeferred(recovery.destination, recovery.notificationId);
       this.onEvent(event);
     }
+    if (retryAttempt !== undefined) return { attempts: retryAttempt, messageSnapshot };
   }
   replay() {
     this.api.delivery?.beginRecoveryAttempt();

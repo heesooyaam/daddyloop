@@ -973,6 +973,105 @@ it('finishes a visible private question after notifications are disabled before 
 });
 
 it.each([
+  ['different text', 'progress', 'Earlier reply.', 'New background reply.'],
+  ['shared prefix', 'final', 'A'.repeat(5000), 'A'.repeat(5000) + 'New ending.'],
+] as const)(
+  'does not mistake a legacy turn receipt for a muted reply: %s',
+  async (_case, phase, firstText, mutedText) => {
+    const f = daddyFixture();
+    const calls: { method: string; body: Record<string, any> }[] = [];
+    let clock = 1000;
+    let nextMessageId = 700;
+    let failNext = false;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body));
+      calls.push({ method, body });
+      if (failNext && ['editMessageText', 'sendMessage'].includes(method)) {
+        failNext = false;
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 429,
+            description: 'Too Many Requests',
+            parameters: { retry_after: 60 },
+          }),
+          { status: 429 },
+        );
+      }
+      return Response.json({
+        ok: true,
+        result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+      });
+    });
+    f.store.setSetting('telegram.pairing', {
+      chatId: 7,
+      userId: 7,
+      ownerLabel: 'Owner',
+    });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Muted legacy reply' });
+    const first = f.store.daddyMessage(group.id, 'agent', firstText, 'background-run', undefined, {
+      phase: 'progress',
+    });
+    const notification = (message: typeof first) =>
+      `telegram:dialog:7:0:${message.id}:${message.phase}`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(notification(first), 'pending', first.at);
+    const card = (value: string) =>
+      new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(value);
+    const legacy = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    api.delivery = legacy;
+    await legacy.send({ chatId: 7 }, card(first.text), {
+      groupId: group.id,
+      key: 'turn:background-run',
+      replace: true,
+      notificationId: notification(first),
+    });
+    const muted = f.store.daddyMessage(group.id, 'agent', mutedText, 'background-run', undefined, {
+      phase,
+    });
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(notification(muted), 'pending', muted.at);
+    failNext = true;
+    await legacy.send({ chatId: 7 }, card(muted.text), {
+      groupId: group.id,
+      key: 'turn:background-run',
+      replace: true,
+      final: phase === 'final',
+      notificationId: notification(muted),
+    });
+    const beforeRecovery = calls.length;
+    await legacy.stop();
+
+    f.store.setSetting('notifications.telegram', { enabled: false, mode: 'all' });
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    try {
+      await api.delivery.send({ chatId: 7 }, new TelegramText().add('Menu'), { key: 'menu' });
+      workspace.replay();
+      await vi.waitFor(() =>
+        expect(
+          f.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(notification(muted))
+            ?.status,
+        ).toBe('superseded'),
+      );
+      clock += 60000;
+      await api.delivery.flush(20);
+      expect(calls.slice(beforeRecovery).map((call) => [call.method, call.body.text])).toEqual([
+        ['sendMessage', 'Menu'],
+      ]);
+    } finally {
+      await workspace.stop();
+      await api.delivery.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([
   ['en', 'private chat', false, false, false],
   ['ru', 'topic', true, true, false],
   ['en', 'topic closed before replay', true, false, true],
@@ -1556,6 +1655,70 @@ it('replays an interrupted progress delivery even when a later final reply was s
   }
 });
 
+it('recovers an earlier reply without a notification before a current-format final receipt', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 750;
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    return Response.json({
+      ok: true,
+      result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Recovered history' });
+  const progress = f.store.daddyMessage(
+    group.id,
+    'agent',
+    'Missing earlier progress.',
+    'background-run',
+    undefined,
+    { phase: 'progress' },
+  );
+  const final = f.store.daddyMessage(
+    group.id,
+    'agent',
+    'Already delivered final.',
+    'background-run',
+    undefined,
+    { phase: 'final' },
+  );
+  const finalNotification = `telegram:dialog:7:0:${final.id}:final`;
+  f.store.db
+    .prepare('INSERT INTO notifications VALUES(?,?,?)')
+    .run(finalNotification, 'pending', final.at);
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  await api.delivery.send(
+    { chatId: 7 },
+    new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(final.text),
+    {
+      groupId: group.id,
+      key: `message:${final.id}`,
+      replace: true,
+      final: true,
+      notificationId: finalNotification,
+    },
+  );
+  await api.delivery.stop();
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  try {
+    workspace.replay();
+    await vi.waitFor(() =>
+      expect(calls.filter((call) => call.method === 'sendMessage')).toHaveLength(2),
+    );
+    expect(calls.at(-1)!.body.text).toContain(progress.text);
+  } finally {
+    await workspace.stop();
+    await api.delivery.stop();
+    await f.close();
+  }
+});
+
 it.each([
   ['a final reply', 'final', false],
   ['an owner question', 'final', true],
@@ -1656,6 +1819,159 @@ it.each([
     }
   },
 );
+
+it('replays messages saved while an earlier delivery retry is in flight', async () => {
+  const f = daddyFixture();
+  const calls: { method: string; body: Record<string, any> }[] = [];
+  let nextMessageId = 800;
+  let holdRetry = false;
+  let releaseRetry!: () => void;
+  let retryStarted!: () => void;
+  const retryGate = new Promise<void>((resolve) => {
+    releaseRetry = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    retryStarted = resolve;
+  });
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(options?.body));
+    calls.push({ method, body });
+    if (holdRetry && method === 'sendMessage' && body.text?.includes('Earlier reply.')) {
+      holdRetry = false;
+      retryStarted();
+      await retryGate;
+    }
+    return Response.json({
+      ok: true,
+      result: method === 'sendMessage' ? { message_id: ++nextMessageId } : true,
+    });
+  });
+  f.store.setSetting('telegram.pairing', {
+    chatId: 7,
+    userId: 7,
+    ownerLabel: 'Owner',
+  });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Growing retry' });
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  const originalSetSetting = f.store.setSetting.bind(f.store);
+  let failDeliverySave = true;
+  vi.spyOn(f.store, 'setSetting').mockImplementation((key, value) => {
+    if (failDeliverySave && key.startsWith('telegram.delivery:')) {
+      failDeliverySave = false;
+      throw new Error('database is temporarily locked');
+    }
+    originalSetSetting(key, value);
+  });
+  try {
+    const first = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Earlier reply.',
+      'background-run',
+      undefined,
+      { phase: 'progress' },
+    );
+    workspace.onEvent({
+      id: 1,
+      taskId: group.id,
+      type: 'daddy.message',
+      data: { messageId: first.id },
+      at: first.at,
+    });
+    await vi.waitFor(() =>
+      expect(f.store.setting(`telegram.eventRetry:${group.id}`)).toBeDefined(),
+    );
+    const retry = f.store.setting<Record<string, unknown>>(`telegram.eventRetry:${group.id}`)!;
+    f.store.setSetting(`telegram.eventRetry:${group.id}`, {
+      ...retry,
+      blockedUntil: 0,
+      nextAt: 0,
+    });
+    holdRetry = true;
+    workspace.start();
+    await started;
+
+    const second = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Reply saved during retry.',
+      'background-run',
+      undefined,
+      { phase: 'progress' },
+    );
+    workspace.onEvent({
+      id: 2,
+      taskId: group.id,
+      type: 'daddy.message',
+      data: { messageId: second.id },
+      at: second.at,
+    });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Choose the retry strategy',
+      requestId: 'retry-decision',
+    });
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      reason: 'Which retry strategy?',
+      inputRequest: { runId: 'retry-decision', role: 'author', generation: task.generation },
+    });
+    workspace.onEvent({
+      id: 3,
+      taskId: group.id,
+      type: 'daddy.task_question',
+      data: { taskId: task.id, request: 'retry-decision' },
+      at: second.at,
+    });
+    releaseRetry();
+    const taskNotification = `telegram:question:7:${task.id}:retry-decision`;
+    await vi.waitFor(() =>
+      expect(
+        f.store.db.prepare('SELECT status FROM notifications WHERE id=?').get(taskNotification)
+          ?.status,
+      ).toBe('sent'),
+    );
+    expect(f.store.setting(`telegram.eventRetry:${group.id}`)).toBeDefined();
+
+    const final = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Final reply.',
+      'background-run',
+      undefined,
+      { phase: 'final' },
+    );
+    workspace.onEvent({
+      id: 4,
+      taskId: group.id,
+      type: 'daddy.message',
+      data: { messageId: final.id },
+      at: final.at,
+    });
+    const deliveredReplies = () =>
+      calls
+        .filter((call) => call.method === 'sendMessage')
+        .map((call) => call.body.text)
+        .filter((value) =>
+          [first.text, second.text, final.text].some((message) => value?.includes(message)),
+        );
+    await vi.waitFor(() => expect(deliveredReplies()).toHaveLength(3), { timeout: 4000 });
+    expect(deliveredReplies()).toEqual([
+      expect.stringContaining(first.text),
+      expect.stringContaining(second.text),
+      expect.stringContaining(final.text),
+    ]);
+    await vi.waitFor(() => expect(f.store.setting(`telegram.eventRetry:${group.id}`)).toBeNull());
+  } finally {
+    releaseRetry();
+    await workspace.stop();
+    await api.delivery.stop();
+    await f.close();
+  }
+});
 
 it('uses the paired private-chat receipt after another session is selected', async () => {
   const f = daddyFixture();

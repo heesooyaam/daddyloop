@@ -1022,11 +1022,11 @@ export class TelegramDelivery {
   }
   hasAcknowledgedMessage(destination: TelegramDestination, notificationId: string) {
     const message = this.messageDelivery(destination, notificationId);
-    if (message?.value.messages.length) return true;
+    if (message && this.ownedAcknowledgedParts(message.value).length) return true;
     const identity = digest([destination, notificationIdentity(notificationId)]);
     const question =
       this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
-    return !!question?.value.messages.length;
+    return !!question && this.ownedAcknowledgedParts(question.value).length > 0;
   }
   private notificationWasSent(notificationId: string) {
     return !!this.store.db
