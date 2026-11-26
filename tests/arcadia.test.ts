@@ -1,3 +1,4 @@
+import { findingVersion } from '../src/core/review-decisions.js';
 import { it, expect } from 'vitest';
 import { ArcadiaProvider } from '../src/providers/arcadia.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
@@ -11,6 +12,7 @@ class FakeArc extends ArcBridge {
   inline = [
     {
       id: -9,
+      anchor: { file_path: 'file.cpp', line: 5, size: 5, side: 'new' },
       content: 'Exact markdown\n```cpp\nreturn;\n```\n' + tag('daddyloop:test:comment:R1'),
       is_draft: true,
       author: { name: 'tester' },
@@ -112,4 +114,17 @@ it('checks Arcanum, the helper and journals without allocating a probe copy', as
     'helper',
     'arc:info --json',
   ]);
+});
+
+it('keeps the native Arcanum range in the version of a published finding', async () => {
+  const bridge = new FakeArc();
+  bridge.general[0].is_draft = false;
+  bridge.inline[0].is_draft = false;
+  const provider = new ArcadiaProvider(bridge);
+  const before = (await provider.getReview(ref, review)).comments[0];
+  bridge.inline[0].anchor.size = 3;
+  const after = (await provider.getReview(ref, review)).comments[0];
+  expect(before.location).toMatchObject({ startLine: 5, line: 9 });
+  expect(after.location).toMatchObject({ startLine: 5, line: 7 });
+  expect(findingVersion(after)).not.toBe(findingVersion(before));
 });

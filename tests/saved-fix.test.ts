@@ -1,6 +1,6 @@
 import { Worker } from '../src/runtime/worker.js';
 import { DemoRuntime } from '../src/runtime/demo.js';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/core/store.js';
@@ -237,19 +237,30 @@ it('retains a worker message through push confirmation and delivers it once on t
   }
 });
 
-it.each(['restart onto H1', 'restore onto H3'])(
+it.each([
+  'restart onto H1',
+  'restore onto H3',
+  'restart through a symlinked data root',
+  'restart with GitLab diff lag',
+])(
   'recovers the exact Git save after %s and independently reviews the pushed object',
   async (scenario) => {
     const root = mkdtempSync(join(tmpdir(), 'daddyloop-fix-save-'));
+    const physical = join(root, 'physical-data');
     const data = join(root, 'data'),
       source = join(root, 'source'),
       remote = join(root, 'remote');
     mkdirSync(source);
     mkdirSync(remote);
-    mkdirSync(data);
+    if (scenario.includes('symlinked')) {
+      mkdirSync(physical);
+      symlinkSync(physical, data, 'dir');
+    } else mkdirSync(data);
     const registry = allRepositories();
-    const transport = registry.get('github').git!;
-    const url = 'https://github.com/owner/pull-source.git';
+    const gitlab = scenario.includes('GitLab');
+    const host = gitlab ? 'gitlab.com' : 'github.com';
+    const transport = registry.get(gitlab ? 'gitlab' : 'github').git!;
+    const url = `https://${host}/owner/pull-source.git`;
     const environment = vi.spyOn(transport, 'environment').mockReturnValue({
       GIT_CONFIG_COUNT: '1',
       GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
@@ -258,8 +269,8 @@ it.each(['restart onto H1', 'restore onto H3'])(
     let store = new Store(join(data, 'daddyloop.sqlite'));
     let worker: Worker | undefined;
     const ref = {
-      provider: 'github',
-      host: 'github.com',
+      provider: gitlab ? 'gitlab' : 'github',
+      host,
       repo: 'owner/target',
       number: 159,
       url: 'https://github.com/owner/target/pull/159',
@@ -375,6 +386,18 @@ it.each(['restart onto H1', 'restore onto H3'])(
       worker.autoSubmit = (id) => restarted.engine.submitSavedFix(id, send);
       await worker.tick();
       await vi.waitFor(() => expect(store.getTask(task.id).revision?.head).toBe(h2));
+      if (gitlab) {
+        const read = restarted.provider.getPR.bind(restarted.provider);
+        const getPR = vi.spyOn(restarted.provider, 'getPR').mockImplementation(async (ref) => {
+          if (store.getTask(task.id).state === 'queued')
+            throw new AppError('diff_unavailable', 'GitLab still reports the H1 diff', 503);
+          return read(ref);
+        });
+        await worker.tick();
+        expect(store.getTask(task.id).state).toBe('queued');
+        expect(runtime.run).not.toHaveBeenCalled();
+        getPR.mockRestore();
+      }
       await worker.tick();
       await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('awaiting_publication'));
       expect(send).toHaveBeenCalledTimes(1);
@@ -505,6 +528,246 @@ it('routes a saved fix merged externally to read-only verification of that exact
       reason: 'Integration check unavailable',
     });
     expect(f.store.getTask(t.id).verifiedMerge).toBeUndefined();
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each([savedHead, 'c'.repeat(40)])(
+  'reconciles a saved ref against prior submission evidence for %s',
+  async (recordedHead) => {
+    const f = await fixture({ state: 'needs_input' });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const job = f.store.enqueue(task, 'author', 'fix', 'Fix');
+      f.store.saveJob({ ...job, status: 'failed' });
+      const prior = { revision: task.revision!, attempted: true, confirmUntil: '2999-01-01' };
+      task.pendingFix = prior;
+      task.pendingAuthorHead = recordedHead;
+      task.fixSave = {
+        runId: job.id,
+        generation: job.generation,
+        revision: task.revision!,
+        pr: task.pr!,
+        ref: prRef(task),
+        summary: 'Saved',
+      };
+      f.store.saveTask(task);
+      f.store.event(task.id, 'author.fixes_saved', { head: recordedHead }, job.id);
+      f.engine.readFixSave = async () => savedHead;
+      await f.engine.recoverFixSave(task.id);
+      const recovered = f.store.getTask(task.id);
+      expect(recovered.pendingFix).toEqual(prior);
+      expect(recovered.pendingAuthorHead).toBe(recordedHead);
+      expect(f.store.events(task.id).filter((e) => e.type === 'author.fixes_saved')).toHaveLength(
+        1,
+      );
+      if (recordedHead === savedHead) {
+        expect(recovered.fixSave).toBeUndefined();
+        expect(recovered.state).toBe('awaiting_push');
+      } else {
+        expect(recovered.fixSave?.runId).toBe(job.id);
+        expect(recovered.state).toBe('needs_input');
+        expect(recovered.reason).toContain(savedHead);
+        expect(recovered.reason).toContain(recordedHead);
+        const push = vi.fn();
+        await f.engine.submitSavedFix(task.id, push);
+        expect(push).not.toHaveBeenCalled();
+      }
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'settles an unchanged save once after an interrupted provider read (retargeted=%s)',
+  async (retargeted) => {
+    const f = await fixture({ state: 'fixing' });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const head = task.revision!.head;
+      const save = vi.fn(async () => head);
+      f.engine.readFixSave = save;
+      f.store.enqueue(task, 'author', 'fix', 'Apply feedback');
+      const job = f.store.claim()!;
+      vi.spyOn(f.provider, 'getPR').mockRejectedValueOnce(new Error('Interrupted confirmation'));
+      await expect(f.engine.completeJob(job, f.result(), save)).rejects.toThrow('Interrupted');
+      f.engine.recoverInterruptedJobs();
+      if (retargeted) f.store.setSetting('demo-pr:1', { ...task.pr, targetBranch: 'release' });
+      await f.engine.recoverFixSave(task.id);
+      await f.engine.recoverFixSave(task.id);
+      const outcome = f.store.getTask(task.id);
+      expect(outcome.pr?.targetBranch).toBe(task.pr?.targetBranch);
+      expect(outcome.state).toBe(retargeted ? 'needs_input' : 'queued');
+      expect(f.store.jobs(task.id).filter((j) => j.kind === 'fix')).toHaveLength(1);
+      expect(f.store.events(task.id).filter((e) => e.type === 'author.fixes_saved')).toHaveLength(
+        retargeted ? 0 : 1,
+      );
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([undefined, '/outside/task/author'])(
+  'classifies invalid author workspace %s before a Git write',
+  async (path) => {
+    const f = await fixture({ state: 'fixing', authorWorktree: path });
+    try {
+      const ws = new Workspaces('/tmp');
+      f.engine.readFixSave = (task, save) => ws.recoverFix(task, save);
+      f.store.enqueue(f.task, 'author', 'fix', 'Apply feedback');
+      const job = f.store.claim()!;
+      await expect(
+        f.engine.completeJob(job, f.result(), (task, save) =>
+          ws.commitFix(task, 'Save', undefined, save),
+        ),
+      ).rejects.toMatchObject({
+        code: 'fix_before_commit',
+        message: expect.stringContaining(
+          path ? 'outside the managed task directory' : 'not initialized',
+        ),
+      });
+      expect(f.store.getTask(f.task.id).fixSave).toBeUndefined();
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it('waits on the original Arcanum diff ID even when the saved head is already visible', async () => {
+  const f = await fixture({ state: 'awaiting_push', pendingAuthorHead: savedHead });
+  try {
+    const task = f.store.getTask(f.task.id);
+    task.ref.provider = 'arcadia';
+    task.revision!.revisionId = 'D1';
+    task.pr!.revisionId = 'D1';
+    f.store.saveTask(task);
+    const provider = vi.spyOn(f.provider, 'getPR').mockResolvedValue(task.pr!);
+    const push = vi.fn(async () => {
+      provider.mockResolvedValue({ ...task.pr!, head: savedHead });
+    });
+    await f.engine.submitSavedFix(task.id, push);
+    await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'awaiting_push',
+      pendingAuthorHead: savedHead,
+    });
+    expect(f.store.jobs(task.id)).toHaveLength(0);
+    provider.mockResolvedValue({ ...task.pr!, head: savedHead, revisionId: 'D2' });
+    await f.engine.submitSavedFix(task.id, push);
+    await f.engine.review(task.id);
+    expect(push).toHaveBeenCalledOnce();
+    expect(f.store.getTask(task.id).review?.revision).toMatchObject({
+      head: savedHead,
+      revisionId: 'D2',
+    });
+    expect(f.store.jobs(task.id)).toHaveLength(1);
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each(['manual publication', 'CI', 'resume'] as const)(
+  'keeps the finding version attached to the completed review through %s',
+  async (entry) => {
+    const f = await fixture();
+    try {
+      await f.engine.review(f.task.id);
+      const old = f.store.getTask(f.task.id).review!;
+      const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+        key: 'version',
+        body: 'Original finding',
+      })) as { id: string };
+      await f.run();
+      await f.engine.publish(f.task.id);
+      await f.run();
+      await f.engine.review(f.task.id);
+      const current = f.store.getTask(f.task.id);
+      const job = f.store.claim()!;
+      await f.engine.refreshFindingEvidence(current, job);
+      f.store.saveTask(current);
+      await f.engine.completeJob(job, f.result({ verifiedCommentIds: [finding.id] }));
+      f.store.saveJob({ ...job, status: 'completed' });
+      if (entry === 'CI') {
+        f.store.setSetting('demo-pr:1', { ...current.pr, checks: 'pending' });
+        await f.engine.publish(current.id);
+        expect(f.store.getTask(current.id).state).toBe('awaiting_checks');
+      } else if (entry === 'resume') {
+        await f.engine.publish(current.id);
+        const waiting = f.store.getTask(current.id);
+        waiting.state = 'awaiting_merge';
+        f.store.saveTask(waiting);
+        await f.engine.action(current.id, 'pause');
+        await f.engine.action(current.id, 'resume');
+      } else {
+        await f.provider.publish(prRef(current), current.review!);
+      }
+      await f.provider.updateComment(prRef(current), old, finding.id, 'New acceptance criterion');
+      f.store.setSetting('demo-pr:1', { ...current.pr, checks: 'passing' });
+      if (entry === 'resume') {
+        expect(await f.engine.completedReviewFindingsCurrent(f.store.getTask(current.id))).toBe(
+          false,
+        );
+      } else {
+        await f.engine.reconcile(current.id);
+        expect(f.store.getTask(current.id).state).toBe('needs_input');
+      }
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'locates a legacy publication after long history (new head=%s)',
+  async (newHead) => {
+    const f = await fixture();
+    try {
+      await f.engine.review(f.task.id);
+      const old = f.store.getTask(f.task.id).review!;
+      const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+        key: 'legacy',
+        body: 'Original finding',
+      })) as { id: string };
+      for (let i = 0; i < 510; i++) f.store.event(f.task.id, 'fixture.event', {});
+      await f.run();
+      await f.engine.publish(f.task.id);
+      if (newHead) await f.provider.advance(prRef(f.task));
+      await f.run();
+      await f.engine.review(f.task.id);
+      const task = f.store.getTask(f.task.id);
+      delete task.feedbackReview;
+      const job = f.store.claim()!;
+      await f.provider.updateComment(prRef(task), old, finding.id, 'Updated native finding');
+      await f.engine.refreshFindingEvidence(task, job);
+      expect(job.publishedFindingReview?.id).toBe(old.id);
+      expect(task.feedback?.comments[0].body).toContain('Updated native finding');
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it('preserves plan approval through a rerun of mandatory CI on an external merge', async () => {
+  const f = await fixture({ kind: 'plan', state: 'needs_input' });
+  try {
+    const pr = { ...f.task.pr, state: 'merged', mergeCommit: 'merged-plan', checks: 'passing' };
+    f.store.setSetting('demo-pr:1', pr);
+    await f.engine.action(f.task.id, 'verify-merge');
+    await f.run();
+    expect(f.store.getTask(f.task.id).state).toBe('awaiting_plan_approval');
+    f.store.setSetting('demo-pr:1', { ...pr, checks: 'pending' });
+    await f.engine.action(f.task.id, 'approve-plan');
+    expect(f.store.getTask(f.task.id)).toMatchObject({
+      state: 'awaiting_checks',
+      approvedAt: expect.any(String),
+    });
+    f.store.setSetting('demo-pr:1', { ...pr, checks: 'failing' });
+    expect((await f.engine.reconcile(f.task.id)).state).toBe('awaiting_checks');
+    f.store.setSetting('demo-pr:1', pr);
+    expect((await f.engine.reconcile(f.task.id)).state).toBe('complete');
   } finally {
     f.store.close();
   }

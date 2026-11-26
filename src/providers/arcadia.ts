@@ -113,7 +113,8 @@ export class ArcadiaProvider implements ReviewProvider {
         ? {
             location: {
               path: anchor.file_path ?? anchor.path!,
-              line: anchor.line,
+              line: anchor.line + Math.max(0, (anchor.size ?? 1) - 1),
+              startLine: (anchor.size ?? 1) > 1 ? anchor.line : undefined,
               side: anchor.side === 'old' ? ('LEFT' as const) : ('RIGHT' as const),
             },
           }

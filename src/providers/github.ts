@@ -31,6 +31,8 @@ type GHComment = {
   path?: string;
   line?: number;
   original_line?: number;
+  start_line?: number | null;
+  original_start_line?: number | null;
   side?: 'LEFT' | 'RIGHT';
   user?: { login: string };
 };
@@ -46,6 +48,7 @@ const comment = (c: GHComment): ReviewComment => ({
         location: {
           path: c.path,
           line: c.line ?? c.original_line!,
+          startLine: (c.line ? c.start_line : c.original_start_line) ?? undefined,
           side: c.side ?? 'RIGHT',
         },
       }

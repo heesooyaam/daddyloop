@@ -1391,39 +1391,54 @@ describe('opt-in GitHub merging', () => {
       }
     },
   );
-  it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
-    const f = await setup();
+  it('uses the exact Git checkpoint for conflict repair even when the author copy advances', async () => {
+    const fixture = daddyFixture();
     try {
+      const repo = join(fixture.dir, 'source');
+      mkdirSync(repo);
+      await git(['init'], repo);
+      const commit = (cwd: string, subject: string) =>
+        git(['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-am', subject], cwd);
+      writeFileSync(join(repo, 'file'), 'H1\n');
+      await git(['add', '.'], repo);
+      await commit(repo, 'H1');
+      const head = await git(['rev-parse', 'HEAD'], repo);
+      const f = await setup(fixture, { head, base: head, start: head }, repo);
       await f.daddy.settings(f.group.id, { autoMerge: true });
       const task = f.store.getTask(f.task.id);
       task.state = 'fixing';
-      task.authorWorktree = f.dir;
+      const author = await f.checkouts.prepare(task, 'author');
       f.store.saveTask(task);
       saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
       f.setRemote({ mergeable: false, mergeConflict: true });
-      const job = f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
-      f.store.claim();
-      const save = vi.fn(async () => 'c'.repeat(40));
+      f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
+      const job = f.store.claim()!;
+      writeFileSync(join(author, 'file'), 'H2\n');
+      let h2 = '',
+        h3 = '';
       await f.engine.completeJob(
         job,
-        {
-          status: 'incomplete',
-          summary: 'Integration blocked on conflict',
-          checkedHead: task.revision!.head,
+        { status: 'incomplete', summary: 'Integration blocked on conflict', checkedHead: head },
+        async (current, save) => {
+          expect(save?.runId).toBe(job.id);
+          h2 = await f.checkouts.commitFix(current, 'H2', undefined, save);
+          writeFileSync(join(author, 'file'), 'H3\n');
+          await commit(author, 'H3');
+          h3 = await git(['rev-parse', 'HEAD'], author);
+          return h2;
         },
-        save,
       );
-      f.store.saveJob({ ...job, status: 'completed' });
-      expect(save).toHaveBeenCalledOnce();
+      expect(h2).not.toBe(h3);
       expect(f.store.getTask(task.id)).toMatchObject({
         state: 'fixing',
         fixingMergeConflict: true,
-        conflictCheckpoint: 'c'.repeat(40),
+        conflictCheckpoint: h2,
       });
-      expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      expect(await git(['rev-parse', 'HEAD'], author)).toBe(h3);
+      expect(readFileSync(join(author, 'file'), 'utf8')).toBe('H3\n');
       expect(f.daddy.board(f.group.id).workers.slots[0].taskId).toBe(task.id);
     } finally {
-      await f.close();
+      await fixture.close();
     }
   });
 

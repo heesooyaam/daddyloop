@@ -1,3 +1,10 @@
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { git, Workspaces } from '../src/runtime/workspaces.js';
+import { allRepositories } from '../src/modules/repositories/index.js';
+import { fixture } from './helpers.js';
+import { findingVersion } from '../src/core/review-decisions.js';
 import { Store } from '../src/core/store.js';
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubProvider } from '../src/providers/github.js';
@@ -427,5 +434,130 @@ it('persists backoff for transient GitHub reads and does not treat a failed muta
     expect(calls).toHaveBeenCalledTimes(2);
   } finally {
     store.close();
+  }
+});
+
+it('keeps the native GitHub range in the version of a published finding', async () => {
+  const review = { id: '33', marker: 'review', revision };
+  let start = 5;
+  const http = transport((path) =>
+    path.includes('/comments')
+      ? [{ id: 19, body: 'Same finding', path: 'file.ts', line: 10, start_line: start }]
+      : { id: 33, state: 'COMMENTED', commit_id: revision.head, user: { id: 7 } },
+  );
+  const provider = new GitHubProvider(ref.host, 'fake', http);
+  const before = (await provider.getReview(ref, review)).comments[0];
+  start = 8;
+  const after = (await provider.getReview(ref, review)).comments[0];
+  expect(before.location).toMatchObject({ startLine: 5, line: 10 });
+  expect(after.location).toMatchObject({ startLine: 8, line: 10 });
+  expect(findingVersion(after)).not.toBe(findingVersion(before));
+});
+
+it('reads a merged GitLab fork with separate source and target clone URLs', async () => {
+  const mr = parsePR('https://gitlab.com/team/target/-/merge_requests/9');
+  const project = (id: number) => `https://gitlab.com/team/project-${id}.git`;
+  let diffHead = revision.base;
+  const http = transport((path) => {
+    if (path.endsWith('/projects/22')) return { http_url_to_repo: project(22) };
+    if (path.endsWith('/projects/33')) return { http_url_to_repo: project(33) };
+    return {
+      sha: revision.head,
+      diff_refs: { head_sha: diffHead, base_sha: revision.base, start_sha: revision.start },
+      source_project_id: 22,
+      target_project_id: 33,
+      state: 'merged',
+      source_branch: 'worker',
+      target_branch: 'main',
+      merge_commit_sha: 'd'.repeat(40),
+      head_pipeline: null,
+    };
+  });
+  const provider = new GitLabProvider(mr.host, 'fake', http);
+  await expect(provider.getPR(mr)).rejects.toMatchObject({ code: 'diff_unavailable' });
+  diffHead = revision.head;
+  expect(await provider.getPR(mr)).toMatchObject({
+    ...revision,
+    cloneUrl: project(22),
+    targetCloneUrl: project(33),
+    branch: 'worker',
+    mergeCommit: 'd'.repeat(40),
+  });
+});
+
+it('prepares a merged GitLab fork on its source head and fetches the result from the target', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-gitlab-fork-'));
+  const source = join(dir, 'source'),
+    target = join(dir, 'target');
+  mkdirSync(source);
+  const f = await fixture();
+  try {
+    const commit = (cwd: string, subject: string) =>
+      git(
+        [
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=test@local',
+          'commit',
+          '--allow-empty',
+          '-m',
+          subject,
+        ],
+        cwd,
+      );
+    await git(['init'], source);
+    await commit(source, 'H1');
+    const base = await git(['rev-parse', 'HEAD'], source);
+    await commit(source, 'H2');
+    const head = await git(['rev-parse', 'HEAD'], source);
+    await git(['clone', source, target], dir);
+    // The integration object exists only in the target project.
+    await commit(target, 'Integrated result');
+    const mergeCommit = await git(['rev-parse', 'HEAD'], target);
+    await expect(git(['cat-file', '-t', mergeCommit], source)).rejects.toThrow();
+    const sourceUrl = 'https://gitlab.com/team/fork.git';
+    const targetUrl = 'https://gitlab.com/team/target.git';
+    const gitlab = parsePR('https://gitlab.com/team/target/-/merge_requests/9');
+    const http = transport((path) => {
+      if (path.endsWith('/projects/22')) return { http_url_to_repo: sourceUrl };
+      if (path.endsWith('/projects/33')) return { http_url_to_repo: targetUrl };
+      return {
+        sha: head,
+        diff_refs: { head_sha: head, base_sha: base, start_sha: base },
+        source_project_id: 22,
+        target_project_id: 33,
+        state: 'merged',
+        source_branch: 'worker',
+        target_branch: 'main',
+        merge_commit_sha: mergeCommit,
+        head_pipeline: null,
+      };
+    });
+    const provider = new GitLabProvider(gitlab.host, 'fake', http);
+    const pr = await provider.getPR(gitlab);
+    const repositories = allRepositories();
+    const transportModule = repositories.get('gitlab').git!;
+    const credentials = vi.spyOn(transportModule, 'environment').mockImplementation((remote) => ({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: `url.file://${remote.url === targetUrl ? target : source}.insteadOf`,
+      GIT_CONFIG_VALUE_0: remote.url,
+    }));
+    try {
+      const task = { ...f.task, ref: gitlab, repoPath: source, revision: pr, pr };
+      const reviewer = await new Workspaces(join(dir, 'data'), repositories).prepare(
+        task,
+        'reviewer',
+      );
+      expect(await git(['rev-parse', 'HEAD'], reviewer)).toBe(head);
+      expect(await git(['cat-file', '-t', mergeCommit], reviewer)).toBe('commit');
+      expect(pr.cloneUrl).toBe(sourceUrl);
+      expect(credentials.mock.calls.map(([remote]) => remote.url)).toEqual([targetUrl]);
+    } finally {
+      credentials.mockRestore();
+    }
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

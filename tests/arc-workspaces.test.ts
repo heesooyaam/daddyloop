@@ -155,3 +155,52 @@ it('recovers the saved Arc hash and refuses a push from a different checkout has
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it.each([false, true])(
+  'attributes an Arc commit only to the marked save (checkout changed=%s)',
+  async (moved) => {
+    const f = await fixture({ repoPath: '/fake/arc-source' });
+    const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-moved-save-'));
+    const bridge = new MountFixture();
+    const workspaces = new ArcWorkspaces(dir, bridge);
+    try {
+      const task = f.task;
+      await workspaces.prepare(task, 'author');
+      bridge.status = ' M fixed.txt';
+      const h2 = 'c'.repeat(40),
+        h3 = 'd'.repeat(40);
+      const native = bridge.native.bind(bridge);
+      let title = '';
+      bridge.native = async (args) => {
+        if (args[0] === 'commit') {
+          title = args[2];
+          bridge.hash = moved ? h3 : h2;
+          if (moved) bridge.branch += '-different';
+          return '';
+        }
+        if (args[0] === 'log') return args.at(-1) === h2 ? title : 'Unrelated commit';
+        return native(args);
+      };
+      const save = {
+        runId: 'fix-run',
+        generation: task.generation,
+        revision: task.revision!,
+        pr: task.pr!,
+        ref: task.ref,
+        summary: 'Saved correction',
+      };
+      const commit = workspaces.commit(task, 'Correct finding', undefined, save);
+      if (moved) {
+        await expect(commit).rejects.toThrow('did not confirm');
+        expect(bridge.hash).toBe(h3);
+        await expect(workspaces.recoverFix(task, save)).rejects.toThrow();
+      } else {
+        expect(await commit).toBe(h2);
+        expect(await workspaces.recoverFix(task, save)).toBe(h2);
+      }
+    } finally {
+      f.store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

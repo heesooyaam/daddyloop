@@ -861,6 +861,7 @@ export class Engine {
     task.approvedAt = undefined;
     task.checksWaivedAt = undefined;
     task.reviewFinished = false;
+    delete task.completedReview;
     task.pr = pr;
     task.revision = pr ? revisionOf(pr) : undefined;
     task.verifiedMerge = undefined;
@@ -1341,7 +1342,7 @@ export class Engine {
         !(task.pendingFix && pr.head === task.pendingAuthorHead)) ||
       !samePullRequestTarget(task.pr, pr) ||
       ((task.ref.provider === 'github' || task.ref.provider === 'gitlab') && !pr.mergeCommit) ||
-      (task.ref.provider === 'arcadia' && !pr.revisionId) ||
+      (task.ref.provider === 'arcadia' && (!pr.revisionId || !this.savedFixDiffReady(task, pr))) ||
       (task.pr?.mergeCommit && task.pr.state === 'merged' && task.pr.mergeCommit !== pr.mergeCommit)
     )
       throw new AppError(
@@ -1415,6 +1416,7 @@ export class Engine {
     const feedbackReview = task.review;
     this.store.transaction(() => {
       if (action.preparation !== 'resume') {
+        if (action.preparation === 'checkpoint') delete task.fixSave;
         this.invalidate(task, pr, !options.finishingRun);
         task.pendingFix = undefined;
         task.conflictCheckpoint = checkpoint;
@@ -1442,14 +1444,15 @@ export class Engine {
     task: Task,
     result: AgentResult,
     pr: PullRequest,
-    checkpoint: (task: Task) => Promise<string>,
+    job: Job,
+    checkpoint: (task: Task, save?: FixSave) => Promise<string>,
   ) {
     const action = this.prAction(task, pr, { report: { kind: 'fix', result } });
-    return (
-      action.kind === 'repair' &&
-      action.preparation === 'checkpoint' &&
-      this.applyRepair(task, pr, action, { checkpoint, finishingRun: true })
-    );
+    if (action.kind !== 'repair' || action.preparation !== 'checkpoint') return false;
+    return this.applyRepair(task, pr, action, {
+      checkpoint: (current) => this.writeFixSave(current, job, result.summary, checkpoint, pr),
+      finishingRun: true,
+    });
   }
 
   async fixCanContinueOnAdvancedBase(task: Task, pr: PullRequest, resumeConflict = false) {
@@ -1502,7 +1505,10 @@ export class Engine {
     }
   }
 
-  async recoverInterruptedFix(id: string, checkpoint: (task: Task) => Promise<string>) {
+  async recoverInterruptedFix(
+    id: string,
+    checkpoint: (task: Task, save?: FixSave) => Promise<string>,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (
@@ -1632,6 +1638,7 @@ export class Engine {
         task,
         result,
         await this.provider(prRef(task)).getPR(prRef(task)),
+        job,
         checkpoint,
       );
     });
@@ -1866,6 +1873,15 @@ export class Engine {
     return this.store.getTask(id);
   }
   // Keep the original PR identity pinned until the provider confirms the saved head.
+  private savedFixDiffReady(task: Task, pr: PullRequest) {
+    const original = task.pendingFix?.revision ?? task.revision;
+    return (
+      task.ref.provider !== 'arcadia' ||
+      pr.head === original?.head ||
+      (!!pr.revisionId && pr.revisionId !== original?.revisionId)
+    );
+  }
+
   private async checkSavedFix(task: Task, pr: PullRequest, resume = false): Promise<boolean> {
     const head = task.pendingAuthorHead;
     const original = task.pendingFix?.revision ?? task.revision;
@@ -1910,6 +1926,17 @@ export class Engine {
         (pr.head === head || pr.head === original.head) &&
         (await this.provider(prRef(task)).targetAdvanced?.(prRef(task), original.base, pr.base)) ===
           true);
+    if (sameTarget && pr.head === head && compatibleBase && !this.savedFixDiffReady(task, pr)) {
+      if (!task.pendingFix.attempted) {
+        task.pendingFix.attempted = true;
+        task.pendingFix.confirmUntil = confirmationDeadline();
+        this.store.saveTask(task);
+      }
+      const reason = `Waiting for Arcanum to prepare the diff for saved fix ${head}.`;
+      if (task.state !== 'awaiting_push' || task.reason !== reason)
+        this.state(task, 'awaiting_push', reason);
+      return false;
+    }
     if (sameTarget && pr.head === head && compatibleBase) {
       const old = task.review;
       const snapshot =
@@ -1971,6 +1998,7 @@ export class Engine {
       const head = task.pendingAuthorHead;
       if (
         task.state !== 'awaiting_push' ||
+        task.fixSave ||
         !task.revision ||
         !head ||
         head === task.revision.head ||
@@ -2028,13 +2056,14 @@ export class Engine {
   private feedbackHandle(task: Task) {
     if (task.feedbackReview) return task.feedbackReview;
     if (!task.feedback) return;
-    if (task.review && sameRevision(task.review.revision, task.feedback.revision))
-      return task.review;
     // Old records often have a publication event even after the next draft replaced the handle.
-    const events = this.store.events(task.id);
-    for (const event of events.reverse()) {
-      if (!['review.published', 'review.findings_published'].includes(event.type)) continue;
-      const data = event.data as {
+    const events = this.store.db
+      .prepare(
+        "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published') ORDER BY id DESC",
+      )
+      .all(task.id);
+    for (const event of events) {
+      const data = JSON.parse(String(event.data)) as {
         reviewId?: string;
         handle?: ReviewHandle;
         snapshot?: ReviewSnapshot;
@@ -2061,6 +2090,12 @@ export class Engine {
       if (task.ref.provider === 'github')
         return { id: data.reviewId, marker: '', revision: task.feedback.revision };
     }
+    if (
+      task.review &&
+      task.snapshot?.status === 'published' &&
+      sameRevision(task.review.revision, task.feedback.revision)
+    )
+      return task.review;
   }
 
   async refreshFindingEvidence(
@@ -2072,6 +2107,11 @@ export class Engine {
     job.mergeFindingVersions = {};
     const handle = job.publishedFindingReview ?? this.feedbackHandle(task);
     job.publishedFindingReview = handle;
+    if (!handle && task.feedback?.comments.length)
+      throw new AppError(
+        'feedback_unconfirmed',
+        'The native publication of earlier findings could not be identified.',
+      );
     if (handle) {
       const native = await this.provider(prRef(task)).getReview(prRef(task), handle);
       if (native.status !== 'published' || !sameRevision(native.revision, handle.revision))
@@ -2114,14 +2154,31 @@ export class Engine {
   }
 
   async completedReviewFindingsCurrent(task: Task) {
-    const review = this.store
-      .jobs(task.id)
-      .findLast(
-        (job) =>
-          job.kind === 'review' && job.status === 'completed' && job.generation === task.generation,
-      );
-    // Use the prior publication seen in that run. The task now holds the new review.
+    const receipt = task.completedReview;
+    if (
+      receipt &&
+      (receipt.reviewId !== task.review?.id || !sameRevision(receipt.revision, task.revision))
+    )
+      return false;
+    const jobs = this.store.jobs(task.id);
+    const review = receipt
+      ? jobs.find((job) => job.id === receipt.runId && job.kind === 'review')
+      : jobs.findLast(
+          (job) =>
+            job.kind === 'review' &&
+            job.status === 'completed' &&
+            job.generation <= task.generation &&
+            !!job.publishedFindingReview,
+        );
+    if (receipt && !review) return false;
     return !review?.publishedFindingReview || this.findingsStillCurrent({ ...task }, review);
+  }
+
+  private async confirmCompletedReview(task: Task) {
+    if (!task.reviewFinished || (await this.completedReviewFindingsCurrent(task))) return true;
+    task.reviewFinished = false;
+    this.state(task, 'needs_input', 'Published findings changed. Retry review before completing.');
+    return false;
   }
 
   private hasUnverifiedFindings(task: Task, verified: Set<string>, feedback = task.feedback) {
@@ -2161,7 +2218,10 @@ export class Engine {
   private async finish(task: Task) {
     const gate = completionGate(task);
     if (gate) this.state(task, gate.state, gate.reason);
-    else if (await this.checkMergedFindings(task)) {
+    else if (
+      (await this.checkMergedFindings(task)) &&
+      (task.verifiedMerge || (await this.confirmCompletedReview(task)))
+    ) {
       if (task.kind === 'plan') task.approvedAt = now();
       this.finishReviewedTask(
         task,
@@ -2222,6 +2282,7 @@ export class Engine {
       );
       return true;
     }
+    if (!snapshot.comments.length && !(await this.confirmCompletedReview(task))) return true;
     task.snapshot = snapshot;
     this.setFeedback(task, snapshot);
     if (sameRevision(task.revision, pr)) task.pr = pr;
@@ -2453,27 +2514,8 @@ export class Engine {
       if (task.publicationRetry && task.publicationRetry.retryAt > Date.now()) return task;
       try {
         if (task.partialReview) return await this.releaseReviewFindings(task);
-        const reviewed = this.store
-          .jobs(id)
-          .findLast(
-            (job) =>
-              job.kind === 'review' &&
-              job.status === 'completed' &&
-              job.generation === task.generation,
-          );
-        if (
-          reviewed?.findingVersions &&
-          !task.snapshot?.comments.length &&
-          !(await this.findingsStillCurrent(task, reviewed))
-        ) {
-          task.reviewFinished = false;
-          this.state(
-            task,
-            'needs_input',
-            'Published findings changed. Retry review before publishing.',
-          );
+        if (!task.snapshot?.comments.length && !(await this.confirmCompletedReview(task)))
           return task;
-        }
         const publication = await this.broker.publish(task);
         return await this.reconcileLocked(id, publication);
       } catch (error) {
@@ -2630,7 +2672,7 @@ export class Engine {
     });
   }
 
-  private async settleFixSave(task: Task) {
+  private async settleFixSave(task: Task, savedHead?: string) {
     const save = task.fixSave;
     if (!save || !this.readFixSave) return;
     const job = this.store.jobs(task.id).find((job) => job.id === save.runId);
@@ -2648,41 +2690,118 @@ export class Engine {
         !samePullRequestTarget(save.pr, task.pr)
       )
         throw new Error('The original fix run or target changed.');
-      head = await this.readFixSave(task, save);
+      head = savedHead ?? (await this.readFixSave(task, save));
     } catch (error) {
       const reason = `Could not confirm local save for run ${save.runId}. The author copy was preserved. ${redact(String(error))}`;
       if (task.reason !== reason) this.state(task, 'needs_input', reason);
       return;
     }
 
-    if (head === save.revision.head) {
+    const recorded = this.store.db
+      .prepare("SELECT data FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved'")
+      .all(task.id, save.runId)
+      .map((event) => (JSON.parse(String(event.data)) as { head: string }).head);
+    const previous = task.pendingAuthorHead;
+    if (
+      recorded.some((value) => value !== head) ||
+      (previous && previous !== head && (task.pendingFix || previous !== save.revision.head))
+    ) {
+      const conflicting = [...new Set([...recorded, ...(previous ? [previous] : [])])];
+      const reason = `Conflicting evidence for fix run ${save.runId}: saved ${head}, previously recorded ${conflicting.join(', ')}. The author copy and both records were preserved.`;
+      if (task.reason !== reason) this.state(task, 'needs_input', reason);
+      return;
+    }
+
+    if (save.checkpointTarget) {
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
-      if (!sameRevision(pr, save.revision) || !sameOpenTarget(save.pr, pr)) {
+      if (
+        !sameOpenTarget(save.pr, pr) ||
+        !sameRevision(pr, save.checkpointTarget) ||
+        pr.draft !== false ||
+        pr.mergeConflict !== true ||
+        !autoMergeEnabled(this.store, task)
+      ) {
+        this.state(
+          task,
+          'needs_input',
+          `Conflict checkpoint ${head} was preserved. The PR or conflict repair conditions changed.`,
+        );
+        return;
+      }
+      await this.applyRepair(
+        task,
+        pr,
+        { kind: 'repair', preparation: 'checkpoint' },
+        {
+          checkpoint: async () => head,
+        },
+      );
+    } else if (head === save.revision.head && !task.pendingFix) {
+      const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (!sameRevision(pr, save.revision) || !sameOpenTarget(save.pr, pr) || pr.draft) {
         this.state(task, 'needs_input', 'The PR changed after the worker saved no code changes.');
         return;
       }
       this.store.transaction(() => {
-        this.recordFixSave(task, save.runId, head);
+        this.recordFixSave(task, save.runId, head, recorded.length > 0);
         task.pendingAuthorHead = undefined;
         this.invalidate(task, pr, false);
         this.state(task, 'queued', noFixChanges);
       });
     } else {
-      this.store.transaction(() => this.recordFixSave(task, save.runId, head));
+      this.store.transaction(() => this.recordFixSave(task, save.runId, head, recorded.length > 0));
     }
   }
 
-  private recordFixSave(task: Task, runId: string, head: string) {
+  private recordFixSave(task: Task, runId: string, head: string, alreadyRecorded = false) {
     const save = task.fixSave;
     delete task.fixSave;
     task.pendingAuthorHead = head;
-    task.pendingFix = head === task.revision!.head ? undefined : { revision: task.revision! };
-    if (task.pendingFix) {
+    if (head !== task.revision!.head) {
+      task.pendingFix ??= { revision: task.revision! };
       task.resumeState = 'awaiting_push';
       this.state(task, 'awaiting_push', 'Author saved the fixes; sending them to the PR');
     } else this.store.saveTask(task);
-    this.store.event(task.id, 'author.fixes_saved', { head, revision: task.revision }, runId);
-    if (save) this.store.message(task.id, 'author', 'agent', save.summary, runId, runId);
+    if (!alreadyRecorded)
+      this.store.event(task.id, 'author.fixes_saved', { head, revision: task.revision }, runId);
+    if (save && !this.store.messageById(task.id, runId))
+      this.store.message(task.id, 'author', 'agent', save.summary, runId, runId);
+  }
+
+  private async writeFixSave(
+    task: Task,
+    job: Job,
+    summary: string,
+    write: (task: Task, save?: FixSave) => Promise<string>,
+    checkpoint?: PullRequest,
+  ) {
+    if (task.fixSave)
+      throw new AppError('fix_save_pending', 'The previous local fix save needs reconciliation');
+    const save =
+      this.readFixSave && task.pr && task.revision
+        ? {
+            runId: job.id,
+            generation: job.generation,
+            revision: task.revision,
+            pr: task.pr,
+            ref: prRef(task),
+            summary,
+            checkpointTarget: checkpoint && revisionOf(checkpoint),
+          }
+        : undefined;
+    if (save) {
+      task.fixSave = save;
+      this.store.saveTask(task);
+    }
+    try {
+      return await write(task, save);
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'fix_before_commit') {
+        delete task.fixSave;
+        this.store.saveTask(task);
+      }
+      throw error;
+    }
   }
 
   async completeJob(
@@ -2704,40 +2823,16 @@ export class Engine {
         result.checkedHead === task.revision.head &&
         !result.disputedCommentIds?.length
       ) {
-        if (task.fixSave)
-          throw new AppError(
-            'fix_save_pending',
-            'The previous local fix save needs reconciliation',
-          );
-        // Deferred results can arrive after Git and SQLite already recorded the fix.
         if (!task.pendingFix) {
-          const save =
-            this.readFixSave && task.pr
-              ? {
-                  runId: job.id,
-                  generation: job.generation,
-                  revision: task.revision,
-                  pr: task.pr,
-                  ref: prRef(task),
-                  summary: result.summary,
-                }
-              : undefined;
-          if (save) {
-            task.fixSave = save;
-            this.store.saveTask(task);
-          }
-          let head: string;
-          try {
-            head = await saveFix(task, save);
-          } catch (error) {
-            if (error instanceof AppError && error.code === 'fix_before_commit') {
-              delete task.fixSave;
-              this.store.saveTask(task);
-            }
-            throw error;
-          }
-          this.store.transaction(() => this.recordFixSave(task, job.id, head));
+          const head = await this.writeFixSave(task, job, result.summary, saveFix);
+          if (task.fixSave) {
+            await this.settleFixSave(task, head);
+            if (task.fixSave || head === result.checkedHead) return;
+          } else this.store.transaction(() => this.recordFixSave(task, job.id, head));
         }
+      } else if (job.kind === 'fix' && task.fixSave) {
+        await this.settleFixSave(task);
+        return;
       }
       if (isTicket(task)) {
         if (
@@ -2918,7 +3013,7 @@ export class Engine {
       if (
         job.kind === 'fix' &&
         saveFix &&
-        (await this.handOffIncompleteFix(task, result, pr, saveFix))
+        (await this.handOffIncompleteFix(task, result, pr, job, saveFix))
       )
         return;
       if (
@@ -3001,6 +3096,11 @@ export class Engine {
           task.draftRecheck = undefined;
         }
         task.reviewFinished = true;
+        task.completedReview = {
+          runId: job.id,
+          reviewId: task.review!.id,
+          revision: task.revision!,
+        };
         delete task.openReviewQuestion;
         for (const id of verified)
           this.store.decision(task, {
@@ -3194,10 +3294,15 @@ export class Engine {
             (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
-        if (!(await this.checkMergedFindings(task))) return task;
+        if (
+          !(await this.checkMergedFindings(task)) ||
+          (!task.verifiedMerge && !(await this.confirmCompletedReview(task)))
+        )
+          return task;
         task.approvedAt = now();
         task.pr = current;
-        this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
+        this.store.saveTask(task);
+        await this.finish(task);
       } else if (action === 'waive-checks') {
         if (task.state !== 'awaiting_checks' || !reason.trim())
           throw new AppError(

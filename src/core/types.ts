@@ -221,6 +221,7 @@ export interface FixSave {
   pr: PullRequest;
   ref: PRRef;
   summary: string;
+  checkpointTarget?: Revision;
 }
 
 export interface Task {
@@ -343,6 +344,7 @@ export interface Task {
   lastFeedbackHash?: string;
   feedback?: ReviewSnapshot;
   feedbackReview?: ReviewHandle;
+  completedReview?: { runId: string; reviewId: string; revision: Revision };
   createdAt: string;
   updatedAt: string;
 }

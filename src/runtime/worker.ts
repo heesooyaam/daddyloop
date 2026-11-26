@@ -279,8 +279,13 @@ export class Worker {
             task.ref.provider === 'github'
           ) {
             try {
-              await this.engine.recoverInterruptedFix(task.id, (t) =>
-                this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
+              await this.engine.recoverInterruptedFix(task.id, (t, save) =>
+                this.workspaces.commitFix(
+                  t,
+                  'Preserve review fixes before conflict resolution',
+                  undefined,
+                  save,
+                ),
               );
             } catch (error) {
               store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
@@ -371,7 +376,11 @@ export class Worker {
             await this.engine.review(task.id);
             if (this.stopped) return;
           } catch (error) {
-            if (error instanceof GitHubRetryError) continue;
+            if (
+              error instanceof GitHubRetryError ||
+              (error instanceof AppError && error.code === 'diff_unavailable')
+            )
+              continue;
             const current = store.getTask(task.id);
             if (
               current.generation === task.generation &&
@@ -582,11 +591,12 @@ export class Worker {
           job.kind === 'fix' &&
             job.deferredResult.status === 'incomplete' &&
             !task.fixingMergeConflict
-            ? (t) =>
+            ? (t, save) =>
                 this.workspaces.commitFix(
                   t,
                   'Preserve review fixes before conflict resolution',
                   abort.signal,
+                  save,
                 )
             : undefined,
         );
@@ -914,11 +924,17 @@ export class Worker {
       const capacity =
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       const quota = error instanceof GitHubRetryError && !abort.signal.aborted;
-      job.status = capacity || quota ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
+      const diffPending =
+        error instanceof AppError &&
+        error.code === 'diff_unavailable' &&
+        !abort.signal.aborted &&
+        !!(job.kind === 'review' || job.kind === 'verify_merge');
+      job.status =
+        capacity || quota || diffPending ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
       if (error instanceof AppError) job.errorCode = error.code;
       if (quota) job.notBefore = new Date(error.until).toISOString();
-      else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
+      else if (capacity || diffPending) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
       if (job.role === 'reviewer') {

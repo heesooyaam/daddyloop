@@ -345,15 +345,23 @@ export class Workspaces {
     save?: FixSave,
   ): Promise<string> {
     if (task.ref.provider === 'arcadia') return this.arc.commit(task, message, signal, save);
-    if (!task.authorWorktree || !task.revision || !task.pr)
-      throw new AppError('workspace_missing', 'Author workspace is not initialized');
-    const cwd = resolve(task.authorWorktree);
-    const run = (args: string[], env: NodeJS.ProcessEnv = {}) => git(args, cwd, env, signal);
-    if (!cwd.startsWith(resolve(this.dataDir, 'workspaces', task.id) + '/'))
-      throw new AppError(
-        'workspace_invalid',
-        'Author workspace is outside the managed task directory',
-      );
+    const { cwd, revision } = (() => {
+      try {
+        if (!task.authorWorktree || !task.revision || !task.pr)
+          throw new AppError('workspace_missing', 'Author workspace is not initialized');
+        const cwd = resolve(task.authorWorktree);
+        if (!cwd.startsWith(resolve(this.dataDir, 'workspaces', task.id) + '/'))
+          throw new AppError(
+            'workspace_invalid',
+            'Author workspace is outside the managed task directory',
+          );
+        return { cwd, revision: task.revision };
+      } catch (error) {
+        if (save) throw new AppError('fix_before_commit', String(error));
+        throw error;
+      }
+    })();
+    const run = (args: string[]) => git(args, cwd, {}, signal);
     const record = async (head: string) => {
       if (save) await run(['update-ref', this.fixRef(save), head, '']);
       return head;
@@ -363,21 +371,18 @@ export class Workspaces {
     try {
       if (save) {
         const bare = join(realpathSync(this.dataDir), 'workspaces', task.id, 'objects.git');
-        if (cwd !== join(bare, '..', 'author') || realpathSync(bare) !== bare)
+        if (realpathSync(cwd) !== join(bare, '..', 'author') || realpathSync(bare) !== bare)
           throw new Error('The author copy is outside the task Git store');
         await this.verifyCopy(cwd, bare, signal);
       }
       parent = await run(['rev-parse', 'HEAD']);
-      await run(['merge-base', '--is-ancestor', task.revision.head, parent]);
+      await run(['merge-base', '--is-ancestor', revision.head, parent]);
       merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
       if (task.fixingMergeConflict) {
-        const checkpoint = task.conflictCheckpoint ?? task.revision.head;
-        if (
-          !merging &&
-          (await this.savedConflictMerge(cwd, checkpoint, task.revision.base, signal))
-        )
+        const checkpoint = task.conflictCheckpoint ?? revision.head;
+        if (!merging && (await this.savedConflictMerge(cwd, checkpoint, revision.base, signal)))
           return record(parent);
-        if (merging !== task.revision.base || parent !== checkpoint)
+        if (merging !== revision.base || parent !== checkpoint)
           throw new AppError(
             'merge_target_changed',
             'The worker copy has no pending merge of the expected target commit.',

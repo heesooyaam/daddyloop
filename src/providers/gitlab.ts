@@ -61,6 +61,7 @@ export class GitLabProvider implements ReviewProvider {
       source_branch: string;
       target_branch: string;
       source_project_id: number;
+      target_project_id?: number;
       diff_refs: { head_sha: string; base_sha: string; start_sha: string };
       merge_commit_sha?: string;
       squash_commit_sha?: string;
@@ -81,6 +82,13 @@ export class GitLabProvider implements ReviewProvider {
       'GET',
       `/projects/${mr.source_project_id}`,
     );
+    const target =
+      mr.target_project_id && mr.target_project_id !== mr.source_project_id
+        ? await this.http.request<{ http_url_to_repo: string }>(
+            'GET',
+            `/projects/${mr.target_project_id}`,
+          )
+        : undefined;
     const pipeline = mr.head_pipeline?.sha === mr.diff_refs.head_sha ? mr.head_pipeline : null;
     const status = pipeline?.status;
     return {
@@ -91,6 +99,7 @@ export class GitLabProvider implements ReviewProvider {
       title: mr.title,
       body: mr.description ?? '',
       cloneUrl: workspace.http_url_to_repo,
+      targetCloneUrl: target?.http_url_to_repo,
       branch: mr.source_branch,
       targetBranch: mr.target_branch,
       state: mr.state === 'merged' ? 'merged' : mr.state === 'opened' ? 'open' : 'closed',

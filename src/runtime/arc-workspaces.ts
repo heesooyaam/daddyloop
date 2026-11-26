@@ -291,7 +291,7 @@ export class ArcWorkspaces {
       throw new Error(
         'The Arc author branch changed outside daddyloop; no commit or push was performed',
       );
-    return { saved, head: before.hash };
+    return { saved, head: before.hash, branch: before.branch };
   }
   private fixReceipt(task: Task, save: FixSave) {
     if (!/^[a-zA-Z0-9_-]+$/.test(save.runId)) throw new Error('Invalid fix run ID');
@@ -318,7 +318,8 @@ export class ArcWorkspaces {
     save: FixSave | undefined,
     committing: () => void,
   ) {
-    const { saved } = await this.checkedAuthor(task, signal);
+    const before = await this.checkedAuthor(task, signal);
+    const { saved } = before;
     const status = await this.bridge.native(['status', '--short'], saved.mount, signal);
     if (status) {
       const files = status
@@ -338,14 +339,27 @@ export class ArcWorkspaces {
       )
         throw new Error('Ambiguous Arc status paths require manual review before committing');
       for (const path of files) await this.bridge.native(['add', path], saved.mount, signal);
+      const title = save ? `${message.split('\n', 1)[0]} [daddyloop fix ${save.runId}]` : message;
       committing();
-      await this.bridge.native(['commit', '-m', message], saved.mount, signal);
+      await this.bridge.native(['commit', '-m', title], saved.mount, signal);
+      const after = await this.checkedAuthor(task, signal);
+      if (
+        save &&
+        (after.branch !== before.branch ||
+          after.head === before.head ||
+          (await this.bridge.native(
+            ['log', '-n', '1', '--no-walk', '--format={title}', after.head],
+            saved.mount,
+            signal,
+          )) !== title)
+      )
+        throw new Error(
+          'Arc did not confirm that the current commit was created by this fix run. The author copy was preserved.',
+        );
+      if (save) privateWrite(this.fixReceipt(task, save), after.head);
+      return after.head;
     }
-    const head = (
-      JSON.parse(await this.bridge.native(['info', '--json'], saved.mount, signal)) as {
-        hash: string;
-      }
-    ).hash;
+    const head = before.head;
     if (save) {
       committing();
       const path = this.fixReceipt(task, save);
