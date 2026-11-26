@@ -482,7 +482,10 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
-  async readCurrentReview(task: Task): Promise<ReviewSnapshot> {
+  async readCurrentReview(
+    task: Task,
+    confirmedPublishedIds: readonly string[] = [],
+  ): Promise<ReviewSnapshot> {
     const handle = task.review;
     if (!handle) throw new AppError('review_missing', 'No native review to read');
     const ref = prRef(task);
@@ -500,8 +503,10 @@ export class Broker {
         sameRevision(snapshot.revision, handle.revision) &&
         (snapshot.status === 'draft' || snapshot.status === 'published'),
     );
-    const hasPublishedSnapshot = snapshots.some((snapshot) => snapshot.status === 'published');
-    const nativeIds = new Set<string>();
+    const hasPublishedSnapshot =
+      confirmedPublishedIds.length > 0 ||
+      snapshots.some((snapshot) => snapshot.status === 'published');
+    const nativeIds = new Set(confirmedPublishedIds);
     const draftNotes = new Map<string, ReviewComment>();
     for (const snapshot of snapshots) {
       for (const comment of snapshot.comments) {

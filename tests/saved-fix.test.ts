@@ -1051,9 +1051,13 @@ it.each([
   }
 });
 
-it.each(['verification', 'CI', 'plan approval'] as const)(
-  'preserves a known published finding when its review is missing during %s',
-  async (phase) => {
+it.each(
+  (['verification', 'CI', 'plan approval'] as const).flatMap((phase) =>
+    (['missing', 'published'] as const).map((status) => ({ phase, status })),
+  ),
+)(
+  'preserves a known published finding when the review is $status without the finding during $phase',
+  async ({ phase, status }) => {
     const f = await fixture({
       kind: phase === 'plan approval' ? 'plan' : 'code',
       state: 'needs_input',
@@ -1080,7 +1084,7 @@ it.each(['verification', 'CI', 'plan approval'] as const)(
       const current = f.store.getTask(task.id);
       await f.engine.refreshFindingEvidence(current, job);
       f.store.saveTask(current);
-      const missing = { ...snapshot, status: 'missing' as const, comments: [] };
+      const missing = { ...snapshot, status, comments: [] };
       const complete = async (verified: boolean) => {
         await f.engine.completeJob(
           job,

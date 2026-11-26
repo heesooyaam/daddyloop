@@ -2183,19 +2183,38 @@ export class Engine {
       if (task.review?.id === handle.id) remember(task.snapshot);
       return [...known];
     };
-    const readPublished = (handle: ReviewHandle) =>
+    const readPublished = (handle: ReviewHandle, knownCommentIds: string[]) =>
       provider.getReview(prRef(task), handle, {
         publishedEvidence: true,
-        knownCommentIds: knownFindingIds(handle),
+        knownCommentIds,
       });
-    const read = new Map<string, ReviewSnapshot>();
-    for (const handle of handles.values()) {
-      const native = await readPublished(handle);
-      if (job.kind === 'verify_merge' && native.status === 'missing')
+    const readMergeEvidence = async (handle: ReviewHandle) => {
+      const known = knownFindingIds(handle);
+      const current = task.review?.id === handle.id;
+      const native = current
+        ? await this.broker.readCurrentReview(task, known)
+        : await readPublished(handle, known);
+      const ids = new Set(native.comments.map((comment) => comment.id));
+      if (
+        !sameRevision(native.revision, handle.revision) ||
+        native.status === 'missing' ||
+        native.status === 'partial' ||
+        (native.status !== 'published' &&
+          (known.length > 0 || (current && task.snapshot?.status === 'published'))) ||
+        known.some((id) => !ids.has(id))
+      )
         throw new AppError(
           'published_review_unavailable',
-          `Published review ${handle.id} could not be read. Its last snapshot was preserved.`,
+          `Could not confirm the recorded findings in review ${handle.id}. Its last snapshot was preserved.`,
         );
+      return native;
+    };
+    const read = new Map<string, ReviewSnapshot>();
+    for (const handle of handles.values()) {
+      const native =
+        job.kind === 'verify_merge'
+          ? await readMergeEvidence(handle)
+          : await readPublished(handle, knownFindingIds(handle));
       if (native.status !== 'published' || !sameRevision(native.revision, handle.revision))
         throw new AppError('feedback_unconfirmed', 'Could not confirm the published findings.');
       read.set(handle.id, native);
@@ -2206,17 +2225,7 @@ export class Engine {
     job.mergeFindingVersions = {};
     if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
-      const current = read.get(task.review.id) ?? (await readPublished(task.review));
-      if (
-        current.status === 'missing' ||
-        (task.snapshot?.status === 'published' && current.status !== 'published')
-      )
-        throw new AppError(
-          'published_review_unavailable',
-          `Published review ${task.review.id} could not be read. Its last snapshot was preserved.`,
-        );
-      if (current.status === 'partial')
-        throw new AppError('feedback_unconfirmed', 'The latest review is partially published.');
+      const current = read.get(task.review.id) ?? (await readMergeEvidence(task.review));
       task.snapshot = current;
       job.mergeFindingVersions = this.findingVersions([current]);
       if (current.status === 'published') read.set(task.review.id, current);
@@ -2243,8 +2252,9 @@ export class Engine {
     const beforeMerge = job.mergeFindingVersions ?? this.findingVersions([task.snapshot]);
     const current = { ...job };
     const evidence = await this.refreshFindingEvidence(task, current);
-    const matches = (before: Record<string, string>, after?: Record<string, string>) =>
-      Object.entries(after ?? {}).every(([id, version]) => before[id] === version);
+    const matches = (before: Record<string, string>, after: Record<string, string> = {}) =>
+      Object.entries(after).every(([id, version]) => before[id] === version) &&
+      (job.kind !== 'verify_merge' || Object.keys(before).length === Object.keys(after).length);
     if (
       matches(before, current.findingVersions) &&
       matches(beforeMerge, current.mergeFindingVersions)
@@ -2354,7 +2364,10 @@ export class Engine {
       )
         return true;
     } catch (error) {
-      if (!(error instanceof AppError) || error.code !== 'published_review_unavailable')
+      if (
+        !(error instanceof AppError) ||
+        !['published_review_unavailable', 'feedback_unconfirmed'].includes(error.code)
+      )
         throw error;
       const state = task.state === 'awaiting_plan_approval' ? task.state : 'awaiting_checks';
       if (task.state !== state || task.reason !== error.message)
@@ -3115,7 +3128,10 @@ export class Engine {
           try {
             evidence = await this.currentFindingEvidence(task, job, true);
           } catch (error) {
-            if (!(error instanceof AppError) || error.code !== 'published_review_unavailable')
+            if (
+              !(error instanceof AppError) ||
+              !['published_review_unavailable', 'feedback_unconfirmed'].includes(error.code)
+            )
               throw error;
             this.state(task, 'needs_input', error.message);
             return;
@@ -3322,10 +3338,7 @@ export class Engine {
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
-          const snapshot =
-            task.state === 'awaiting_publication'
-              ? await this.readReviewForReconciliation(task)
-              : await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          const snapshot = await this.readReviewForReconciliation(task);
           if (!snapshot) return;
           task.snapshot = snapshot;
           task.summary = result.summary;
