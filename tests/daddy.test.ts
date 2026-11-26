@@ -106,9 +106,12 @@ it('keeps simultaneous review disputes separate and ignores a late question abou
         .sort(),
     ).toEqual(['first', 'second']);
     expect(queued.filter((j) => j.trigger === 'user')).toHaveLength(1);
-    const gate = Promise.withResolvers<void>();
+    let finishDispute!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finishDispute = resolve;
+    });
     f.runtime.runSession.mockImplementationOnce(async () => {
-      await gate.promise;
+      await gate;
       return {
         status: 'needs_input',
         summary: 'Original dispute',
@@ -126,7 +129,7 @@ it('keeps simultaneous review disputes separate and ignores a late question abou
       reason: 'Continuing with the accepted requirements',
       inputRequest: undefined,
     });
-    gate.resolve();
+    finishDispute();
     await vi.waitFor(() =>
       expect(f.store.daddyJobs(group.id).find((j) => j.id === run.id)?.status).toBe('completed'),
     );
