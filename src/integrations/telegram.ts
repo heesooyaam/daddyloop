@@ -125,7 +125,6 @@ export class TelegramApi {
     messageId: number;
     replied: boolean;
     active: boolean;
-    deliveryManaged?: boolean;
   }>();
   delivery?: TelegramDelivery;
   onCleanupError?: (error: unknown) => void;
@@ -253,7 +252,6 @@ export class TelegramApi {
       messageId: message.message_id,
       replied: false,
       active: true,
-      deliveryManaged: false,
     };
     let result: T;
     try {
@@ -261,7 +259,7 @@ export class TelegramApi {
     } finally {
       navigation.active = false;
     }
-    if (navigation.replied && !navigation.deliveryManaged) {
+    if (navigation.replied && !this.delivery) {
       try {
         await this.call('deleteMessage', {
           chat_id: navigation.chatId,
@@ -339,12 +337,12 @@ export class TelegramApi {
       const navigation = this.navigation.getStore();
       const target = typeof destination === 'number' ? { chatId: destination } : destination;
       const cleanup =
+        !delivery?.sessionRoute &&
         navigation?.active &&
         target.chatId === navigation.chatId &&
         target.threadId === navigation.threadId
           ? { chatId: navigation.chatId, messageId: navigation.messageId }
           : undefined;
-      if (cleanup) navigation!.deliveryManaged = true;
       return this.delivery.send(
         target,
         { ...value, ...(keyboard ? { buttons: keyboard } : {}) },

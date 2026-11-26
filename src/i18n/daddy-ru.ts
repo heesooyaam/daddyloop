@@ -776,8 +776,10 @@ export const daddyRu: Record<string, string> = {
     'Выбери максимум одновременно работающих воркеров. daddy решит, какие задачи можно распараллелить. При уменьшении лимита текущая работа спокойно завершится.',
   Back: 'Назад',
   'Telegram group connected': 'Группа подключена',
-  'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.':
-    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Боту нужны права на управление темами и закрепление сообщений.',
+  'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics. Allow it to pin messages to keep the session status visible.':
+    'Создай группу Telegram, включи «Темы» и выбери её кнопкой ниже. Боту нужно право управлять темами. Разреши закрепление сообщений, чтобы статус сессии был виден вверху темы.',
+  'Could not pin the session status. Give the bot permission to pin messages.':
+    'Не удалось закрепить статус сессии. Разреши боту закреплять сообщения.',
   'Choose a group with topics': 'Выбрать группу с темами',
   'Group selection expired. Send /workspace again.':
     'Выбор группы истёк. Отправь /workspace ещё раз.',

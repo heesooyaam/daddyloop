@@ -2,7 +2,12 @@ import { reminderOpen, type OwnerQuestion } from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
-import { splitTelegramText, type TelegramCard, type FormattedText } from './telegram-text.js';
+import {
+  TelegramText,
+  splitTelegramText,
+  type TelegramCard,
+  type FormattedText,
+} from './telegram-text.js';
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
@@ -12,6 +17,10 @@ export interface DeliveryOptions {
   reactionMessageId?: number;
   pinMessageId?: number;
   pin?: boolean;
+  pinWarning?: string;
+  sessionRoute?: boolean;
+  mention?: { question: OwnerQuestion; text: FormattedText };
+  replyMessageId?: number;
   key?: string;
   replace?: boolean;
   order?: string;
@@ -30,6 +39,7 @@ type Delivery = {
   createdAt: number;
   status: 'queued' | 'sending' | 'sent' | 'cancelled';
   attempts: number;
+  mentionOnPromotion?: boolean;
   nextAttemptAt: number;
   error?: string;
   messages: { id: number; fingerprint: string }[];
@@ -42,11 +52,15 @@ const prefix = 'telegram.delivery:';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const isIndependent = ({ options }: Delivery) =>
   options.operation === 'reaction' || options.operation === 'pin';
+export const dialogKey = (messageId: string) => `dialog:${messageId}`;
+const deliveryKey = (bot: string, route: TelegramDestination, key: string) =>
+  prefix + digest([bot, route, key]);
+
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
 }
 
-/** Durable, ordered delivery. Text for a running turn is replaced, not appended to a backlog. */
+/** Durable, ordered delivery with one receipt per acknowledged message part. */
 export class TelegramDelivery {
   private pending = new Map<string, Delivery>();
   private running?: Promise<void>;
@@ -60,8 +74,9 @@ export class TelegramDelivery {
     private bot: string,
     private clock = Date.now,
   ) {
+    this.migrateDialogDeliveries();
     for (const row of store.db
-      .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.delivery:%'")
+      .prepare("SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*' ORDER BY rowid")
       .all()) {
       const value = JSON.parse(String(row.value)) as Delivery;
       if (!value || value.bot !== bot || !['queued', 'sending'].includes(value.status)) continue;
@@ -69,6 +84,72 @@ export class TelegramDelivery {
       this.pending.set(String(row.key), value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
+  }
+  private migrateDialogDeliveries() {
+    const rows = this.store.db
+      .prepare(
+        `SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+       AND json_extract(value,'$.bot')=?
+       AND json_extract(value,'$.options.key') NOT GLOB 'dialog:*'
+       AND json_extract(value,'$.options.notificationId') GLOB 'telegram:dialog:*'
+       ORDER BY json_extract(value,'$.options.final') DESC, rowid DESC`,
+      )
+      .all(this.bot);
+    if (!rows.length) return;
+    this.store.transaction(() => {
+      for (const row of rows) {
+        const value = JSON.parse(String(row.value)) as Delivery;
+        const { options, destination } = value;
+        // Legacy progress and final notifications can share a turn receipt.
+        // Its notificationId identifies the content, including an in-flight edit.
+        const match = options.notificationId?.match(
+          /^telegram:dialog:-?\d+:\d+:([^:]+)(?::(?:progress|final))?$/,
+        );
+        if (!match) continue;
+        if (!options.groupId && options.key?.startsWith('turn:')) {
+          const job = this.store.db
+            .prepare('SELECT group_id FROM daddy_jobs WHERE id=?')
+            .get(options.key.slice(5));
+          if (typeof job?.group_id === 'string') options.groupId = job.group_id;
+        }
+        if (!options.groupId) continue;
+        const message = this.store.messageById(options.groupId, match[1]);
+        if (message?.sender !== 'agent') continue;
+        const key = dialogKey(message.id);
+        const storageKey = deliveryKey(this.bot, destination, key);
+        if (this.store.setting<Delivery>(storageKey)) {
+          // Earlier versions could send a final mention as well as a progress card.
+          // Keep the old native receipts for reply routing, but stop queued duplicates.
+          if (['queued', 'sending'].includes(value.status)) {
+            value.status = 'cancelled';
+            this.store.setSetting(String(row.key), value);
+          }
+          continue;
+        }
+        options.key = key;
+        options.sessionRoute = true;
+        const heading = value.content.text.indexOf('👨‍💻 [daddy]');
+        if (heading > 0 && message.needsReply) {
+          options.mention = {
+            question: { groupId: options.groupId, messageId: message.id },
+            text: {
+              text: value.content.text.slice(0, heading),
+              entities: value.content.entities.filter((entity) => entity.offset < heading),
+            },
+          };
+          value.content = {
+            text: value.content.text.slice(heading),
+            entities: value.content.entities
+              .filter((entity) => entity.offset >= heading)
+              .map((entity) => ({ ...entity, offset: entity.offset - heading })),
+          };
+        }
+        // Change the key in place to preserve FIFO order for equal timestamps.
+        this.store.db
+          .prepare('UPDATE settings SET key=?,value=? WHERE key=?')
+          .run(storageKey, JSON.stringify(value), row.key);
+      }
+    });
   }
   start() {
     if (this.timer) return;
@@ -89,6 +170,23 @@ export class TelegramDelivery {
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
+    if (value.options.sessionRoute && value.options.groupId) {
+      const groupId = value.options.groupId;
+      const row = this.store.db.prepare('SELECT data FROM review_groups WHERE id=?').get(groupId);
+      if (!row || JSON.parse(String(row.data)).deletedAt) return false;
+      if (room && room.ownerId === pair?.userId) {
+        const row = this.store.db
+          .prepare('SELECT data FROM telegram_topics WHERE id=?')
+          .get(`${room.ownerId}:${room.chatId}:${groupId}`);
+        const topic = row && (JSON.parse(String(row.data)) as TelegramDestination);
+        return (
+          !!topic &&
+          topic.chatId === value.destination.chatId &&
+          topic.threadId === value.destination.threadId
+        );
+      }
+      return value.destination.chatId === pair?.chatId && value.destination.threadId === undefined;
+    }
     return (
       !pair ||
       value.destination.chatId === pair.chatId ||
@@ -155,17 +253,32 @@ export class TelegramDelivery {
       ),
     );
   }
-  private enqueuePin(destination: TelegramDestination, messageId: number) {
+  private enqueuePin(
+    destination: TelegramDestination,
+    messageId: number,
+    options: DeliveryOptions,
+  ) {
     const key = prefix + digest([this.bot, 'pin', destination.chatId, messageId]);
-    if (this.pending.has(key) || this.store.setting<Delivery>(key)) return;
-    this.save(
-      key,
-      this.createDelivery(
-        destination,
-        { text: '', entities: [] },
-        { operation: 'pin', pinMessageId: messageId },
-      ),
-    );
+    const pinOptions: DeliveryOptions = {
+      operation: 'pin',
+      pinMessageId: messageId,
+      groupId: options.groupId,
+      sessionRoute: options.sessionRoute,
+      pinWarning: options.pinWarning,
+    };
+    const existing = this.pending.get(key) ?? this.store.setting<Delivery>(key);
+    if (existing) {
+      if (existing.status === 'sent') return;
+      const staleRoute = existing.status === 'cancelled' && !existing.error;
+      const legacy = !existing.options.pinWarning && !!options.pinWarning;
+      if (!staleRoute && !legacy) return;
+      // Older pin jobs did not carry the status card's route or warning.
+      existing.options = pinOptions;
+      if (existing.status === 'cancelled') existing.status = 'queued';
+      this.save(key, existing);
+      return;
+    }
+    this.save(key, this.createDelivery(destination, new TelegramText(), pinOptions));
   }
   async send(
     destination: TelegramDestination,
@@ -176,19 +289,26 @@ export class TelegramDelivery {
       chatId: destination.chatId,
       ...(destination.threadId === undefined ? {} : { threadId: destination.threadId }),
     };
-    const key = prefix + digest([this.bot, destination, options.key ?? randomUUID()]);
+    const key = deliveryKey(this.bot, destination, options.key ?? randomUUID());
     let value = this.pending.get(key) ?? this.store.setting<Delivery>(key);
     if (value) {
       if (
-        (value.options.final && !options.final) ||
-        (options.order && value.options.order && options.order < value.options.order)
+        value.status !== 'cancelled' &&
+        ((value.options.final && !options.final) ||
+          (options.order && value.options.order && options.order < value.options.order))
       )
         return { status: 'superseded', deliveryId: value.id };
-      if (!options.replace)
+      if (!options.replace && value.status !== 'cancelled')
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
-        digest([value.content, value.options.final, value.options.pin]) ===
-        digest([content, options.final, options.pin])
+        value.status !== 'cancelled' &&
+        digest([
+          value.content,
+          value.options.final,
+          value.options.pinWarning,
+          value.options.pin,
+          value.options.mention,
+        ]) === digest([content, options.final, options.pinWarning, options.pin, options.mention])
       )
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
@@ -199,6 +319,8 @@ export class TelegramDelivery {
         this.store.db
           .prepare("UPDATE notifications SET status='superseded' WHERE id=?")
           .run(value.options.notificationId);
+      if (options.mention && options.final && !value.options.final && value.messages.length > 0)
+        value.mentionOnPromotion = true;
       value.content = structuredClone(content);
       value.options = {
         ...options,
@@ -276,7 +398,12 @@ export class TelegramDelivery {
   private async attempt(key: string, value: Delivery) {
     if (!this.valid(value)) {
       value.status = 'cancelled';
-      if (value.options.reminder && value.options.notificationId)
+      value.error = undefined;
+      if (
+        value.options.reminder &&
+        value.options.notificationId &&
+        !reminderOpen(this.store, value.options.reminder)
+      )
         this.store.db
           .prepare("UPDATE notifications SET status='superseded',at=? WHERE id=?")
           .run(new Date(this.clock()).toISOString(), value.options.notificationId);
@@ -285,7 +412,7 @@ export class TelegramDelivery {
       return;
     }
     const revision = value.revision,
-      content = structuredClone(value.content),
+      original = structuredClone(value.content),
       options = { ...value.options };
     value.status = 'sending';
     this.save(key, value);
@@ -321,7 +448,7 @@ export class TelegramDelivery {
             {
               chat_id: value.destination.chatId,
               message_thread_id: value.destination.threadId,
-              name: content.text,
+              name: original.text,
             },
             this.controller.signal,
           );
@@ -334,6 +461,17 @@ export class TelegramDelivery {
         this.save(key, value);
         return;
       }
+      const mention =
+        options.mention && reminderOpen(this.store, options.mention.question)
+          ? options.mention
+          : undefined;
+      // Telegram edits do not generate a fresh mention. If the progress was already
+      // visible, send the mention as a reply to that message after finalization.
+      const mentionAsReply = mention && value.mentionOnPromotion && value.messages.length > 0;
+      const content =
+        mention && !mentionAsReply
+          ? { ...original, ...new TelegramText().append(mention.text).append(original) }
+          : original;
       const chunks = splitTelegramText(content);
       for (let i = 0; i < chunks.length; i++) {
         if (value.revision !== revision || !this.valid(value)) break;
@@ -370,6 +508,14 @@ export class TelegramDelivery {
             'sendMessage',
             {
               ...body,
+              ...(options.replyMessageId
+                ? {
+                    reply_parameters: {
+                      message_id: options.replyMessageId,
+                      allow_sending_without_reply: true,
+                    },
+                  }
+                : {}),
               ...(value.destination.threadId === undefined
                 ? {}
                 : { message_thread_id: value.destination.threadId }),
@@ -379,10 +525,16 @@ export class TelegramDelivery {
           if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0)
             throw new Error('Telegram did not return a message ID');
           value.messages[i] = { id: result.message_id, fingerprint };
+          if (!options.final && value.options.final && value.options.mention)
+            value.mentionOnPromotion = true;
         }
         this.save(key, value);
       }
-      while (value.revision === revision && value.messages.length > chunks.length) {
+      while (
+        value.revision === revision &&
+        this.valid(value) &&
+        value.messages.length > chunks.length
+      ) {
         const part = value.messages.at(-1)!;
         try {
           await this.api.call(
@@ -398,7 +550,20 @@ export class TelegramDelivery {
       }
       if (value.revision === revision && this.valid(value)) {
         if (options.pin && value.messages[0])
-          this.enqueuePin(value.destination, value.messages[0].id);
+          this.enqueuePin(value.destination, value.messages[0].id, options);
+        if (mentionAsReply && mention && value.messages[0]) {
+          const reply = deliveryKey(this.bot, value.destination, `mention:${options.key}`);
+          if (!this.store.setting<Delivery>(reply))
+            this.save(
+              reply,
+              this.createDelivery(value.destination, mention.text, {
+                groupId: options.groupId,
+                sessionRoute: options.sessionRoute,
+                reminder: mention.question,
+                replyMessageId: value.messages[0].id,
+              }),
+            );
+        }
         value.status = 'sent';
         value.error = undefined;
         value.attempts = 0;
@@ -433,6 +598,33 @@ export class TelegramDelivery {
           this.save(key, value);
           return;
         }
+        if (
+          status === 403 ||
+          /not enough rights|CHAT_ADMIN_REQUIRED|not permitted to pin/i.test(description)
+        ) {
+          value.status = 'cancelled';
+          value.error = redact(description);
+          if (options.pinWarning) {
+            const warning = deliveryKey(
+              this.bot,
+              value.destination,
+              `pin-warning:${options.pinMessageId}`,
+            );
+            this.store.transaction(() => {
+              if (!this.store.setting<Delivery>(warning))
+                this.save(
+                  warning,
+                  this.createDelivery(
+                    value.destination,
+                    new TelegramText().add(options.pinWarning!),
+                    { groupId: options.groupId, sessionRoute: options.sessionRoute },
+                  ),
+                );
+              this.save(key, value);
+            });
+          } else this.save(key, value);
+          return;
+        }
         if (/message to pin not found|message[_ ]id[_ ]invalid|chat not found/i.test(description)) {
           value.status = 'cancelled';
           value.error = redact(description);
@@ -465,7 +657,7 @@ export class TelegramDelivery {
         this.clock() + Math.min(300000, 1000 * 2 ** Math.min(value.attempts - 1, 9)),
       );
       this.save(key, value);
-      if (options.notificationId)
+      if (value.revision === revision && options.notificationId)
         this.store.db
           .prepare("UPDATE notifications SET status='queued' WHERE id=?")
           .run(options.notificationId);

@@ -48,7 +48,7 @@ import { findPreset, selectPreset, presetLines } from '../client/presets.js';
 import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
-import { deliveryStatus } from './telegram-delivery.js';
+import { deliveryStatus, dialogKey } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
@@ -284,6 +284,12 @@ export class TelegramWorkspace {
     return `https://t.me/c/${String(topic.chatId).replace(/^-100/, '')}/${topic.threadId}`;
   }
   async ensureTopic(group: ReviewGroup): Promise<Topic | undefined> {
+    const topic = await this.ensureTopicBinding(group);
+    if (topic && this.room()?.chatId === topic.chatId && this.pair()?.userId === topic.ownerId)
+      await this.progress.update(this.store.getGroup(group.id));
+    return topic;
+  }
+  private async ensureTopicBinding(group: ReviewGroup): Promise<Topic | undefined> {
     const room = this.room();
     if (!room) return;
     const key = this.key(room, group.id),
@@ -386,13 +392,13 @@ export class TelegramWorkspace {
       can_edit_stories: false,
       can_delete_stories: false,
       can_manage_topics: true,
-      can_pin_messages: true,
+      can_pin_messages: false,
     };
     await this.api.call('sendMessage', {
       chat_id: pair.chatId,
       text:
         this.t(
-          'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics and pin messages.',
+          'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics. Allow it to pin messages to keep the session status visible.',
         ) +
         '\n\n@' +
         this.username,
@@ -1561,6 +1567,10 @@ export class TelegramWorkspace {
         ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
         : undefined;
     try {
+      // Store events are published in a microtask. Queue their replies before
+      // the menu for this update, even if both arrived in the same tick.
+      await Promise.resolve();
+      await this.pending;
       if (callback) {
         if (
           !callback.data?.startsWith('dad:') &&
@@ -1751,7 +1761,10 @@ export class TelegramWorkspace {
         this.store.db
           .prepare("UPDATE operations SET status='done',result=? WHERE id=? AND status='pending'")
           .run(JSON.stringify(topic), `telegram:topic:${this.key(this.room()!, groups[0].id)}`);
-        await this.show(groups[0].id, destination);
+        this.clearDeferred(groups[0].id);
+        await this.progress.update(this.store.getGroup(groups[0].id));
+        this.replayGroup(groups[0]);
+        await this.pending;
         return true;
       }
       const groupId = privateChat
@@ -2255,13 +2268,12 @@ export class TelegramWorkspace {
             .some((entry) => entry.sender === 'user' && entry.at > message.at);
         const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
         if (task && !ping) return;
-        const question: OwnerQuestion | undefined = reminder
-          ? task && request
+        const question: OwnerQuestion | undefined =
+          task && request
             ? { groupId: group.id, taskId: task.id, request }
-            : message
+            : message?.needsReply
               ? { groupId: group.id, messageId: message.id }
-              : undefined
-          : undefined;
+              : undefined;
         if (reminder && (!ping || !question || !reminderOpen(this.store, question))) return;
         const topic = await this.ensureTopic(group);
         const destination = topic
@@ -2303,15 +2315,25 @@ export class TelegramWorkspace {
           .prepare('INSERT OR IGNORE INTO notifications VALUES(?,?,?)')
           .run(id, 'pending', now());
         const text = new TelegramText();
-        if (ping)
-          text
-            .append(await this.ownerMention(pair))
-            .add(
-              ' · ' +
-                this.t(reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed') +
-                '\n\n',
-            );
-        if (this.pair()?.userId !== pair.userId || (topic && this.room()?.chatId !== topic.chatId))
+        const mention = ping
+          ? new TelegramText()
+              .append(await this.ownerMention(pair))
+              .add(
+                ' · ' +
+                  this.t(
+                    reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed',
+                  ) +
+                  '\n\n',
+              )
+          : undefined;
+        const currentRoom = this.room();
+        const currentTopic = currentRoom && this.topic(currentRoom, group.id);
+        if (
+          this.pair()?.userId !== pair.userId ||
+          this.pair()?.chatId !== pair.chatId ||
+          topic?.chatId !== currentTopic?.chatId ||
+          topic?.threadId !== currentTopic?.threadId
+        )
           return;
         if (
           task &&
@@ -2319,7 +2341,9 @@ export class TelegramWorkspace {
             !notificationPreferences(this.store).enabled)
         )
           return;
-        if (question && !reminderOpen(this.store, question)) return;
+        if ((task || reminder) && question && !reminderOpen(this.store, question)) return;
+        const dialog = !reminder && message?.sender === 'agent' ? message : undefined;
+        if (!dialog && mention) text.append(mention);
         if (task) {
           const worker = task.inputRequest?.role === 'author';
           text
@@ -2333,8 +2357,6 @@ export class TelegramWorkspace {
           if (message.sender === 'user') text.add(message.text);
           else text.markdown(message.text);
         }
-        // An edit to a progress card does not send a fresh mention notification.
-        const replaceTurn = !ping && message?.sender === 'agent' && !!message.runId;
         const url = task && task.ref.kind !== 'ticket' && safeLink(task.ref.url);
         const card = task
           ? {
@@ -2349,15 +2371,19 @@ export class TelegramWorkspace {
           : text;
         const result = await this.api.send(destination, card, undefined, {
           groupId: group.id,
-          key: replaceTurn ? `turn:${message!.runId}` : id,
-          replace: replaceTurn,
+          key: dialog ? dialogKey(dialog.id) : id,
+          replace: !!dialog,
+          sessionRoute: true,
+          mention: dialog && question && mention ? { question, text: mention } : undefined,
           order: message?.at ?? event.at,
           final: message?.phase !== 'progress',
           notificationId: id,
-          reminder: question,
+          reminder: task || reminder ? question : undefined,
         });
         this.store.db
-          .prepare('UPDATE notifications SET status=? WHERE id=?')
+          .prepare(
+            "UPDATE notifications SET status=? WHERE id=? AND status NOT IN ('sent','superseded')",
+          )
           .run(deliveryStatus(result), id);
         this.clearDeferred(group.id);
       })
@@ -2412,14 +2438,7 @@ export class TelegramWorkspace {
         data: { retryAttempt },
       });
     const messages = this.store.messages(group.id);
-    const completedRuns = new Set(
-      messages.filter((message) => message.phase === 'final').map((message) => message.runId),
-    );
-    for (const message of messages.filter(
-      (message) =>
-        ['user', 'agent'].includes(message.sender) &&
-        !(message.phase === 'progress' && completedRuns.has(message.runId)),
-    ))
+    for (const message of messages.filter((message) => ['user', 'agent'].includes(message.sender)))
       this.onEvent({
         id: retry ? -1 : 0,
         taskId: group.id,

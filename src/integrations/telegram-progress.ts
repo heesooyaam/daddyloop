@@ -195,11 +195,13 @@ function render(
 
 type StatusRoute = TelegramDestination & { ownerId: number };
 type LiveCard = { id: string; route: StatusRoute };
+const topicCardKey = (key: string, route: StatusRoute) =>
+  `${key}:${route.ownerId}:${route.chatId}:${route.threadId}`;
 
 export class TelegramProgress {
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
-  private sent = new Map<string, { at: number; signature: string }>();
+  private sent = new Map<string, { cardId: string; at: number; signature: string }>();
 
   constructor(
     private store: Store,
@@ -254,50 +256,85 @@ export class TelegramProgress {
     );
     const groups = this.store.groups().filter((group) => group.orchestrated && !group.deletedAt);
     const groupIds = new Set(groups.map((group) => group.id));
-    for (const [groupId, card] of cards)
-      if (!groupIds.has(groupId)) this.clearCard(this.prefix + groupId, card.id);
+    for (const [suffix, card] of cards)
+      if (!groupIds.has(suffix.split(':', 1)[0])) this.clearCard(this.prefix + suffix, card.id);
     for (const group of groups) {
       if (!this.timer) return;
-      const key = this.prefix + group.id;
-      let card = cards.get(group.id);
-      const route = this.destination(group.id, card?.route);
-      if (!route) continue;
-      if (
-        card &&
-        (card.route.ownerId !== route.ownerId ||
-          card.route.chatId !== route.chatId ||
-          card.route.threadId !== route.threadId)
-      ) {
-        this.clearCard(key, card.id);
-        card = undefined;
-      }
-      const status = snapshot(this.store, group, jobs, coordination);
-      const topic = route.threadId !== undefined;
-      if (!card && !topic && !status.active) continue;
-      const locale = this.locale();
-      const signature = JSON.stringify([locale, group.title, status]);
-      const last = card && this.sent.get(card.id);
-      const now = Date.now();
-      if (last && last.signature === signature && (!status.active || now - last.at < 60000))
-        continue;
-      if (!card) {
-        card = { id: randomUUID(), route };
-        this.store.setSetting(key, card);
-      }
+      await this.update(group, snapshot(this.store, group, jobs, coordination));
+    }
+  }
+
+  async update(
+    group: ReviewGroup,
+    status = snapshot(this.store, group, this.store.activeJobs(), this.store.activeDaddyJobs()),
+  ) {
+    const groupKey = this.prefix + group.id;
+    const previous = this.store.setting<LiveCard>(groupKey);
+    const route = this.destination(group.id, previous?.route);
+    if (!route) {
+      this.sent.delete(group.id);
+      return;
+    }
+    const topic = route.threadId !== undefined;
+    if (previous?.route.threadId !== undefined) {
+      // Older releases kept just the most recent card. Retain its ID by topic.
+      this.store.transaction(() => {
+        const previousKey = topicCardKey(groupKey, previous.route);
+        if (!this.store.setting<LiveCard>(previousKey))
+          this.store.setSetting(previousKey, previous);
+        this.clearCard(groupKey, previous.id);
+      });
+    } else if (topic && previous) this.clearCard(groupKey, previous.id);
+    const key = topic ? topicCardKey(groupKey, route) : groupKey;
+    let card = this.store.setting<LiveCard>(key);
+    if (card && (card.route.ownerId !== route.ownerId || card.route.chatId !== route.chatId)) {
+      this.clearCard(key, card.id);
+      card = undefined;
+    }
+    if (!card && !topic && !status.active) return;
+    const locale = this.locale();
+    const signature = JSON.stringify([locale, group.title, status]);
+    const last = this.sent.get(group.id);
+    const now = Date.now();
+    if (
+      last &&
+      last.cardId === card?.id &&
+      last.signature === signature &&
+      (!status.active || now - last.at < 60000)
+    )
+      return;
+    if (!card) {
+      card = { id: randomUUID(), route };
+      this.store.setSetting(key, card);
+    }
+    const current = { cardId: card.id, at: now, signature };
+    this.sent.set(group.id, current);
+    try {
       await this.api.send(route, render(this.store, locale, group, status, now), undefined, {
         key: `progress:${card.id}`,
         replace: true,
         final: topic || !status.active,
         pin: topic,
+        pinWarning: topic
+          ? translator(locale)(
+              'Could not pin the session status. Give the bot permission to pin messages.',
+            )
+          : undefined,
+        groupId: group.id,
+        sessionRoute: true,
       });
-      if (topic || status.active) this.sent.set(card.id, { at: now, signature });
-      else this.clearCard(key, card.id);
+    } catch (error) {
+      if (this.sent.get(group.id) === current) this.sent.delete(group.id);
+      throw error;
     }
+    if (!topic && !status.active && this.sent.get(group.id) === current)
+      this.clearCard(key, card.id);
   }
 
   private clearCard(key: string, id: string) {
     this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
-    this.sent.delete(id);
+    const groupId = key.slice(this.prefix.length).split(':', 1)[0];
+    if (this.sent.get(groupId)?.cardId === id) this.sent.delete(groupId);
   }
 
   async stop() {

@@ -285,4 +285,4 @@ Deleting a managed session first cancels and waits for its runs. The repository 
 
 Code: [cancellation, revision changes and recovery](../../src/core/engine.ts), [coordinator recovery](../../src/core/daddy.ts), [resource checks](../../src/core/resources.ts). [buildApp()](../../src/server/app.ts) assembles all components.
 
-Agent execution defaults to the service user on the host (`agentExecution: "host"`), including its DNS and local sockets. Explicit sandbox mode is separate from the workflow role. Telegram persists deliveries before sending, coalesces one agent turn into an editable card and retries failures independently of model execution. Topic names follow session rename events.
+Agent execution defaults to the service user on the host (`agentExecution: "host"`), including its DNS and local sockets. Explicit sandbox mode is separate from the workflow role. Telegram persists deliveries before sending, keeps each public agent reply as a separate message and retries failures independently of model execution. Topic names follow session rename events.

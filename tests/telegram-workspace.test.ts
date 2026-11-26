@@ -2,6 +2,8 @@ import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
+import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
+import { TelegramText } from '../src/integrations/telegram-text.js';
 import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import { UpdateMonitor } from '../src/core/updates.js';
 import { catalogue } from './planning-fixture.js';
@@ -215,19 +217,26 @@ it('does not recreate a topic after a lost response and lets the owner attach th
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
   let calls = 0;
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url) => {
+  const sent: string[] = [];
+  const pinned: number[] = [];
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
     if (String(url).endsWith('/createForumTopic')) {
       calls++;
       throw new Error('response lost after creation');
     }
-    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (String(url).endsWith('/sendMessage')) sent.push(body.text);
+    if (String(url).endsWith('/pinChatMessage')) pinned.push(body.message_id);
+    return Response.json({ ok: true, result: { message_id: sent.length } });
   });
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
   try {
     const group = f.daddy.create({ workspaceId: f.workspace.id });
     await expect(workspace.ensureTopic(group)).rejects.toThrow();
     await expect(workspace.ensureTopic(group)).rejects.toThrow('/attach');
     expect(calls).toBe(1);
+    f.store.finishDaddyReply(group.id, 'Reply saved before attaching', 'turn');
     await workspace.handle({
       update_id: 1,
       message: {
@@ -239,8 +248,13 @@ it('does not recreate a topic after a lost response and lets the owner attach th
     });
     expect(await workspace.ensureTopic(group)).toMatchObject({ threadId: 51, groupId: group.id });
     expect(calls).toBe(1);
+    await api.delivery.flush();
+    expect(sent[0]).toContain('Server status');
+    expect(sent.at(-1)).toContain('Reply saved before attaching');
+    expect(pinned).toEqual([1]);
   } finally {
     await workspace.stop();
+    await api.delivery.stop();
     await f.close();
   }
 });
@@ -796,7 +810,12 @@ it.each(['private', 'topic'])(
     const sent: { destination: any; card: any; options: any }[] = [];
     const api = {
       send: vi.fn(async (destination, card, _unused, options) => {
-        sent.push({ destination, card, options });
+        const prefix = options?.mention?.text;
+        sent.push({
+          destination,
+          card: prefix ? new TelegramText().append(prefix).append(card) : card,
+          options,
+        });
         return { message_id: sent.length };
       }),
       call: vi.fn(async (method) =>
@@ -831,7 +850,7 @@ it.each(['private', 'topic'])(
       );
       expect(first.card.text).toContain('Choose a branch?');
       expect(first.card.text).toContain('Owner');
-      expect(first.options.replace).toBe(false);
+      expect(first.options.key).toMatch(/^dialog:/);
       expect(
         sent.find((entry) => entry.card.text?.includes('Checking.'))?.card.entities,
       ).not.toContainEqual(expect.objectContaining({ url: 'tg://user?id=7' }));
@@ -1123,3 +1142,137 @@ it('binds the current turn to the quoted Telegram parent even after an unrelated
     await f.close();
   }
 });
+
+it.each(['topic', 'private'])(
+  'keeps each public reply in order across throttling and restart in %s',
+  async (where) => {
+    const f = daddyFixture();
+    const isTopic = where === 'topic';
+    const chatId = isTopic ? -10042 : 7;
+    const requests: { method: string; body: Record<string, any>; id?: number }[] = [];
+    let nextId = 100;
+    let clock = 1000;
+    let rateLimited = false;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(options?.body ?? '{}'));
+      const call = { method, body, id: undefined as number | undefined };
+      requests.push(call);
+      if (method === 'createForumTopic')
+        return Response.json({ ok: true, result: { message_thread_id: 31 } });
+      if (method === 'pinChatMessage')
+        return Response.json({
+          ok: false,
+          error_code: 403,
+          description: 'Not enough rights to pin a message',
+        });
+      if (method !== 'sendMessage') return Response.json({ ok: true, result: true });
+      if (body.text.startsWith('B'.repeat(50)) && !rateLimited) {
+        rateLimited = true;
+        return Response.json({
+          ok: false,
+          error_code: 429,
+          description: 'Too many requests',
+          parameters: { retry_after: 10 },
+        });
+      }
+      call.id = ++nextId;
+      return Response.json({ ok: true, result: { message_id: call.id } });
+    });
+    const connect = () => {
+      api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+      return new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    };
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    if (isTopic) f.store.setSetting('telegram.group', { chatId, title: 'Work', ownerId: 7 });
+    let bot = connect();
+    const listener = (event: any) => bot.onEvent(event);
+    f.store.changes.on('event', listener);
+    const menu = (id: number) =>
+      bot.handle({
+        update_id: id,
+        message: {
+          message_id: id,
+          text: '/status',
+          from: { id: 7 },
+          chat: { id: chatId, type: isTopic ? 'supergroup' : 'private' },
+          ...(isTopic ? { message_thread_id: 31 } : {}),
+        },
+      });
+    try {
+      const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Work' });
+      f.store.setSetting('telegram.currentDaddy', group.id);
+      const run = 'first-turn';
+      f.store.daddyMessage(group.id, 'agent', 'Inspecting the queue', run, undefined, {
+        phase: 'progress',
+      });
+      f.store.daddyMessage(
+        group.id,
+        'agent',
+        'Long reply ' + 'A'.repeat(4096) + 'B'.repeat(4500),
+        run,
+        undefined,
+        {
+          phase: 'progress',
+        },
+      );
+      f.store.finishDaddyReply(group.id, 'First answer', run);
+      const same = f.store.daddyMessage(
+        group.id,
+        'agent',
+        'Second answer',
+        'second-turn',
+        undefined,
+        { phase: 'progress' },
+      );
+      await menu(10);
+      expect(f.store.finishDaddyReply(group.id, 'Second answer', 'second-turn').id).toBe(same.id);
+      await vi.waitFor(() => expect(rateLimited).toBe(true));
+      const before = requests.length;
+      await bot.stop();
+      await api.delivery!.stop();
+      bot = connect();
+      await api.delivery!.flush();
+      expect(requests).toHaveLength(before);
+      clock += 10000;
+      await api.delivery!.flush(30);
+      bot.replay();
+      await menu(11);
+      await api.delivery!.flush(30);
+
+      const messages = requests.filter((call) => call.id !== undefined);
+      const position = (value: string) =>
+        messages.findIndex(({ body }) => body.text.includes(value));
+      const order = ['Inspecting the queue', 'Long reply', 'First answer', 'Second answer'].map(
+        position,
+      );
+      expect(order.every((index) => index >= 0)).toBe(true);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      for (const value of ['Inspecting the queue', 'Long reply', 'First answer', 'Second answer'])
+        expect(messages.filter(({ body }) => body.text.includes(value))).toHaveLength(1);
+      expect(messages[order.at(-1)! + 1].body.reply_markup.inline_keyboard.length).toBeGreaterThan(
+        0,
+      );
+      if (isTopic) {
+        expect(messages[0].body.text).toContain('No work in progress');
+        expect(
+          requests
+            .filter(({ method }) => method === 'pinChatMessage')
+            .map(({ body }) => body.message_id),
+        ).toEqual([messages[0].id]);
+        expect(messages.filter(({ body }) => body.text.includes('permission to pin'))).toHaveLength(
+          1,
+        );
+        expect(requests.some(({ method }) => method.startsWith('unpin'))).toBe(false);
+      } else {
+        expect(requests.some(({ method }) => method === 'pinChatMessage')).toBe(false);
+      }
+    } finally {
+      f.store.changes.off('event', listener);
+      await bot.stop();
+      await api.delivery!.stop();
+      await f.close();
+    }
+  },
+);

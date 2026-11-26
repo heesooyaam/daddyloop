@@ -1,7 +1,8 @@
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
-import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
+import { TelegramDelivery, dialogKey } from '../src/integrations/telegram-delivery.js';
 import { TelegramText } from '../src/integrations/telegram-text.js';
+import { daddyFixture } from './daddy-fixture.js';
 import { TelegramApi } from '../src/integrations/telegram.js';
 
 function fixture() {
@@ -52,7 +53,7 @@ it('keeps status edits delivering while a durable pin retries', async () => {
   let restored: TelegramDelivery | undefined;
   try {
     await f.queue.send(target, text('Waiting'), options);
-    f.call.mockRejectedValueOnce(new Error('Bad Request: not enough rights'));
+    f.call.mockRejectedValueOnce(new Error('Network unavailable'));
     await f.queue.flush();
     expect(f.queue.status().pending).toBe(1);
     await f.queue.send(target, text('Working'), options);
@@ -332,6 +333,184 @@ it('does not shorten a Telegram flood wait longer than one day', async () => {
     await f.queue.flush();
     expect(f.call).toHaveBeenCalledTimes(2);
   } finally {
+    await f.close();
+  }
+});
+
+it('adopts sent and partially delivered turn receipts from the released format', async () => {
+  const f = daddyFixture();
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const target = { chatId: 7 };
+  let clock = 1000;
+  const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 100 }));
+  const connect = () =>
+    new TelegramDelivery(
+      f.store,
+      { call: call as unknown as TelegramApi['call'] },
+      'test_bot',
+      () => clock,
+    );
+  let queue = connect();
+  try {
+    const sent = f.store.finishDaddyReply(group.id, 'Already delivered', 'first');
+    const partial = f.store.finishDaddyReply(group.id, 'x'.repeat(9000), 'second');
+    const legacy = (message: typeof sent) => ({
+      key: 'turn:' + message.runId,
+      groupId: group.id,
+      notificationId: `telegram:dialog:7:0:${message.id}:final`,
+      replace: true,
+      final: true,
+    });
+    await queue.send(target, text(sent.text), legacy(sent));
+    call
+      .mockResolvedValueOnce({ message_id: 101 })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Too many requests'), { retryAfter: 10, telegramStatus: 429 }),
+      );
+    await queue.send(target, text(partial.text), legacy(partial));
+    await queue.stop();
+    expect(call).toHaveBeenCalledTimes(3);
+
+    queue = connect();
+    const deliver = (message: typeof sent) =>
+      queue.send(target, text(message.text), {
+        ...legacy(message),
+        key: dialogKey(message.id),
+        sessionRoute: true,
+      });
+    expect(await deliver(sent)).toMatchObject({ status: 'sent' });
+    expect(await deliver(partial)).toMatchObject({ status: 'queued' });
+    await queue.flush();
+    expect(call).toHaveBeenCalledTimes(3);
+    clock += 10000;
+    call.mockResolvedValueOnce({ message_id: 102 }).mockResolvedValueOnce({ message_id: 103 });
+    await queue.flush();
+    expect(call.mock.calls.slice(3).map(([method]) => method)).toEqual([
+      'sendMessage',
+      'sendMessage',
+    ]);
+    expect(queue.replySession(7, 100, 7)).toBe(group.id);
+    expect(queue.replySession(7, 101, 7)).toBe(group.id);
+    expect(queue.replySession(7, 103, 7)).toBe(group.id);
+    expect(await deliver(partial)).toMatchObject({ status: 'sent' });
+    expect(call).toHaveBeenCalledTimes(5);
+  } finally {
+    await queue.stop();
+    await f.close();
+  }
+});
+
+it('drops stale routes and old pings while delivering the public question on the current route', async () => {
+  const f = daddyFixture();
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+  const message = f.store.finishDaddyReply(group.id, 'Choose a branch?', 'turn', true);
+  const route = (threadId: number) => ({ chatId: -10042, threadId });
+  const bind = (threadId: number) =>
+    f.store.db
+      .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+      .run(`7:-10042:${group.id}`, group.id, JSON.stringify(route(threadId)));
+  let clock = 1000;
+  const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 100 }));
+  const queue = new TelegramDelivery(
+    f.store,
+    { call: call as unknown as TelegramApi['call'] },
+    'test_bot',
+    () => clock,
+  );
+  const question = { groupId: group.id, messageId: message.id };
+  const options = {
+    key: dialogKey(message.id),
+    groupId: group.id,
+    sessionRoute: true,
+    final: true,
+    mention: { question, text: text('Your reply is needed. ') },
+  };
+  try {
+    bind(12);
+    call.mockRejectedValueOnce(
+      Object.assign(new Error('Too many requests'), { retryAfter: 10, telegramStatus: 429 }),
+    );
+    await queue.send(route(12), text(message.text), options);
+    await queue.send(route(12), text('Reminder'), {
+      ...options,
+      key: 'reminder',
+      reminder: question,
+    });
+    bind(13);
+    await queue.send(route(13), text(message.text), options);
+    f.store.daddyMessage(group.id, 'user', 'Use main');
+    clock += 10000;
+    await queue.flush();
+    expect(call.mock.calls.slice(1)).toEqual([
+      [
+        'sendMessage',
+        expect.objectContaining({ message_thread_id: 13, text: 'Choose a branch?' }),
+        expect.anything(),
+      ],
+    ]);
+    expect(queue.status().pending).toBe(0);
+  } finally {
+    await queue.stop();
+    await f.close();
+  }
+});
+
+it('mentions a new decision by replying to the already delivered public message', async () => {
+  const f = daddyFixture();
+  const call = vi.fn(async () => ({ message_id: 77 }));
+  const queue = new TelegramDelivery(
+    f.store,
+    { call: call as unknown as TelegramApi['call'] },
+    'test_bot',
+  );
+  const target = { chatId: 7 };
+  f.store.setSetting('telegram.pairing', { ...target, userId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const message = f.store.daddyMessage(group.id, 'agent', 'Choose a branch?', 'turn', undefined, {
+      phase: 'progress',
+    });
+    const options = {
+      key: dialogKey(message.id),
+      groupId: group.id,
+      sessionRoute: true,
+      replace: true,
+    };
+    await queue.send(target, text(message.text), options);
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    f.store.finishDaddyReply(group.id, message.text, 'turn', true);
+    const final = {
+      ...options,
+      final: true,
+      mention: {
+        question: { groupId: group.id, messageId: message.id },
+        text: text('Your reply is needed.'),
+      },
+    };
+    await queue.send(target, text(message.text), final);
+    call.mockResolvedValueOnce({ message_id: 78 });
+    await queue.flush();
+    expect(call.mock.calls).toEqual([
+      ['sendMessage', expect.objectContaining({ text: 'Choose a branch?' }), expect.anything()],
+      [
+        'sendMessage',
+        expect.objectContaining({
+          text: 'Your reply is needed.',
+          reply_parameters: expect.objectContaining({ message_id: 77 }),
+        }),
+        expect.anything(),
+      ],
+    ]);
+    await queue.send(target, text(message.text), final);
+    expect(call).toHaveBeenCalledTimes(2);
+  } finally {
+    await queue.stop();
     await f.close();
   }
 });
