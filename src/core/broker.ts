@@ -51,7 +51,7 @@ const descriptions: Record<keyof typeof schemas, string> = {
   read_review:
     'Read this task’s current native review and exact Markdown comments. Author access is limited to published feedback.',
   add_comment:
-    'Create a native DRAFT comment. Use a stable key such as R1; preserve Markdown, code blocks, links and suggestions. Cite a concrete failure scenario. This does not publish anything.',
+    'Create a native DRAFT comment. Reuse a descriptive acceptance-criterion key across rounds; preserve Markdown, code blocks, links and suggestions. Group related cases. State the expected user outcome, concrete failure and acceptance check. This does not publish anything.',
   edit_comment:
     'Edit a comment belonging to the current draft review after rechecking its evidence. Preserve the full explanation and links.',
   remove_comment:
@@ -309,6 +309,28 @@ export class Broker {
           'Start line must be at or before the anchor line',
           400,
         );
+      const previous = task.feedback;
+      if (
+        previous?.status === 'published' &&
+        previous.comments.length &&
+        (task.round >= 3 ||
+          previous.comments.some((c) => c.body.trimEnd().endsWith(`:comment:${data.key} -->`)))
+      ) {
+        const operations = this.store.db;
+        const priorWrite = operations
+          .prepare('SELECT 1 FROM operations WHERE task_id=? AND id=?')
+          .get(task.id, marker);
+        const diagnosis = operations
+          .prepare(
+            "SELECT 1 FROM operations WHERE task_id=? AND id GLOB ? AND status='done' LIMIT 1",
+          )
+          .get(task.id, `${task.review.marker}:${job.id}:set_summary:*`);
+        if (!priorWrite && !diagnosis)
+          throw new AppError(
+            'review_strategy_needed',
+            'Use set_summary in this turn first. Explain the remaining acceptance criterion, what the previous fix missed, the revised approach and the check that would settle it. Then add the grouped finding.',
+          );
+      }
       const location =
         data.path && data.line
           ? {
@@ -376,6 +398,8 @@ export class Broker {
       return { removed: data.id };
     }
     const data = schemas.set_summary.parse(input);
+    if (!data.body.trim())
+      throw new AppError('empty_summary', 'Write the review summary before saving it.');
     await this.outbox.perform(
       task.id,
       key,
