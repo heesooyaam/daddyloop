@@ -168,6 +168,7 @@ it('reviews a report without code changes before daddy dispatches follow-up work
     f.daddy.start();
     const task = await f.daddy.createTask(group.id, {
       requirements: 'Create a sub-issue and report its URL',
+      validatePlan: false,
       requestId: 'report-without-code',
     });
     await f.worker.tick();
@@ -232,6 +233,7 @@ it.each([
       const group = f.daddy.create({ workspaceId: f.workspace.id });
       const task = await f.daddy.createTask(group.id, {
         requirements: 'Verify an external result',
+        validatePlan: false,
         requestId: 'unverified-report',
       });
       await f.worker.tick();
@@ -263,6 +265,7 @@ it('keeps previously saved code changes on the PR path when the next run adds no
   try {
     const group = f.daddy.create({ workspaceId: f.workspace.id });
     const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Check and preserve the saved changes',
       requestId: 'preserved-commit',
     });
@@ -296,13 +299,13 @@ it('creates one daddy conversation idempotently and lets him split and dispatch 
     for (let i = 0; i < 3; i++) {
       const task = (await input.onTool(
         'create_task',
-        { title: `Part ${i}`, requirements: `Implement independent part ${i}` },
+        { title: `Part ${i}`, requirements: `Research independent part ${i}`, reportOnly: true },
         `create-${i}`,
       )) as { taskId: string };
       created.push(task.taskId);
       const again = (await input.onTool(
         'create_task',
-        { title: `Part ${i}`, requirements: `Implement independent part ${i}` },
+        { title: `Part ${i}`, requirements: `Research independent part ${i}`, reportOnly: true },
         `create-${i}`,
       )) as { taskId: string };
       expect(again.taskId).toBe(task.taskId);
@@ -509,13 +512,17 @@ it('enforces same-session task scope and acyclic prerequisites before dispatch',
     await expect(current.onTool('read_task', { taskId: foreign.id }, 'read')).rejects.toThrow(
       'another daddy',
     );
-    const a = (await current.onTool('create_task', { title: 'A', requirements: 'A' }, 'a')) as {
+    const a = (await current.onTool(
+      'create_task',
+      { title: 'A', requirements: 'A', reportOnly: true },
+      'a',
+    )) as {
       taskId: string;
     };
     expect(f.store.getTask(a.taskId).groupId).toBe(group.id);
     const b = (await current.onTool(
       'create_task',
-      { title: 'B', requirements: 'B', dependsOn: [a.taskId] },
+      { title: 'B', requirements: 'B', reportOnly: true, dependsOn: [a.taskId] },
       'b',
     )) as { taskId: string };
     await expect(

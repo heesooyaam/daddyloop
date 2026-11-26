@@ -671,6 +671,16 @@ export class Worker {
       if (isTicket(task)) task.revision = prepared.revision;
       if (job.role === 'reviewer' && group) task.reviewerThreadId = prepared.reviewerThreadId;
       store.saveTask(task);
+      if (
+        isTicket(task) &&
+        task.planning &&
+        job.kind === 'implement' &&
+        !(await this.engine.checkImplementationPlan(job))
+      ) {
+        job.status = 'cancelled';
+        return;
+      }
+
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
@@ -693,8 +703,11 @@ export class Worker {
         if (!agentCwd.startsWith(realpathSync(cwd) + sep))
           throw new Error('The starting directory escaped its managed workspace');
       }
-      const tools =
-        job.kind === 'verify_merge'
+      const readOnlyWork =
+        job.kind === 'plan' || (task.reportOnly && isTicket(task) && job.kind === 'implement');
+      const tools = readOnlyWork
+        ? []
+        : job.kind === 'verify_merge'
           ? [reviewDecisionTool]
           : isolatedReview
             ? []
@@ -711,6 +724,7 @@ export class Worker {
         task,
         job,
         cwd: agentCwd,
+        ...(readOnlyWork && { execution: 'sandbox' as const }),
         readPaths: demo
           ? []
           : [
@@ -745,7 +759,8 @@ export class Worker {
             current.agents.worker.engine !== job.profile?.engine
           )
             return;
-          if (job.role === 'author') current.authorThreadId = threadId;
+          if (job.kind === 'plan' && current.planning) current.planning.threadId = threadId;
+          else if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);
           job.threadId = threadId;
@@ -795,6 +810,7 @@ export class Worker {
         task.generation === job.generation &&
         isTicket(task) &&
         job.kind === 'implement' &&
+        !task.reportOnly &&
         result.status === 'completed' &&
         result.checkedHead === task.revision?.head
       ) {

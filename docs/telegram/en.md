@@ -41,6 +41,7 @@ Each daddy session gets a topic. Send goals and tickets there. Workers report to
 ## Tasks and workers
 
 - `/task Fix search filters` creates and queues a task in the current session. The bot returns a short ID such as `DADDY-12ab34cd`.
+- `/task --no-plan -- Fix search` skips the default architecture check for this task. A regular message can ask daddy to discuss the plan and record it in the issue before dispatch.
 - `/task DADDY-12ab34cd` shows the task’s current stage, assigned worker and PR when available.
 - `/queue` lists unfinished tasks with their status and worker assignment. The queue shows how long ago work began and, during an active run, who is running it and for how long. Use the task's ID button to open its details. The queue button takes you back to the page you opened the task from. `/workers` shows the numbered workers, their models and assigned work.
 - `/task --worker 2 --model MODEL --effort EFFORT -- Fix search filters` waits for worker 2 and uses the requested profile. The options are independent. A model request without a worker number prefers a free worker with that profile and reconfigures the first free worker if needed.

@@ -55,7 +55,7 @@ it('restores the session-owned tasks and their attempts once, including a runnin
     expect(f.store.activeJobs(active.id)).toMatchObject([
       {
         firstAttemptId: first.id,
-        kind: 'implement',
+        kind: 'plan',
         status: 'queued',
         groupGeneration: generation,
       },

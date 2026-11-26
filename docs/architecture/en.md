@@ -51,6 +51,8 @@ The website and CLI send text over HTTP. Regular Telegram messages call the same
 
 **Queue task** on the website and `/task` in Telegram call the same service operation. It saves the task and its first author run together. A retry with the same request ID finds the same task. The dispatcher can start the run as soon as a worker is available. Both interfaces show the same task IDs and worker assignments.
 
+Direct queueing starts a read-only architecture check by default. The planner validates the ticket against the repository and returns a Markdown plan for the pinned base. The engine stores the plan and queues implementation in one transaction. A stale or incomplete plan cannot advance the task. The coordinator path records the agreed coding brief in the GitHub issue first and starts implementation directly unless a separate plan check was requested. See [task controls](../tasks/en.md#architecture-before-implementation).
+
 The coordinator receives the goal, task board and recent messages. It uses tools to read older conversation or task details. For example, `create_task` creates “Fix search” and `dispatch` assigns implementation. The service first checks the selected workspace, the task's session and its dependencies.
 
 When a worker finishes, an event queues another coordinator turn. That is how it learns about the result and can assign more work or ask you a question.

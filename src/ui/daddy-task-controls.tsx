@@ -25,6 +25,7 @@ export function QueueTaskForm({
   const [profile, setProfile] = useState<AgentProfile>({ engine: board.workerDefault.engine });
   const [repository, setRepository] = useState<RepositorySelection>();
   const [editingRepository, setEditingRepository] = useState(false);
+  const [validatePlan, setValidatePlan] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const { catalogue, load } = useAgentCatalogue(api, false);
@@ -33,6 +34,7 @@ export function QueueTaskForm({
     if (busy || voiceBusy || editingRepository || !requirements.trim()) return;
     const input = {
       requirements: requirements.trim(),
+      validatePlan,
       repository,
       workerRequest: {
         slot: slot ? Number(slot) : undefined,
@@ -73,6 +75,14 @@ export function QueueTaskForm({
           value={requirements}
           onChange={(event) => setRequirements(event.target.value)}
         />
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={validatePlan}
+          onChange={(event) => setValidatePlan(event.target.checked)}
+        />
+        {t('Check architecture and plan before implementation')}
       </label>
       <VoiceInput
         key={board.group.id}

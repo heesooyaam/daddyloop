@@ -2358,6 +2358,19 @@ export class Engine {
         this.store.message(id, role, 'user', text);
         if (
           role === 'author' &&
+          isTicket(task) &&
+          task.state === 'needs_input' &&
+          task.resumeState === 'implementing' &&
+          task.planning &&
+          !task.planning.result &&
+          task.inputRequest?.generation === task.generation
+        ) {
+          this.rememberClarification(task, text);
+          this.queueImplementation(task, actionId);
+          return;
+        }
+        if (
+          role === 'author' &&
           task.state === 'needs_input' &&
           task.resumeState === 'fixing' &&
           !task.fixingMergeConflict &&
@@ -2425,6 +2438,13 @@ export class Engine {
         });
       }
       if (isTicket(task)) {
+        if (
+          job.kind === 'plan' &&
+          (task.state !== 'implementing' ||
+            !task.planning ||
+            task.planning.result?.runId === job.id)
+        )
+          return;
         this.store.transaction(() => {
           this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
           const reportReview = job.kind === 'review';
@@ -2453,6 +2473,25 @@ export class Engine {
             task.resumeState = undefined;
             task.reviewFinished = true;
             this.state(task, 'complete', 'daddy verified the worker report');
+          } else if (job.kind === 'plan') {
+            if (
+              !task.planning ||
+              task.state !== 'implementing' ||
+              task.planning.result?.runId === job.id
+            )
+              return;
+            if (!result.summary.trim()) {
+              task.resumeState = 'implementing';
+              this.state(task, 'needs_input', 'The planning step returned an empty plan.');
+              return;
+            }
+            task.planning.result = {
+              text: result.summary,
+              runId: job.id,
+              revision: { ...task.revision! },
+            };
+            this.store.event(task.id, 'task.plan_validated', { head: result.checkedHead }, job.id);
+            this.queueImplementation(task, undefined, task.planning.instruction);
           } else if (job.kind === 'implement') {
             const head = task.pendingAuthorHead;
             const base = task.ticketRepository?.baseHead ?? task.revision?.base;
@@ -2754,22 +2793,15 @@ export class Engine {
             this.store.transaction(() => this.queueReportReview(task));
             return task;
           }
-          const implementing = task.resumeState === 'implementing';
-          this.state(
-            task,
-            implementing
-              ? 'implementing'
-              : task.pendingAuthorHead
-                ? 'ready_for_review'
-                : 'discussing',
-            'Resumed ticket work; existing changes were preserved',
-          );
-          if (implementing)
-            this.store.enqueue(
+          if (task.resumeState === 'implementing')
+            this.store.transaction(() =>
+              this.queueImplementation(task, undefined, task.planning?.instruction),
+            );
+          else
+            this.state(
               task,
-              'author',
-              'implement',
-              'Continue the interrupted task. Preserve the existing working copy and verify the requested outcome.',
+              task.pendingAuthorHead ? 'ready_for_review' : 'discussing',
+              'Resumed ticket work; existing changes were preserved',
             );
           return task;
         }
@@ -3322,6 +3354,8 @@ export class Engine {
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    reportOnly?: boolean;
+    validatePlan?: boolean;
     id?: string;
   }) {
     if (
@@ -3408,6 +3442,8 @@ export class Engine {
         id: input.id ?? randomUUID(),
         title: input.source.title,
         kind: 'code',
+        planning: input.validatePlan ? {} : undefined,
+        reportOnly: input.reportOnly || undefined,
         ref: input.ref,
         source: input.source,
         repoPath: input.repoPath,
@@ -3475,7 +3511,7 @@ export class Engine {
     };
     return parent ? this.lock(parent.id, create) : create();
   }
-  async implement(id: string, actionId?: string, instruction?: string) {
+  async implement(id: string, actionId?: string, instruction?: string, validatePlan?: boolean) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (!isTicket(task))
@@ -3493,8 +3529,25 @@ export class Engine {
           'task_busy',
           'Resume or wait for the current discussion before implementing',
         );
-      this.store.transaction(() => this.queueImplementation(task, actionId, instruction));
+      this.store.transaction(() => {
+        if (validatePlan === true) task.planning ??= {};
+        if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))
+          delete task.planning;
+        this.queueImplementation(task, actionId, instruction);
+      });
       return task;
+    });
+  }
+  async checkImplementationPlan(job: Job) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state !== 'implementing') return false;
+      if (!task.planning || sameRevision(task.planning.result?.revision, task.revision))
+        return true;
+      this.store.transaction(() =>
+        this.queueImplementation(task, undefined, task.planning?.instruction),
+      );
+      return false;
     });
   }
   private queueImplementation(task: Task, actionId?: string, instruction?: string) {
@@ -3504,6 +3557,19 @@ export class Engine {
       task.summary = '';
     }
     task.resumeState = 'implementing';
+    if (task.planning && !sameRevision(task.planning.result?.revision, task.revision)) {
+      delete task.planning.result;
+      if (instruction) task.planning.instruction = instruction;
+      this.state(task, 'implementing', 'Checking architecture and implementation plan');
+      this.store.enqueue(
+        task,
+        'author',
+        'plan',
+        task.planning.instruction ?? 'Validate the task plan before implementation.',
+        actionId,
+      );
+      return;
+    }
     this.state(task, 'implementing', 'The worker is carrying out the task');
     this.store.enqueue(
       task,
@@ -3528,7 +3594,7 @@ export class Engine {
       .jobs(id)
       .filter((job) => ['failed', 'cancelled'].includes(job.status))
       .at(-1);
-    if (previous?.kind === 'implement') return this.implement(id);
+    if (previous?.kind === 'implement' || previous?.kind === 'plan') return this.implement(id);
     return this.lock(id, async () => {
       const current = this.store.getTask(id);
       if (!isTicket(current) || current.state === 'paused' || this.store.busy(id))
