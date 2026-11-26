@@ -31,7 +31,7 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
       const created = (await f.daddy.call(
         job,
         'create_task',
-        { title: job.input, requirements: job.input },
+        { title: job.input, requirements: job.input, reportOnly: true },
         'create',
         new AbortController().signal,
       )) as { taskId: string };
@@ -66,6 +66,7 @@ it('pins defaults and per-request repositories through queued turns, tool calls 
       {
         workspaceId: other.id,
         title: 'Follow-up',
+        reportOnly: true,
         requirements: 'Continue in the previously selected repository',
       },
       'followup',

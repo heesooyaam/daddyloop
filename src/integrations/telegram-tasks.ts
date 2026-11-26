@@ -34,19 +34,27 @@ export function parseTaskInput(args: string, engine: string) {
   if (!args) return;
   if (!args.startsWith('--')) return { requirements: args };
   const separator = /(?:^|\s)--\s+/.exec(args);
-  if (!separator) return;
+  if (!separator) {
+    const single = /^--(no-plan|plan)\s+(?!-)([\s\S]+)$/.exec(args);
+    return single && single[2].trim()
+      ? { requirements: single[2].trim(), validatePlan: single[1] === 'plan' }
+      : undefined;
+  }
   const requirements = args.slice(separator.index + separator[0].length).trim();
   if (!requirements) return;
   try {
     const { values } = parseArgs({
       args: args.slice(0, separator.index).trim().split(/\s+/).filter(Boolean),
       options: {
+        plan: { type: 'boolean' },
+        'no-plan': { type: 'boolean' },
         worker: { type: 'string' },
         engine: { type: 'string' },
         model: { type: 'string' },
         effort: { type: 'string' },
       },
     });
+    if (values.plan && values['no-plan']) return;
     if (values.worker && !/^[1-8]$/.test(values.worker)) return;
     if (!values.model && (values.engine || values.effort)) return;
     const workerRequest: WorkerRequest = {
@@ -55,7 +63,7 @@ export function parseTaskInput(args: string, engine: string) {
         ? { engine: values.engine ?? engine, model: values.model, effort: values.effort }
         : undefined,
     };
-    return { requirements, workerRequest };
+    return { requirements, workerRequest, validatePlan: values['no-plan'] ? false : values.plan };
   } catch {
     return;
   }

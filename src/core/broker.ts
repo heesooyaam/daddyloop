@@ -251,6 +251,8 @@ export class Broker {
     const task = this.store.getTask(job.taskId);
     if (task.generation !== job.generation || task.state === 'paused')
       throw new AppError('stale_run', 'This run no longer has permission to change the task');
+    if (job.kind === 'plan')
+      throw new AppError('role_forbidden', 'Architecture planning has no native review tools', 403);
     if (job.kind === 'verify_merge')
       throw new AppError('role_forbidden', 'Merge verification is read-only', 403);
     if (!Object.hasOwn(schemas, tool))

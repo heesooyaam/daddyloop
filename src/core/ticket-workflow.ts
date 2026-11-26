@@ -1,6 +1,6 @@
 import { GitHubRetryError } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   AppError,
   assertTaskVersion,
@@ -76,12 +76,104 @@ export class TicketWorkflow {
     this.reader =
       reader ?? new TicketReader(undefined, undefined, undefined, repositories, engine.store);
   }
+  async recordArchitectureIssue(
+    groupId: string,
+    workspace: Workspace,
+    title: string,
+    brief: string,
+    source: string | undefined,
+    assertCurrent: () => void,
+  ): Promise<string> {
+    const issue = source && githubTaskIssue(source, workspace);
+    if (source && !issue)
+      throw new AppError(
+        'workspace_mismatch',
+        'Use an issue from the selected GitHub repository',
+        422,
+      );
+    const http = this.reader.github(workspace);
+    const path = `/repos/${workspace.repo}/issues`;
+    const number = issue ? parseTicket(issue).number : undefined;
+    const endpoint = number ? `${path}/${number}/comments` : path;
+    if (number) {
+      const existing = await http.request<{
+        number: number;
+        pull_request?: unknown;
+        body: string | null;
+      }>('GET', `${path}/${number}`);
+      if (existing.number !== number || existing.pull_request)
+        throw new AppError('not_an_issue', 'Choose a GitHub issue for the architecture plan', 422);
+      if (existing.body?.trim() === brief.trim()) return issue!;
+    }
+    const owner = await http.request<{ id: number }>('GET', '/user');
+    if (!Number.isSafeInteger(owner.id) || owner.id <= 0)
+      throw new AppError('provider_shape', 'GitHub did not confirm the issue author');
+    const digest = createHash('sha256')
+      .update(JSON.stringify([groupId, workspace.host, workspace.repo, number, title, brief]))
+      .digest('hex');
+    const key = 'architecture-issue:' + digest;
+    const body = brief + '\n\n<!-- daddyloop:' + key + ' -->';
+    type GithubIssueEntry = {
+      id: number;
+      number?: number;
+      user?: { id: number };
+      body?: string;
+      pull_request?: unknown;
+    };
+    const identify = (record: GithubIssueEntry) => {
+      const n = number ?? record?.number;
+      if (
+        !Number.isSafeInteger(record?.id) ||
+        record.id <= 0 ||
+        !n ||
+        !Number.isSafeInteger(n) ||
+        n <= 0 ||
+        record.pull_request ||
+        record.user?.id !== owner.id ||
+        record.body !== body
+      )
+        return;
+      return `https://${workspace.host}/${workspace.repo}/issues/${n}`;
+    };
+    return this.engine.broker.outbox.perform<string>(
+      groupId,
+      key,
+      { owner: owner.id, title, body, endpoint },
+      async () => {
+        assertCurrent();
+        const written = await http.request<GithubIssueEntry>(
+          'POST',
+          endpoint,
+          number ? { body } : { title, body },
+        );
+        const url = identify(written);
+        if (!url)
+          throw new AppError(
+            'issue_unconfirmed',
+            'GitHub did not confirm the saved architecture brief',
+          );
+        return url;
+      },
+      async () => {
+        const records = await http.pages<GithubIssueEntry>(
+          number ? endpoint : endpoint + '?state=all',
+        );
+        const matches = records.map(identify).filter((url): url is string => !!url);
+        return matches.length === 1 ? { found: true, value: matches[0]! } : { found: false };
+      },
+      (error) =>
+        error instanceof AppError &&
+        ['provider_401', 'provider_403', 'provider_422'].includes(error.code),
+    );
+  }
   async start(input: {
     replyTo?: TelegramReply;
     source: string;
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    reportOnly?: boolean;
+    validatePlan?: boolean;
     repoPath?: string;
     parentTaskId?: string;
     base?: string;
@@ -120,6 +212,8 @@ export class TicketWorkflow {
       dependsOn: input.dependsOn,
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
+      reportOnly: input.reportOnly,
+      validatePlan: input.validatePlan,
       parentTaskId: input.parentTaskId,
       requirements: input.requirements,
       replyTo: input.replyTo,
@@ -145,6 +239,9 @@ export class TicketWorkflow {
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    reportOnly?: boolean;
+    validatePlan?: boolean;
+    discussedBrief?: boolean;
   }) {
     const id = randomUUID(),
       workspace = input.workspace;
@@ -168,8 +265,34 @@ export class TicketWorkflow {
             'The ticket already belongs to another workspace',
             422,
           );
+        if (input.discussedBrief && existing.state === 'discussing') {
+          await this.engine.lock(existing.id, async () => {
+            const current = this.engine.store.getTask(existing.id);
+            const group = this.engine.store.getGroup(input.groupId);
+            if (
+              current.state !== 'discussing' ||
+              group.generation !== input.groupGeneration ||
+              group.daddyState !== 'active' ||
+              group.deletion
+            )
+              throw new AppError(
+                'stale_task',
+                'The task changed while saving its architecture brief',
+              );
+            current.requirements = input.requirements;
+            current.reportOnly = input.reportOnly || undefined;
+            if (input.validatePlan !== undefined)
+              current.planning = input.validatePlan ? {} : undefined;
+            this.engine.store.saveTask(current);
+          });
+        }
         if (input.startImplementation && existing.state === 'discussing')
-          await this.engine.implement(existing.id, input.createdByAction);
+          await this.engine.implement(
+            existing.id,
+            input.createdByAction,
+            undefined,
+            input.validatePlan,
+          );
         return this.engine.store.getTask(existing.id);
       }
       return this.start({
@@ -211,6 +334,8 @@ export class TicketWorkflow {
       dependsOn: input.dependsOn,
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
+      reportOnly: input.reportOnly,
+      validatePlan: input.validatePlan,
       requirements: input.requirements,
       replyTo: input.replyTo,
       source: {

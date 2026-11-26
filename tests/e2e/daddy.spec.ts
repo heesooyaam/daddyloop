@@ -545,6 +545,11 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
   const queue = page.getByRole('dialog', { name: 'Queue task' });
   await queue.getByLabel('Task description').fill('Repair the filter cache');
+  const planning = queue.getByRole('checkbox', {
+    name: 'Check architecture and plan before implementation',
+  });
+  await expect(planning).toBeChecked();
+  await planning.uncheck();
   await queue.getByLabel('Assign to worker').selectOption('2');
   await queue.getByText('Choose a model', { exact: true }).click();
   await queue.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra');
@@ -553,7 +558,9 @@ test('queues a task for a numbered worker and updates that worker’s model from
     (response) => response.url().endsWith('/tasks') && response.request().method() === 'POST',
   );
   await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
-  const task = await (await submitted).json();
+  const response = await submitted;
+  expect(response.request().postDataJSON().validatePlan).toBe(false);
+  const task = await response.json();
   const report = page.getByRole('dialog', { name: 'Work item' });
   await expect(report.getByRole('heading', { name: 'Repair the filter cache' })).toBeVisible();
   await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();

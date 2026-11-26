@@ -301,6 +301,13 @@ export interface Task {
   >;
   planTaskId?: string;
   planDocuments?: { path: string; body: string }[];
+  reportOnly?: boolean;
+  planning?: {
+    activeRunId?: string;
+    instruction?: string;
+    threadId?: string;
+    result?: { text: string; revision: Revision; runId: string };
+  };
   approvedPlan?: {
     taskId: string;
     head: string;
@@ -365,7 +372,7 @@ export interface Job {
   taskId: string;
   generation: number;
   role: Role;
-  kind: 'review' | 'fix' | 'chat' | 'implement' | 'verify_merge';
+  kind: 'review' | 'fix' | 'chat' | 'plan' | 'implement' | 'verify_merge';
   freshContextRetry?: boolean;
   timeoutRetry?: boolean;
   deferredResult?: AgentResult;

@@ -74,7 +74,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' },
       },
     });
-    expect(f.store.jobs(task!.id)).toMatchObject([{ kind: 'implement', status: 'queued' }]);
+    expect(f.store.jobs(task!.id)).toMatchObject([{ kind: 'plan', status: 'queued' }]);
     expect(f.store.daddyJobs(group.id)).toHaveLength(0);
     const id = task!.source!.key;
     expect(lastText()).toContain(id);

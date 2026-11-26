@@ -492,6 +492,8 @@ export async function restoreBackup(
           const data = remapData(JSON.parse(String(row.data)), paths) as Record<string, unknown>;
           if (table === 'tasks') {
             delete data.authorThreadId;
+            if (data.planning && typeof data.planning === 'object' && 'threadId' in data.planning)
+              delete data.planning.threadId;
             delete data.reviewerThreadId;
             if (data.arcWorkspaces) {
               delete data.arcWorkspaces;

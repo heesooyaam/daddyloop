@@ -1,4 +1,6 @@
 export const daddyRu: Record<string, string> = {
+  'Check architecture and plan before implementation': 'Проверить архитектуру и план до реализации',
+  'Checking architecture and implementation plan': 'Проверяет архитектуру и план реализации',
   Presets: 'Пресеты',
   'Preset library': 'Библиотека пресетов',
   'Session presets': 'Пресеты сессии',
@@ -749,8 +751,8 @@ export const daddyRu: Record<string, string> = {
     'Этот ID совпал у нескольких задач. Открой нужную из /queue или укажи полный ID.',
   'Use /task DESCRIPTION to queue a task. Send a regular message to talk to daddy.':
     'Поставить задачу в очередь можно командой /task ОПИСАНИЕ. Обычные сообщения идут в разговор с daddy.',
-  'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.':
-    'Отправь /task ОПИСАНИЕ для постановки задачи или /task DADDY-ID для проверки статуса. Чтобы выбрать воркера и модель, отправь /task --worker НОМЕР --model МОДЕЛЬ --effort УРОВЕНЬ -- ОПИСАНИЕ.',
+  'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. Plan checking is on by default. Use /task --no-plan -- DESCRIPTION to skip it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.':
+    'Отправь /task ОПИСАНИЕ для постановки задачи или /task DADDY-ID для проверки статуса. По умолчанию проверяется план. Для пропуска отправь /task --no-plan -- ОПИСАНИЕ. Чтобы выбрать воркера и модель, отправь /task --worker НОМЕР --model МОДЕЛЬ --effort УРОВЕНЬ -- ОПИСАНИЕ.',
   'Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.':
     'Отправь /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force]. Воркеры доступны в /workers, модели в /models.',
   'Change a model with /worker NUMBER MODEL [EFFORT].':

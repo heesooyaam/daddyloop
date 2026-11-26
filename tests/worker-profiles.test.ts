@@ -32,20 +32,24 @@ it('uses matching free workers, honors an explicit slot and retunes the first fr
   try {
     await f.daddy.configureWorker(group.id, 2, tuned);
     const matched = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Use the tuned worker',
       requestId: 'matching',
       workerRequest: { profile: tuned },
     });
     const pinned = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Wait for worker 2',
       requestId: 'pinned',
       workerRequest: { slot: 2 },
     });
     const ordinary = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Fit anywhere',
       requestId: 'ordinary',
     });
     const retuned = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'A new profile',
       requestId: 'retuned',
       workerRequest: { profile: alternate },
@@ -72,6 +76,7 @@ it('uses matching free workers, honors an explicit slot and retunes the first fr
       profile: alternate,
     });
     const followup = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Inherit the assigned worker profile',
       requestId: 'inherit',
     });
@@ -94,6 +99,7 @@ it('forces only the active author attempt to restart and preserves its queue ord
   const next = { engine: 'claude', model: 'sonnet', effort: 'high' };
   try {
     const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Continue in the author copy',
       requestId: 'forced',
     });
@@ -161,6 +167,7 @@ it('keeps a result that is already being saved when the model is switched', asyn
   vi.mocked(f.checkouts.commitTicket).mockReturnValue(saved);
   try {
     const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Save before switching',
       requestId: 'saving',
     });
@@ -192,6 +199,7 @@ it('applies the common worker profile to overridden slots, assigned tasks and qu
     const override = { engine: 'claude', model: 'sonnet', effort: 'high' };
     await f.daddy.configureWorker(group.id, 1, override);
     const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Active job',
       requestId: 'active',
       workerRequest: { slot: 1 },
@@ -199,6 +207,7 @@ it('applies the common worker profile to overridden slots, assigned tasks and qu
     await f.worker.tick();
     await vi.waitFor(() => expect(runs).toHaveLength(1));
     const waiting = await f.daddy.createTask(group.id, {
+      validatePlan: false,
       requirements: 'Next job',
       requestId: 'waiting',
       workerRequest: { profile: override },

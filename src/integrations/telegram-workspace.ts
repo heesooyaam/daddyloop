@@ -628,7 +628,7 @@ export class TelegramWorkspace {
       await this.api.send(
         destination,
         this.t(
-          'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
+          'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. Plan checking is on by default. Use /task --no-plan -- DESCRIPTION to skip it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
         ),
       );
       return;

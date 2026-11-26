@@ -14,6 +14,12 @@ New messages in an existing session go to the same daddy. He imports requirement
 
 An answer to a blocked author fix resumes that worker. The task retains the clarification for subsequent author turns and independent reviews.
 
+## Architecture before implementation
+
+**Queue task** and Telegram `/task DESCRIPTION` start with a read-only planning turn. Send an issue URL to include its description and comments. The planner inspects the repository, validates an existing design or writes a concise one, identifies the acceptance checks, and hands the saved plan to implementation. A material open question waits for an answer. The implementation and independent reviewer receive the same plan.
+
+To skip this step for one task, clear **Check architecture and plan before implementation** in the queue form or send `/task --no-plan -- DESCRIPTION`. Through a conversation with daddy, discuss the design and steps first. In GitHub workspaces daddy creates an issue or adds the agreed brief to the existing issue before dispatch. This path uses the brief directly by default. Ask daddy to validate the plan separately to enable the additional turn.
+
 ## Queue a task and choose a worker
 
 Click **Queue a task** in the web task panel or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.

@@ -32,11 +32,16 @@ export const daddySchemas = {
       source: z.string().url().max(2048).optional(),
       title: z.string().trim().min(1).max(200),
       requirements: text,
+      architecturePlan: text.optional(),
+      reportOnly: z.boolean().optional(),
+      validatePlan: z.boolean().optional(),
       workspaceId: id.optional(),
       dependsOn: z.array(id).max(20).optional(),
     })
     .strict(),
-  dispatch: z.object({ taskId: id, instruction: text.optional() }).strict(),
+  dispatch: z
+    .object({ taskId: id, instruction: text.optional(), validatePlan: z.boolean().optional() })
+    .strict(),
   message_worker: z.object({ taskId: id, instruction: text }).strict(),
   set_dependencies: z.object({ taskId: id, dependsOn: z.array(id).max(20) }).strict(),
   pause_task: z.object({ taskId: id, reason: text }).strict(),
@@ -63,9 +68,9 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   attach_review:
     'Attach an existing GitHub/GitLab/Arcadia pull request to this daddy session for its native review/fix workflow. The workspace must match the native repository.',
   create_task:
-    'Create a concrete task from the user requirements. For an existing GitHub issue or newly created sub-issue, pass its canonical issue URL in source (one task per issue). Choose a registered workspace and optional dependencies. Does not start a worker.',
+    'Create a concrete task. For coding work always supply architecturePlan in the user’s language: the agreed design, affected components, steps and acceptance checks. On GitHub the service records this brief in an issue before queueing the local task. For a report-only request set reportOnly=true to omit the coding brief. Set validatePlan=true when the user asks for a separate planning pass. For an existing GitHub issue or newly created sub-issue, pass its canonical issue URL in source (one task per issue). Choose a registered workspace and optional dependencies. Does not start a worker.',
   dispatch:
-    'Start work on a ready task. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
+    'Start work on a ready task. validatePlan can explicitly enable or disable the extra architecture check. Coordinator-created tasks normally use the agreed ticket plan directly. The service enforces dependencies and worker limits. Work without code changes goes through a report review. Saved code changes go through native PR review.',
   message_worker:
     'Send scoped instructions to the task worker. When an author asks a question and the answer is already in the session, send the decision here to resume that fix. Results return to daddy.',
   set_dependencies:

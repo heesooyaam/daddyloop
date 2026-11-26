@@ -132,6 +132,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         requirements: z.string().trim().min(1).max(20000),
         requestId: id,
         repository: repositorySelectionSchema.optional(),
+        validatePlan: z.boolean().optional(),
         workerRequest: z
           .object({ slot: workerNumber.optional(), profile: profileSchema.optional() })
           .strict()
@@ -148,6 +149,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       requirements: input.requirements,
       requestId: `web:task:${input.requestId}`,
       workerRequest: input.workerRequest,
+      validatePlan: input.validatePlan,
       workspace,
     });
     return reply.code(201).send({ id: task.id });

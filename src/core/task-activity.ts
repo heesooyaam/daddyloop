@@ -150,6 +150,8 @@ export function localRetryStatus(task: Task, job?: Job) {
 }
 
 export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
+  if (job?.kind === 'plan' && job.status === 'running')
+    return 'Checking architecture and implementation plan';
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
   if (waitingForMergeability(task)) {
     if (mergeStatus) return `${mergeabilityStatus} · ${mergeStatus}`;
