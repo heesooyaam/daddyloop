@@ -314,6 +314,26 @@ export class Engine {
         this.invalidate(task, pr);
         task.pendingFix = undefined;
       }
+      if (
+        retry &&
+        task.ref.provider === 'github' &&
+        task.state === 'needs_input' &&
+        task.reason === draftInspectionRequired &&
+        task.review &&
+        sameOpenTarget(task.pr, pr) &&
+        pr.draft === false &&
+        pr.mergeConflict &&
+        autoMergeEnabled(this.store, task)
+      ) {
+        if (!(await this.retireSupersededDraft(task, provider))) return task;
+        await this.applyRepair(
+          task,
+          pr,
+          { kind: 'repair', preparation: 'clean' },
+          { snapshot: task.feedback },
+        );
+        return task;
+      }
       if (task.pendingFix && (!sameRevision(task.revision, pr) || !sameOpenTarget(task.pr, pr))) {
         this.holdSavedFix(task, pr);
         return task;
@@ -345,12 +365,14 @@ export class Engine {
       ) {
         if (retry && (await this.resumeReviewAfterResourcePause(task, pr, clarification)))
           return task;
-        const previous = await provider.getReview(prRef(task), task.review);
+        const previous = await this.readReviewForRetry(task, provider, task.review);
         if (previous.status === 'draft' || previous.status === 'partial')
           throw new AppError(
             'stale_draft',
             `Inspect the earlier draft review ${task.review.id} before reviewing ${pr.head}.`,
           );
+        if (previous.status === 'published' || previous.dismissed)
+          this.rememberCarriedReview(task, task.review, previous);
         this.invalidate(task, pr);
       }
       const changed = !sameRevision(task.revision, pr);
@@ -365,11 +387,13 @@ export class Engine {
       }
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+        const snapshot =
+          task.draftHandoff === task.review.id
+            ? await this.readReviewForRetry(task, provider, task.review)
+            : await provider.getReview(prRef(task), task.review);
         if (task.draftHandoff === task.review.id) {
           if (snapshot.status === 'published' || snapshot.dismissed)
             this.rememberCarriedReview(task, task.review, snapshot);
-          delete task.draftHandoff;
         } else if (snapshot.status === 'published') task.feedback = snapshot;
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
@@ -644,6 +668,11 @@ export class Engine {
     const snapshots = await Promise.all(
       carried.reviews.map(async (review) => {
         const snapshot = await provider.getReview(ref, review);
+        if (snapshot.status === 'missing' && !snapshot.dismissed)
+          throw new AppError(
+            'draft_missing',
+            'The earlier published GitHub review is temporarily unreadable.',
+          );
         if (
           (snapshot.status !== 'published' && !snapshot.dismissed) ||
           snapshot.authorId !== review.authorId ||
@@ -939,85 +968,35 @@ export class Engine {
     };
   }
 
+  private async readReviewForRetry(task: Task, provider: ReviewProvider, review: ReviewHandle) {
+    const ref = prRef(task);
+    await provider.assertReviewOwner?.(review);
+    const snapshot = await provider.getReview(ref, review);
+    if (
+      snapshot.status === 'missing' &&
+      !snapshot.dismissed &&
+      provider.confirmReviewAbsent &&
+      !(await provider.confirmReviewAbsent(ref, review))
+    )
+      throw new AppError(
+        'draft_missing',
+        'Waiting to confirm whether the GitHub review is absent.',
+      );
+    return snapshot;
+  }
+
   private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
-    const handle = task.review!,
-      ref = prRef(task);
-    const snapshot = await provider.getReview(ref, handle);
-    if (snapshot.status === 'published') return true;
-    const archiveKey = 'review.archive:' + task.id + ':' + handle.id;
-    const archived = this.store.setting<typeof snapshot>(archiveKey);
-    const key = handle.marker + ':retire:' + handle.id;
-    let pending = this.broker.draftStartOperation(task, key);
-    if (
-      pending?.status === 'pending' &&
-      provider.prepareDraftDeletion &&
-      !this.broker.outbox.isActive(key)
-    ) {
-      // Older versions recorded the intent before their preflight reads. A
-      // recorded read failure proves that version never sent the DELETE.
-      const latest = this.store.db
-        .prepare(
-          "SELECT type, json_extract(data,'$.error') AS error FROM events WHERE task_id=? AND type GLOB 'operation.*' AND json_extract(data,'$.operationId')=? ORDER BY id DESC LIMIT 1",
-        )
-        .get(task.id, key);
-      if (
-        latest?.type === 'operation.uncertain' &&
-        typeof latest.error === 'string' &&
-        /^AppError: (?:GET \/\S+: HTTP |GitHub read failed \(|GitHub API quota is unavailable until )/.test(
-          latest.error,
-        )
-      ) {
-        this.store.db
-          .prepare("DELETE FROM operations WHERE id=? AND task_id=? AND status='pending'")
-          .run(key, task.id);
-        this.store.event(task.id, 'operation.refused', { operationId: key, error: latest.error });
-        pending = undefined;
-      }
+    const handle = task.review!;
+    const draft = await this.readReviewForRetry(task, provider, handle);
+    if (draft.status === 'published' || draft.dismissed) {
+      this.rememberCarriedReview(task, handle, draft);
+      return true;
     }
-    if (snapshot.status === 'missing' && !pending) return true;
-    const source = snapshot.status === 'missing' ? archived : snapshot;
-    const body = source?.body ?? '';
-    if (
-      !source ||
-      source.status !== 'draft' ||
-      source.revision.head !== handle.revision.head ||
-      !handle.authorId ||
-      source.comments.length ||
-      !this.knownDraftSummary(task.id, handle, body) ||
-      !provider.prepareDraftDeletion ||
-      (archived && archived.body !== body)
-    ) {
-      this.state(task, 'needs_input', draftInspectionRequired);
-      return false;
-    }
-    if (!archived)
-      this.store.transaction(() => {
-        this.store.setSetting(archiveKey, source);
-        this.store.event(task.id, 'review.draft_archived', {
-          reviewId: handle.id,
-          head: source.revision.head,
-          archiveKey,
-        });
-      });
-    const remove = pending ? undefined : await provider.prepareDraftDeletion(ref, handle, source);
-    await this.broker.outbox.perform(
-      task.id,
-      key,
-      { review: handle.id, head: source.revision.head, body },
-      async () => {
-        if (!remove)
-          throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
-        await remove();
-        return null;
-      },
-      async () => {
-        const deleted = provider.reviewDeleted
-          ? await provider.reviewDeleted(ref, handle)
-          : (await provider.getReview(ref, handle)).status === 'missing';
-        return deleted ? { found: true, value: null } : { found: false };
-      },
-    );
-    return true;
+    if (draft.status === 'missing') return true;
+    // GitHub has no content precondition on DELETE. Keep the native draft,
+    // including edits arriving after our last observation.
+    if (!confirmedSupersededDraft(task)) this.state(task, 'needs_input', draftInspectionRequired);
+    return false;
   }
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
     task.generation++;
@@ -1055,6 +1034,7 @@ export class Engine {
   }
   private restartNativeReview(task: Task, pr: PullRequest, draft: ReviewSnapshot, reason: string) {
     const handle = task.review!;
+    const handoff = task.draftHandoff;
     const recheck =
       !sameRevision(handle.revision, pr) && this.draftHasWork(handle, draft)
         ? { commentIds: draft.comments.map((comment) => comment.id) }
@@ -1063,6 +1043,7 @@ export class Engine {
     this.invalidate(task, pr);
     task.reviewerThreadId = undefined;
     task.review = { ...handle, revision: revisionOf(pr) };
+    task.draftHandoff = handoff;
     task.snapshot = { ...draft, revision: revisionOf(pr) };
     task.draftRecheck = recheck;
     task.resumeState = 'reviewing';
@@ -1084,8 +1065,9 @@ export class Engine {
     if (handle.authorId && draft.authorId !== handle.authorId) return draftInspectionRequired;
     this.broker.reconcileDraftEdits(task, draft);
     if (this.broker.hasUnsettledDraftWrites(task, draft)) return draftSyncPending;
-    if (!this.draftHasWork(handle, draft)) return;
-    if (!this.recordedDraft(task, draft)) return draftInspectionRequired;
+    const hasWork = this.draftHasWork(handle, draft);
+    if (!hasWork && task.draftHandoff !== handle.id) return;
+    if (hasWork && !this.recordedDraft(task, draft)) return draftInspectionRequired;
     if (
       !sameRevision(handle.revision, pr) &&
       !(await this.provider(prRef(task)).targetAdvanced?.(
@@ -1839,10 +1821,12 @@ export class Engine {
     const hadUnpublished =
       task.review && task.snapshot?.status !== 'published' && task.state !== 'awaiting_push';
     const previous = task.snapshot;
+    const handoff = task.draftHandoff;
     this.invalidate(task, pr);
     if (hadUnpublished) {
       if (handle) task.resumeState = 'reviewing';
       task.review = handle;
+      task.draftHandoff = handoff;
       task.snapshot = previous;
     }
     this.state(
@@ -3061,7 +3045,9 @@ export class Engine {
     });
   }
   recoverInterruptedJobs() {
+    const startedAt = Date.now();
     for (const task of this.store.tasks()) {
+      if (task.ref.provider === 'github') this.broker.recoverLegacyDraftRefusal(task, startedAt);
       if (
         task.ref.provider === 'github' &&
         !task.review &&

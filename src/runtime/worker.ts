@@ -28,10 +28,10 @@ async function readReviewAdmission<T>(read: () => Promise<T>): Promise<T> {
   } catch (error) {
     if (
       error instanceof SyntaxError ||
-      (error instanceof AppError && error.code === 'provider_shape')
+      (error instanceof AppError && ['provider_shape', 'draft_missing'].includes(error.code))
     )
       throw new GitHubRetryError(
-        'provider_shape',
+        error instanceof AppError ? error.code : 'provider_shape',
         'GitHub returned incomplete review admission data. Retrying the queued job.',
         Date.now() + 15000,
         false,

@@ -96,6 +96,56 @@ export class Broker {
       .prepare('SELECT status, result FROM operations WHERE task_id=? AND id=?')
       .get(task.id, marker ?? '');
   }
+  recoverLegacyDraftRefusal(task: Task, startedAt: number) {
+    const intent = task.draftStart;
+    if (!intent || this.outbox.isActive(intent.marker)) return;
+    if (this.draftStartOperation(task)?.status !== 'pending') return;
+    const evidence = this.store.db
+      .prepare(
+        "SELECT id,type,json_extract(data,'$.error') AS error,json_extract(data,'$.code') AS code,json_extract(data,'$.retryAt') AS retryAt FROM events WHERE task_id=? AND (json_extract(data,'$.operationId')=? OR (type='review.create_deferred' AND json_extract(data,'$.marker')=?)) ORDER BY id DESC LIMIT 3",
+      )
+      .all(task.id, intent.marker, intent.marker);
+    const [deferred, refusal, start] =
+      evidence[0]?.type === 'review.create_deferred' ? evidence : [undefined, ...evidence];
+    if (refusal?.type !== 'operation.uncertain' || start?.type !== 'operation.started') return;
+    // Main did not journal a second POST in the task outbox. A retained
+    // backoff or a scheduler stop without a later wake-up rules one out.
+    const waiting =
+      task.state === 'queued' &&
+      !!intent.retryAt &&
+      intent.retryAt > startedAt &&
+      deferred?.code === 'draft_creation_race' &&
+      deferred.retryAt === intent.retryAt &&
+      refusal.error ===
+        'AppError: GitHub has a pending review that is not visible in the review list yet.';
+    const occupied =
+      !deferred &&
+      task.state === 'needs_input' &&
+      !!task.groupId &&
+      task.reason === refusal.error &&
+      refusal.error ===
+        'AppError: A different pending GitHub review belongs to this account. Its contents have been preserved.' &&
+      this.store.db
+        .prepare(
+          "SELECT 1 FROM events WHERE task_id=? AND id>? AND type='review.start_failed' AND json_extract(data,'$.error')=? LIMIT 1",
+        )
+        .get(task.id, refusal.id, refusal.error) &&
+      !this.store.db
+        .prepare(
+          "SELECT 1 FROM events WHERE id>? AND ((task_id=? AND type='operation.started') OR (task_id=? AND type='task.state' AND json_extract(data,'$.state')!='needs_input')) LIMIT 1",
+        )
+        .get(refusal.id, task.groupId, task.id);
+    if (!waiting && !occupied) return;
+    this.store.transaction(() => {
+      this.store.db
+        .prepare("DELETE FROM operations WHERE task_id=? AND id=? AND status='pending'")
+        .run(task.id, intent.marker);
+      this.store.event(task.id, 'operation.refused', {
+        operationId: intent.marker,
+        error: refusal.error,
+      });
+    });
+  }
   async ensureReview(task: Task) {
     if (task.review) return task.review;
     const marker =
@@ -156,7 +206,9 @@ export class Broker {
           // pending slot while still absent from the list.
           throw new AppError('draft_create_unconfirmed', 'Waiting for the original GitHub review.');
         },
-        (error) => error instanceof AppError && error.code === 'draft_creation_race',
+        (error) =>
+          error instanceof AppError &&
+          ['draft_creation_race', 'provider_403', 'provider_422'].includes(error.code),
       );
       if (prepared.existing && prepared.existing.id !== receipt.id)
         throw new AppError('draft_changed', 'The listed review differs from the recorded review.');
@@ -190,7 +242,9 @@ export class Broker {
   async checkRecoveredDraft(ref: PRRef, review: ReviewHandle) {
     if (!review.nodeId?.trim())
       throw new AppError('provider_shape', 'The recovered GitHub draft has no node ID.', 502);
-    const snapshot = await this.provider(ref).getReview(ref, review);
+    const provider = this.provider(ref);
+    await provider.assertReviewOwner?.(review);
+    const snapshot = await provider.getReview(ref, review);
     if (snapshot.status === 'missing' && !snapshot.dismissed)
       throw new AppError(
         'draft_missing',

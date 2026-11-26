@@ -1062,10 +1062,12 @@ it.each(draftChanges)(
       });
       try {
         await worker.tick();
-        await vi.waitFor(() => expect(f.store.jobs(id).at(-1)?.status).toBe('failed'));
+        await vi.waitFor(() =>
+          expect(f.store.jobs(id).at(-1)?.status).toBe(change === 'deleted' ? 'queued' : 'failed'),
+        );
         expect(run).not.toHaveBeenCalled();
         expect(f.store.getTask(id)).toMatchObject({
-          state: 'needs_input',
+          state: change === 'deleted' ? 'reviewing' : 'needs_input',
           draftHandoff: '6060947228',
         });
         expect(f.deletes()).toBe(0);
@@ -1154,3 +1156,349 @@ it('retries the same marker after GitHub explicitly refuses to create a second p
     f.close();
   }
 });
+
+it.each(['saved fix', 'conflict'])(
+  'keeps native Markdown and ID in shared draft retirement: %s',
+  async (transition) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      await f.engine.review(id);
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      const current = await f.engine.review(id);
+      const job = f.store.claim()!;
+      f.store.saveJob({ ...job, status: 'failed' });
+      const handle = current.review!;
+      const editedBody = 'Owner changed **Markdown**';
+      const comments = [{ id: 42, body: '`owner` comment' }];
+      f.gitHub.override = (path) => {
+        if (path.endsWith('/reviews/6060947228')) {
+          const before = Response.json(f.gitHub.draft);
+          Object.assign(f.gitHub.draft as object, { body: editedBody });
+          f.gitHub.readComments = () => Response.json(comments);
+          return before;
+        }
+      };
+      if (transition === 'saved fix') {
+        changes.head(f.pr);
+        f.store.saveTask({
+          ...current,
+          state: 'needs_input',
+          pr: { ...f.pr },
+          revision: { ...revision, head: f.pr.head },
+          pendingFix: { revision },
+          pendingAuthorHead: f.pr.head,
+          reason: `Saved fix ${f.pr.head} is on the PR. Inspect the earlier draft review ${handle.id} before starting another review.`,
+        });
+        await f.engine.review(id, true);
+      } else {
+        await f.engine.lock(id, () =>
+          f.engine.applyRepair(
+            current,
+            { ...f.pr },
+            { kind: 'repair', preparation: 'retire-draft' },
+            {
+              snapshot: {
+                status: 'draft',
+                body: 'placeholder',
+                authorId: '7',
+                comments: [],
+                url: ref.url,
+                revision,
+              },
+            },
+          ),
+        );
+      }
+      expect(f.deletes()).toBe(0);
+      expect(f.gitHub.draft).toMatchObject({ id: 6060947228, body: editedBody });
+      expect(await f.gitHub.readComments().json()).toEqual(comments);
+      expect(f.store.getTask(id).review?.id).toBe(handle.id);
+      expect(f.store.activeJobs(id)).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it('cannot replace the recovered review after an account switch and resumes it when the owner returns', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    await f.engine.review(id);
+    f.gitHub.reviews = [f.gitHub.draft];
+    f.ready();
+    const original = (await f.engine.review(id)).review!;
+    f.gitHub.account = 8;
+    f.gitHub.override = (path) =>
+      f.gitHub.account === 8 && path.endsWith('/reviews/6060947228')
+        ? new Response(null, { status: 404 })
+        : undefined;
+    const { worker, run } = startWorker(f);
+    try {
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.jobs(id).at(-1)?.errorCode).toBe('draft_owner_changed'),
+      );
+      expect(run).not.toHaveBeenCalled();
+      await expect(f.engine.review(id, true)).rejects.toMatchObject({
+        code: 'draft_owner_changed',
+      });
+      expect(f.store.getTask(id).review).toEqual(original);
+      expect(f.posts()).toBe(1);
+      f.gitHub.account = 7;
+      expect((await f.engine.review(id, true)).draftHandoff).toBe(original.id);
+      await worker.tick();
+      await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+      expect(run.mock.calls[0][0].task.review?.id).toBe(original.id);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['retry', 'advanced', 'advanced unchanged', 'rewritten'])(
+  'preserves the handoff requirement across %s',
+  async (transition) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      await f.engine.review(id);
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      const original = (await f.engine.review(id)).review!;
+      if (transition === 'retry') {
+        const job = f.store.claim()!;
+        f.engine.failJob(job, new Error('Inspect the native draft'));
+        f.store.saveJob({ ...job, status: 'failed' });
+        await f.engine.review(id, true);
+      } else {
+        f.gitHub.advanced = transition !== 'rewritten';
+        changes.base(f.pr);
+        await f.engine.reconcile(id);
+      }
+      expect(f.store.getTask(id).draftHandoff).toBe(original.id);
+      if (transition === 'rewritten') {
+        expect(f.store.getTask(id).state).toBe('needs_input');
+        expect(f.store.activeJobs(id)).toHaveLength(0);
+        return;
+      }
+      expect(f.store.activeJobs(id)).toHaveLength(1);
+      const { worker, run } = startWorker(f, async () => {
+        if (transition !== 'advanced unchanged') changeDraft(f, 'published');
+        return '/tmp';
+      });
+      try {
+        await worker.tick();
+        if (transition === 'advanced unchanged') {
+          await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+          expect(run.mock.calls[0][0].task.review?.id).toBe(original.id);
+        } else {
+          await vi.waitFor(() => expect(f.store.jobs(id).at(-1)?.status).toBe('failed'));
+          expect(run).not.toHaveBeenCalled();
+        }
+        expect(f.store.getTask(id).review?.id).toBe(original.id);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['draft', 'published feedback'])(
+  'continues automatically after a transient 404 reading %s',
+  async (source) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      await f.engine.review(id);
+      const original = f.gitHub.draft as object;
+      f.gitHub.reviews = [original];
+      if (source === 'published feedback') {
+        Object.assign(original, { state: 'COMMENTED' });
+        f.ready();
+        await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'draft_changed' });
+        await f.engine.review(id, true);
+        f.gitHub.nextId = 6060947229;
+        f.gitHub.createStatus = 201;
+      } else {
+        f.ready();
+      }
+      const ready = await f.engine.review(id);
+      let missing = true;
+      f.gitHub.override = (path) => {
+        if (!path.endsWith('/reviews/6060947228')) return;
+        return missing ? new Response(null, { status: 404 }) : Response.json(original);
+      };
+      const { worker, run } = startWorker(f);
+      try {
+        await worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.jobs(id).at(-1)).toMatchObject({
+            status: 'queued',
+            errorCode: 'draft_missing',
+          }),
+        );
+        expect(run).not.toHaveBeenCalled();
+        missing = false;
+        const job = f.store.jobs(id).at(-1)!;
+        f.store.saveJob({ ...job, notBefore: undefined });
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+        expect(run.mock.calls[0][0].task.review?.id).toBe(ready.review?.id);
+        expect(f.posts()).toBe(source === 'draft' ? 1 : 2);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([403, 422])(
+  'retries after a definitive GitHub POST refusal (%s) and restart',
+  async (status) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      f.gitHub.override = (_path, method) =>
+        method === 'POST'
+          ? Response.json(
+              {
+                message:
+                  status === 403 ? 'Resource not accessible by integration' : 'Validation Failed',
+                errors: status === 422 ? [{ field: 'commit_id', code: 'invalid' }] : undefined,
+              },
+              { status },
+            )
+          : undefined;
+      await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'provider_' + status });
+      const intent = f.store.getTask(id).draftStart!;
+      expect(
+        f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(intent.marker),
+      ).toBeUndefined();
+      f.restart();
+      f.gitHub.override = () => undefined;
+      f.gitHub.createStatus = 201;
+      expect((await f.engine.review(id, true)).review?.marker).toBe(intent.marker);
+      expect(f.posts()).toBe(2);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['unexpired', 'expired', 'later observation', 'unlogged replay possible'])(
+  'preserves uncertainty on upgrade unless the legacy refusal excludes a replay: %s',
+  async (scenario) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      f.gitHub.listStatus = 502;
+      const saved = await f.engine.review(id);
+      const intent = saved.draftStart!;
+      const marker = intent.marker;
+      intent.owner = '7';
+      intent.retryAt = Date.now() + (scenario === 'expired' ? -1000 : 30000);
+      const occupied = scenario === 'unlogged replay possible';
+      const error = occupied
+        ? 'AppError: A different pending GitHub review belongs to this account. Its contents have been preserved.'
+        : 'AppError: GitHub has a pending review that is not visible in the review list yet.';
+      if (occupied) {
+        saved.state = 'needs_input';
+        saved.reason = error;
+      }
+      f.store.saveTask(saved);
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(
+          marker,
+          id,
+          'pending',
+          createHash('sha256').update(JSON.stringify(intent.revision)).digest('hex'),
+        );
+      f.store.event(id, 'operation.started', { operationId: marker });
+      f.store.event(id, 'operation.uncertain', { operationId: marker, error });
+      if (!occupied)
+        f.store.event(id, 'review.create_deferred', {
+          marker,
+          code: 'draft_creation_race',
+          retryAt: intent.retryAt,
+        });
+      if (scenario === 'later observation')
+        f.store.event(id, 'review.create_deferred', {
+          marker,
+          code: 'provider_502',
+          retryAt: intent.retryAt,
+        });
+      f.restart();
+      f.ready();
+      f.gitHub.listStatus = 200;
+      f.gitHub.createStatus = 201;
+      const next = await f.engine.review(id, true);
+      expect(f.posts()).toBe(scenario === 'unexpired' ? 1 : 0);
+      if (scenario === 'unexpired') expect(next.review?.marker).toBe(marker);
+      else expect(next.draftStart?.marker).toBe(marker);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'migrates a legacy preflight refusal only if the session could not have retried it (%s)',
+  async (laterAction) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      f.gitHub.listStatus = 502;
+      const saved = await f.engine.review(id);
+      const intent = saved.draftStart!;
+      const groupId = 'legacy-session';
+      const timestamp = new Date().toISOString();
+      f.store.saveGroup({
+        id: groupId,
+        rootTaskId: id,
+        title: '',
+        requirements: '',
+        generation: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        daddy: { engine: 'codex' },
+      });
+      const error =
+        'AppError: A different pending GitHub review belongs to this account. Its contents have been preserved.';
+      intent.owner = '7';
+      intent.retryAt = undefined;
+      f.store.saveTask({ ...saved, state: 'needs_input', groupId, reason: error });
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)')
+        .run(
+          intent.marker,
+          id,
+          'pending',
+          createHash('sha256').update(JSON.stringify(intent.revision)).digest('hex'),
+        );
+      f.store.event(id, 'operation.started', { operationId: intent.marker });
+      f.store.event(id, 'operation.uncertain', { operationId: intent.marker, error });
+      f.store.event(id, 'review.start_failed', { error });
+      if (laterAction) f.store.event(groupId, 'operation.started', { operationId: 'daddy:retry' });
+      f.restart();
+      f.ready();
+      f.gitHub.listStatus = 200;
+      f.gitHub.createStatus = 201;
+      const result = await f.engine.review(id, true);
+      expect(f.posts()).toBe(laterAction ? 0 : 1);
+      if (laterAction) expect(result.draftStart?.marker).toBe(intent.marker);
+      else expect(result.review?.marker).toBe(intent.marker);
+    } finally {
+      f.close();
+    }
+  },
+);

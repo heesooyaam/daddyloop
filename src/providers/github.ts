@@ -450,8 +450,25 @@ export class GitHubProvider implements ReviewProvider {
       throw new AppError('provider_shape', 'GitHub returned unreadable review comments.', 502);
     return comments;
   }
-  async reviewDeleted(ref: PRRef, review: ReviewHandle) {
-    return (await this.readReview(`${path(ref)}/reviews/${review.id}`)) === undefined;
+  async assertReviewOwner(review: ReviewHandle) {
+    const user = await this.http.request<{ id: number }>('GET', '/user');
+    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
+      throw new AppError('provider_shape', 'GitHub returned no account for the review.', 502);
+    if (!review.authorId || String(user.id) !== review.authorId)
+      throw new AppError(
+        'draft_owner_changed',
+        'The GitHub account differs from the recorded review owner.',
+      );
+  }
+  async confirmReviewAbsent(ref: PRRef, review: ReviewHandle) {
+    await this.assertReviewOwner(review);
+    const list = await this.http.pages<GHReview>(`${path(ref)}/reviews`);
+    if (list.some((entry) => !Number.isSafeInteger(entry?.id) || entry.id <= 0))
+      throw new AppError('provider_shape', 'GitHub returned incomplete review identities.', 502);
+    return (
+      !list.some((entry) => String(entry.id) === review.id) &&
+      (await this.readReview(`${path(ref)}/reviews/${review.id}`)) === undefined
+    );
   }
   async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
     const url = `${path(ref)}/reviews/${review.id}`;
@@ -472,30 +489,6 @@ export class GitHubProvider implements ReviewProvider {
       comments: (await this.reviewComments(url)).map(comment),
       url: value.html_url ?? ref.url,
       revision: { ...review.revision, head: value.commit_id },
-    };
-  }
-  async prepareDraftDeletion(ref: PRRef, review: ReviewHandle, snapshot: ReviewSnapshot) {
-    const url = `${path(ref)}/reviews/${review.id}`;
-    const user = await this.http.request<{ id: number }>('GET', '/user');
-    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
-      throw new AppError('provider_shape', 'GitHub returned no account for draft deletion.', 502);
-    const comments = await this.reviewComments(url);
-    const value = await this.readReview(url);
-    if (
-      value?.state !== 'PENDING' ||
-      String(user.id) !== review.authorId ||
-      value.user.id !== user.id ||
-      value.commit_id !== review.revision.head ||
-      value.body !== snapshot.body ||
-      !value.body.endsWith(tag(review.marker)) ||
-      comments.length
-    )
-      throw new AppError(
-        'draft_changed',
-        'The old draft changed. Inspect it before replacing the review.',
-      );
-    return async () => {
-      await this.http.request('DELETE', url);
     };
   }
   private async mutation<T>(query: string, input: object): Promise<T> {

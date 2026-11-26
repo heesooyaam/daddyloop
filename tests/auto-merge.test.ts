@@ -1269,7 +1269,7 @@ describe('opt-in GitHub merging', () => {
     },
   );
 
-  it('archives a stale service draft before deletion and opens a fresh draft only on the confirmed saved head', async () => {
+  it('preserves the stale draft until its owner resolves it on GitHub', async () => {
     const f = await setup();
     try {
       const t = f.store.getTask(f.task.id),
@@ -1289,21 +1289,22 @@ describe('opt-in GitHub merging', () => {
       const draft = {
         ...snapshot,
         status: 'draft',
+        authorId: old.authorId,
         body: `Review in progress.\n\n<!-- ${old.marker} -->`,
       };
-      const discard = vi.fn(async () => {
-        expect(f.store.setting('review.archive:' + t.id + ':' + old.id)).toEqual(draft);
-        f.store.setSetting(key, { ...draft, status: 'missing' });
-      });
-      Object.assign(f.provider, { prepareDraftDeletion: async () => discard });
       f.store.saveTask(t);
-      f.store.setSetting(key, { ...draft, body: 'Human edit' });
+      const edited = {
+        ...draft,
+        body: 'Human edit',
+        comments: [{ id: '42', body: '**Keep this**', url: t.ref.url }],
+      };
+      f.store.setSetting(key, edited);
       await f.engine.review(t.id, true);
-      expect(discard).not.toHaveBeenCalled();
-      f.store.saveTask(t);
-      f.store.setSetting(key, draft);
+      expect(f.store.getTask(t.id).review?.id).toBe(old.id);
+      expect(f.store.setting(key)).toEqual(edited);
+      expect(f.store.activeJobs(t.id)).toHaveLength(0);
+      f.store.setSetting(key, { ...edited, status: 'published' });
       await f.engine.review(t.id, true);
-      expect(discard).toHaveBeenCalledTimes(1);
       const current = f.store.getTask(t.id);
       expect(current).toMatchObject({
         state: 'reviewing',
@@ -1312,6 +1313,56 @@ describe('opt-in GitHub merging', () => {
       });
       expect(current.review!.id).not.toBe(old.id);
       expect(f.store.activeJobs(t.id)).toHaveLength(1);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it('resumes conflict repair after the owner publishes their preserved draft', async () => {
+    const f = await setup();
+    try {
+      const t = f.store.getTask(f.task.id);
+      const handle = t.review!;
+      await f.daddy.settings(f.group.id, { autoMerge: true });
+      f.setRemote({ mergeConflict: true });
+      handle.authorId = '123';
+      t.state = 'reviewing';
+      t.reviewFinished = false;
+      t.snapshot = undefined;
+      t.feedback = undefined;
+      const key = 'demo-review:' + handle.id;
+      const draft = {
+        status: 'draft' as const,
+        authorId: handle.authorId,
+        body: 'Owner summary',
+        comments: [{ id: '42', body: '**Owner finding**', url: t.ref.url }],
+        url: t.ref.url,
+        revision: handle.revision,
+      };
+      f.store.saveTask(t);
+      f.store.setSetting(key, draft);
+      const pr = await f.provider.getPR(prRef(t));
+      await f.engine.lock(t.id, () =>
+        f.engine.applyRepair(
+          t,
+          pr,
+          { kind: 'repair', preparation: 'retire-draft' },
+          { snapshot: draft },
+        ),
+      );
+      expect(f.store.getTask(t.id).review?.id).toBe(handle.id);
+      expect(f.store.activeJobs(t.id)).toHaveLength(0);
+      f.store.setSetting(key, { ...draft, status: 'published' });
+      const result = await f.engine.review(t.id, true);
+      expect(result).toMatchObject({
+        state: 'fixing',
+        fixingMergeConflict: true,
+        feedback: {
+          body: draft.body,
+          comments: draft.comments,
+        },
+      });
+      expect(f.store.activeJobs(t.id)).toMatchObject([{ kind: 'fix', role: 'author' }]);
     } finally {
       await f.close();
     }

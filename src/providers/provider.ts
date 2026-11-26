@@ -35,12 +35,8 @@ export interface ReviewProvider {
     confirmOwner?: (owner: string) => Promise<void>,
   ): Promise<ReviewHandle>;
   getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
-  reviewDeleted?(ref: PRRef, review: ReviewHandle): Promise<boolean>;
-  prepareDraftDeletion?(
-    ref: PRRef,
-    review: ReviewHandle,
-    snapshot: ReviewSnapshot,
-  ): Promise<() => Promise<void>>;
+  assertReviewOwner?(review: ReviewHandle): Promise<void>;
+  confirmReviewAbsent?(ref: PRRef, review: ReviewHandle): Promise<boolean>;
   createComment(
     ref: PRRef,
     review: ReviewHandle,
