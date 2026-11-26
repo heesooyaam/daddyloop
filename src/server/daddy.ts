@@ -196,6 +196,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       const input = z
         .object({
           profile: profileSchema,
+          baseline: profileSchema.optional(),
           forceTaskId: id.optional(),
           expected: z
             .object({ groupGeneration: generation, task: expectedTask })
@@ -212,7 +213,12 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         id.parse(request.params.id),
         workerNumber.parse(Number(request.params.number)),
         input.profile,
-        { force: !!input.forceTaskId, expectedTaskId: input.forceTaskId, expected: input.expected },
+        {
+          force: !!input.forceTaskId,
+          expectedTaskId: input.forceTaskId,
+          expected: input.expected,
+          baseline: input.baseline,
+        },
       );
     },
   );

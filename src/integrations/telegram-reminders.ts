@@ -50,13 +50,13 @@ export function reminderOpen(store: Store, question: OwnerQuestion, requireNotif
         `SELECT 1 FROM messages m WHERE m.task_id=?
       AND json_extract(m.data,'$.sender')='user' AND json_extract(m.data,'$.origin.replyTo.messageId') IS NOT NULL
       AND EXISTS (SELECT 1 FROM settings s WHERE s.key GLOB 'telegram.delivery:*'
-        AND (json_extract(s.value,'$.options.key')=? OR json_extract(s.value,'$.options.key') GLOB ?)
+        AND (json_extract(s.value,'$.options.key')=? OR instr(json_extract(s.value,'$.options.key'), ?) = 1)
         AND json_extract(s.value,'$.destination.chatId')=json_extract(m.data,'$.origin.chatId')
         AND json_extract(s.value,'$.destination.threadId') IS json_extract(m.data,'$.origin.threadId')
         AND EXISTS(SELECT 1 FROM json_each(s.value,'$.messages') delivered
           WHERE json_extract(delivered.value,'$.id')=json_extract(m.data,'$.origin.replyTo.messageId'))) LIMIT 1`,
       )
-      .get(group.id, original, original + ':reminder:*');
+      .get(group.id, original, original + ':reminder:');
   }
   const message = store.messageById(group.id, question.messageId);
   if (!message?.needsReply || message.phase !== 'final' || message.sender !== 'agent') return false;
@@ -77,9 +77,9 @@ export function reminderOpen(store: Store, question: OwnerQuestion, requireNotif
 export function nextReminderId(store: Store, originalId: string, time: number) {
   const prior = store.db
     .prepare(
-      'SELECT id,status,at FROM notifications WHERE id=? OR id GLOB ? ORDER BY rowid DESC LIMIT 1',
+      'SELECT id,status,at FROM notifications WHERE id=? OR instr(id, ?) = 1 ORDER BY rowid DESC LIMIT 1',
     )
-    .get(originalId, originalId + ':reminder:*');
+    .get(originalId, originalId + ':reminder:');
   if (!prior) return;
   if (prior.status === 'pending' && prior.id !== originalId) return String(prior.id);
   if (prior.status !== 'sent' && !(prior.status === 'superseded' && prior.id !== originalId))

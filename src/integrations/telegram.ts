@@ -632,15 +632,27 @@ export class Telegram {
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
+    const cleanupUpdate = hash(
+      JSON.stringify([
+        store.setting('telegram.botId') ?? this.username,
+        pair.userId,
+        chat.id,
+        update.update_id,
+      ]),
+    );
     const cleanup = message?.text
       ?.replace(/^\/start cleanup$/, '/cleanup')
       .trim()
       .match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
     if (cleanup && (!cleanup[1] || cleanup[1].toLowerCase() === this.username.toLowerCase())) {
       try {
-        await this.showCleanup(chat.id, cleanupCommand(cleanup[2]));
+        await this.showCleanup(chat.id, cleanupCommand(cleanup[2]), update, cleanupUpdate);
       } catch (error) {
-        if (store.setting(resultKey(update.update_id))) throw error;
+        if (
+          store.setting(resultKey(update.update_id)) ||
+          this.integrations?.cleanup?.hasTelegramUpdate(cleanupUpdate)
+        )
+          throw error;
         await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
       }
       return;
@@ -650,7 +662,7 @@ export class Telegram {
       if (callback) {
         await this.api.replaceCard(callback, async () => {
           await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
-          if (!(await this.navigate(callback.data ?? '', chat.id)))
+          if (!(await this.navigate(callback.data ?? '', chat.id, update, cleanupUpdate)))
             throw new Error('Unknown action. Open the current menu with /start.');
         });
         return;
@@ -717,22 +729,54 @@ export class Telegram {
         ),
       );
     } catch (error) {
-      if (store.setting(resultKey(update.update_id))) throw error;
+      if (
+        store.setting(resultKey(update.update_id)) ||
+        this.integrations?.cleanup?.hasTelegramUpdate(cleanupUpdate)
+      )
+        throw error;
       await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
   }
-  private async showCleanup(chatId: number, patch?: Record<string, unknown>) {
+  private async showCleanup(
+    chatId: number,
+    patch: Record<string, unknown> | undefined,
+    update: Update,
+    cleanupUpdate: string,
+  ) {
     const control = this.integrations?.cleanup;
     if (!control) throw new Error('Disk cleanup is unavailable');
-    const status = patch ? await control.update(patch) : control.status();
-    await this.api.send(chatId, cleanupControlCard(this.locale(), status));
+    if (!patch) {
+      await this.api.send(chatId, cleanupControlCard(this.locale(), control.status()));
+      return;
+    }
+    const completed = control.hasTelegramUpdate(cleanupUpdate);
+    const status = completed ? control.status() : await control.update(patch, cleanupUpdate);
+    const store = this.engine.store;
+    store.transaction(() =>
+      commitTelegramOperation(store, update.update_id, operationDestination(update)),
+    );
+    await this.api.send(
+      chatId,
+      completed
+        ? this.locale() === 'ru'
+          ? 'Действие уже выполнено.'
+          : 'This action has already completed.'
+        : cleanupControlCard(this.locale(), status),
+    );
   }
 
-  private async navigate(data: string, chatId: number): Promise<boolean> {
+  private async navigate(
+    data: string,
+    chatId: number,
+    update: Update,
+    cleanupUpdate: string,
+  ): Promise<boolean> {
     if (['cleanup:show', 'cleanup:on', 'cleanup:off'].includes(data)) {
       await this.showCleanup(
         chatId,
         data === 'cleanup:show' ? undefined : { enabled: data === 'cleanup:on' },
+        update,
+        cleanupUpdate,
       );
       return true;
     }

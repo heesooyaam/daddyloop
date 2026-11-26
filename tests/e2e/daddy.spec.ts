@@ -1757,6 +1757,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
                 ? {
                     ...task,
                     state,
+                    generation: task.generation + stage,
                     statusLabel: 'Test stage ' + stage,
                     revision,
                     ref: {
@@ -1772,11 +1773,33 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
         }),
   );
   let detailUnavailable = true;
-  await page.route('**/api/tasks/' + id, (route) =>
-    detailUnavailable
-      ? route.fulfill({ status: 503, json: { error: { message: 'Task details unavailable' } } })
-      : route.continue(),
-  );
+  let delayDetails: Promise<void> | undefined;
+  let detailsWaiting: (() => void) | undefined;
+  await page.route('**/api/tasks/' + id, async (route) => {
+    if (detailUnavailable)
+      return route.fulfill({
+        status: 503,
+        json: { error: { message: 'Task details unavailable' } },
+      });
+    const response = await route.fetch();
+    const detail = await response.json();
+    const snapshot = {
+      ...detail,
+      task: {
+        ...detail.task,
+        generation: task.generation + stage,
+        title: 'Report snapshot ' + stage,
+        state,
+        revision,
+      },
+    };
+    const pending = delayDetails;
+    if (pending) {
+      detailsWaiting?.();
+      await pending;
+    }
+    await route.fulfill({ response, json: snapshot });
+  });
   await page.route('**' + session + '/task-action', (route) =>
     route.fulfill({ status: 409, json: { error: { message: 'Confirmation became stale' } } }),
   );
@@ -1798,9 +1821,29 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
     ['complete', undefined],
     ['awaiting_checks', actions[1]],
   ] as const) {
+    let release!: () => void;
+    delayDetails = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      detailsWaiting = resolve;
+    });
     state = next;
     stage++;
-    await expect(report.getByText('Test stage ' + stage)).toBeVisible();
+    try {
+      await expect(report.getByText('Test stage ' + stage)).toBeVisible();
+      await waiting;
+      await expect(
+        report.getByRole('heading', { name: 'Report snapshot ' + (stage - 1) }),
+      ).toBeVisible();
+      if (action)
+        await expect(report.getByRole('button', { name: action, exact: true })).toHaveCount(0);
+    } finally {
+      detailsWaiting = undefined;
+      delayDetails = undefined;
+      release();
+    }
+    await expect(report.getByRole('heading', { name: 'Report snapshot ' + stage })).toBeVisible();
     for (const label of actions)
       await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(
         label === action ? 1 : 0,

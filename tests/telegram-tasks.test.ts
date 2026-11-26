@@ -899,6 +899,67 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       await f.daddy.resume(other.id);
     }
 
+    for (const viaButton of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      await bot.handle(privateMessage('/worker 1 gpt-5.6-sol medium'));
+      const pick = () => {
+        if (!viaButton) return bot.handle(privateMessage('/session ' + other.id));
+        const data = keyboard().find(
+          (button) => button.text === f.daddy.group(other.id).title,
+        )!.callback_data;
+        const update = click(data);
+        update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+        return bot.handle(update);
+      };
+      const before = f.daddy.board(other.id).workers.slots[0]?.profile;
+      await f.daddy.pause(other.id);
+      await f.daddy.resume(other.id);
+      await pick();
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const validation = vi
+        .spyOn(f.daddy.catalogue, 'validate')
+        .mockImplementationOnce(() => blocked);
+      const delayed = pick();
+      try {
+        await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+        await f.daddy.pause(other.id);
+        await f.daddy.resume(other.id);
+      } finally {
+        release();
+        await delayed;
+        validation.mockRestore();
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+      await pick();
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toMatchObject({
+        model: 'gpt-5.6-sol',
+        effort: 'medium',
+      });
+      const next = f.daddy.group(other.id);
+      next.workerSlots = [];
+      f.store.saveGroup(next);
+    }
+
+    const profileUrl = session + '/workers/2';
+    const workerBaseline = { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' };
+    const saveWorker = (profile: typeof workerBaseline, baseline?: typeof workerBaseline) =>
+      app.inject({ method: 'POST', url: profileUrl, payload: { profile, baseline } });
+    expect((await saveWorker(workerBaseline)).statusCode).toBe(200);
+    await bot.handle(message('/worker 2 gpt-6-astra'));
+    expect(
+      (await saveWorker({ ...workerBaseline, effort: 'medium' }, workerBaseline)).statusCode,
+    ).toBe(200);
+    const combined = { engine: 'codex', model: 'gpt-6-astra', effort: 'medium' };
+    expect(f.daddy.board(group.id).workers.slots[1]?.profile).toEqual(combined);
+    expect(
+      (await saveWorker({ ...workerBaseline, model: 'other-model' }, workerBaseline)).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[1]?.profile).toEqual(combined);
+
     await bot.handle(privateMessage('/session ' + group.id));
     await bot.handle(message('/export ' + other.id));
     const exportLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
@@ -938,6 +999,28 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await confirm();
     expect(f.daddy.maxConcurrentAgents()).toBe(3);
 
+    const openPrivate = async () => {
+      const link = keyboard().find((button) => button.url?.includes('?start=operation_'));
+      await bot.handle(privateMessage('/start ' + new URL(link!.url!).searchParams.get('start')));
+    };
+    for (const role of ['daddy', 'worker'] as const) {
+      const peer = role === 'daddy' ? 'worker' : 'daddy';
+      const configured = { engine: 'codex', model: 'gpt-6-astra', effort: 'max' };
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [role]: { engine: 'codex' } });
+      await bot.handle(message('/agents ' + role + ' codex'));
+      await openPrivate();
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [role]: configured });
+      await confirm();
+      expect(f.engine.defaultAgents()[role]).toEqual(configured);
+      await bot.handle(message('/agents ' + role + ' codex'));
+      await openPrivate();
+      const unrelated = { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' };
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [peer]: unrelated });
+      await confirm();
+      expect(f.engine.defaultAgents()[role]).toEqual({ engine: 'codex' });
+      expect(f.engine.defaultAgents()[peer]).toEqual(unrelated);
+    }
+
     const attachDocument = async (caption: string, update = privateMessage()) => {
       await bot.handle({
         ...update,
@@ -961,6 +1044,28 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await confirm();
     expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore + 1);
     expect(f.daddy.group(other.id).instructions?.daddy.prompt).toBe(imported.daddy.prompt);
+    await attachDocument('/import@fixture_bot ' + other.id, message(''));
+    await openPrivate();
+    const retained = f.daddy.group(other.id).instructions;
+    const room = f.store.setting('telegram.group');
+    let sendFile!: (bytes: Uint8Array) => void;
+    const getFile = vi.spyOn(api, 'downloadFile').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          sendFile = resolve;
+        }),
+    );
+    const late = confirm();
+    try {
+      await vi.waitFor(() => expect(getFile).toHaveBeenCalledOnce());
+      f.store.setSetting('telegram.group', null);
+    } finally {
+      sendFile?.(Buffer.from(JSON.stringify({ daddy: { prompt: 'Stale late file' }, worker: {} })));
+      await late;
+      getFile.mockRestore();
+      f.store.setSetting('telegram.group', room);
+    }
+    expect(f.daddy.group(other.id).instructions).toEqual(retained);
     await attachDocument('/skill_file@fixture_bot ' + other.id + ' worker');
     expect(f.daddy.group(other.id).instructions?.worker.skills).toHaveLength(1);
     await attachDocument('/preset_create@fixture_bot From attachment');
@@ -1099,7 +1204,15 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       true,
     );
 
-    const parent = { ...external, message_thread_id: 17 };
+    const reminderText = 'Reminder for task ten';
+    await api.send(destination, reminderText, undefined, {
+      key: `telegram:question:7:${withPr.id}:${taskRequestKey(f.store, requestTask)}:reminder:1`,
+      groupId: group.id,
+    });
+    await api.delivery!.flush();
+    const reminderId = sent.findIndex((item) => item.body.text === reminderText) + 1;
+    expect(reminderId).toBeGreaterThan(0);
+    const parent = { ...external, message_id: reminderId, message_thread_id: 17 };
     const answered = message('Continue task ten');
     await bot.handle({ ...answered, message: { ...answered.message!, reply_to_message: parent } });
     expect(
@@ -1109,7 +1222,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const duplicate = message('Second answer for the same question');
     await bot.handle({
       ...duplicate,
-      message: { ...duplicate.message!, reply_to_message: parent },
+      message: { ...duplicate.message!, reply_to_message: { ...parent, message_id: messageId } },
     });
     expect(f.store.messages(group.id).some((item) => item.text === duplicate.message!.text)).toBe(
       false,
@@ -1135,7 +1248,8 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       { phase: 'final', needsReply: true },
     );
     await api.send(destination, followUp.text, undefined, {
-      key: `telegram:dialog:-10042:17:${followUp.id}:final`,
+      key: 'turn:older-coordinator-run',
+      notificationId: `telegram:dialog:-10042:17:${followUp.id}:final`,
       groupId: group.id,
     });
     await api.delivery!.flush();

@@ -1,5 +1,5 @@
 import { VoiceInput, appendDictation } from './voice-input.js';
-import { sameAgentProfile } from '../core/types.js';
+import { sameAgentProfile, sameRevision } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import {
   useCallback,
@@ -1993,32 +1993,48 @@ function TaskReport({
   onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
-    [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
+    [read, setRead] = useState<{ key: string; value: { task: Task; messages: Message[] } }>(),
     [error, setError] = useState(''),
     [retry, setRetry] = useState(0),
     [busy, setBusy] = useState(false);
   const live = board?.tasks.find((task) => task.id === id);
-  const canAct =
-    connected && value?.task.id === id && !!live && !error && !!board && !board.group.deletion;
-  const slot = board?.workers.slots.find((worker) => worker.taskId === id);
-  const request = live?.workerRequest ?? value?.task.workerRequest;
-  const worker = slot?.number ?? request?.slot;
-  const profile = slot ? live?.worker : request?.profile;
-  const ref = live?.ref ?? value?.task.ref;
-  const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   const detailVersion = JSON.stringify([
+    id,
+    retry,
+    connected,
+    board?.group.generation,
     live?.generation,
     live?.state,
     live?.revision,
     live?.architectProfile,
     live?.autoMerge.mode,
   ]);
+  const value = read?.value.task.id === id ? read.value : undefined;
+  const canAct =
+    connected &&
+    value &&
+    read?.key === detailVersion &&
+    live &&
+    value.task.generation === live.generation &&
+    value.task.state === live.state &&
+    ((!live.revision && !value.task.revision) ||
+      sameRevision(live.revision, value.task.revision)) &&
+    !error &&
+    !busy &&
+    !!board &&
+    !board.group.deletion;
+  const slot = board?.workers.slots.find((worker) => worker.taskId === id);
+  const request = live?.workerRequest ?? value?.task.workerRequest;
+  const worker = slot?.number ?? request?.slot;
+  const profile = slot ? live?.worker : request?.profile;
+  const ref = live?.ref ?? value?.task.ref;
+  const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
     let active = true;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
       .then((result) => {
         if (active) {
-          setValue(result);
+          setRead({ key: detailVersion, value: result });
           setError('');
         }
       })
@@ -2044,9 +2060,8 @@ function TaskReport({
         expectedRevision: live.revision,
         reason: action === 'waive-checks' ? waiverReason : undefined,
       });
-      onChange();
-      const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
-      setValue(next);
+      await onChange();
+      setRetry((value) => value + 1);
     } catch (error) {
       setError((error as Error).message);
     } finally {

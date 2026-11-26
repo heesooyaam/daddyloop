@@ -271,7 +271,8 @@ function WorkerProfileForm({
 }) {
   const { t } = useLocale();
   const { catalogue, load } = useAgentCatalogue(api);
-  const [profile, setProfile] = useState(slot.profile ?? board.workerDefault);
+  const [baseline] = useState(slot.profile ?? board.workerDefault);
+  const [profile, setProfile] = useState(baseline);
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -287,6 +288,7 @@ function WorkerProfileForm({
     try {
       await api(`/daddy/sessions/${board.group.id}/workers/${slot.number}`, {
         profile,
+        baseline,
         forceTaskId: force ? task?.id : undefined,
         expected:
           force && task

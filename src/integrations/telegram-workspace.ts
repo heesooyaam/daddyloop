@@ -207,7 +207,9 @@ export class TelegramWorkspace {
     this.retryTimer.unref();
   }
   private questionForReceipt(
-    receipt: { question?: unknown; deliveryKey?: unknown; groupId?: unknown } | undefined,
+    receipt:
+      | { question?: unknown; deliveryKey?: unknown; groupId?: unknown; notificationId?: unknown }
+      | undefined,
     ownerId: number,
   ): OwnerQuestion | undefined {
     if (typeof receipt?.question === 'string') return JSON.parse(receipt.question) as OwnerQuestion;
@@ -219,8 +221,9 @@ export class TelegramWorkspace {
       if (task.groupId)
         return { groupId: task.groupId, taskId, request: parts.join(':').split(':reminder:')[0] };
     }
-    if (key.startsWith('telegram:dialog:')) {
-      const messageId = key.split(':')[4];
+    const dialogKey = key.startsWith('turn:') ? receipt?.notificationId : key;
+    if (typeof dialogKey === 'string' && dialogKey.startsWith('telegram:dialog:')) {
+      const messageId = dialogKey.split(':')[4];
       const groupId =
         receipt?.groupId ??
         this.store.db.prepare('SELECT task_id FROM messages WHERE id=?').get(messageId)?.task_id;
@@ -942,10 +945,12 @@ export class TelegramWorkspace {
       }
       const slot = workerSlots(this.store, group).find((item) => item.number === input.number);
       if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      const baseline = slot.profile ?? defaults;
+      const engine = input.engine ?? baseline.engine;
       const profile = {
-        engine: input.engine ?? slot.profile?.engine ?? defaults.engine,
+        engine,
         model: input.model,
-        effort: input.effort,
+        effort: input.effort ?? (engine === baseline.engine ? baseline.effort : undefined),
       };
       if (input.force && slot.taskId) {
         const task = this.daddy.task(groupId, slot.taskId);
@@ -972,7 +977,8 @@ export class TelegramWorkspace {
         return;
       }
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
-        force: input.force && !!slot.taskId,
+        baseline,
+        expectedGeneration: this.update.getStore()?.expectedGeneration,
         onCommit: this.receipt,
       });
       await this.api.send(
@@ -2209,11 +2215,14 @@ export class TelegramWorkspace {
     expectedGeneration?: number;
     expectedConcurrency?: number;
     instructionTarget?: InstructionTarget;
+    expectedAgent?: { role: 'daddy' | 'worker'; profile: AgentProfile };
+    checkRoute?: () => void;
   }>();
 
   private receipt = () => {
     const context = this.update.getStore();
     if (!context) return;
+    context.checkRoute?.();
     commitTelegramOperation(this.store, context.id, context.destination);
     if (context.action) this.finishAction(context.action);
     if (context.pendingKey) this.store.setSetting(context.pendingKey, null);
@@ -2442,13 +2451,19 @@ export class TelegramWorkspace {
           confirmation?: boolean;
           expectedConcurrency?: number;
           instructionTarget?: InstructionTarget;
+          expectedAgent?: { role: 'daddy' | 'worker'; profile: AgentProfile };
         }>(key, destination);
-        if (
-          action.kind !== 'private-operation' ||
-          this.room()?.chatId !== action.source.chatId ||
-          this.groupAt(action.source) !== action.groupId
-        )
+        if (action.kind !== 'private-operation')
           throw new Error(this.t('This action expired. Open a fresh card.'));
+        const checkRoute = () => {
+          this.readAction(key, destination);
+          if (
+            this.room()?.chatId !== action.source.chatId ||
+            this.groupAt(action.source) !== action.groupId
+          )
+            throw new Error(this.t('This action expired. Open a fresh card.'));
+        };
+        checkRoute();
         if (step === 'operation' && !action.readOnly) {
           const expectedConcurrency = /^\/concurrency [1-8]$/.test(action.text)
             ? this.daddy.maxConcurrentAgents()
@@ -2460,14 +2475,21 @@ export class TelegramWorkspace {
           const instructionTarget = group
             ? { id: group.id, generation: group.generation, instructions: group.instructions }
             : undefined;
+          const role = /^\/agents (daddy|worker)\s/.exec(action.text)?.[1] as
+            'daddy' | 'worker' | undefined;
+          const expectedAgent = role
+            ? { role, profile: this.daddy.engine.defaultAgents()[role] }
+            : undefined;
           const confirmKey = this.actionKey(destination, {
             ...action,
             confirmation: true,
             expectedConcurrency,
             instructionTarget,
+            expectedAgent,
           });
           this.finishAction(key);
           const card = new TelegramText().add(action.text, 'code');
+          if (expectedAgent) card.add('\n' + profileText(expectedAgent.profile));
           if (group) card.add('\n' + group.title);
           if (action.document?.file_name) card.add('\n' + action.document.file_name);
           if (expectedConcurrency !== undefined)
@@ -2483,11 +2505,12 @@ export class TelegramWorkspace {
         await this.update.run(
           {
             ...this.update.getStore(),
-            ...this.update.getStore(),
             id: update.update_id,
             action: key,
             expectedConcurrency: action.expectedConcurrency,
             instructionTarget: action.instructionTarget,
+            expectedAgent: action.expectedAgent,
+            checkRoute,
           },
           () =>
             this.handleMessage({
@@ -2575,11 +2598,17 @@ export class TelegramWorkspace {
           model: agent[3],
           effort: agent[4],
         });
-        const baseline = this.daddy.engine.defaultAgents()[role];
+        const shown = this.update.getStore()?.expectedAgent;
+        const baseline =
+          shown?.role === role ? shown.profile : this.daddy.engine.defaultAgents()[role];
         await this.daddy.catalogue.validate(profile);
         const current = this.daddy.engine.defaultAgents();
         if (!sameAgentProfile(baseline, current[role]))
-          throw new Error('Agent settings changed. Open /agents and retry.');
+          throw new AppError(
+            'settings_conflict',
+            'Agent settings changed. Open a fresh confirmation.',
+            409,
+          );
         this.mutate(() => this.daddy.engine.setDefaultAgents({ ...current, [role]: profile }));
         await this.api.send(destination, this.t('Settings saved.'));
         return true;

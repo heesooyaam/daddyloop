@@ -1,3 +1,4 @@
+import type { WorkerSlot } from './types.js';
 import { assertSetting, mergeSetting } from './settings-edit.js';
 import { pauseSessionWork, restoreSessionWork } from './session-pause.js';
 import { githubBackoff } from '../providers/github-quota.js';
@@ -345,24 +346,28 @@ export class Daddy {
   async configureWorker(
     id: string,
     number: number,
-    profile: AgentProfile,
+    requested: AgentProfile,
     {
       force = false,
       expectedTaskId,
+      expectedGeneration,
+      baseline,
       check,
       expected,
       onCommit,
     }: {
       force?: boolean;
       expectedTaskId?: string;
+      expectedGeneration?: number;
+      baseline?: AgentProfile;
       expected?: { groupGeneration: number; task: ExpectedTask };
       check?: () => void;
       onCommit?: () => void;
     } = {},
   ) {
-    await this.catalogue.validate(profile);
     const readSlot = () => {
       const group = this.group(id);
+      this.checkSessionGeneration(group, expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       const slots = workerSlots(this.store, group);
       const slot = slots.find((item) => item.number === number);
@@ -375,13 +380,29 @@ export class Daddy {
         );
       return { group, slots, slot };
     };
-    const update = (lockedTaskId?: string) => {
+    const completeProfile = ({ engine, model, effort }: AgentProfile) => ({
+      engine,
+      model,
+      effort,
+    });
+    const resolve = (group: ReviewGroup, slot: WorkerSlot) => {
+      if (!baseline) return requested;
+      const current = slot.profile ?? group.worker ?? this.engine.defaultAgents().worker;
+      return mergeSetting(
+        'worker.profile',
+        completeProfile(baseline),
+        completeProfile(requested),
+        completeProfile(current),
+      );
+    };
+    const update = (profile: AgentProfile, lockedTaskId?: string) => {
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
       if (expected && lockedTaskId) {
         this.checkSessionGeneration(group, expected.groupGeneration);
         assertTaskVersion(this.task(id, lockedTaskId), expected.task);
       }
+      if (!sameAgentProfile(profile, resolve(group, slot))) return;
       check?.();
       const restarted = this.store.transaction(() => {
         slot.profile = profile;
@@ -407,8 +428,13 @@ export class Daddy {
       return { restarted };
     };
     for (;;) {
-      const taskId = force ? readSlot().slot.taskId : undefined;
-      const result = taskId ? await this.engine.lock(taskId, async () => update(taskId)) : update();
+      const { group, slot } = readSlot();
+      const profile = resolve(group, slot);
+      await this.catalogue.validate(profile);
+      const taskId = force ? slot.taskId : undefined;
+      const result = taskId
+        ? await this.engine.lock(taskId, async () => update(profile, taskId))
+        : update(profile);
       if (result) return result;
     }
   }
