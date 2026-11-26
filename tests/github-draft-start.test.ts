@@ -981,11 +981,25 @@ it.each([
   ['pending', 'verify-merge'],
   ['done', 'verify-merge'],
   ['pending', 'retry'],
+  ['done', 'retry'],
+  ['pending', 'retarget while waiting'],
+  ['pending after refusal', 'retry'],
 ] as const)(
   'requires the original draft intent before merge verification (%s, %s)',
   async (receipt, entry) => {
     const f = await reviewFixture();
     try {
+      if (receipt === 'pending after refusal') {
+        f.options.firstPostStatus = 422;
+        f.options.firstPostAccepted = false;
+        await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'provider_422' });
+        await f.engine.action(f.task.id, 'resume');
+        const post = f.github.postReview.bind(f.github);
+        vi.spyOn(f.github, 'postReview').mockImplementationOnce(async (...args) => {
+          await post(...args);
+          throw new AppError('provider_502', 'The second POST succeeded without a response.');
+        });
+      }
       await f.engine.review(f.task.id);
       if (receipt === 'done') {
         f.options.hidden = false;
@@ -1006,7 +1020,7 @@ it.each([
         f.store.db
           .prepare('SELECT status FROM operations WHERE id=?')
           .get(original.draftStart!.marker),
-      ).toMatchObject({ status: receipt });
+      ).toMatchObject({ status: receipt === 'done' ? 'done' : 'pending' });
 
       f.reviews[0].state = 'COMMENTED';
       f.comments.push({
@@ -1020,24 +1034,31 @@ it.each([
       const verify = () => f.engine.action(f.task.id, 'verify-merge');
       await expect(verify()).rejects.toMatchObject({ code: 'draft_owner_changed' });
       f.options.owner = 12;
-      if (receipt === 'pending')
-        await expect(verify()).rejects.toMatchObject({ code: 'draft_lookup_pending' });
       f.remote.targetBranch = 'release';
       await expect(verify()).rejects.toMatchObject({ code: 'draft_changed' });
       expect(f.store.getTask(f.task.id)).toEqual(original);
       expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
 
       f.remote.targetBranch = original.pr!.targetBranch;
-      // The known ID still works when the listing temporarily hides it.
-      f.options.hidden = receipt === 'done';
-      const retried = await (entry === 'retry' ? f.engine.review(f.task.id, true) : verify());
-      expect(retried).toMatchObject({
-        state: 'reviewing',
-        mergedReviewId: '123',
-        review: { id: '123' },
+      f.options.hidden = true;
+      if (receipt === 'done') f.options.missing = 'comments';
+      const deferred = await (entry === 'retry' ? f.engine.review(f.task.id, true) : verify());
+      expect(deferred).toMatchObject({
+        state: 'queued',
+        draftStart: {
+          marker: original.draftStart!.marker,
+          mergeVerification: {
+            head: f.remote.head,
+            base: f.remote.base,
+            start: f.remote.start,
+            mergeCommit: f.remote.mergeCommit,
+          },
+        },
       });
-      expect(retried.draftStart).toBeUndefined();
-      expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      f.restart();
+      f.options.hidden = receipt === 'done';
+      f.options.missing = undefined;
       const { worker, run } = reviewer(f);
       run.mockResolvedValue({
         checkedHead: f.remote.head,
@@ -1047,8 +1068,30 @@ it.each([
       });
       try {
         await worker.tick();
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+        if (entry === 'retarget while waiting') f.remote.targetBranch = 'release';
+        f.due();
+        await worker.tick();
+        if (entry === 'retarget while waiting') {
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'needs_input',
+            draftStart: { mergeVerification: { mergeCommit: f.remote.mergeCommit } },
+            pr: { targetBranch: original.pr!.targetBranch },
+          });
+          expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+          expect(run).not.toHaveBeenCalled();
+          expect(f.writeAttempts).toEqual(['POST']);
+          return;
+        }
         await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+        await worker.tick();
         expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0]).toMatchObject({
+          job: { kind: 'verify_merge' },
+          task: { mergedReviewId: '123', review: { id: '123' } },
+        });
+        expect(f.store.getTask(f.task.id).draftStart).toBeUndefined();
         expect(run.mock.calls[0][0].task.snapshot?.comments).toMatchObject([
           { id: '456', body: f.comments[0].body },
         ]);
@@ -1056,6 +1099,87 @@ it.each([
           state: 'needs_input',
           reason: expect.stringContaining('verified all previously published findings'),
         });
+        expect(f.writeAttempts).toEqual(
+          receipt === 'pending after refusal' ? ['POST', 'POST'] : ['POST'],
+        );
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['verify-merge', 'original'],
+  ['retry', 'original'],
+  ['resume', 'original'],
+  ['verify-merge', 'retargeted'],
+  ['retry', 'retargeted'],
+  ['resume', 'retargeted'],
+  ['verify-merge', 'retargeted during verification'],
+] as const)(
+  'retains the original target after a definitive refusal (%s, %s)',
+  async (entry, target) => {
+    const f = await reviewFixture();
+    try {
+      f.options.firstPostStatus = 422;
+      f.options.firstPostAccepted = false;
+      await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'provider_422' });
+      const refused = f.store.getTask(f.task.id);
+      expect(f.store.events(f.task.id)).toContainEqual(
+        expect.objectContaining({
+          type: 'operation.refused',
+          data: expect.objectContaining({ operationId: refused.draftStart!.marker }),
+        }),
+      );
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      if (target === 'retargeted') f.remote.targetBranch = 'release';
+      f.restart();
+      const scan = vi.spyOn(f.github, 'inspectReviewStart');
+      const { worker, run } = reviewer(f);
+      run.mockImplementation(async () => {
+        if (target === 'retargeted during verification') f.remote.targetBranch = 'release';
+        return { status: 'completed', summary: 'Checked merge', checkedHead: f.remote.head };
+      });
+      try {
+        if (entry === 'resume') {
+          await f.engine.action(f.task.id, 'resume');
+          await worker.tick();
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'needs_input',
+            draftStart: { marker: refused.draftStart!.marker },
+            pr: { targetBranch: refused.pr!.targetBranch },
+          });
+        }
+        const verify = () =>
+          entry === 'retry'
+            ? f.engine.review(f.task.id, true)
+            : f.engine.action(f.task.id, 'verify-merge');
+        if (target === 'retargeted') {
+          await expect(verify()).rejects.toMatchObject({ code: 'draft_changed' });
+          expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'needs_input',
+            draftStart: { marker: refused.draftStart!.marker },
+            pr: { targetBranch: refused.pr!.targetBranch },
+          });
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          await verify();
+          expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+          await worker.tick();
+          await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+          expect(run).toHaveBeenCalledTimes(1);
+          expect(run.mock.calls[0][0].task.review).toBeUndefined();
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: target === 'original' ? 'complete' : 'needs_input',
+            pr: { targetBranch: refused.pr!.targetBranch },
+          });
+        }
+        expect(scan).not.toHaveBeenCalled();
         expect(f.writeAttempts).toEqual(['POST']);
       } finally {
         await worker.stop();

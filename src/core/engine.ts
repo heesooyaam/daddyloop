@@ -293,7 +293,7 @@ export class Engine {
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
         );
       const provider = this.provider(prRef(task));
-      if (task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
+      if (!retry && task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
       if (task.draftStart) {
         if (retry) task.draftStart.retry = true;
         if (clarification !== undefined) task.draftStart.clarification = clarification;
@@ -500,7 +500,17 @@ export class Engine {
       this.checkDraftStartRef(task);
       const observed = await provider.getPR(ref);
       if (!current()) return this.store.getTask(task.id);
-      if (retry && observed.state === 'merged') return this.queueMergeVerification(task, observed);
+      if (intent.mergeVerification || (retry && observed.state === 'merged'))
+        return await this.queueMergeVerification(task, observed);
+      if (intent.retryAt && intent.retryAt > Date.now()) return task;
+      if (observed.state === 'merged' && this.broker.outbox.wasRefused(task.id, intent.marker)) {
+        this.state(
+          task,
+          'needs_input',
+          'The draft creation was refused. Verify the merged PR against its original target.',
+        );
+        return task;
+      }
       const handle = await this.broker.resolveGitHubDraft(
         task,
         provider,
@@ -583,7 +593,6 @@ export class Engine {
           'draft_revision_changed',
           'The PR changed while checking draft creation.',
         );
-      delete task.draftStart;
       if (!openTarget(pr)) {
         this.state(
           task,
@@ -592,24 +601,34 @@ export class Engine {
         );
         return task;
       }
+      delete task.draftStart;
       this.invalidate(task, pr);
       this.state(task, 'queued', 'New revision is ready for review');
       return task;
     } catch (error) {
       if (!current()) return this.store.getTask(task.id);
-      if (isDraftStartRetry(error)) {
-        const delay = Math.min(300000, (intent.delay ?? 7500) * 2);
-        intent.delay = delay;
-        intent.retryAt = Math.max(
-          Date.now() + delay,
-          error instanceof GitHubRetryError ? error.until : 0,
-        );
-        this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
-        return task;
-      }
+      if (isDraftStartRetry(error)) return this.deferDraftStart(task, error);
       this.state(task, 'needs_input', redact(String(error)));
       throw error;
     }
+  }
+
+  private deferDraftStart(task: Task, error: unknown) {
+    const intent = task.draftStart!;
+    const delay = Math.min(300000, (intent.delay ?? 7500) * 2);
+    intent.delay = delay;
+    intent.retryAt = Math.max(
+      Date.now() + delay,
+      error instanceof GitHubRetryError ? error.until : 0,
+    );
+    this.state(
+      task,
+      'queued',
+      intent.mergeVerification
+        ? 'Waiting for the original GitHub review before verifying the merge'
+        : 'Waiting to retry the GitHub review draft',
+    );
+    return task;
   }
 
   private initialDraftMatches(task: Task, snapshot: ReviewSnapshot, owner?: string) {
@@ -1661,11 +1680,31 @@ export class Engine {
       );
   }
 
-  private async recoverDraftForMerge(task: Task, pr: PullRequest) {
+  private async recoverDraftForMerge(
+    task: Task,
+    pr: PullRequest,
+  ): Promise<{
+    handle?: ReviewHandle;
+    snapshot?: ReviewSnapshot;
+    pr: PullRequest;
+  }> {
     const intent = task.draftStart!;
     this.checkDraftStartRef(task);
     if (!sameReviewTarget(intent.target ?? task.pr, pr))
       throw new AppError('draft_changed', draftInspectionRequired);
+    if (this.broker.outbox.wasRefused(task.id, intent.marker)) {
+      if (!(await this.publicationRevisionApplies(task, intent.revision, pr)))
+        throw new AppError('draft_changed', draftInspectionRequired);
+      const latest = await this.provider(prRef(task)).getPR(prRef(task));
+      if (
+        !sameReviewTarget(pr, latest) ||
+        !sameRevision(pr, latest) ||
+        latest.state !== 'merged' ||
+        latest.mergeCommit !== pr.mergeCommit
+      )
+        throw new AppError('merge_unconfirmed', 'The merged revision changed during verification');
+      return { pr: latest };
+    }
     if (!intent.owner)
       throw new AppError('draft_owner_unknown', 'The original GitHub account was not recorded.');
     const candidate = { ...task };
@@ -1699,14 +1738,48 @@ export class Engine {
         'merge_unconfirmed',
         'The provider must confirm the merge of this task head',
       );
+    const intent = task.draftStart;
+    if (
+      (task.pr && !sameReviewTarget(task.pr, pr)) ||
+      (intent?.mergeVerification &&
+        (!sameRevision(intent.mergeVerification, pr) ||
+          intent.mergeVerification.mergeCommit !== pr.mergeCommit))
+    )
+      throw new AppError('draft_changed', draftInspectionRequired);
     if (task.pendingAuthorHead && task.pendingAuthorHead !== pr.head)
       throw new AppError(
         'unsubmitted_changes',
         'Inspect the saved worker changes before verifying this merge',
       );
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-    const recovered = task.draftStart ? await this.recoverDraftForMerge(task, pr) : undefined;
-    const originalId = recovered?.handle.id ?? this.heldMergeReviewId(task) ?? task.reviewAdmission;
+    const currentTask = () => {
+      const current = this.store.getTask(task.id);
+      const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      const valid =
+        current.generation === task.generation &&
+        current.state === task.state &&
+        current.draftStart?.marker === intent?.marker &&
+        currentGroup?.generation === group?.generation &&
+        !currentGroup?.deletedAt &&
+        !currentGroup?.deletion &&
+        currentGroup?.daddyState !== 'paused' &&
+        currentGroup?.daddyState !== 'archived';
+      return { current, valid };
+    };
+    let recovered: Awaited<ReturnType<Engine['recoverDraftForMerge']>> | undefined;
+    if (intent) {
+      try {
+        recovered = await this.recoverDraftForMerge(task, pr);
+      } catch (error) {
+        if (!isDraftStartRetry(error)) throw error;
+        const { current, valid } = currentTask();
+        if (!valid) return current;
+        intent.mergeVerification ??= { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
+        return this.deferDraftStart(task, error);
+      }
+    }
+    const originalId =
+      recovered?.handle?.id ?? this.heldMergeReviewId(task) ?? task.reviewAdmission;
     let retryAt: number | undefined;
     const original =
       recovered ??
@@ -1717,19 +1790,9 @@ export class Engine {
             return undefined;
           })
         : undefined);
-    if (originalId) {
-      const current = this.store.getTask(task.id);
-      const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-      if (
-        current.generation !== task.generation ||
-        current.state !== task.state ||
-        currentGroup?.generation !== group?.generation ||
-        currentGroup?.deletedAt ||
-        currentGroup?.deletion ||
-        currentGroup?.daddyState === 'paused' ||
-        currentGroup?.daddyState === 'archived'
-      )
-        return current;
+    if (intent || originalId) {
+      const { current, valid } = currentTask();
+      if (!valid) return current;
       task.mergedReviewId = originalId;
       delete task.reviewAdmission;
       pr = original?.pr ?? pr;
@@ -2133,6 +2196,7 @@ export class Engine {
         return task;
       if (
         sameRevision(task.verifiedMerge, pr) &&
+        sameReviewTarget(task.pr, pr) &&
         task.verifiedMerge?.mergeCommit === pr.mergeCommit &&
         ['awaiting_checks', 'awaiting_plan_approval'].includes(task.state)
       ) {
@@ -3009,6 +3073,7 @@ export class Engine {
       if (job.kind === 'verify_merge') {
         const sameMerge =
           pr.state === 'merged' &&
+          sameReviewTarget(task.pr, pr) &&
           sameRevision(task.revision, pr) &&
           pr.mergeCommit === task.pr?.mergeCommit &&
           result.checkedHead === pr.head;
@@ -3373,7 +3438,9 @@ export class Engine {
         if (
           !sameRevision(current, task.revision) ||
           (task.verifiedMerge &&
-            (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
+            (current.state !== 'merged' ||
+              !sameReviewTarget(task.pr, current) ||
+              current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
         if (this.heldMergeReviewId(task)) {
@@ -3393,7 +3460,13 @@ export class Engine {
             400,
           );
         const current = await this.provider(prRef(task)).getPR(prRef(task));
-        if (!sameRevision(current, task.revision))
+        if (
+          !sameRevision(current, task.revision) ||
+          (task.verifiedMerge &&
+            (current.state !== 'merged' ||
+              !sameReviewTarget(task.pr, current) ||
+              current.mergeCommit !== task.verifiedMerge.mergeCommit))
+        )
           throw new AppError(
             'stale_revision',
             'The PR changed; a waiver cannot apply to a new revision',

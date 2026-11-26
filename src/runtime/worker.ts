@@ -609,7 +609,9 @@ export class Worker {
       }
       if (
         job.kind === 'verify_merge' &&
-        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+        (startingPR?.state !== 'merged' ||
+          !sameReviewTarget(task.pr, startingPR) ||
+          startingPR.mergeCommit !== task.pr?.mergeCommit)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;

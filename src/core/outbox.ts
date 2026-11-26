@@ -11,6 +11,19 @@ export class Outbox {
   isActive(id: string) {
     return this.active.has(id);
   }
+  wasRefused(taskId: string, id: string) {
+    const last = this.store.db
+      .prepare(
+        `SELECT type FROM events WHERE task_id=?
+       AND type IN ('operation.started', 'operation.refused', 'operation.completed',
+                    'operation.uncertain', 'operation.recovered')
+       AND json_extract(data, '$.operationId')=?
+       AND NOT EXISTS (SELECT 1 FROM operations WHERE id=?)
+       ORDER BY id DESC LIMIT 1`,
+      )
+      .get(taskId, id, id);
+    return last?.type === 'operation.refused';
+  }
   async perform<T>(
     taskId: string,
     id: string,
@@ -54,11 +67,13 @@ export class Outbox {
       } catch (error) {
         const definitive =
           (error instanceof GitHubRetryError && error.refusedWrite) || refused?.(error) === true;
-        if (definitive)
-          this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
-        this.store.event(taskId, definitive ? 'operation.refused' : 'operation.uncertain', {
-          operationId: id,
-          error: redact(String(error)),
+        this.store.transaction(() => {
+          if (definitive)
+            this.store.db.prepare("DELETE FROM operations WHERE id=? AND status='pending'").run(id);
+          this.store.event(taskId, definitive ? 'operation.refused' : 'operation.uncertain', {
+            operationId: id,
+            error: redact(String(error)),
+          });
         });
         throw error;
       }

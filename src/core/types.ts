@@ -279,6 +279,7 @@ export interface Task {
     revision: Revision;
     retry: boolean;
     clarification?: string;
+    mergeVerification?: Revision & { mergeCommit?: string };
     retryAt?: number;
     delay?: number;
   };
