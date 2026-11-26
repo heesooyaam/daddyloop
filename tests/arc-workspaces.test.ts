@@ -163,11 +163,13 @@ it.each([
   'interrupted read',
   'amended after interrupted read',
   'missing command SHA',
+  'parent moved before commit',
 ])('attributes an Arc commit only to the marked save after %s', async (scenario) => {
   const moved = scenario === 'branch moved';
   const amended = scenario === 'amended before confirmation';
   const interrupted = scenario.includes('interrupted read');
   const noSha = scenario === 'missing command SHA';
+  const parentMoved = scenario === 'parent moved before commit';
   const f = await fixture({ repoPath: '/fake/arc-source' });
   const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-moved-save-'));
   const bridge = new MountFixture();
@@ -182,26 +184,32 @@ it.each([
     let title = '';
     let commits = 0;
     let failRead = interrupted;
+    let actualParent = bridge.hash;
+    const createdHead = parentMoved ? 'e'.repeat(40) : h2;
     bridge.native = async (args) => {
+      if (args[0] === 'add' && parentMoved) bridge.hash = h3;
       if (args[0] === 'commit') {
         commits++;
         title = args[2];
         const branch = bridge.branch;
-        bridge.hash = moved || amended ? h3 : h2;
+        actualParent = bridge.hash;
+        bridge.hash = moved || amended ? h3 : createdHead;
         if (moved) bridge.branch += '-different';
-        return noSha ? '' : `[${branch} ${h2}] ${title}\n1 file changed`;
+        return noSha ? '' : `[${branch} ${createdHead}] ${title}\n1 file changed`;
       }
       if (args[0] === 'log') {
         if (failRead) {
           failRead = false;
           throw new Error('Interrupted commit read');
         }
-        return title;
+        expect(args).toEqual(['log', '-n', '1', '--no-walk', '--json', createdHead]);
+        return JSON.stringify([{ commit: createdHead, parents: [actualParent], message: title }]);
       }
       return native(args);
     };
+    const job = parentMoved ? f.store.enqueue(task, 'author', 'fix', 'Apply feedback') : undefined;
     const save = {
-      runId: 'fix-run',
+      runId: job?.id ?? 'fix-run',
       generation: task.generation,
       revision: task.revision!,
       pr: task.pr!,
@@ -211,7 +219,32 @@ it.each([
     const commit = workspaces.commit(task, 'Correct finding', undefined, save);
     const restarted = new ArcWorkspaces(dir, bridge);
     task.pr!.branch = 'users/test/correction';
-    if (moved || amended || noSha) {
+    if (parentMoved) {
+      await expect(commit).rejects.toThrow('does not have the recorded parent');
+      await expect(restarted.recoverFix(task, save)).rejects.toThrow(
+        'does not have the recorded parent',
+      );
+      expect(bridge.hash).toBe(createdHead);
+      const path = join(dir, 'workspaces', task.id, 'arc-fixes', save.runId);
+      const intent = JSON.parse(readFileSync(path + '.intent', 'utf8'));
+      expect(intent).toMatchObject({ parent: task.revision!.head, reportedHead: createdHead });
+      expect(intent.confirmedParent).toBeUndefined();
+      // Reconcile the interrupted author's persisted operation through the scheduler's entry point.
+      f.store.saveJob({ ...job!, status: 'failed' });
+      task.fixSave = save;
+      task.state = 'fixing';
+      f.store.saveTask(task);
+      f.engine.readFixSave = (current, operation) => restarted.recoverFix(current, operation);
+      await f.engine.recoverFixSave(task.id);
+      await f.engine.submitSavedFix(task.id, (current, head) =>
+        restarted.pushSavedFix(current, head),
+      );
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'needs_input',
+        fixSave: save,
+        reason: expect.stringContaining('does not have the recorded parent'),
+      });
+    } else if (moved || amended || noSha) {
       await expect(commit).rejects.toThrow(
         noSha ? 'did not report an exact SHA' : 'did not confirm',
       );
@@ -225,11 +258,12 @@ it.each([
         expect(await restarted.recoverFix(task, save)).toBe(h2);
       }
     } else expect(await commit).toBe(h2);
-    const held = moved || amended || noSha || scenario === 'amended after interrupted read';
+    const held =
+      parentMoved || moved || amended || noSha || scenario === 'amended after interrupted read';
     if (!held) {
       expect(await restarted.recoverFix(task, save)).toBe(h2);
       await restarted.pushSavedFix(task, h2);
-    } else if (!noSha) {
+    } else if (!noSha && !parentMoved) {
       expect(bridge.hash).toBe(h3);
       await expect(restarted.pushSavedFix(task, h2)).rejects.toMatchObject({
         code: 'fix_before_push',

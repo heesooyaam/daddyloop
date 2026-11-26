@@ -107,6 +107,7 @@ type FindingEvidence = Pick<
   | 'kind'
   | 'publishedFindingReview'
   | 'publishedFindingReviews'
+  | 'reviewFindingIds'
   | 'findingVersions'
   | 'mergeFindingVersions'
 >;
@@ -2167,9 +2168,27 @@ export class Engine {
       }
     }
     const provider = this.provider(prRef(task));
+    const publications = this.publications(task);
+    const knownFindingIds = (handle: ReviewHandle) => {
+      const known = new Set(job.reviewFindingIds?.[handle.id]);
+      const remember = (snapshot?: ReviewSnapshot) => {
+        if (snapshot?.status === 'published' && sameRevision(snapshot.revision, handle.revision))
+          for (const { id } of snapshot.comments) known.add(id);
+      };
+      for (const publication of publications)
+        if (publication.reviewId === handle.id) remember(publication.snapshot);
+      if (latest?.id === handle.id) remember(task.feedback);
+      if (task.review?.id === handle.id) remember(task.snapshot);
+      return [...known];
+    };
+    const readPublished = (handle: ReviewHandle) =>
+      provider.getReview(prRef(task), handle, {
+        publishedEvidence: true,
+        knownCommentIds: knownFindingIds(handle),
+      });
     const read = new Map<string, ReviewSnapshot>();
     for (const handle of handles.values()) {
-      const native = await provider.getReview(prRef(task), handle, { publishedEvidence: true });
+      const native = await readPublished(handle);
       if (job.kind === 'verify_merge' && native.status === 'missing')
         throw new AppError(
           'published_review_unavailable',
@@ -2185,9 +2204,7 @@ export class Engine {
     job.mergeFindingVersions = {};
     if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
-      const current =
-        read.get(task.review.id) ??
-        (await provider.getReview(prRef(task), task.review, { publishedEvidence: true }));
+      const current = read.get(task.review.id) ?? (await readPublished(task.review));
       if (
         current.status === 'missing' ||
         (task.snapshot?.status === 'published' && current.status !== 'published')
@@ -2202,6 +2219,10 @@ export class Engine {
       job.mergeFindingVersions = this.findingVersions([current]);
       if (current.status === 'published') read.set(task.review.id, current);
     }
+    // Retain attribution for IDs first seen in this run as well as archived IDs.
+    job.reviewFindingIds = Object.fromEntries(
+      [...read].map(([id, snapshot]) => [id, snapshot.comments.map((comment) => comment.id)]),
+    );
     return [...read.values()];
   }
 
@@ -3097,6 +3118,7 @@ export class Engine {
             ...revisionOf(pr),
             mergeCommit: pr.mergeCommit,
             publishedFindingReviews: job.publishedFindingReviews,
+            reviewFindingIds: job.reviewFindingIds,
             findingVersions: job.findingVersions,
             mergeFindingVersions: job.mergeFindingVersions,
           };

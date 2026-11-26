@@ -8,7 +8,7 @@ import {
   type ReviewComment,
   type Location,
 } from '../core/types.js';
-import { type ReviewProvider, tag } from './provider.js';
+import { type ReviewProvider, type ReviewReadOptions, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 type Note = {
   id: number;
@@ -184,7 +184,7 @@ export class GitLabProvider implements ReviewProvider {
   async getReview(
     ref: PRRef,
     review: ReviewHandle,
-    options?: { publishedEvidence?: boolean },
+    options?: ReviewReadOptions,
   ): Promise<ReviewSnapshot> {
     const [drafts, notes] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
@@ -193,11 +193,16 @@ export class GitLabProvider implements ReviewProvider {
     const isSummary = (n: Note) => body(n).includes(tag(review.marker));
     const isComment = (n: Note) => body(n).includes(`<!-- ${review.marker}:comment:`);
     const ownAuthor = (n: Note) => String(n.author_id ?? n.author?.id) === review.authorId;
-    const summary = drafts.find(isSummary) ?? notes.find((n) => isSummary(n) && ownAuthor(n));
+    const draft = drafts.find(isSummary);
+    const summary = draft ?? notes.find((n) => isSummary(n) && ownAuthor(n));
+    const publishedEvidence = options?.publishedEvidence && summary && !draft;
+    const known = publishedEvidence ? new Set(options.knownCommentIds) : undefined;
     const draftComments = drafts.filter(isComment);
-    const published = notes.filter((n) => isComment(n) && ownAuthor(n));
-    const stillDraft = drafts.some(isSummary);
-    const publishedEvidence = options?.publishedEvidence && summary && !stillDraft;
+    // GitLab allocates draft and published IDs separately.
+    const published = notes.filter(
+      (n) => ownAuthor(n) && (isComment(n) || known?.has(String(n.id))),
+    );
+    const unresolvedIdentity = notes.some((n) => known?.has(String(n.id)) && !ownAuthor(n));
     const unknown =
       !publishedEvidence &&
       (drafts.some((n) => !isSummary(n) && !isComment(n)) ||
@@ -211,11 +216,14 @@ export class GitLabProvider implements ReviewProvider {
         ));
     return {
       status:
-        unknown || (stillDraft && published.length > 0) || (!stillDraft && draftComments.length > 0)
+        unresolvedIdentity ||
+        unknown ||
+        (draft && published.length > 0) ||
+        (!draft && draftComments.length > 0)
           ? 'partial'
           : !summary
             ? 'missing'
-            : stillDraft
+            : draft
               ? 'draft'
               : 'published',
       body: summary ? body(summary) : '',

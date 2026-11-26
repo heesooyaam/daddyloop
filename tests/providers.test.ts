@@ -567,9 +567,13 @@ it('prepares a merged GitLab fork on its source head and fetches the result from
   }
 });
 
-it.each(['gitlab', 'arcadia'])(
-  'starts the next %s reviewer with a fresh native publication beside its new draft',
-  async (vcs) => {
+it.each(
+  ['gitlab', 'arcadia'].flatMap((vcs) =>
+    ['unchanged', 'edited before review', 'edited during review'].map((phase) => ({ vcs, phase })),
+  ),
+)(
+  'checks the previous $vcs publication beside a new draft with the finding $phase',
+  async ({ vcs, phase }) => {
     const f = await fixture();
     const workspaces = new Workspaces('/tmp');
     const task = f.store.getTask(f.task.id);
@@ -589,9 +593,12 @@ it.each(['gitlab', 'arcadia'])(
     };
     task.ref.provider = vcs;
     const exact = 'Current wording\n\n```ts\ncheck();\n```\n' + tag(old.marker + ':comment:old');
+    const edited = 'Replaced Markdown without the marker.\n\n```ts\ncheckAgain();\n```';
+    let wording = exact;
     let oldFindingDraft = false;
     let otherDraft = false;
     let next: ReviewHandle | undefined;
+    let nextPublished = false;
     const note = (id: number, body: string, draft: boolean) => ({
       id,
       body,
@@ -601,16 +608,25 @@ it.each(['gitlab', 'arcadia'])(
     });
     const notes = () => [
       note(10, tag(old.marker), false),
-      note(11, exact, oldFindingDraft),
-      ...(next ? [note(-20, tag(next.marker), true)] : []),
-      ...(otherDraft ? [note(-21, 'Foreign draft', true)] : []),
+      note(11, wording, oldFindingDraft),
+      ...(next ? [note(-20, tag(next.marker), !nextPublished)] : []),
+      ...(otherDraft ? [note(vcs === 'gitlab' ? 11 : -21, 'Foreign draft', true)] : []),
     ];
     const http = transport((path, method) => {
+      if (method === 'PUT' && path.endsWith('/draft_notes/-20/publish')) {
+        nextPublished = true;
+        return {};
+      }
       expect(method).toBe('GET');
       return notes().filter((n) => n.is_draft === path.includes('draft_notes'));
     });
     const bridge = new ArcBridge();
     vi.spyOn(bridge, 'api').mockImplementation(async <T>(args: string[]) => {
+      if (args[0] === 'draft-comment' && args[1] === 'publish') {
+        expect(args[2]).toBe('--comment-for-review-ids=-20');
+        nextPublished = true;
+        return {} as T;
+      }
       expect(args[1]).toBe('comments');
       return (args[0] === 'pr' ? notes() : []) as T;
     });
@@ -633,15 +649,23 @@ it.each(['gitlab', 'arcadia'])(
       },
     );
     vi.spyOn(f.provider, 'getReview').mockImplementation(native.getReview.bind(native));
+    vi.spyOn(f.provider, 'publish').mockImplementation(native.publish.bind(native));
     vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    let runs = 0;
+    if (phase === 'edited before review') wording = edited;
     const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
       expect(input.task.revision?.head).toBe(target.head);
-      expect(input.task.feedback?.comments).toEqual(snapshot.comments);
+      runs++;
+      expect(input.task.feedback?.comments).toEqual(
+        snapshot.comments.map((comment) => ({ ...comment, body: wording })),
+      );
+      if (phase === 'edited during review') wording = edited;
       return {
         status: 'completed' as const,
         summary: 'Verified',
         checkedHead: target.head,
-        verifiedCommentIds: snapshot.comments.map((c) => c.id),
+        verifiedCommentIds:
+          phase === 'unchanged' || runs > 1 ? snapshot.comments.map((c) => c.id) : [],
       };
     });
     const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
@@ -654,8 +678,36 @@ it.each(['gitlab', 'arcadia'])(
     }));
     try {
       await worker.tick();
-      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_publication'));
+      const changed = phase !== 'unchanged';
+      await vi.waitFor(() =>
+        expect(f.store.getTask(task.id).state).toBe(
+          changed ? 'needs_input' : 'awaiting_publication',
+        ),
+      );
       expect(run).toHaveBeenCalledOnce();
+      if (changed) {
+        expect(f.store.getTask(task.id).reviewFinished).toBeFalsy();
+        await expect(f.engine.publish(task.id)).rejects.toMatchObject({
+          code: 'publication_unavailable',
+        });
+        await f.engine.review(task.id, true);
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_publication'));
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(
+          f.store
+            .decisions(task.id)
+            .some(
+              (d) =>
+                d.outcome === 'verified' &&
+                d.commentVersion === findingVersion({ ...snapshot.comments[0], body: edited }),
+            ),
+        ).toBe(true);
+        await f.engine.publish(task.id);
+        expect(nextPublished).toBe(true);
+        expect(f.store.getTask(task.id).state).toBe('complete');
+        return;
+      }
       expect(await native.getReview(prRef(task), old, { publishedEvidence: true })).toEqual(
         snapshot,
       );
@@ -665,6 +717,12 @@ it.each(['gitlab', 'arcadia'])(
       );
       oldFindingDraft = false;
       otherDraft = true;
+      expect(
+        await native.getReview(prRef(task), old, {
+          publishedEvidence: true,
+          knownCommentIds: snapshot.comments.map((comment) => comment.id),
+        }),
+      ).toEqual(snapshot);
       await expect(native.publish(prRef(task), next!)).rejects.toMatchObject({
         code: vcs === 'arcadia' ? 'review_not_draft' : 'untracked_drafts',
       });

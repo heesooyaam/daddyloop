@@ -12,7 +12,13 @@ type Saved = ArcLease & {
   prepared?: boolean;
   targetBranch?: string;
 };
-type ArcFixIntent = { branch: string; parent: string; title?: string; reportedHead?: string };
+type ArcFixIntent = {
+  branch: string;
+  parent: string;
+  title?: string;
+  reportedHead?: string;
+  confirmedParent?: string;
+};
 export class ArcWorkspaces {
   protectedSources: () => string[] = () => [];
   private allocation = Promise.resolve();
@@ -305,7 +311,12 @@ export class ArcWorkspaces {
       : undefined;
     if (existsSync(path)) {
       const head = readFileSync(path, 'utf8');
-      if (head === intent?.reportedHead || (!intent && head === save.revision.head)) return head;
+      if (
+        (head === intent?.reportedHead &&
+          (intent.title ? intent.confirmedParent === intent.parent : head === intent.parent)) ||
+        (!intent && head === save.revision.head)
+      )
+        return head;
     }
     return this.confirmCommit(task, save, intent);
   }
@@ -321,20 +332,38 @@ export class ArcWorkspaces {
         'Arc commit did not report an exact SHA for this fix run. The author copy was preserved.',
       );
     const after = await this.checkedAuthor(task, signal);
-    if (
-      after.branch !== intent.branch ||
-      after.head !== head ||
-      (intent.title &&
-        (head === intent.parent ||
-          (await this.bridge.native(
-            ['log', '-n', '1', '--no-walk', '--format={title}', head],
-            after.saved.mount,
-            signal,
-          )) !== intent.title))
-    )
+    if (after.branch !== intent.branch || after.head !== head)
       throw new Error(
         'Arc did not confirm the commit reported by this fix run. The author copy was preserved.',
       );
+    if (intent.title) {
+      const commits = JSON.parse(
+        await this.bridge.native(
+          ['log', '-n', '1', '--no-walk', '--json', head],
+          after.saved.mount,
+          signal,
+        ),
+      ) as { commit?: string; parents?: string[]; message?: string }[];
+      const commit = Array.isArray(commits) && commits.length === 1 ? commits[0] : undefined;
+      if (commit?.commit !== head || commit.message?.split('\n', 1)[0] !== intent.title)
+        throw new Error(
+          'Arc did not confirm the commit reported by this fix run. The author copy was preserved.',
+        );
+      if (
+        !Array.isArray(commit.parents) ||
+        commit.parents.length !== 1 ||
+        commit.parents[0] !== intent.parent
+      )
+        throw new Error(
+          `Arc commit ${head} does not have the recorded parent ${intent.parent}. The author copy was preserved.`,
+        );
+      intent.confirmedParent = intent.parent;
+      privateWrite(this.fixReceipt(task, save) + '.intent', JSON.stringify(intent));
+    } else if (head !== intent.parent) {
+      throw new Error(
+        'The Arc no-change save does not match its recorded revision. The author copy was preserved.',
+      );
+    }
     privateWrite(this.fixReceipt(task, save), head);
     return head;
   }

@@ -9,7 +9,7 @@ import type {
 } from '../core/types.js';
 import { AppError } from '../core/types.js';
 import { ArcBridge } from '../integrations/arcadia.js';
-import { type ReviewProvider, tag, assertDraft } from './provider.js';
+import { type ReviewProvider, type ReviewReadOptions, tag, assertDraft } from './provider.js';
 type Note = {
   id: number;
   content: string;
@@ -191,27 +191,40 @@ export class ArcadiaProvider implements ReviewProvider {
   async getReview(
     ref: PRRef,
     review: ReviewHandle,
-    options?: { publishedEvidence?: boolean },
+    options?: ReviewReadOptions,
   ): Promise<ReviewSnapshot> {
     const [general, inline] = await this.notes(ref, review.nodeId!);
     const owned = (note: Note) => !note.deleted_at && note.author?.name === review.authorId;
     const summary = general.find((n) => owned(n) && n.content.includes(tag(review.marker)));
-    const isFinding = (n: Note) => owned(n) && n.content.includes(`<!-- ${review.marker}:comment:`);
-    const notes = [...general.filter(isFinding), ...inline.filter(isFinding)];
     const publishedEvidence = options?.publishedEvidence && summary && !summary.is_draft;
+    const known = publishedEvidence ? new Set(options.knownCommentIds) : undefined;
+    const findings = (items: Note[], kind: 'pr' | 'diff') =>
+      items.filter(
+        (n) =>
+          owned(n) &&
+          (n.content.includes(`<!-- ${review.marker}:comment:`) || known?.has(`${kind}:${n.id}`)),
+      );
+    const generalFindings = findings(general, 'pr');
+    const diffFindings = findings(inline, 'diff');
+    const notes = [...generalFindings, ...diffFindings];
     const unknown =
       !publishedEvidence &&
       [...general, ...inline].some(
         (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
       );
+    const unresolvedIdentity = (items: Note[], kind: 'pr' | 'diff') =>
+      items.some((n) => !n.deleted_at && known?.has(`${kind}:${n.id}`) && !owned(n));
     const partial =
-      unknown || (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
+      unresolvedIdentity(general, 'pr') ||
+      unresolvedIdentity(inline, 'diff') ||
+      unknown ||
+      (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
     return {
       status: partial ? 'partial' : !summary ? 'missing' : summary.is_draft ? 'draft' : 'published',
       body: summary?.content ?? '',
       comments: [
-        ...general.filter(isFinding).map((n) => this.map(ref, n, 'pr')),
-        ...inline.filter(isFinding).map((n) => this.map(ref, n, 'diff')),
+        ...generalFindings.map((n) => this.map(ref, n, 'pr')),
+        ...diffFindings.map((n) => this.map(ref, n, 'diff')),
       ],
       url: ref.url,
       revision: review.revision,

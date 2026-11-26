@@ -276,6 +276,7 @@ export interface Task {
   verifiedMerge?: Revision & {
     mergeCommit?: string;
     publishedFindingReviews?: ReviewHandle[];
+    reviewFindingIds?: Record<string, string[]>;
     findingVersions?: Record<string, string>;
     mergeFindingVersions?: Record<string, string>;
   };
@@ -397,6 +398,7 @@ export interface Decision {
 export interface Job {
   publishedFindingReview?: ReviewHandle;
   publishedFindingReviews?: ReviewHandle[];
+  reviewFindingIds?: Record<string, string[]>;
   findingVersions?: Record<string, string>;
   mergeFindingVersions?: Record<string, string>;
   instructions?: import('./instructions.js').AgentInstructions;
