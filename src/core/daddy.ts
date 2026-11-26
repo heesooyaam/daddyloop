@@ -352,6 +352,7 @@ export class Daddy {
       expectedTaskId,
       expectedGeneration,
       baseline,
+      inheritedEffort = false,
       check,
       expected,
       onCommit,
@@ -360,6 +361,7 @@ export class Daddy {
       expectedTaskId?: string;
       expectedGeneration?: number;
       baseline?: AgentProfile;
+      inheritedEffort?: boolean;
       expected?: { groupGeneration: number; task: ExpectedTask };
       check?: () => void;
       onCommit?: () => void;
@@ -395,14 +397,14 @@ export class Daddy {
         completeProfile(current),
       );
     };
-    const update = (profile: AgentProfile, lockedTaskId?: string) => {
+    const update = (profile: AgentProfile, resolved: AgentProfile, lockedTaskId?: string) => {
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
       if (expected && lockedTaskId) {
         this.checkSessionGeneration(group, expected.groupGeneration);
         assertTaskVersion(this.task(id, lockedTaskId), expected.task);
       }
-      if (!sameAgentProfile(profile, resolve(group, slot))) return;
+      if (!sameAgentProfile(resolved, resolve(group, slot))) return;
       check?.();
       const restarted = this.store.transaction(() => {
         slot.profile = profile;
@@ -429,12 +431,25 @@ export class Daddy {
     };
     for (;;) {
       const { group, slot } = readSlot();
-      const profile = resolve(group, slot);
-      await this.catalogue.validate(profile);
+      const resolved = resolve(group, slot);
+      let profile = resolved;
+      try {
+        await this.catalogue.validate(profile);
+      } catch (error) {
+        if (
+          !inheritedEffort ||
+          !resolved.effort ||
+          !(error instanceof AppError) ||
+          error.code !== 'effort_unavailable'
+        )
+          throw error;
+        profile = { engine: resolved.engine, model: resolved.model };
+        await this.catalogue.validate(profile);
+      }
       const taskId = force ? slot.taskId : undefined;
       const result = taskId
-        ? await this.engine.lock(taskId, async () => update(profile, taskId))
-        : update(profile);
+        ? await this.engine.lock(taskId, async () => update(profile, resolved, taskId))
+        : update(profile, resolved);
       if (result) return result;
     }
   }

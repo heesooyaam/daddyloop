@@ -947,10 +947,11 @@ export class TelegramWorkspace {
       if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       const baseline = slot.profile ?? defaults;
       const engine = input.engine ?? baseline.engine;
+      const inheritedEffort = input.effort === undefined && engine === baseline.engine;
       const profile = {
         engine,
         model: input.model,
-        effort: input.effort ?? (engine === baseline.engine ? baseline.effort : undefined),
+        effort: inheritedEffort ? baseline.effort : input.effort,
       };
       if (input.force && slot.taskId) {
         const task = this.daddy.task(groupId, slot.taskId);
@@ -959,6 +960,8 @@ export class TelegramWorkspace {
           groupId,
           number: input.number,
           profile,
+          baseline,
+          inheritedEffort,
           groupGeneration: group.generation,
           taskId: task.id,
           expected: {
@@ -976,9 +979,16 @@ export class TelegramWorkspace {
         });
         return;
       }
+      const owner = this.pair()?.userId;
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
         baseline,
-        expectedGeneration: this.update.getStore()?.expectedGeneration,
+        inheritedEffort,
+        expectedGeneration: this.update.getStore()?.expectedGeneration ?? group.generation,
+        check: () => {
+          if (this.pair()?.userId !== owner)
+            throw new Error(this.t('This action expired. Open a fresh card.'));
+          this.authorize(destination, groupId);
+        },
         onCommit: this.receipt,
       });
       await this.api.send(
@@ -1982,24 +1992,28 @@ export class TelegramWorkspace {
         groupId: string;
         number: number;
         profile: AgentProfile;
+        baseline?: AgentProfile;
+        inheritedEffort?: boolean;
         taskId: string;
         groupGeneration: number;
         expected: ExpectedTask;
       }>(key, destination);
-      if (action.kind !== 'force-worker') throw new Error('Invalid worker confirmation');
+      if (action.kind !== 'force-worker' || !action.baseline)
+        throw new Error(this.t('This action expired. Open a fresh card.'));
       await this.daddy.configureWorker(action.groupId, action.number, action.profile, {
         force: true,
         expectedTaskId: action.taskId,
+        expectedGeneration: action.groupGeneration,
+        baseline: action.baseline,
+        inheritedEffort: action.inheritedEffort,
         onCommit: () => {
           this.finishAction(key);
           this.receipt();
         },
         check: () => {
-          const group = this.authorize(destination, action.groupId);
-          if (group.generation !== action.groupGeneration)
-            throw new Error(this.t('This action expired. Open a fresh card.'));
+          this.authorize(destination, action.groupId);
           this.readAction(key, destination);
-          assertTaskVersion(this.daddy.task(group.id, action.taskId), action.expected);
+          assertTaskVersion(this.daddy.task(action.groupId, action.taskId), action.expected);
         },
       });
       await this.showTasks(action.groupId, destination, 'workers');

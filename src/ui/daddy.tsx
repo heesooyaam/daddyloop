@@ -2010,15 +2010,18 @@ function TaskReport({
     live?.autoMerge.mode,
   ]);
   const value = read?.value.task.id === id ? read.value : undefined;
+  const matchesBoard = (task: Task) =>
+    !!live &&
+    task.id === id &&
+    task.generation === live.generation &&
+    task.state === live.state &&
+    ((!live.revision && !task.revision) || sameRevision(live.revision, task.revision));
   const canAct =
     connected &&
     value &&
     read?.key === detailVersion &&
     live &&
-    value.task.generation === live.generation &&
-    value.task.state === live.state &&
-    ((!live.revision && !value.task.revision) ||
-      sameRevision(live.revision, value.task.revision)) &&
+    matchesBoard(value.task) &&
     !error &&
     !busy &&
     !!board &&
@@ -2030,12 +2033,18 @@ function TaskReport({
   const ref = live?.ref ?? value?.task.ref;
   const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
+    if (!connected || !live) return;
     let active = true;
+    let reread: ReturnType<typeof setTimeout> | undefined;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
       .then((result) => {
         if (active) {
           setRead({ key: detailVersion, value: result });
           setError('');
+          // A successful GET can observe a transient stage between board polls.
+          // Keep confirmations hidden and retry even if the board key never changes.
+          if (!matchesBoard(result.task))
+            reread = setTimeout(() => setRetry((value) => value + 1), 1000);
         }
       })
       .catch((error) => {
@@ -2043,6 +2052,7 @@ function TaskReport({
       });
     return () => {
       active = false;
+      if (reread) clearTimeout(reread);
     };
   }, [id, detailVersion, retry, connected]);
   const waiverKey = JSON.stringify([id, live?.state, live?.generation, live?.revision]);

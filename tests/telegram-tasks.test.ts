@@ -13,7 +13,7 @@ import { draftSyncPending, taskReference } from '../src/core/task-activity.js';
 import { githubActivityStatus } from '../src/core/auto-merge.js';
 import { queueCard } from '../src/integrations/telegram-tasks.js';
 import { translate } from '../src/i18n/index.js';
-import { prRef as taskPrRef, type Job, type Task } from '../src/core/types.js';
+import { AppError, prRef as taskPrRef, type Job, type Task } from '../src/core/types.js';
 import { DemoProvider } from '../src/providers/demo.js';
 
 it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
@@ -942,6 +942,90 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       const next = f.daddy.group(other.id);
       next.workerSlots = [];
       f.store.saveGroup(next);
+    }
+
+    const workerOrigin = f.store.setting('telegram.group');
+    for (const interrupt of ['generation', 'topic'] as const) {
+      const before = f.daddy.board(other.id).workers.slots[0]?.profile;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const validation = vi
+        .spyOn(f.daddy.catalogue, 'validate')
+        .mockImplementationOnce(() => blocked);
+      const delayed = bot.handle(message('/worker 1 gpt-6-astra medium', 7, 18));
+      try {
+        await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+        if (interrupt === 'generation') {
+          await f.daddy.pause(other.id);
+          await f.daddy.resume(other.id);
+        } else f.store.setSetting('telegram.group', null);
+      } finally {
+        release();
+        await delayed;
+        validation.mockRestore();
+        f.store.setSetting('telegram.group', workerOrigin);
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+    }
+    await bot.handle(message('/worker 1 gpt-6-astra medium', 7, 18));
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile).toMatchObject({
+      model: 'gpt-6-astra',
+      effort: 'medium',
+    });
+
+    const oldBoard = f.daddy.board(other.id);
+    const oldSlot = oldBoard.workers.slots[0]!.profile!;
+    await f.daddy.pause(other.id);
+    await f.daddy.resume(other.id);
+    const updateSlot = (generation: number) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/daddy/sessions/' + other.id + '/workers/1',
+        payload: {
+          profile: { ...oldSlot, effort: 'max' },
+          baseline: oldSlot,
+          expectedGeneration: generation,
+        },
+      });
+    expect((await updateSlot(oldBoard.group.generation)).statusCode).toBe(409);
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(oldSlot);
+    expect((await updateSlot(f.daddy.group(other.id).generation)).statusCode).toBe(200);
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile?.effort).toBe('max');
+
+    const catalogueEfforts = vi
+      .spyOn(f.daddy.catalogue, 'validate')
+      .mockImplementation(async (profile) => {
+        if (
+          (profile.model === 'standard' || profile.model === 'limited') &&
+          profile.effort &&
+          !(profile.model === 'limited' && profile.effort === 'medium')
+        )
+          throw new AppError('effort_unavailable', 'The model does not support that effort', 422);
+      });
+    try {
+      for (const model of ['standard', 'limited']) {
+        const url = '/api/daddy/sessions/' + other.id + '/workers/1';
+        const set = (profile: { engine: string; model: string; effort?: string }) =>
+          app.inject({
+            method: 'POST',
+            url,
+            payload: { profile, expectedGeneration: f.daddy.group(other.id).generation },
+          });
+        const initial = { engine: 'claude', model: 'sonnet', effort: 'high' };
+        const target = { engine: 'claude', model };
+        expect((await set(initial)).statusCode).toBe(200);
+        await bot.handle(message('/worker 1 ' + model + ' high', 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(initial);
+        await bot.handle(message('/worker 1 ' + model, 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+        expect((await set(initial)).statusCode).toBe(200);
+        expect((await set(target)).statusCode).toBe(200);
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+      }
+    } finally {
+      catalogueEfforts.mockRestore();
     }
 
     const profileUrl = session + '/workers/2';

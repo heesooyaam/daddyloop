@@ -289,6 +289,7 @@ function WorkerProfileForm({
       await api(`/daddy/sessions/${board.group.id}/workers/${slot.number}`, {
         profile,
         baseline,
+        expectedGeneration: shown.groupGeneration,
         forceTaskId: force ? task?.id : undefined,
         expected:
           force && task

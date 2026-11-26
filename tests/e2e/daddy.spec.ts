@@ -520,6 +520,43 @@ test('supports the phone task board, pool controls and workspace directory choos
   const limit = workers.getByLabel('Maximum workers');
   await limit.selectOption('3');
   await expect(limit).toHaveValue('3');
+  const slot = workers.getByRole('button', { name: 'Configure worker 3' });
+  const session = '/api/daddy/sessions/' + new URL(page.url()).hash.slice('#session/'.length);
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  const before = await board();
+  const choose = async () => {
+    await slot.click();
+    await workers.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra');
+    await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('medium');
+  };
+  await choose();
+  const changeState = (action: string, expectedGeneration: number) =>
+    page.request.post(session + '/' + action, {
+      headers: { 'X-daddyloop-Request': '1' },
+      data: { expectedGeneration },
+    });
+  expect((await changeState('pause', before.group.generation)).status()).toBe(200);
+  await expect(page.locator('button[aria-label="Resume"]')).toBeAttached();
+  const resumed = (await board()).group.generation;
+  expect((await changeState('resume', resumed)).status()).toBe(200);
+  const save = async () => {
+    const result = page.waitForResponse(
+      (response) => response.url().endsWith('/workers/3') && response.request().method() === 'POST',
+    );
+    await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+    return result;
+  };
+  const stale = await save();
+  expect(stale.status()).toBe(409);
+  expect(stale.request().postDataJSON().expectedGeneration).toBe(before.group.generation);
+  expect((await board()).workers.slots[2]?.profile).toBeUndefined();
+  await workers.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.locator('button[aria-label="Pause"]')).toBeAttached();
+  await choose();
+  const fresh = await save();
+  expect(fresh.request().postDataJSON().expectedGeneration).toBe(resumed);
+  expect(fresh.status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra · medium');
   await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
@@ -1578,6 +1615,9 @@ test('shows quota remaining on a phone and requires confirmation before spending
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
   await login(page);
   await create(page, 'GitHub auto-merge settings', Date.now());
+  // This case verifies persistence on a stable revision. The stale revision path
+  // is covered by the task report's confirmation tests.
+  await expect(page.locator('.daddy-work-item').first()).toContainText('Ready for review');
   await page.getByRole('button', { name: 'Session settings' }).click();
   const dialog = page.getByRole('dialog');
   const sessionSwitch = dialog.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ });
@@ -1773,6 +1813,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
         }),
   );
   let detailUnavailable = true;
+  let intermediate = false;
   let delayDetails: Promise<void> | undefined;
   let detailsWaiting: (() => void) | undefined;
   await page.route('**/api/tasks/' + id, async (route) => {
@@ -1788,8 +1829,8 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       task: {
         ...detail.task,
         generation: task.generation + stage,
-        title: 'Report snapshot ' + stage,
-        state,
+        title: intermediate ? 'Intermediate CI snapshot' : 'Report snapshot ' + stage,
+        state: intermediate ? 'awaiting_checks' : state,
         revision,
       },
     };
@@ -1829,6 +1870,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       detailsWaiting = resolve;
     });
     state = next;
+    intermediate = next === 'awaiting_plan_approval';
     stage++;
     try {
       await expect(report.getByText('Test stage ' + stage)).toBeVisible();
@@ -1842,6 +1884,12 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       detailsWaiting = undefined;
       delayDetails = undefined;
       release();
+    }
+    if (intermediate) {
+      await expect(report.getByRole('heading', { name: 'Intermediate CI snapshot' })).toBeVisible();
+      for (const label of actions)
+        await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(0);
+      intermediate = false;
     }
     await expect(report.getByRole('heading', { name: 'Report snapshot ' + stage })).toBeVisible();
     for (const label of actions)
