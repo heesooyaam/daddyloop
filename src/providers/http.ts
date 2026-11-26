@@ -48,7 +48,11 @@ export class ProviderHttp {
         response.status === 404 ? 404 : 502,
       );
     }
-    return bodyText ? (JSON.parse(bodyText) as T) : (undefined as T);
+    try {
+      return bodyText ? (JSON.parse(bodyText) as T) : (undefined as T);
+    } catch {
+      throw new AppError('provider_shape', 'Provider returned invalid JSON', 502);
+    }
   }
   async pages<T>(path: string): Promise<T[]> {
     const all: T[] = [];

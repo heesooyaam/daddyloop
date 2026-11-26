@@ -7,7 +7,10 @@ import {
   type Task,
 } from './types.js';
 
-export function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+export function sameOpenTarget(
+  expected: Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl'> | undefined,
+  current: PullRequest,
+) {
   return (
     current.state === 'open' &&
     !!expected &&

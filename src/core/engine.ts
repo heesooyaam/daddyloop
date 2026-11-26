@@ -48,6 +48,13 @@ import type { ReviewProvider } from '../providers/provider.js';
 import { redact } from './security.js';
 import { inheritedProfiles } from './agents.js';
 
+const isDraftStartRetry = (error: unknown) =>
+  error instanceof GitHubRetryError ||
+  (error instanceof AppError &&
+    /^(?:provider_(?:408|429|5[0-9]{2}|unreachable|shape)|draft_creation_race|draft_create_unconfirmed|draft_revision_changed|draft_lookup_pending|ambiguous_write)$/.test(
+      error.code,
+    ));
+
 const interruptedSubmission =
   'PR submission was interrupted. Submit again to reconcile its native result before retrying.';
 const reviewRetryInstruction =
@@ -251,6 +258,9 @@ export class Engine {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       const entryGeneration = task.generation;
+      const entryGroupGeneration = task.groupId
+        ? this.store.getGroup(task.groupId).generation
+        : undefined;
       if (this.store.busy(id))
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
@@ -281,19 +291,17 @@ export class Engine {
         );
       const provider = this.provider(prRef(task));
       if (task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
-      const pr = await provider.getPR(prRef(task));
       if (task.draftStart) {
-        if (task.draftStart.retry) retry = true;
-        clarification ??= task.draftStart.clarification;
-        if (
-          !sameRevision(task.draftStart.revision, pr) ||
-          !sameOpenTarget(task.pr, pr) ||
-          pr.draft ||
-          this.prAction(task, pr).kind === 'repair'
-        ) {
-          return this.settleMovedDraftStart(task, pr, provider);
-        }
+        if (retry) task.draftStart.retry = true;
+        if (clarification !== undefined) task.draftStart.clarification = clarification;
+        return this.startGitHubDraft(task, provider);
       }
+      if (task.reviewAdmission) {
+        if (!retry && task.state !== 'queued')
+          throw new AppError('review_exists', 'Retry the original GitHub review.');
+        return this.enqueueReview(task, retry, clarification);
+      }
+      const pr = await provider.getPR(prRef(task));
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
       if (confirmedSupersededDraft(task)) {
         if (pr.head !== task.pendingAuthorHead || !sameOpenTarget(task.pr, pr)) {
@@ -365,152 +373,293 @@ export class Engine {
           'review_exists',
           'This revision already has a review. Discuss it or use retry to continue an interrupted run.',
         );
-      if (!task.review && !task.draftStart) task.round++;
+      if (!task.review) task.round++;
       task.pr = pr;
       task.revision = revisionOf(pr);
       if (!task.review && task.ref.provider === 'github') {
-        if (!task.draftStart) {
-          const latest = this.store.getTask(id);
-          const group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
-          if (
-            latest.generation !== entryGeneration ||
-            latest.state === 'paused' ||
-            group?.deletedAt ||
-            group?.deletion ||
-            group?.daddyState === 'paused' ||
-            group?.daddyState === 'archived'
-          )
-            return latest;
-          task.draftStart = {
-            marker: `daddyloop:${task.id}:${task.generation}:${task.round}`,
-            revision: task.revision,
-            retry,
-            clarification,
-          };
-          // A previous saved fix is already confirmed on this exact PR head here.
-          if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
-          this.state(task, 'queued', 'Preparing the GitHub review draft');
-        }
-        try {
-          await this.broker.ensureReview(task);
-        } catch (error) {
-          if (!this.currentReviewStart(task)) return this.store.getTask(id);
-          if (
-            error instanceof AppError &&
-            (error instanceof GitHubRetryError ||
-              /^(?:provider_(?:408|500|502|503|504)|provider_unreachable|draft_creation_race|draft_create_unconfirmed|draft_revision_changed)$/.test(
-                error.code,
-              ))
-          ) {
-            const delay = Math.min(300000, (task.draftStart.delay ?? 7500) * 2);
-            task.draftStart.delay = delay;
-            task.draftStart.retryAt = Math.max(
-              Date.now() + delay,
-              error instanceof GitHubRetryError ? error.until : 0,
-            );
-            this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
-            this.store.event(id, 'review.create_deferred', {
-              marker: task.draftStart.marker,
-              code: error.code,
-              retryAt: task.draftStart.retryAt,
-            });
-            return task;
-          }
-          this.state(task, 'needs_input', redact(String(error)));
-          throw error;
-        }
-        if (!this.currentReviewStart(task)) return this.store.getTask(id);
-        delete task.draftStart;
-      } else await this.broker.ensureReview(task);
-      task.reviewFinished = false;
-      this.store.transaction(() => {
-        task.pendingFix = undefined;
-        if (clarification?.trim()) this.rememberClarification(task, clarification);
-        this.state(task, 'reviewing', `Independent review, round ${task.round}`);
-        this.store.enqueue(
-          task,
-          'reviewer',
-          'review',
-          retry
-            ? clarification?.trim()
-              ? clarifiedReviewPrefix + clarification.trim()
-              : reviewRetryInstruction
-            : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
-        );
-      });
-      return task;
+        const latest = this.store.getTask(id);
+        if (
+          latest.generation !== entryGeneration ||
+          !this.currentReviewStart(latest) ||
+          (latest.groupId &&
+            this.store.getGroup(latest.groupId).generation !== entryGroupGeneration)
+        )
+          return latest;
+        const { branch, targetBranch, cloneUrl, targetCloneUrl } = pr;
+        task.draftStart = {
+          marker: `daddyloop:${task.id}:${task.generation}:${task.round}`,
+          ref: prRef(task),
+          target: { branch, targetBranch, cloneUrl, targetCloneUrl },
+          revision: task.revision,
+          retry,
+          clarification,
+        };
+        if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
+        this.state(task, 'queued', 'Preparing the GitHub review draft');
+        return this.startGitHubDraft(task, provider);
+      }
+      await this.broker.ensureReview(task);
+      return this.enqueueReview(task, retry, clarification);
     });
   }
-  private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
-    // Settle the old intent before routing the new revision. Never replay an old POST.
-    const intent = task.draftStart!;
-    const existing = await provider.findReview(prRef(task), intent.marker);
-    if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-    if (existing) {
-      if (
-        existing.revision.head !== intent.revision.head ||
-        (intent.owner && existing.authorId !== intent.owner)
-      )
-        throw new AppError('draft_changed', 'The marked review belongs to a different commit.');
-      const handle = { ...existing, revision: intent.revision };
-      task.review = await this.broker.outbox.perform(
-        task.id,
-        intent.marker,
-        intent.revision,
-        async () => handle,
-        async () => ({ found: true, value: handle }),
-      );
-      task.snapshot = await provider.getReview(prRef(task), task.review);
-      if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-      if (
-        task.snapshot.status !== 'draft' ||
-        task.snapshot.authorId !== existing.authorId ||
-        task.snapshot.comments.length ||
-        task.snapshot.body !== `Review in progress.\n\n<!-- ${intent.marker} -->`
-      ) {
-        delete task.draftStart;
-        task.resumeState = 'reviewing';
-        this.state(task, 'needs_input', draftInspectionRequired);
-        return task;
-      }
-      if (
-        sameOpenTarget(task.pr, pr) &&
-        pr.draft === false &&
-        intent.revision.head === pr.head &&
-        this.prAction(task, pr).kind !== 'repair'
-      ) {
-        const draft = task.snapshot;
-        this.store.transaction(() => {
-          delete task.draftStart;
-          if (intent.clarification) this.rememberClarification(task, intent.clarification);
-          this.restartNativeReview(
-            task,
-            pr,
-            draft,
-            'The target branch advanced. Reviewing the updated change.',
-          );
-        });
-        return task;
-      }
-      // This verified empty placeholder may be retired using the normal guarded operation.
-      if (!(await this.retireSupersededDraft(task, provider))) return task;
-    }
-    if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-    delete task.draftStart;
-    task.review = undefined;
-    task.snapshot = undefined;
-    if (!sameOpenTarget(task.pr, pr) || pr.draft) {
-      this.state(
+
+  private enqueueReview(task: Task, retry: boolean, clarification?: string) {
+    this.store.transaction(() => {
+      delete task.draftStart;
+      task.reviewFinished = false;
+      task.pendingFix = undefined;
+      if (clarification?.trim()) this.rememberClarification(task, clarification);
+      this.state(task, 'reviewing', `Independent review, round ${task.round}`);
+      this.store.enqueue(
         task,
-        'needs_input',
-        'The PR is closed, a draft or its branches changed. Inspect it before starting review.',
+        'reviewer',
+        'review',
+        retry
+          ? clarification?.trim()
+            ? clarifiedReviewPrefix + clarification.trim()
+            : reviewRetryInstruction
+          : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
       );
-      return task;
-    }
-    this.invalidate(task, pr);
-    this.state(task, 'queued', 'New revision is ready for review');
+    });
     return task;
   }
+
+  private async startGitHubDraft(task: Task, provider: ReviewProvider) {
+    const intent = task.draftStart!;
+    const ref = prRef(task);
+    const target = intent.target ?? task.pr;
+    const groupGeneration = task.groupId ? this.store.getGroup(task.groupId).generation : undefined;
+    const current = () =>
+      this.currentReviewStart(task) &&
+      (!task.groupId || this.store.getGroup(task.groupId).generation === groupGeneration);
+    const openTarget = (pr: PullRequest) =>
+      sameOpenTarget(target, pr) && pr.targetCloneUrl === target?.targetCloneUrl && !pr.draft;
+    const ready = (pr: PullRequest) =>
+      openTarget(pr) &&
+      (sameRevision(intent.revision, pr) || this.prAction(task, pr).kind !== 'repair');
+    try {
+      if (
+        intent.ref &&
+        (intent.ref.host !== ref.host ||
+          intent.ref.repo !== ref.repo ||
+          intent.ref.number !== ref.number ||
+          intent.ref.provider !== ref.provider)
+      )
+        throw new AppError('draft_changed', 'The pull request changed during draft recovery.');
+      const observed = await provider.getPR(ref);
+      if (!current()) return this.store.getTask(task.id);
+      const handle = await this.broker.resolveGitHubDraft(
+        task,
+        provider,
+        async (owner) => {
+          const fresh = await provider.getPR(ref);
+          if ((await this.provider(ref).reviewAccount?.()) !== owner)
+            throw new AppError(
+              'draft_owner_changed',
+              'The GitHub account changed before draft creation.',
+            );
+          if (!ready(fresh) || !sameRevision(intent.revision, fresh))
+            throw new AppError('draft_revision_changed', 'The PR changed before draft creation.');
+          if (!current())
+            throw new AppError('stale_task', 'The task changed before draft creation.');
+          const latest = this.store.getTask(task.id);
+          if (latest.draftStart!.owner && latest.draftStart!.owner !== owner)
+            throw new AppError(
+              'draft_owner_changed',
+              'The GitHub account changed before draft creation.',
+            );
+          latest.draftStart!.owner = intent.owner = owner;
+          this.store.saveTask(latest);
+        },
+        ready(observed) && sameRevision(intent.revision, observed),
+      );
+      const account = handle && (await this.provider(ref).reviewAccount?.());
+      const pr = await provider.getPR(ref);
+      const compatible =
+        ready(pr) &&
+        (sameRevision(intent.revision, pr) ||
+          (intent.revision.head === pr.head &&
+            intent.revision.base !== pr.base &&
+            !!(await provider.targetAdvanced?.(ref, intent.revision.base, pr.base)) &&
+            (await provider.getPR(ref).then((fresh) => ready(fresh) && sameRevision(pr, fresh)))));
+      if (!current()) return this.store.getTask(task.id);
+      if (handle) {
+        task.review = handle;
+        if (provider.reviewAccount) task.reviewAdmission = handle.id;
+        const snapshot = task.snapshot;
+        if (
+          !compatible ||
+          !sameRevision(handle.revision, intent.revision) ||
+          (provider.reviewAccount &&
+            (!snapshot ||
+              account !== intent.owner ||
+              !this.initialDraftMatches(task, snapshot, intent.owner)))
+        ) {
+          delete task.draftStart;
+          task.reviewFinished = false;
+          task.resumeState = 'reviewing';
+          this.state(task, 'needs_input', draftInspectionRequired);
+          return task;
+        }
+        if (!sameRevision(intent.revision, pr) && snapshot) {
+          this.store.transaction(() => {
+            delete task.draftStart;
+            if (intent.clarification?.trim())
+              this.rememberClarification(task, intent.clarification);
+            this.restartNativeReview(
+              task,
+              pr,
+              snapshot,
+              'The target branch advanced. Reviewing the updated change.',
+            );
+            task.reviewAdmission = handle.id;
+            this.store.saveTask(task);
+          });
+          return task;
+        }
+        task.pr = pr;
+        task.revision = revisionOf(pr);
+        return this.enqueueReview(task, intent.retry, intent.clarification);
+      }
+      if (ready(pr) && sameRevision(intent.revision, pr))
+        throw new AppError(
+          'draft_revision_changed',
+          'The PR changed while checking draft creation.',
+        );
+      delete task.draftStart;
+      if (!openTarget(pr)) {
+        this.state(
+          task,
+          'needs_input',
+          'The PR or its branches changed. Inspect it before starting review.',
+        );
+        return task;
+      }
+      this.invalidate(task, pr);
+      this.state(task, 'queued', 'New revision is ready for review');
+      return task;
+    } catch (error) {
+      if (!current()) return this.store.getTask(task.id);
+      if (isDraftStartRetry(error)) {
+        const delay = Math.min(300000, (intent.delay ?? 7500) * 2);
+        intent.delay = delay;
+        intent.retryAt = Math.max(
+          Date.now() + delay,
+          error instanceof GitHubRetryError ? error.until : 0,
+        );
+        this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
+        return task;
+      }
+      this.state(task, 'needs_input', redact(String(error)));
+      throw error;
+    }
+  }
+
+  private initialDraftMatches(task: Task, snapshot: ReviewSnapshot, owner?: string) {
+    const handle = task.review!;
+    return (
+      !!owner &&
+      snapshot.authorId === owner &&
+      handle.authorId === owner &&
+      (!task.draftStart || task.draftStart.marker === handle.marker) &&
+      snapshot.status === 'draft' &&
+      sameRevision(handle.revision, snapshot.revision) &&
+      !this.draftHasWork(handle, snapshot)
+    );
+  }
+
+  async checkInitialGitHubDraft(job: Job) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (
+        !task.review ||
+        task.reviewAdmission !== task.review.id ||
+        task.generation !== job.generation ||
+        task.state !== 'reviewing'
+      )
+        return false;
+      const ref = prRef(task);
+      const provider = this.provider(ref);
+      const [owner, snapshot] = await Promise.all([
+        provider.reviewAccount?.(),
+        provider.getReview(ref, task.review),
+      ]);
+      const pr = await provider.getPR(ref);
+      const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (
+        this.store.getTask(task.id).generation !== job.generation ||
+        (group &&
+          (group.generation !== job.groupGeneration ||
+            group.deletedAt ||
+            group.deletion ||
+            group.daddyState === 'paused' ||
+            group.daddyState === 'archived'))
+      )
+        return false;
+      const open =
+        sameOpenTarget(task.pr, pr) && task.pr?.targetCloneUrl === pr.targetCloneUrl && !pr.draft;
+      if (open && this.initialDraftMatches(task, snapshot, owner)) {
+        if (sameRevision(task.revision, pr)) {
+          delete task.reviewAdmission;
+          this.store.saveTask(task);
+          return true;
+        }
+        if (
+          task.revision?.head === pr.head &&
+          task.revision.base !== pr.base &&
+          (await provider.targetAdvanced?.(ref, task.revision.base, pr.base))
+        ) {
+          const latest = await provider.getPR(ref);
+          const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+          if (
+            this.store.getTask(task.id).generation !== job.generation ||
+            currentGroup?.generation !== group?.generation ||
+            currentGroup?.deletedAt ||
+            currentGroup?.deletion ||
+            currentGroup?.daddyState === 'paused' ||
+            currentGroup?.daddyState === 'archived'
+          )
+            return false;
+          if (
+            !sameRevision(pr, latest) ||
+            !sameOpenTarget(pr, latest) ||
+            latest.draft ||
+            pr.targetCloneUrl !== latest.targetCloneUrl
+          )
+            throw new AppError(
+              'draft_revision_changed',
+              'The PR moved again before reviewer admission.',
+            );
+          this.store.transaction(() => {
+            this.restartNativeReview(
+              task,
+              latest,
+              snapshot,
+              'The target branch advanced. Reviewing the updated change.',
+            );
+            task.reviewAdmission = task.review!.id;
+            this.store.saveTask(task);
+          });
+          return false;
+        }
+      }
+      task.snapshot = snapshot;
+      task.resumeState = 'reviewing';
+      this.state(task, 'needs_input', draftInspectionRequired);
+      return false;
+    }).catch((error: unknown) => {
+      if (isDraftStartRetry(error) && !(error instanceof GitHubRetryError))
+        throw new GitHubRetryError(
+          'github_read_unavailable',
+          redact(String(error)),
+          Date.now() + 15000,
+          false,
+          503,
+        );
+      throw error;
+    });
+  }
+
   private currentReviewStart(task: Task) {
     const current = this.store.getTask(task.id);
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
@@ -845,6 +994,7 @@ export class Engine {
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
+    delete task.reviewAdmission;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
@@ -1673,7 +1823,7 @@ export class Engine {
   }
   private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
     let task = this.store.getTask(id);
-    if (task.draftStart) return task; // Draft creation reconciles its own outstanding native write.
+    if (task.draftStart || task.reviewAdmission) return task;
     if (task.state === 'paused' || isTicket(task) || this.reviewWaitingForResources(task))
       return task;
     if (task.state === 'awaiting_publication' && task.partialReview) return task;
@@ -2767,6 +2917,10 @@ export class Engine {
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
+        if (task.reviewAdmission && task.state === 'paused') {
+          this.state(task, 'queued', 'Checking the original GitHub review draft');
+          return task;
+        }
         if (task.draftStart && !task.review) {
           this.state(task, 'queued', 'Waiting to retry the GitHub review draft');
           return task;
@@ -3012,6 +3166,25 @@ export class Engine {
         )
       )
         this.state(task, 'needs_input', interruptedSubmission);
+    for (const job of this.store.jobs()) {
+      if (job.kind !== 'review' || job.status !== 'running') continue;
+      const task = this.store.getTask(job.taskId);
+      const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (
+        task.reviewAdmission &&
+        task.state === 'reviewing' &&
+        task.generation === job.generation &&
+        (!group ||
+          (group.generation === job.groupGeneration &&
+            !group.deletedAt &&
+            !group.deletion &&
+            group.daddyState !== 'paused' &&
+            group.daddyState !== 'archived'))
+      ) {
+        // The persisted admission check has not completed. The reviewer never started.
+        this.store.saveJob({ ...job, status: 'queued' });
+      }
+    }
     for (const job of this.store.jobs())
       if (
         job.status === 'running' ||

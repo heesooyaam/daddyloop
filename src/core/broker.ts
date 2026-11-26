@@ -8,6 +8,7 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type ReviewHandle,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
@@ -96,58 +97,12 @@ export class Broker {
       task.draftStart?.marker ?? `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
       revision = task.revision!;
-    const create = (replay: boolean) =>
-      provider.createReview(
-        prRef(task),
-        revision,
-        marker,
-        task.draftStart
-          ? async (owner) => {
-              if (replay) {
-                const pr = await provider.getPR(prRef(task));
-                if (!sameOpenTarget(task.pr, pr) || !sameRevision(revision, pr) || pr.draft)
-                  throw new AppError(
-                    'draft_revision_changed',
-                    'The PR changed during draft recovery.',
-                  );
-              }
-              const latest = this.store.getTask(task.id);
-              const intent = latest.draftStart;
-              const group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
-              if (
-                !intent ||
-                intent.marker !== marker ||
-                latest.generation !== task.generation ||
-                latest.state === 'paused' ||
-                group?.deletion ||
-                group?.deletedAt ||
-                group?.daddyState === 'paused' ||
-                group?.daddyState === 'archived'
-              )
-                throw new AppError('stale_task', 'The task changed during draft recovery.');
-              if (intent.owner && intent.owner !== owner)
-                throw new AppError(
-                  'draft_owner_changed',
-                  'The GitHub account changed during draft recovery.',
-                );
-              if (!intent.owner) {
-                intent.owner = owner;
-                task.draftStart!.owner = owner;
-                this.store.saveTask(latest);
-              }
-            }
-          : undefined,
-      );
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => create(false),
+      () => provider.createReview(prRef(task), revision, marker),
       async () => {
-        // The GitHub draft create checks all of this account's reviews before writing,
-        // reuses the marked draft and refuses to touch a different pending review.
-        if (task.ref.provider === 'github' && task.draftStart)
-          return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
@@ -155,6 +110,89 @@ export class Broker {
     task.review = review;
     return review;
   }
+
+  async resolveGitHubDraft(
+    task: Task,
+    provider: ReviewProvider,
+    beforeWrite: (owner: string) => Promise<void>,
+    allowCreate: boolean,
+  ) {
+    const intent = task.draftStart!;
+    const { marker, revision } = intent;
+    const ref = intent.ref ?? prRef(task);
+    if (!provider.reviewAccount || !provider.inspectReviewStart || !provider.postReview) {
+      if (!allowCreate) return;
+      return this.ensureReview(task);
+    }
+
+    const owner = await provider.reviewAccount();
+    if (intent.owner && intent.owner !== owner)
+      throw new AppError(
+        'draft_owner_changed',
+        'Reconnect the original GitHub account to recover the draft.',
+      );
+
+    const operation = this.store.db
+      .prepare('SELECT status, result FROM operations WHERE task_id=? AND id=?')
+      .get(task.id, marker);
+    const confirmed =
+      operation?.status === 'done'
+        ? (JSON.parse(String(operation.result)) as ReviewHandle)
+        : undefined;
+    if (operation && !intent.owner)
+      throw new AppError(
+        'draft_owner_unknown',
+        'The original GitHub account was not recorded. Inspect the existing review before continuing.',
+      );
+    const observed = confirmed ? undefined : await provider.inspectReviewStart(ref, marker, owner);
+    const match = confirmed ?? observed?.match;
+    if (!match) {
+      if (operation)
+        throw new AppError(
+          'draft_lookup_pending',
+          'Waiting for the original GitHub review to become visible.',
+        );
+      if (!allowCreate) return;
+      if (observed?.occupied)
+        throw new AppError(
+          'draft_occupied',
+          'A different pending GitHub review occupies this account.',
+        );
+      await beforeWrite(owner);
+    }
+
+    // Save the native ID before reading the contents. The marker can disappear if the
+    // account holder edits or submits the draft while GitHub is still serving stale lists.
+    const handle = await this.outbox.perform<ReviewHandle>(
+      task.id,
+      marker,
+      revision,
+      () =>
+        match
+          ? Promise.resolve({ ...match, revision })
+          : provider.postReview!(ref, revision, marker, owner),
+      async () => (match ? { found: true, value: { ...match, revision } } : { found: false }),
+      (error) =>
+        error instanceof AppError &&
+        [
+          'provider_400',
+          'provider_401',
+          'provider_403',
+          'provider_404',
+          'provider_422',
+          'provider_429',
+          'draft_creation_race',
+        ].includes(error.code),
+    );
+    task.snapshot = await provider.getReview(ref, handle);
+    if (task.snapshot.status === 'missing' && !task.snapshot.authorId)
+      throw new AppError(
+        'draft_lookup_pending',
+        'Waiting for the original GitHub review to become visible.',
+      );
+    return handle;
+  }
+
   reconcileDraftEdits(task: Task, draft: ReviewSnapshot) {
     const review = task.review!;
     if (

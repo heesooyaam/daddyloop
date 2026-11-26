@@ -267,8 +267,12 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
+  /** Native review ID awaiting its first reviewer admission check. */
+  reviewAdmission?: string;
   draftStart?: {
     marker: string;
+    ref?: PRRef;
+    target?: Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl' | 'targetCloneUrl'>;
     owner?: string;
     revision: Revision;
     retry: boolean;

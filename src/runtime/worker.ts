@@ -567,9 +567,10 @@ export class Worker {
         job.status = 'completed';
         return;
       }
-      const startingPR = isTicket(task)
-        ? undefined
-        : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const startingPR =
+        isTicket(task) || (job.kind === 'review' && task.reviewAdmission)
+          ? undefined
+          : await this.engine.provider(prRef(task)).getPR(prRef(task));
       if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
@@ -690,8 +691,18 @@ export class Worker {
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
       } else if (job.kind === 'fix') {
-        const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
-        if (actual.status !== 'published')
+        const provider = this.engine.provider(prRef(task));
+        const actual = await provider.getReview(prRef(task), task.review!);
+        const freshPR = await provider.getPR(prRef(task));
+        if (
+          actual.status !== 'published' ||
+          !sameRevision(actual.revision, task.review!.revision) ||
+          (task.review!.authorId && actual.authorId !== task.review!.authorId) ||
+          !sameOpenTarget(startingPR, freshPR) ||
+          !sameRevision(startingPR, freshPR) ||
+          startingPR?.targetCloneUrl !== freshPR.targetCloneUrl ||
+          freshPR.draft
+        )
           throw new Error(
             'The published review changed before the author started; feedback was not released.',
           );
@@ -725,6 +736,18 @@ export class Worker {
           (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
         );
       };
+      if (
+        job.kind === 'review' &&
+        task.reviewAdmission &&
+        !(await this.engine.checkInitialGitHubDraft(job))
+      ) {
+        job.status = 'cancelled';
+        return;
+      }
+      if (abort.signal.aborted) {
+        job.status = 'cancelled';
+        return;
+      }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
