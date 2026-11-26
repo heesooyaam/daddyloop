@@ -4,8 +4,8 @@ import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { dynamicTools } from '../src/core/broker.js';
 import { reviewDecisionTool } from '../src/core/review-decisions.js';
-import { codexInputLimit } from '../src/runtime/agent.js';
-import type { Decision } from '../src/core/types.js';
+import { codexInputLimit, taskSession } from '../src/runtime/agent.js';
+import { prRef, type Decision, type Job, type Task } from '../src/core/types.js';
 import { CodexRuntime } from '../src/modules/agents/codex/runtime.js';
 import { buildContext } from '../src/runtime/context.js';
 import { fixture } from './helpers.js';
@@ -581,5 +581,77 @@ it('keeps linked task context and published findings on a correction without rep
     expect(context).not.toContain('An unrelated backlog item');
   } finally {
     await f.close();
+  }
+});
+
+it('routes a missing behavior test to the worker and reviews its correction on the next pinned head', async () => {
+  const f = await fixture();
+  const session = (task: Task, job: Job) =>
+    taskSession({
+      task,
+      job,
+      cwd: '/tmp',
+      signal: new AbortController().signal,
+      prompt: buildContext(f.store, task, job),
+      onSession: () => {},
+      onEvent: () => {},
+      onTool: async () => undefined,
+    });
+  try {
+    await f.engine.review(f.task.id);
+    const initial = f.store.getTask(f.task.id);
+    const first = f.store.claim()!;
+    const firstReview = session(initial, first);
+    expect(firstReview.readOnly).toBe(true);
+    expect(firstReview.instructions).toContain('missing or would also pass on the broken code');
+    expect(first.input).toContain('all confirmed blockers together');
+    // Planning and report-only work keep their existing acceptance contract.
+    expect(session({ ...initial, kind: 'plan' }, first).instructions).not.toContain(
+      'blocking native finding',
+    );
+    expect(session({ ...initial, reportOnly: true }, first).instructions).not.toContain(
+      'blocking native finding',
+    );
+    const body =
+      'Changing a setting is tested. Add a case that clears it from Telegram and observes the saved profile.';
+    const added = (await f.engine.broker.call(first, 'add_comment', {
+      key: 'clear-setting',
+      body,
+    })) as { id: string };
+    await f.engine.completeJob(first, f.result());
+    f.store.saveJob({ ...first, status: 'completed' });
+    await f.engine.publish(initial.id);
+    const fixing = f.store.getTask(initial.id);
+    expect(fixing.state).toBe('fixing');
+    const author = f.store.claim()!;
+    const fix = session(fixing, author);
+    expect(fix.readOnly).toBe(false);
+    expect(fix.instructions).toContain('permanent automated regression test');
+    expect(fix.prompt).toContain(body);
+    await f.provider.advance(prRef(fixing));
+    await f.engine.completeJob(author, f.result());
+    f.store.saveJob({ ...author, status: 'completed' });
+    await f.engine.review(initial.id);
+    const corrected = f.store.getTask(initial.id);
+    const repeat = f.store.claim()!;
+    expect(corrected.revision?.head).not.toBe(initial.revision?.head);
+    expect(repeat.input).toContain('Check the correction on the pinned revision');
+    expect(session(corrected, repeat).prompt).toContain(added.id);
+    const legacy = {
+      ...repeat,
+      input:
+        'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
+    };
+    expect(buildContext(f.store, corrected, legacy)).toContain(repeat.input);
+    expect(
+      buildContext(f.store, corrected, { ...repeat, input: 'Check retry after 503.' }),
+    ).toContain('Check retry after 503.');
+
+    await f.engine.completeJob(repeat, f.result({ verifiedCommentIds: [added.id] }));
+    f.store.saveJob({ ...repeat, status: 'completed' });
+    await f.engine.publish(initial.id);
+    expect(f.store.getTask(initial.id).state).toBe('complete');
+  } finally {
+    f.store.close();
   }
 });

@@ -1,3 +1,4 @@
+import { nativeReviewInstruction } from './instructions.js';
 import {
   nextPrAction,
   completionGate,
@@ -435,7 +436,7 @@ export class Engine {
             ? clarification?.trim()
               ? clarifiedReviewPrefix + clarification.trim()
               : reviewRetryInstruction
-            : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
+            : nativeReviewInstruction(task),
         );
       });
       return task;
