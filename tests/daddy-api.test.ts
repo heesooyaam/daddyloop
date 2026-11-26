@@ -839,6 +839,7 @@ it('merges independent instruction elements and rejects an overlapping patch ato
             target: 'preset-order',
             before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
             after: [presetB.id, presetC.id, presetD.id, presetE.id, presetA.id],
+            moved: [presetA.id],
           },
         ],
         first = reverse ? move : remove,
@@ -863,6 +864,65 @@ it('merges independent instruction elements and rejects an overlapping patch ato
           : [presetB.id, presetC.id, presetD.id, presetE.id],
       );
     }
+
+    for (const removed of [presetD, presetE])
+      for (const reverse of [false, true]) {
+        const adjacent = f.daddy.create({
+            workspaceId: f.workspace.id,
+            instructions: {
+              daddy: {},
+              worker: { prompt: 'Keep adjacent edit atomic' },
+              presets: [
+                selected(presetA),
+                selected(presetB),
+                selected(presetC),
+                selected(presetD),
+                selected(presetE),
+              ],
+            },
+          }),
+          remove = [
+            { target: 'preset', id: removed.id, before: state(removed), after: null },
+            {
+              target: 'preset-order',
+              before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+              after: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id].filter(
+                (id) => id !== removed.id,
+              ),
+              moved: [],
+            },
+          ],
+          moveD = [
+            {
+              target: 'preset-order',
+              before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+              after: [presetA.id, presetB.id, presetC.id, presetE.id, presetD.id],
+              moved: [presetD.id],
+            },
+          ],
+          first = reverse ? moveD : remove,
+          second = [
+            {
+              target: 'worker.prompt',
+              before: 'Keep adjacent edit atomic',
+              after: 'Do not save',
+            },
+            ...(reverse ? remove : moveD),
+          ];
+        expect((await patchInstructions(adjacent.id, first)).statusCode).toBe(200);
+        const result = await patchInstructions(adjacent.id, second);
+        if (removed.id === presetD.id) {
+          expect(result.statusCode).toBe(409);
+          expect(f.daddy.group(adjacent.id).instructions?.worker.prompt).toBe(
+            'Keep adjacent edit atomic',
+          );
+        } else {
+          expect(result.statusCode, result.body).toBe(200);
+          expect(
+            f.daddy.group(adjacent.id).instructions?.presets?.map((entry) => entry.preset.id),
+          ).toEqual([presetA.id, presetB.id, presetC.id, presetD.id]);
+        }
+      }
 
     for (const reverse of [false, true]) {
       const independent = f.daddy.create({

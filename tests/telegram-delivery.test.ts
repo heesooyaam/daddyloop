@@ -65,6 +65,33 @@ it('recognizes a registration prompt saved before prompt bindings existed', asyn
   try {
     await f.queue.send({ chatId: 7 }, new TelegramText().add('Workspace name'));
     expect(f.queue.replyRegistration(7, 1, 7)).toEqual({ id: '', step: 'unknown' });
+    await f.queue.send(
+      { chatId: 7 },
+      new TelegramText().add(
+        '⚠️ Could not complete the action\n\nUse an HTTPS or SSH repository URL without query parameters',
+      ),
+    );
+    expect(f.queue.replyRegistration(7, 2, 7)).toEqual({ id: '', step: 'unknown' });
+    await f.queue.send({ chatId: 7 }, new TelegramText().add('Workspace name for the project'), {
+      groupId: 'ordinary-session',
+    });
+    expect(f.queue.replyRegistration(7, 3, 7)).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+it('does not classify registration result buttons as input prompts', async () => {
+  const f = fixture();
+  try {
+    await f.queue.send(
+      { chatId: 7 },
+      {
+        ...new TelegramText().add('Repository saved'),
+        buttons: [[{ text: 'Continue', callback_data: 'dad-workspace-new:fixture' }]],
+      },
+      { key: 'registration:legacy-result' },
+    );
+    expect(f.queue.replyRegistration(7, 1, 7)).toBeUndefined();
   } finally {
     await f.close();
   }

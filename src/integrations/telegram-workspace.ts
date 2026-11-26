@@ -2253,7 +2253,9 @@ export class TelegramWorkspace {
       const message = reply.messages[index]!;
       if (message.delivered) continue;
       await this.api.send(message.destination, message.content, undefined, {
-        key: `registration:${updateId}:${index}`,
+        key: message.binding
+          ? `registration:${updateId}:${index}`
+          : `registration-result:${updateId}:${index}`,
         registration: message.binding,
       });
       message.delivered = true;
@@ -3605,6 +3607,13 @@ export class TelegramWorkspace {
           : undefined;
     try {
       if (registrationPrompt) {
+        if (
+          this.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id) &&
+          this.store.setting(this.registrationReplyKey(update.update_id))
+        ) {
+          await this.sendRegistrationReply(update.update_id);
+          return true;
+        }
         const active = this.store.setting<{ id?: string; step?: 'source' | 'name'; path?: string }>(
             this.registrationKey(destination),
           ),
@@ -3617,10 +3626,14 @@ export class TelegramWorkspace {
         if (!matches) {
           if (callback)
             await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
-          await this.api.send(
-            destination,
-            this.t('This selection expired. Open repository registration again.'),
-          );
+          const content = this.t('This selection expired. Open repository registration again.');
+          this.store.transaction(() => {
+            this.store.db
+              .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+              .run(update.update_id, now());
+            this.saveRegistrationReply(update.update_id, [{ destination, content }]);
+          });
+          await this.sendRegistrationReply(update.update_id);
           return true;
         }
         if (message?.voice || message?.document) {

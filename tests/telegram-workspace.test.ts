@@ -1362,7 +1362,7 @@ it('recovers the expected private registration reply after its delivery record f
         .some((button: any) => String(button.callback_data).startsWith('dad-workspace-new:')),
     );
     expect(continuations).toHaveLength(1);
-    expect(continuations[0]!.options.key).toBe(`registration:${name.update_id}:0`);
+    expect(continuations[0]!.options.key).toBe(`registration-result:${name.update_id}:0`);
   } finally {
     await bot.stop();
     await f.close();
@@ -1548,11 +1548,14 @@ it('keeps explicit replies bound to the delivered registration prompt', async ()
     });
 
     active('source');
-    await bot.handle(reply('https://example.test/repository-a', 103));
+    const staleAddress = reply('https://example.test/repository-a', 103);
+    await bot.handle(staleAddress);
+    await bot.handle(staleAddress);
     expect(f.store.setting<any>('telegram.addWorkspace:7:7:0')).toMatchObject({
       id: 'registration-B',
       step: 'source',
     });
+    expect(sent.filter((item) => String(item.card).includes('selection expired'))).toHaveLength(1);
     expect(sent.at(-1)!.destination).toEqual({ chatId: 7, threadId: undefined });
 
     await bot.stop();

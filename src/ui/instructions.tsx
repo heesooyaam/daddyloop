@@ -4,7 +4,7 @@ import type { SessionInstructions, SkillSnapshot } from '../core/instructions.js
 import type { DaddyApi } from '../client/daddy.js';
 import { useLocale } from './i18n.js';
 import { PresetLibrary } from './preset-library.js';
-import { PresetPicker } from './preset-picker.js';
+import { PresetPicker, type PresetSelectionAction } from './preset-picker.js';
 import { InstructionFile } from './instruction-file.js';
 import { FolderSkills } from './folder-skills.js';
 
@@ -14,6 +14,7 @@ export function InstructionFields({
   onChange,
   onFullImport,
   onBusyChange,
+  onPresetAction,
   scope = 'session',
 }: {
   api: DaddyApi;
@@ -21,6 +22,7 @@ export function InstructionFields({
   onChange: (value: SessionInstructions) => void;
   onFullImport?: (value: SessionInstructions) => void;
   onBusyChange?: (busy: boolean) => void;
+  onPresetAction?: (action: PresetSelectionAction) => void;
   scope?: 'session' | 'preset';
 }) {
   const { t } = useLocale();
@@ -145,9 +147,10 @@ export function InstructionFields({
           api={api}
           onCreate={() => setCreatingPreset(true)}
           value={value?.presets}
-          onChange={(presets) =>
-            change.current({ ...(current.current ?? { daddy: {}, worker: {} }), presets })
-          }
+          onChange={(presets, action) => {
+            change.current({ ...(current.current ?? { daddy: {}, worker: {} }), presets });
+            if (action) onPresetAction?.(action);
+          }}
           onBusyChange={setPresetBusy}
           disabled={importBusy || folderBusy}
         />

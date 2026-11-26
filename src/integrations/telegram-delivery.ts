@@ -131,7 +131,9 @@ export class TelegramDelivery {
         `SELECT json_extract(value,'$.options.registration.id') AS id,
       json_extract(value,'$.options.registration.step') AS step,
       json_extract(value,'$.options.key') AS deliveryKey,
-      json_extract(value,'$.content.text') AS content FROM settings
+      json_extract(value,'$.content.text') AS content,
+      json_extract(value,'$.content.buttons[0][0].callback_data') AS callbackData,
+      json_extract(value,'$.options.groupId') AS groupId FROM settings
       WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
         AND json_extract(value,'$.destination.chatId')=?
         AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
@@ -139,12 +141,21 @@ export class TelegramDelivery {
       .get(this.bot, ownerId, chatId, messageId);
     if (typeof row?.id === 'string' && ['source', 'name'].includes(String(row.step)))
       return { id: row.id, step: row.step as 'source' | 'name' };
+    if (
+      String(row?.callbackData ?? '').startsWith('dad-workspace-new:') ||
+      row?.callbackData === 'dad:workspaces'
+    )
+      return;
     if (String(row?.deliveryKey ?? '').startsWith('registration:'))
       return { id: '', step: 'unknown' };
     if (
-      /Send (?:a repository URL|an HTTPS|the path)|Workspace name|Send a short name|Пришли (?:URL репозитория|HTTPS|путь|короткое имя)|Название воркспейса/i.test(
+      !row?.groupId &&
+      (/^(?:📦 )?(?:Workspace name|Название воркспейса)(?:\n|$)|^(?:Send (?:a repository URL|an HTTPS|the path)|Пришли (?:URL репозитория|HTTPS|путь))/i.test(
         String(row?.content ?? ''),
-      )
+      ) ||
+        /^⚠️ [\s\S]*(?:query parameters|at most 100|не более 100|параметр[^\n]*запрос)/i.test(
+          String(row?.content ?? ''),
+        ))
     )
       return { id: '', step: 'unknown' };
   }

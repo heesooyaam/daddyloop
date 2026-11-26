@@ -134,6 +134,7 @@ const presetOrderChangeSchema = z
     target: z.literal('preset-order'),
     before: z.array(z.string().uuid()).max(16),
     after: z.array(z.string().uuid()).max(16),
+    moved: z.array(z.string().uuid()).max(16).optional(),
   })
   .strict();
 export const sessionInstructionChangesSchema = z
@@ -160,6 +161,9 @@ export const sessionInstructionChangesSchema = z
         code: 'custom',
         message: 'Each instruction element can change only once',
       });
+    const order = value.changes.find((change) => change.target === 'preset-order');
+    if (order?.moved?.some((id) => !order.before.includes(id) || !order.after.includes(id)))
+      context.addIssue({ code: 'custom', message: 'Moved presets must remain selected' });
   });
 export type SessionInstructionChange = z.infer<
   typeof sessionInstructionChangesSchema
@@ -294,6 +298,7 @@ export function applyInstructionChanges(
   current: SessionInstructions | undefined,
   changes: SessionInstructionChange[],
   resolvePreset: (id: string, revision: number) => InstructionPreset,
+  concurrentMoved: string[] = [],
 ): SessionInstructions {
   const next = structuredClone(current ?? { daddy: {}, worker: {} });
   const selection = (entry: AppliedPreset | undefined) =>
@@ -330,11 +335,16 @@ export function applyInstructionChanges(
         order.before.filter((candidate) => shared.includes(candidate)),
         order.after.filter((candidate) => shared.includes(candidate)),
       ),
-      moved = shared.filter((id) => !orderAnchors.includes(id)),
+      moved = order.moved ?? shared.filter((id) => !orderAnchors.includes(id)),
       actualPresent = order.before.filter((id) => orderActual.includes(id)),
       actualAnchors = commonSubsequence(
         actualPresent,
         orderActual.filter((id) => order.before.includes(id)),
+      ),
+      actualMoved = new Set(
+        concurrentMoved.length
+          ? concurrentMoved
+          : actualPresent.filter((id) => !actualAnchors.includes(id)),
       );
     if (
       new Set(order.before).size !== order.before.length ||
@@ -349,7 +359,7 @@ export function applyInstructionChanges(
       if (
         !order.after.includes(id) &&
         orderActual.includes(id) &&
-        (presetChanges.get(id)?.after !== null || !actualAnchors.includes(id))
+        (presetChanges.get(id)?.after !== null || actualMoved.has(id))
       )
         throw new Error('instruction_conflict');
   }

@@ -6,6 +6,7 @@ import { presetParts } from '../core/preset-parts.js';
 import type { DaddyApi } from '../client/daddy.js';
 import { useLocale } from './i18n.js';
 type PresetSummary = ReturnType<InstructionPresets['list']>[number];
+export type PresetSelectionAction = { kind: 'add' | 'remove'; id: string };
 export function PresetPicker({
   api,
   value = [],
@@ -16,7 +17,7 @@ export function PresetPicker({
 }: {
   api: DaddyApi;
   value?: AppliedPreset[];
-  onChange: (value: AppliedPreset[]) => void;
+  onChange: (value: AppliedPreset[], action?: PresetSelectionAction) => void;
   onBusyChange: (busy: boolean) => void;
   disabled?: boolean;
   onCreate: () => void;
@@ -74,7 +75,10 @@ export function PresetPicker({
         controller.signal,
       );
       if (!controller.signal.aborted)
-        change.current([...current.current, { preset, enabled: true, omit: [] }]);
+        change.current([...current.current, { preset, enabled: true, omit: [] }], {
+          kind: 'add',
+          id,
+        });
     } catch (error) {
       if (!controller.signal.aborted) setError((error as Error).message);
     } finally {
@@ -161,7 +165,15 @@ export function PresetPicker({
                     className="daddy-icon"
                     disabled={busy || disabled}
                     aria-label={t('Remove preset {name} from this session', { name: preset.name })}
-                    onClick={() => onChange(value.filter((item) => item !== selected))}
+                    onClick={() =>
+                      onChange(
+                        value.filter((item) => item !== selected),
+                        {
+                          kind: 'remove',
+                          id: preset.id,
+                        },
+                      )
+                    }
                   >
                     <Trash2 size={14} />
                   </button>

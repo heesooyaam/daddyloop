@@ -1847,6 +1847,8 @@ function SessionSettings({
   const originalProfiles = useRef(profiles);
   const originalInstructions = useRef(instructions);
   const originalTitle = useRef(title);
+  const removedPresetIds = useRef(new Set<string>()),
+    movedPresetIds = useRef(new Set<string>());
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
   const overrides = board.workers.slots.filter(
@@ -1924,6 +1926,7 @@ function SessionSettings({
             target: 'preset-order',
             before: originalOrder,
             after: nextOrder,
+            moved: nextOrder.filter((id) => movedPresetIds.current.has(id)),
           });
         void onSave(
           Object.keys(changed).length ? changed : undefined,
@@ -2025,6 +2028,19 @@ function SessionSettings({
         api={api}
         value={instructions}
         onChange={setInstructions}
+        onPresetAction={(action) => {
+          if (action.kind === 'remove') {
+            if (
+              (originalInstructions.current?.presets ?? []).some(
+                (entry) => entry.preset.id === action.id,
+              )
+            )
+              removedPresetIds.current.add(action.id);
+          } else if (removedPresetIds.current.has(action.id)) {
+            removedPresetIds.current.delete(action.id);
+            movedPresetIds.current.add(action.id);
+          }
+        }}
         onFullImport={(value) => {
           setInstructions(value);
           setFullInstructionImport(true);

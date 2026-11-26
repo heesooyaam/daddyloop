@@ -579,7 +579,10 @@ export class Daddy {
       const restartReviews: string[] = [];
       let restartCoordinator = false;
       this.store.transaction(() => {
-        if (input.instructions) group.instructions = input.instructions;
+        if (input.instructions) {
+          group.instructions = input.instructions;
+          this.store.setSetting('instructions.order:' + id, null);
+        }
         if (changeWorkers) {
           group.worker = nextWorker;
           for (const slot of group.workerSlots ?? []) delete slot.profile;
@@ -684,6 +687,7 @@ export class Daddy {
       this.store.transaction(() => {
         group.instructions = instructions;
         this.store.saveGroup(group);
+        this.store.setSetting('instructions.order:' + id, null);
         this.store.event(id, 'daddy.settings', {
           workerLimit: group.workerLimit,
           requestedWorkerLimit: group.requestedWorkerLimit,
@@ -699,6 +703,20 @@ export class Daddy {
   async changeInstructions(id: string, changes: SessionInstructionChange[]) {
     await this.withSessionTasks(id, (group) => {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+      const order = changes.find((change) => change.target === 'preset-order'),
+        currentOrder = (group.instructions?.presets ?? []).map((entry) => entry.preset.id),
+        previousOrder = this.store.setting<{
+          before: string[];
+          after: string[];
+          moved: string[];
+        }>('instructions.order:' + id),
+        concurrentMoved =
+          order &&
+          previousOrder &&
+          JSON.stringify(previousOrder.before) === JSON.stringify(order.before) &&
+          JSON.stringify(previousOrder.after) === JSON.stringify(currentOrder)
+            ? previousOrder.moved
+            : [];
       let instructions: SessionInstructions;
       try {
         const library = new InstructionPresets(this.store);
@@ -715,6 +733,7 @@ export class Daddy {
               );
             return preset;
           },
+          concurrentMoved,
         );
       } catch (error) {
         if (error instanceof Error && error.message === 'instruction_conflict')
@@ -728,6 +747,12 @@ export class Daddy {
       this.store.transaction(() => {
         group.instructions = instructions;
         this.store.saveGroup(group);
+        if (order)
+          this.store.setSetting('instructions.order:' + id, {
+            before: order.before,
+            after: (instructions.presets ?? []).map((entry) => entry.preset.id),
+            moved: order.moved ?? [],
+          });
         this.store.event(id, 'daddy.settings', {
           workerLimit: group.workerLimit,
           requestedWorkerLimit: group.requestedWorkerLimit,
