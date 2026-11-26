@@ -2442,7 +2442,8 @@ export class Engine {
           job.kind === 'plan' &&
           (task.state !== 'implementing' ||
             !task.planning ||
-            task.planning.result?.runId === job.id)
+            task.planning.activeRunId !== (job.firstAttemptId ?? job.id) ||
+            !!task.planning.result)
         )
           return;
         this.store.transaction(() => {
@@ -2474,12 +2475,7 @@ export class Engine {
             task.reviewFinished = true;
             this.state(task, 'complete', 'daddy verified the worker report');
           } else if (job.kind === 'plan') {
-            if (
-              !task.planning ||
-              task.state !== 'implementing' ||
-              task.planning.result?.runId === job.id
-            )
-              return;
+            if (!task.planning) return;
             if (!result.summary.trim()) {
               task.resumeState = 'implementing';
               this.state(task, 'needs_input', 'The planning step returned an empty plan.');
@@ -3561,13 +3557,15 @@ export class Engine {
       delete task.planning.result;
       if (instruction) task.planning.instruction = instruction;
       this.state(task, 'implementing', 'Checking architecture and implementation plan');
-      this.store.enqueue(
+      const plan = this.store.enqueue(
         task,
         'author',
         'plan',
         task.planning.instruction ?? 'Validate the task plan before implementation.',
         actionId,
       );
+      task.planning.activeRunId = plan.id;
+      this.store.saveTask(task);
       return;
     }
     this.state(task, 'implementing', 'The worker is carrying out the task');

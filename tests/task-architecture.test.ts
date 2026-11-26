@@ -73,6 +73,8 @@ it('preserves the planning gate on pause, stale completion, explicit clarificati
     f.store.saveJob({ ...second, status: 'completed' });
     expect(f.store.activeJobs(task.id)).toEqual([]);
     await f.engine.chat(task.id, 'author', 'Keep the old filters.');
+    await f.engine.completeJob(second, result);
+    expect(f.store.jobs(task.id).some((j) => j.kind === 'implement')).toBe(false);
     const answer = f.store.claim()!;
     expect(answer.kind).toBe('plan');
     expect(f.store.getTask(task.id).latestClarification?.text).toBe('Keep the old filters.');

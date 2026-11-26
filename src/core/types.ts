@@ -303,6 +303,7 @@ export interface Task {
   planDocuments?: { path: string; body: string }[];
   reportOnly?: boolean;
   planning?: {
+    activeRunId?: string;
     instruction?: string;
     threadId?: string;
     result?: { text: string; revision: Revision; runId: string };
