@@ -1021,7 +1021,12 @@ export class TelegramDelivery {
     return value ? { key, value } : undefined;
   }
   hasAcknowledgedMessage(destination: TelegramDestination, notificationId: string) {
-    return !!this.messageDelivery(destination, notificationId)?.value.messages.length;
+    const message = this.messageDelivery(destination, notificationId);
+    if (message?.value.messages.length) return true;
+    const identity = digest([destination, notificationIdentity(notificationId)]);
+    const question =
+      this.pendingByNotification.get(identity) ?? this.legacyByNotification.get(identity);
+    return !!question?.value.messages.length;
   }
   private notificationWasSent(notificationId: string) {
     return !!this.store.db

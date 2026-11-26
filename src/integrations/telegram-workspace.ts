@@ -1922,6 +1922,7 @@ export class TelegramWorkspace {
     return (
       !!deferred &&
       ((deferred.blockedUntil ?? 0) > Date.now() ||
+        (event.type === 'daddy.message' && event.id > 0) ||
         (event.id < 0 &&
           deferred.attempts > Number((event.data as { retryAttempt?: number }).retryAttempt ?? 0) &&
           deferred.nextAt > Date.now()) ||
@@ -2213,7 +2214,7 @@ export class TelegramWorkspace {
               const finishPartial =
                 !!messageNotificationId &&
                 !!this.api.delivery?.hasAcknowledgedMessage(destination, messageNotificationId);
-              if (messageNotificationId)
+              if (messageNotificationId && !finishPartial)
                 this.api.delivery?.discardDeferred(
                   destination,
                   messageNotificationId,
@@ -2227,7 +2228,7 @@ export class TelegramWorkspace {
                 const finishPartial =
                   !!messageNotificationId &&
                   !!this.api.delivery?.hasAcknowledgedMessage(destination, messageNotificationId);
-                if (messageNotificationId)
+                if (messageNotificationId && !finishPartial)
                   this.api.delivery?.discardDeferred(
                     destination,
                     messageNotificationId,
@@ -2402,11 +2403,16 @@ export class TelegramWorkspace {
         })
         .map((message) => message.runId),
     );
-    for (const message of messages.filter(
-      (message) =>
-        ['user', 'agent'].includes(message.sender) &&
-        !(message.phase === 'progress' && deliveredFinalRuns.has(message.runId)),
-    )) {
+    const pendingNotification = this.store.db.prepare(
+      "SELECT 1 FROM notifications WHERE status='pending' AND id=?",
+    );
+    for (const message of messages.filter((message) => {
+      if (!['user', 'agent'].includes(message.sender)) return false;
+      if (message.phase !== 'progress' || !deliveredFinalRuns.has(message.runId) || !destination)
+        return true;
+      const notificationId = `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message.id}:progress`;
+      return !!pendingNotification.get(notificationId);
+    })) {
       const recovery = destination
         ? {
             destination,
