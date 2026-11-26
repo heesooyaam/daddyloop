@@ -78,6 +78,70 @@ it('lets the scheduler publish PR work and wakes daddy when that automatic step 
   }
 });
 
+it('keeps simultaneous review disputes separate and ignores a late question about a resolved dispute', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    for (const id of ['first', 'second']) {
+      const t = await f.daddy.createTask(group.id, { requirements: id, requestId: id });
+      f.store.saveTask({
+        ...t,
+        state: 'needs_input',
+        reason: 'Disputed review',
+        inputRequest: {
+          role: 'author',
+          runId: id,
+          generation: t.generation,
+          reviewDispute: 'daddy',
+        },
+      });
+    }
+    f.daddy.start();
+    f.daddy.chat(group.id, 'How is work going?');
+    const queued = f.store.daddyJobs(group.id);
+    expect(
+      queued
+        .filter((j) => j.disputeRunId)
+        .map((j) => j.disputeRunId)
+        .sort(),
+    ).toEqual(['first', 'second']);
+    expect(queued.filter((j) => j.trigger === 'user')).toHaveLength(1);
+    const gate = Promise.withResolvers<void>();
+    f.runtime.runSession.mockImplementationOnce(async () => {
+      await gate.promise;
+      return {
+        status: 'needs_input',
+        summary: 'Original dispute',
+        question: 'Which original order?',
+        checkedHead: '',
+      };
+    });
+    await f.daddy.tick();
+    await vi.waitFor(() => expect(f.runtime.runSession).toHaveBeenCalledTimes(1));
+    const run = f.store.daddyJobs(group.id).find((j) => j.status === 'running')!;
+    const task = f.store.getTask(run.waitingTaskId!);
+    f.store.saveTask({
+      ...task,
+      state: 'fixing',
+      reason: 'Continuing with the accepted requirements',
+      inputRequest: undefined,
+    });
+    gate.resolve();
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).find((j) => j.id === run.id)?.status).toBe('completed'),
+    );
+    expect(f.store.getTask(task.id)).toMatchObject({ state: 'fixing' });
+    expect(f.store.getGroup(group.id).daddyState).toBe('active');
+    expect(f.store.messages(group.id).at(-1)?.needsReply).toBeFalsy();
+    expect(
+      f.store.daddyJobs(group.id).find((j) => j.waitingTaskId && j.waitingTaskId !== task.id)
+        ?.status,
+    ).toBe('queued');
+  } finally {
+    await f.close();
+  }
+});
+
 it('keeps other tasks active while a worker question awaits a reply', async () => {
   const f = daddyFixture();
   try {

@@ -2321,7 +2321,8 @@ export class TelegramWorkspace {
           return;
         if (question && !reminderOpen(this.store, question)) return;
         if (task) {
-          const worker = task.inputRequest?.role === 'author';
+          const worker =
+            task.inputRequest?.role === 'author' && task.inputRequest.reviewDispute !== 'owner';
           text
             .add(worker ? this.t('Worker') : 'daddy', 'bold')
             .add(' · ')

@@ -1,3 +1,5 @@
+import { daddyFixture } from './daddy-fixture.js';
+import { disputedFindings } from '../src/core/task-activity.js';
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import { TelegramDelivery } from '../src/integrations/telegram-delivery.js';
@@ -28,6 +30,55 @@ function fixture() {
     },
   };
 }
+it('drops a queued first mention from the old release when a dispute now belongs to daddy', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const task = await f.daddy.createTask(group.id, {
+    requirements: 'Restore replies',
+    requestId: 'ordering',
+  });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  let clock = Date.now();
+  const call = vi.fn(async () => ({ message_id: 1 }));
+  const open = () =>
+    new TelegramDelivery(f.store, { call } as unknown as TelegramApi, 'test_bot', () => clock);
+  let queue = open();
+  try {
+    const request = { runId: 'author-run', role: 'author', generation: task.generation } as const;
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      reason: 'Which order?',
+      inputRequest: request,
+    });
+    const key = `telegram:question:7:${task.id}:${request.runId}`;
+    call.mockRejectedValueOnce(
+      Object.assign(new Error('Slow down'), { telegramStatus: 429, retryAfter: 5 }),
+    );
+    await queue.send({ chatId: 7 }, new TelegramText().add('Owner, decide'), {
+      key,
+      groupId: group.id,
+      notificationId: key,
+    });
+    expect(queue.status().pending).toBe(1);
+    await queue.stop();
+    f.store.saveTask({
+      ...task,
+      state: 'needs_input',
+      reason: disputedFindings,
+      inputRequest: request,
+    });
+    queue = open();
+    clock += 6000;
+    await queue.flush();
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(queue.status().pending).toBe(0);
+  } finally {
+    await queue.stop();
+    await f.close();
+  }
+});
+
 it('resolves a private reply only against a matching bot, owner, chat and native message', async () => {
   const f = fixture();
   try {
