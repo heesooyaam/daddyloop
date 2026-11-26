@@ -7,6 +7,7 @@ import {
   type State,
   type Job,
   type AgentProfile,
+  architectProfileFor,
   sameAgentProfile,
 } from './types.js';
 
@@ -160,13 +161,15 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
         generation: task.generation,
         groupGeneration: group.generation,
         profile:
-          job.role === 'reviewer'
-            ? group.daddy
-            : item.workerProfile &&
-                task.agents?.worker &&
-                !sameAgentProfile(item.workerProfile, task.agents.worker)
-              ? task.agents.worker
-              : job.profile,
+          job.kind === 'plan'
+            ? architectProfileFor(task, group)
+            : job.role === 'reviewer'
+              ? group.daddy
+              : item.workerProfile &&
+                  task.agents?.worker &&
+                  !sameAgentProfile(item.workerProfile, task.agents.worker)
+                ? task.agents.worker
+                : job.profile,
         status: 'queued',
         startedAt: undefined,
         finishedAt: undefined,

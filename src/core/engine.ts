@@ -3213,6 +3213,7 @@ export class Engine {
     const previous = jobs.find(
       (job) =>
         job.role === role &&
+        job.kind !== 'plan' &&
         job.status === 'running' &&
         canInterrupt(job.id) &&
         !sameAgentProfile(job.profile, profile),
@@ -3227,7 +3228,7 @@ export class Engine {
     for (const job of jobs) {
       if (job.status !== 'queued') continue;
       job.generation = task.generation;
-      if (job.role === role) job.profile = profile;
+      if (job.role === role && job.kind !== 'plan') job.profile = profile;
       this.store.saveJob(job);
     }
     if (!previous) return false;
@@ -3350,6 +3351,7 @@ export class Engine {
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    architectProfile?: AgentProfile;
     reportOnly?: boolean;
     validatePlan?: boolean;
     id?: string;
@@ -3439,6 +3441,7 @@ export class Engine {
         title: input.source.title,
         kind: 'code',
         planning: input.validatePlan ? {} : undefined,
+        architectProfile: input.architectProfile,
         reportOnly: input.reportOnly || undefined,
         ref: input.ref,
         source: input.source,
@@ -3507,7 +3510,13 @@ export class Engine {
     };
     return parent ? this.lock(parent.id, create) : create();
   }
-  async implement(id: string, actionId?: string, instruction?: string, validatePlan?: boolean) {
+  async implement(
+    id: string,
+    actionId?: string,
+    instruction?: string,
+    validatePlan?: boolean,
+    architectProfile?: AgentProfile,
+  ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       if (!isTicket(task))
@@ -3526,6 +3535,7 @@ export class Engine {
           'Resume or wait for the current discussion before implementing',
         );
       this.store.transaction(() => {
+        if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};
         if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))
           delete task.planning;

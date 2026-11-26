@@ -476,13 +476,18 @@ export class Worker {
                 task.workerRequest.slot = undefined;
                 if (task.workerRequest.profile) slot.profile = task.workerRequest.profile;
                 const profile = slot.profile;
-                if (profile && !sameAgentProfile(claimed.profile, profile)) {
-                  claimed.profile = profile;
+                if (
+                  profile &&
+                  (!sameAgentProfile(task.agents?.worker, profile) ||
+                    (claimed.kind !== 'plan' && !sameAgentProfile(claimed.profile, profile)))
+                ) {
+                  if (claimed.kind !== 'plan') claimed.profile = profile;
                   this.engine.applyAuthorProfile(task, profile);
                   for (const job of store.activeJobs(task.id))
                     if (
                       job.id !== claimed.id &&
                       job.role === 'author' &&
+                      job.kind !== 'plan' &&
                       job.status === 'queued' &&
                       job.generation === task.generation
                     )
@@ -755,12 +760,22 @@ export class Worker {
           }
           if (
             job.role === 'author' &&
+            job.kind !== 'plan' &&
             current.agents?.worker &&
             current.agents.worker.engine !== job.profile?.engine
           )
             return;
-          if (job.kind === 'plan' && current.planning) current.planning.threadId = threadId;
-          else if (job.role === 'author') current.authorThreadId = threadId;
+          if (job.kind === 'plan' && current.planning) {
+            const planning = current.planning;
+            // A pre-upgrade planner-only thread still serves its clarifications.
+            planning.sharedThread =
+              threadId === current.authorThreadId ||
+              threadId !== planning.threadId ||
+              planning.sharedThread === true;
+            planning.threadId = threadId;
+            if (planning.sharedThread && current.agents?.worker.engine === job.profile?.engine)
+              current.authorThreadId = threadId;
+          } else if (job.role === 'author') current.authorThreadId = threadId;
           else current.reviewerThreadId = threadId;
           store.saveTask(current);
           job.threadId = threadId;

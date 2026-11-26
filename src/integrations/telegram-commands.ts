@@ -28,8 +28,8 @@ const commands: Command[] = [
     en: 'Queue work or open an existing task',
     ru: 'Поставить работу в очередь или открыть задачу',
     detail: {
-      en: 'Send /task Fix search or /task DADDY-12ab34cd. Plan checking is on by default. Use --no-plan -- to skip it. Before -- you can set --worker 1..8, --model MODEL, --engine ENGINE and --effort LEVEL. Engine and effort require a model. Example: /task --worker 2 -- Fix search.',
-      ru: 'Напиши /task Почини поиск или /task DADDY-12ab34cd. Проверка плана включена. Для пропуска используй --no-plan --. Перед -- доступны --worker 1..8, --model МОДЕЛЬ, --engine ДВИЖОК и --effort УРОВЕНЬ. Для движка и уровня нужна модель. Пример: /task --worker 2 -- Почини поиск.',
+      en: 'Send /task Fix search or /task DADDY-12ab34cd. Plan checking is on by default. Use --no-plan -- to skip it. Before -- you can set --worker 1..8, --model MODEL, --engine ENGINE and --effort LEVEL. To select the architect, use --architect-model MODEL, optionally with --architect-engine and --architect-effort. Engine and effort require a model. Example: /task --worker 2 -- Fix search.',
+      ru: 'Напиши /task Почини поиск или /task DADDY-12ab34cd. Проверка плана включена. Для пропуска используй --no-plan --. Перед -- доступны --worker 1..8, --model МОДЕЛЬ, --engine ДВИЖОК и --effort УРОВЕНЬ. Для архитектора укажи --architect-model МОДЕЛЬ, при необходимости --architect-engine и --architect-effort. Для движка и уровня нужна модель. Пример: /task --worker 2 -- Почини поиск.',
     },
   },
   {

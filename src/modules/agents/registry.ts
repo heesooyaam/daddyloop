@@ -92,9 +92,18 @@ export class AgentRegistry implements AgentRuntime, SessionRuntime, AgentCatalog
       task = { ...input.task };
     input.onEvent('runtime.execution', { engine, mode: input.execution ?? this.execution });
     const key = input.job.role === 'author' ? 'authorThreadId' : 'reviewerThreadId';
-    task[key] = nativeSession(engine, task[key]);
-    if (input.job.kind === 'plan' && task.planning)
-      task.planning = { ...task.planning, threadId: nativeSession(engine, task.planning.threadId) };
+    const compatible = (handle?: string) => (handle?.startsWith(engine + ':') ? handle : undefined);
+    if (input.job.kind === 'plan' && task.planning) {
+      const thread = compatible(task.authorThreadId) ?? compatible(task.planning.threadId);
+      task.authorThreadId = nativeSession(engine, thread);
+      task.planning = { ...task.planning, threadId: task.authorThreadId };
+    } else {
+      const handoff =
+        input.job.role === 'author' && task.planning?.sharedThread
+          ? compatible(task.planning.threadId)
+          : undefined;
+      task[key] = nativeSession(engine, task[key] ?? handoff);
+    }
     const run = (processScope?: AgentInput['processScope']) =>
       module.runtime.run({
         ...input,

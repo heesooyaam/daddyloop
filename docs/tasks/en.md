@@ -20,6 +20,10 @@ An answer to a blocked author fix resumes that worker. The task retains the clar
 
 To skip this step for one task, clear **Check architecture and plan before implementation** in the queue form or send `/task --no-plan -- DESCRIPTION`. Through a conversation with daddy, discuss the design and steps first. In GitHub workspaces daddy creates an issue or adds the agreed brief to the existing issue before dispatch. This path uses the brief directly by default. Ask daddy to validate the plan separately to enable the additional turn.
 
+The architect inherits the session reviewer’s engine, model and reasoning effort. In **Session settings → Architect**, clear **Use the shared reviewer profile** to choose a session default. In **Queue task → Choose a model → Architect**, or on the task card, choose an override for that task. Select the inheritance checkbox to reset it. Telegram offers the same choices under `/models → Architect` and the task card’s **Architect** button. For example, `/task --architect-model MODEL --architect-effort high -- Fix search` overrides planning for this task. The developer uses its worker profile. Changes apply to queued and future planning turns; a running turn finishes on its selected profile.
+
+The plan and implementation use one conversation per task when both profiles use the same engine. Each turn has its own model and permissions. Different engines pass the saved Markdown plan between their conversations. The independent reviewer keeps its own session thread.
+
 ## Queue a task and choose a worker
 
 Click **Queue a task** in the web task panel or send `/task DESCRIPTION` in Telegram. The task appears under the same ID in both places. Click it on the website or send `/task DADDY-ID` for its stage, assigned worker and PR. Telegram’s `/queue` lists open tasks.

@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
+  architectProfileFor,
   now,
   type Task,
   type Event,
@@ -198,10 +199,12 @@ export class Store {
       status: 'queued',
       createdAt: now(),
       profile:
-        role === 'reviewer' && group
-          ? group.daddy
-          : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
-            defaults?.[role === 'author' ? 'worker' : 'daddy']),
+        kind === 'plan' && group
+          ? architectProfileFor(task, group)
+          : role === 'reviewer' && group
+            ? group.daddy
+            : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
+              defaults?.[role === 'author' ? 'worker' : 'daddy']),
       groupId: group?.id,
       instructions: structuredClone(
         effectiveInstructions(group?.instructions, role === 'author' ? 'worker' : 'daddy'),
@@ -251,6 +254,11 @@ export class Store {
       .all(...taskIds);
     return new Map(rows.map((row) => [String(row.taskId), String(row.startedAt)]));
   }
+  refreshQueuedPlans(task: Task, group: ReviewGroup) {
+    for (const job of this.activeJobs(task.id))
+      if (job.kind === 'plan' && job.status === 'queued')
+        this.saveJob({ ...job, profile: architectProfileFor(task, group) });
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,
@@ -282,6 +290,8 @@ export class Store {
           )
         )
           continue;
+        if (job.kind === 'plan' && job.groupId)
+          job.profile = architectProfileFor(task, this.getGroup(job.groupId));
         job.status = 'running';
         onClaim?.(job);
         const startedAt = now();

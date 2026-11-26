@@ -44,7 +44,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { DaddyClient, type DaddyApi, type DaddyBoard } from '../client/daddy.js';
-import type { AgentProfiles, Message, Workspace, Task } from '../core/types.js';
+import type { AgentProfile, AgentProfiles, Message, Workspace, Task } from '../core/types.js';
 import type { Preferences } from '../core/preferences.js';
 import { useLocale } from './i18n.js';
 import { UpdatesPanel } from './runtime.js';
@@ -60,8 +60,12 @@ import type { SessionInstructions } from '../core/instructions.js';
 import { Dialog } from './dialog.js';
 import { ThemeButton } from './themes.js';
 import { UsageIndicator, UsagePanel } from './usage.js';
-import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
-import { QueueTaskForm, WorkerControls } from './daddy-task-controls.js';
+import {
+  AgentProfileFields,
+  ArchitectProfileFields,
+  useAgentCatalogue,
+} from './agent-profile-fields.js';
+import { QueueTaskForm, WorkerControls, TaskArchitectSettings } from './daddy-task-controls.js';
 import {
   activityReason,
   activityStatus,
@@ -1112,7 +1116,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onPreviewingChange={setPreviewingRepository}
             api={api}
             board={board}
-            onSave={async (profiles, instructions, autoMerge, forceDaddy, applyWorkers) => {
+            onSave={async (
+              profiles,
+              instructions,
+              autoMerge,
+              forceDaddy,
+              applyWorkers,
+              architectProfile,
+            ) => {
               await model.action(
                 'settings',
                 {
@@ -1121,6 +1132,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   autoMerge,
                   forceDaddy,
                   applyWorkers,
+                  architectProfile,
                 },
                 board.group.id,
               );
@@ -1741,6 +1753,7 @@ function SessionSettings({
     autoMerge?: boolean,
     forceDaddy?: boolean,
     applyWorkers?: boolean,
+    architectProfile?: AgentProfile | null,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1756,6 +1769,8 @@ function SessionSettings({
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
+  const [architect, setArchitect] = useState(board.group.architectProfile);
+  const originalArchitect = useRef(architect);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const [forceDaddy, setForceDaddy] = useState(false),
@@ -1789,6 +1804,9 @@ function SessionSettings({
           autoMerge === originalAutoMerge.current ? undefined : autoMerge,
           forceDaddy || undefined,
           applyWorkers || undefined,
+          JSON.stringify(architect) === JSON.stringify(originalArchitect.current)
+            ? undefined
+            : (architect ?? null),
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1859,6 +1877,13 @@ function SessionSettings({
           </fieldset>
         );
       })}
+      <ArchitectProfileFields
+        profile={architect}
+        inherited={profiles.daddy}
+        catalogue={catalogue}
+        session
+        onChange={setArchitect}
+      />
       <SessionRepository
         api={api}
         board={board}
@@ -1970,6 +1995,19 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? activityReason(value.task))}</p>
+          {board &&
+            live?.ref.kind === 'ticket' &&
+            live.state !== 'complete' &&
+            (value.task.planning || live.state === 'discussing') && (
+              <TaskArchitectSettings
+                key={id + JSON.stringify(live.architectProfile)}
+                api={api}
+                board={board}
+                taskId={id}
+                initial={live.architectProfile}
+                onSaved={onChange}
+              />
+            )}
           {board?.workspace.provider === 'github' && live?.ref.provider === 'github' && (
             <label className="daddy-pool-control">
               {t('Auto-merge GitHub PRs')}

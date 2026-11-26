@@ -623,7 +623,11 @@ export class TelegramWorkspace {
       await this.showTask(groupId, tasks[0].id, destination);
       return;
     }
-    const request = parseTaskInput(args, defaults.engine);
+    const request = parseTaskInput(
+      args,
+      defaults.engine,
+      (group.architectProfile ?? group.daddy).engine,
+    );
     if (!request) {
       await this.api.send(
         destination,
@@ -695,9 +699,18 @@ export class TelegramWorkspace {
       ],
     });
   }
-  private async models(groupId: string, destination: Destination, role?: 'worker' | 'daddy') {
+  private async models(
+    groupId: string,
+    destination: Destination,
+    role?: 'worker' | 'daddy' | 'architect',
+    taskId?: string,
+  ) {
     const group = this.authorize(destination, groupId);
     const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
+    const task = taskId ? this.store.getTask(taskId) : undefined;
+    if (task && task.groupId !== groupId)
+      throw new AppError('task_scope', 'Task does not belong to this session', 403);
+    const architect = task?.architectProfile ?? group.architectProfile ?? group.daddy;
     const text = new TelegramText()
       .add('🤖 ' + this.t('Models'), 'bold')
       .add('\n\ndaddy: ')
@@ -706,6 +719,8 @@ export class TelegramWorkspace {
       .add('\n' + this.t('All workers') + ': ')
       .add(defaults.model ?? this.t('Engine configuration'), 'code')
       .add(' / ' + (defaults.effort ?? this.t('Default')));
+    text.add('\n' + this.t('Architect') + ' · ' + profileText(architect));
+    if (task) text.add(' · ' + taskReference(task));
     for (const slot of workerSlots(this.store, group)) {
       if (slot.profile && !sameAgentProfile(slot.profile, defaults))
         text.add(
@@ -723,6 +738,7 @@ export class TelegramWorkspace {
             { text: 'daddy', callback_data: `dad:models:${groupId}:daddy` },
             { text: this.t('All workers'), callback_data: `dad:models:${groupId}:worker` },
           ],
+          [{ text: this.t('Architect'), callback_data: `dad:models:${groupId}:architect` }],
           [{ text: this.t('Back'), callback_data: `dad:open:${groupId}` }],
         ],
       });
@@ -737,6 +753,7 @@ export class TelegramWorkspace {
         JSON.stringify({
           groupId,
           role,
+          taskId,
           model,
           chatId: destination.chatId,
           threadId: destination.threadId,
@@ -745,6 +762,15 @@ export class TelegramWorkspace {
       );
       return [{ text: model.engine + ' · ' + model.name, callback_data: id }];
     });
+    if (role === 'architect')
+      buttons.unshift([
+        {
+          text: this.t(
+            task ? 'Use the session architect profile' : 'Use the shared reviewer profile',
+          ),
+          callback_data: `dad:arch-reset:${task ? 't' : 'g'}:${task?.id ?? groupId}`,
+        },
+      ]);
     await this.api.send(destination, { ...text, buttons });
   }
   private async newSession(workspaceId: string, destination: Destination, workspace?: Workspace) {
@@ -1185,7 +1211,8 @@ export class TelegramWorkspace {
         throw new Error(this.t('This model selection expired. Open Models again.'));
       const action = JSON.parse(row.data as string) as {
         groupId: string;
-        role: 'worker' | 'daddy';
+        role: 'worker' | 'daddy' | 'architect';
+        taskId?: string;
         model: {
           id: string;
           engine: string;
@@ -1210,30 +1237,39 @@ export class TelegramWorkspace {
           .add('\n\n' + this.t('Reasoning effort'));
         await this.api.send(destination, {
           ...text,
-          buttons: action.model.efforts.map((effort, index) => [
-            { text: effort, callback_data: `${key}:${index}` },
-            ...(action.role === 'daddy'
-              ? [
-                  {
-                    text: this.t('Apply now · {effort}', { effort }),
-                    callback_data: `${key}:${index}:force`,
-                  },
-                ]
-              : []),
-          ]),
+          buttons: (action.model.efforts.length ? action.model.efforts : [this.t('Default')]).map(
+            (effort, index) => [
+              { text: effort, callback_data: `${key}:${index}` },
+              ...(action.role === 'daddy'
+                ? [
+                    {
+                      text: this.t('Apply now · {effort}', { effort }),
+                      callback_data: `${key}:${index}:force`,
+                    },
+                  ]
+                : []),
+            ],
+          ),
         });
       } else {
         const effort = action.model.efforts[Number(modelAction[2])];
-        if (!effort) throw new Error('Unsupported reasoning effort');
-        await this.daddy.settings(group.id, {
-          profiles: {
-            [action.role]: { engine: action.model.engine, model: action.model.id, effort },
-          },
-          forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
-          applyWorkers: action.role === 'worker',
-        });
+        if (!effort && (action.model.efforts.length || modelAction[2] !== '0'))
+          throw new Error('Unsupported reasoning effort');
+        const profile = { engine: action.model.engine, model: action.model.id, effort };
+        if (action.role === 'architect') {
+          if (action.taskId) await this.daddy.taskArchitect(group.id, action.taskId, profile);
+          else await this.daddy.settings(group.id, { architectProfile: profile });
+        } else
+          await this.daddy.settings(group.id, {
+            profiles: {
+              [action.role]: profile,
+            },
+            forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
+            applyWorkers: action.role === 'worker',
+          });
         this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
-        await this.models(group.id, destination);
+        if (action.taskId) await this.showTask(group.id, action.taskId, destination);
+        else await this.models(group.id, destination);
       }
       return true;
     }
@@ -1387,9 +1423,33 @@ export class TelegramWorkspace {
       }
       return true;
     }
-    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(worker|daddy))?$/);
+    const taskArchitect = data.match(/^dad:arch-task:([a-f0-9-]{36})$/);
+    if (taskArchitect) {
+      const task = this.store.getTask(taskArchitect[1]);
+      if (!task.groupId) throw new Error('Task has no session');
+      await this.models(task.groupId, destination, 'architect', task.id);
+      return true;
+    }
+    const resetArchitect = data.match(/^dad:arch-reset:(t|g):([a-f0-9-]{36})$/);
+    if (resetArchitect) {
+      const task = resetArchitect[1] === 't' ? this.store.getTask(resetArchitect[2]) : undefined;
+      const group = this.authorize(destination, task?.groupId ?? resetArchitect[2]);
+      if (task) {
+        await this.daddy.taskArchitect(group.id, task.id, null);
+        await this.showTask(group.id, task.id, destination);
+      } else {
+        await this.daddy.settings(group.id, { architectProfile: null });
+        await this.models(group.id, destination);
+      }
+      return true;
+    }
+    const models = data.match(/^dad:models:([a-f0-9-]{36})(?::(worker|daddy|architect))?$/);
     if (models) {
-      await this.models(models[1], destination, models[2] as 'worker' | 'daddy' | undefined);
+      await this.models(
+        models[1],
+        destination,
+        models[2] as 'worker' | 'daddy' | 'architect' | undefined,
+      );
       return true;
     }
     const instructions = data.match(/^dad:instructions:([a-f0-9-]{36})$/);

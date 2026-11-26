@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { taskSession } from '../src/runtime/agent.js';
 import { ProviderHttp } from '../src/providers/http.js';
+import { profiles } from './planning-fixture.js';
 import { parseTaskInput } from '../src/integrations/telegram-tasks.js';
 import type { AgentResult } from '../src/core/types.js';
 
@@ -21,7 +22,11 @@ it('validates the supplied design before implementation and passes the checked p
     f.agentRuntime.run.mockImplementationOnce(async (input) => {
       expect(input.prompt).toContain(request.requirements);
       expect(input.tools).toEqual([]);
-      expect(taskSession(input)).toMatchObject({ readOnly: true, execution: 'sandbox' });
+      expect(taskSession(input)).toMatchObject({
+        readOnly: true,
+        execution: 'sandbox',
+        profile: profiles.daddy,
+      });
       input.onSession('planner-thread');
       return { status: 'completed', summary, checkedHead: input.task.revision!.head };
     });
@@ -33,12 +38,16 @@ it('validates the supplied design before implementation and passes the checked p
       ]),
     );
     expect(f.checkouts.commitTicket).not.toHaveBeenCalled();
-    expect(f.store.getTask(task.id).authorThreadId).toBeUndefined();
+    expect(f.store.getTask(task.id).authorThreadId).toBe('planner-thread');
     await f.worker.tick();
     await vi.waitFor(() => expect(f.checkouts.commitTicket).toHaveBeenCalledOnce());
     const implementation = f.agentRuntime.run.mock.calls[1][0];
     expect(implementation.prompt).toContain(summary);
-    expect(taskSession(implementation).readOnly).toBe(false);
+    expect(taskSession(implementation)).toMatchObject({
+      readOnly: false,
+      threadId: 'planner-thread',
+      profile: profiles.worker,
+    });
     expect(f.store.getTask(task.id).planning?.result?.revision.head).toBe(task.revision!.head);
   } finally {
     await f.close();
@@ -210,4 +219,66 @@ it('revalidates the plan if preparing the implementation reveals a different che
   } finally {
     await f.close();
   }
+});
+
+it('resolves planning profiles independently from slot selection, queued updates and paused work', async () => {
+  const f = daddyFixture();
+  const developer = { ...profiles.worker, effort: 'medium' };
+  const architect = { ...profiles.daddy, effort: 'medium' };
+  const override = { engine: 'claude', model: 'test-architect' };
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    await f.daddy.configureWorker(group.id, 1, developer);
+    const first = await f.daddy.createTask(group.id, {
+      requirements: 'Implement the filter.',
+      requestId: 'inherit',
+    });
+    const other = await f.daddy.createTask(group.id, {
+      requirements: 'Implement a library.',
+      requestId: 'override',
+      architectProfile: override,
+    });
+    const profile = (id: string) => f.store.activeJobs(id).find((j) => j.kind === 'plan')?.profile;
+    expect(profile(first.id)).toEqual(profiles.daddy);
+    await f.daddy.settings(group.id, { architectProfile: architect });
+    expect(profile(first.id)).toEqual(architect);
+    expect(profile(other.id)).toEqual(override);
+    await f.daddy.settings(group.id, { profiles: { worker: developer }, applyWorkers: true });
+    expect(profile(first.id)).toEqual(architect);
+    await f.daddy.pause(group.id);
+    await f.daddy.settings(group.id, { architectProfile: null, profiles: { daddy: override } });
+    await f.daddy.taskArchitect(group.id, other.id, architect);
+    await f.daddy.resume(group.id);
+    expect(profile(first.id)).toEqual(override);
+    expect(profile(other.id)).toEqual(architect);
+    await f.daddy.taskArchitect(group.id, other.id, null);
+    expect(profile(other.id)).toEqual(override);
+    await f.worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.activeJobs(first.id)).toMatchObject([
+        { kind: 'implement', profile: developer },
+      ]),
+    );
+    expect(f.agentRuntime.run.mock.calls[0][0].job.profile).toEqual(override);
+    expect(f.store.getTask(first.id).authorThreadId).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+
+it('uses the architect engine independently in a Telegram queue request', () => {
+  expect(
+    parseTaskInput(
+      '--model dev --architect-model design --architect-effort high -- Fix search',
+      'claude',
+      'codex',
+    ),
+  ).toMatchObject({
+    workerRequest: { profile: { engine: 'claude', model: 'dev' } },
+    architectProfile: { engine: 'codex', model: 'design', effort: 'high' },
+  });
+  expect(parseTaskInput('--architect-effort high -- Fix search', 'codex')).toBeUndefined();
+  expect(
+    parseTaskInput('--no-plan --architect-model design -- Fix search', 'codex'),
+  ).toBeUndefined();
 });

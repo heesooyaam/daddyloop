@@ -7,6 +7,7 @@ import {
   type ExpectedTask,
   isTicket,
   now,
+  type AgentProfile,
   type AgentProfiles,
   type PRRef,
   type Task,
@@ -172,6 +173,7 @@ export class TicketWorkflow {
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    architectProfile?: AgentProfile;
     reportOnly?: boolean;
     validatePlan?: boolean;
     repoPath?: string;
@@ -212,6 +214,7 @@ export class TicketWorkflow {
       dependsOn: input.dependsOn,
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
+      architectProfile: input.architectProfile,
       reportOnly: input.reportOnly,
       validatePlan: input.validatePlan,
       parentTaskId: input.parentTaskId,
@@ -239,6 +242,7 @@ export class TicketWorkflow {
     dependsOn?: string[];
     workerRequest?: WorkerRequest;
     startImplementation?: boolean;
+    architectProfile?: AgentProfile;
     reportOnly?: boolean;
     validatePlan?: boolean;
     discussedBrief?: boolean;
@@ -281,6 +285,7 @@ export class TicketWorkflow {
               );
             current.requirements = input.requirements;
             current.reportOnly = input.reportOnly || undefined;
+            if (input.architectProfile) current.architectProfile = input.architectProfile;
             if (input.validatePlan !== undefined)
               current.planning = input.validatePlan ? {} : undefined;
             this.engine.store.saveTask(current);
@@ -292,6 +297,7 @@ export class TicketWorkflow {
             input.createdByAction,
             undefined,
             input.validatePlan,
+            input.architectProfile,
           );
         return this.engine.store.getTask(existing.id);
       }
@@ -334,6 +340,7 @@ export class TicketWorkflow {
       dependsOn: input.dependsOn,
       workerRequest: input.workerRequest,
       startImplementation: input.startImplementation,
+      architectProfile: input.architectProfile,
       reportOnly: input.reportOnly,
       validatePlan: input.validatePlan,
       requirements: input.requirements,
