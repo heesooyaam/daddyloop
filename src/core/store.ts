@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { disputedFindings } from './task-activity.js';
 import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
@@ -18,12 +19,6 @@ import {
   type Workspace,
   type DaddyJob,
 } from './types.js';
-
-function readTask(data: string): Task {
-  const task: Task = JSON.parse(data);
-  if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
-  return task;
-}
 
 // A replacement run keeps the queue position of the original, including across restarts.
 const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
@@ -109,10 +104,28 @@ export class Store {
       this.transactionEvents = undefined;
     }
   }
+  private readTask(data: string): Task {
+    const task: Task = JSON.parse(data);
+    if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
+    if (
+      task.state === 'needs_input' &&
+      task.reason === disputedFindings &&
+      task.inputRequest?.role === 'author' &&
+      !task.inputRequest.reviewDispute &&
+      task.groupId &&
+      this.db
+        .prepare(
+          "SELECT id FROM review_groups WHERE id=? AND json_extract(data,'$.orchestrated')=1",
+        )
+        .get(task.groupId)
+    )
+      task.inputRequest.reviewDispute = 'daddy';
+    return task;
+  }
   getTask(id: string): Task {
     const row = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
     if (!row) throw new AppError('not_found', 'Task not found', 404);
-    return readTask(row.data as string);
+    return this.readTask(row.data as string);
   }
   tasks(groupId?: string): Task[] {
     const rows =
@@ -123,7 +136,7 @@ export class Store {
               "SELECT data FROM tasks WHERE json_extract(data,'$.groupId')=? ORDER BY rowid DESC",
             )
             .all(groupId);
-    return rows.map((row) => readTask(row.data as string));
+    return rows.map((row) => this.readTask(row.data as string));
   }
   taskCountsByGroup() {
     const rows = this.db

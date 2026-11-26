@@ -7,7 +7,7 @@ import {
   type PrAction,
   type PrEvidence,
 } from './pr-routing.js';
-import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
+import { disputedFindings, draftInspectionRequired, draftSyncPending } from './task-activity.js';
 import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
@@ -231,9 +231,9 @@ export class Engine {
     });
     return task;
   }
-  private state(task: Task, state: State, reason: string, request?: Job) {
+  private state(task: Task, state: State, reason: string, request?: Job, reviewDispute?: 'daddy') {
     task.inputRequest = request
-      ? { runId: request.id, role: request.role, generation: task.generation }
+      ? { runId: request.id, role: request.role, generation: task.generation, reviewDispute }
       : undefined;
     const previousState = task.state;
     task.state = state;
@@ -2708,8 +2708,9 @@ export class Engine {
           this.state(
             task,
             'needs_input',
-            'Author disputes published findings; discuss them with the reviewer',
+            disputedFindings,
             job,
+            task.groupId && this.store.getGroup(task.groupId).orchestrated ? 'daddy' : undefined,
           );
           return;
         }
