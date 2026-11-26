@@ -45,6 +45,8 @@ type Delivery = {
   status: 'queued' | 'sending' | 'sent' | 'cancelled';
   attempts: number;
   mentionOnPromotion?: boolean;
+  mentionDelivered?: boolean;
+  queuePosition?: number;
   pinPermissionDenied?: boolean;
   nextAttemptAt: number;
   error?: string;
@@ -63,7 +65,11 @@ const deliveryKey = (bot: string, route: TelegramDestination, key: string) =>
   prefix + digest([bot, route, key]);
 
 const legacyDialog = /^telegram:dialog:-?\d+:\d+:([^:]+)(?::(?:progress|final))?$/;
-const topicOwner = (value: Delivery) => `${value.ownerId}:${value.destination.chatId}`;
+const childSession = 'telegram:child-session:';
+type Pairing = { chatId: number; userId: number };
+type Room = { chatId: number; ownerId: number };
+const sameDestination = (a: TelegramDestination, b: TelegramDestination) =>
+  a.chatId === b.chatId && a.threadId === b.threadId;
 const pinPermissionDenied = (error: unknown) =>
   Number((error as { telegramStatus?: number })?.telegramStatus) === 403 ||
   /not enough rights|CHAT_ADMIN_REQUIRED|not permitted to pin|forbidden|\b403\b/i.test(
@@ -102,21 +108,25 @@ export class TelegramDelivery {
   ) {
     this.migrateDialogDeliveries();
     for (const row of store.db
-      .prepare("SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*' ORDER BY rowid")
+      .prepare(
+        `SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+        ORDER BY COALESCE(json_extract(value,'$.queuePosition'),rowid), rowid`,
+      )
       .all()) {
       const value = JSON.parse(String(row.value)) as Delivery;
       if (!value || value.bot !== bot || !['queued', 'sending'].includes(value.status)) continue;
       value.status = 'queued';
       const adopted = this.adoptLegacyRoute(value);
       if (!adopted) value.status = 'cancelled';
-      this.save(String(row.key), value);
+      const key = adopted ? this.restoreChildDestination(String(row.key), value) : String(row.key);
+      this.save(key, value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
   private migrateDialogDeliveries() {
     const rows = this.store.db
       .prepare(
-        `SELECT key,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+        `SELECT key,value,rowid AS position FROM settings WHERE key GLOB 'telegram.delivery:*'
        AND json_extract(value,'$.bot')=?
        AND json_extract(value,'$.options.key') NOT GLOB 'dialog:*'
        AND json_extract(value,'$.options.notificationId') GLOB 'telegram:dialog:*'
@@ -141,29 +151,51 @@ export class TelegramDelivery {
         if (message?.sender !== 'agent') continue;
         const key = dialogKey(message.id);
         const storageKey = deliveryKey(this.bot, destination, key);
-        if (options.key?.startsWith('turn:')) this.separateTurnReceipts(value, message);
+        if (options.key?.startsWith('turn:'))
+          this.separateTurnReceipts(value, message, Number(row.position));
         const prior = this.store.setting<Delivery>(storageKey);
         let sourceKey = String(row.key);
         if (prior) {
-          if (
-            prior.messages.some(Boolean) &&
-            !value.messages.some(Boolean) &&
-            value.status !== 'sent' &&
-            options.final &&
-            options.notificationId &&
-            message.needsReply
-          ) {
-            // A pending standalone mention may follow a confirmed progress card.
+          if (!options.final || !message.needsReply || !prior.messages.some(Boolean)) {
+            if (value.messages.some(Boolean) && !prior.messages.some(Boolean)) {
+              this.store.db.prepare('DELETE FROM settings WHERE key=?').run(storageKey);
+            } else {
+              value.status = value.status === 'sent' ? 'sent' : 'cancelled';
+              this.store.setSetting(sourceKey, value);
+              continue;
+            }
+          } else if (value.messages.some(Boolean)) {
+            // The legacy standalone delivery already emitted the mention. Keep
+            // its native receipts and finish the single public reply separately.
+            const finalNotification = options.notificationId!;
+            this.store.setSetting(sourceKey, {
+              ...value,
+              status: 'sent',
+              options: {
+                ...options,
+                key: `legacy-mention:${message.id}`,
+                notificationId: undefined,
+              },
+            });
+            prior.mentionDelivered = true;
+            prior.options.final = true;
+            prior.options.notificationId = finalNotification;
+            if (prior.status === 'sent')
+              this.store.db
+                .prepare("UPDATE notifications SET status='sent' WHERE id=?")
+                .run(finalNotification);
+            this.store.setSetting(storageKey, prior);
+            continue;
+          } else if (value.status !== 'sent') {
+            // The standalone mention never obtained a receipt: finish the
+            // existing reply and send just the mention as a native reply to it.
             value.messages = prior.messages;
             value.createdAt = prior.createdAt;
+            value.queuePosition = prior.queuePosition;
             value.mentionOnPromotion = true;
             this.store.db.prepare('DELETE FROM settings WHERE key=?').run(sourceKey);
             sourceKey = storageKey;
           } else {
-            if (['queued', 'sending'].includes(value.status)) {
-              value.status = 'cancelled';
-              this.store.setSetting(String(row.key), value);
-            }
             continue;
           }
         }
@@ -192,7 +224,7 @@ export class TelegramDelivery {
       }
     });
   }
-  private separateTurnReceipts(value: Delivery, latest: Message) {
+  private separateTurnReceipts(value: Delivery, latest: Message, position: number) {
     if (value.status === 'sent' || !value.messages.some(Boolean)) return;
     const groupId = value.options.groupId!;
     const candidates = this.store
@@ -213,8 +245,6 @@ export class TelegramDelivery {
           ),
         };
       });
-    if (candidates.length < 2) return;
-    const current = candidates.find((candidate) => candidate.message.id === latest.id)!;
     const retained = new Map<string, Delivery['messages']>();
     value.messages = value.messages.map((part, index) => {
       if (!part) return null;
@@ -232,7 +262,7 @@ export class TelegramDelivery {
               .get(this.legacyDialogId(value, message, phase)),
           ),
       );
-      const owner = confirmed ?? (matches.includes(current) ? current : matches[0]);
+      const owner = confirmed ?? matches[0];
       if (owner?.message.id === latest.id) return part;
       if (owner) {
         const parts = retained.get(owner.message.id) ?? [];
@@ -274,10 +304,29 @@ export class TelegramDelivery {
           order: message.at,
           notificationId: this.legacyDialogId(value, message, message.phase),
         },
-        createdAt: value.createdAt - 1,
+        queuePosition: position,
         status: chunks.every((_, index) => messages[index]) ? 'sent' : 'queued',
         messages,
       });
+    }
+    if (retained.size) {
+      const notification = this.store.db
+        .prepare('SELECT at FROM notifications WHERE id=?')
+        .get(value.options.notificationId!);
+      const queuedAt = Date.parse(String(notification?.at ?? latest.at));
+      if (Number.isFinite(queuedAt)) value.createdAt = Math.max(value.createdAt, queuedAt);
+      // An attempted write on the same route is evidence of precedence over
+      // the replacement under the old FIFO, even within a single millisecond.
+      const earlier = this.store.db
+        .prepare(
+          `SELECT MAX(rowid) AS position FROM settings WHERE key GLOB 'telegram.delivery:*'
+         AND json_extract(value,'$.bot')=? AND json_extract(value,'$.destination')=?
+         AND json_extract(value,'$.createdAt')=? AND json_extract(value,'$.attempts')>0
+         AND json_extract(value,'$.status') IN ('queued','sending')
+         AND json_extract(value,'$.options.operation') IS NULL`,
+        )
+        .get(this.bot, JSON.stringify(value.destination), value.createdAt);
+      value.queuePosition = Math.max(position, Number(earlier?.position ?? 0)) + 0.5;
     }
   }
   private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
@@ -295,6 +344,15 @@ export class TelegramDelivery {
       options.reminder = { groupId, taskId: question[2], request: question[3] };
     }
     if (options.sessionRoute !== undefined) return true;
+    if (key.startsWith(childSession)) {
+      const child = this.store
+        .groups()
+        .find((group) => group.id === key.slice(childSession.length));
+      if (!child?.parentGroupId) return false;
+      options.groupId = child.parentGroupId;
+      options.sessionRoute = true;
+      return true;
+    }
     const status = key.startsWith('progress:') || options.operation === 'pin';
     const board = key.startsWith('telegram:daddy-intro:');
     const resources = key.startsWith('resources:');
@@ -328,19 +386,52 @@ export class TelegramDelivery {
         if (card) groupId = String(card.key).split(':')[2];
       }
     }
-    if (!groupId && destination.threadId !== undefined && (rename || status)) {
-      const topic = this.store.db
+    if (!groupId && rename) {
+      const sources = this.store.db
         .prepare(
-          `SELECT group_id FROM telegram_topics WHERE id GLOB ?
-         AND json_extract(data,'$.threadId')=?`,
+          `SELECT DISTINCT task_id FROM operations WHERE id GLOB 'telegram:topic:*' AND status='done'
+         AND json_extract(result,'$.chatId')=? AND json_extract(result,'$.threadId')=?
+         AND json_extract(result,'$.ownerId')=? AND json_extract(result,'$.groupId')=task_id`,
         )
-        .get(topicOwner(value) + ':*', destination.threadId);
-      if (typeof topic?.group_id === 'string') groupId = topic.group_id;
+        .all(destination.chatId, destination.threadId ?? null, value.ownerId ?? null);
+      if (sources.length === 1) groupId = String(sources[0].task_id);
     }
-    if (!groupId) return destination.threadId === undefined;
+    if (!groupId) return !rename && destination.threadId === undefined;
     options.groupId = groupId;
     options.sessionRoute = !board || destination.threadId !== undefined;
     return true;
+  }
+  private sessionDestination(groupId: string, pair: Pairing, room: Room | null | undefined) {
+    if (!room || room.ownerId !== pair.userId) return { chatId: pair.chatId };
+    const row = this.store.db
+      .prepare('SELECT data FROM telegram_topics WHERE id=?')
+      .get(`${room.ownerId}:${room.chatId}:${groupId}`);
+    if (!row) return;
+    const { chatId, threadId } = JSON.parse(String(row.data)) as TelegramDestination;
+    return { chatId, threadId };
+  }
+  private restoreChildDestination(key: string, value: Delivery) {
+    const { options } = value;
+    if (!options.key?.startsWith(childSession) || !options.groupId || value.messages.some(Boolean))
+      return key;
+    const pair = this.store.setting<Pairing>('telegram.pairing');
+    if (!pair || value.ownerId !== pair.userId) return key;
+    const route = this.sessionDestination(
+      options.groupId,
+      pair,
+      this.store.setting<Room>('telegram.group'),
+    );
+    if (!route || sameDestination(route, value.destination)) return key;
+    const replacement = deliveryKey(this.bot, route, options.key);
+    if (this.store.setting<Delivery>(replacement)) {
+      value.status = 'cancelled';
+      return key;
+    }
+    value.destination = route;
+    this.store.db
+      .prepare('UPDATE settings SET key=?,value=? WHERE key=?')
+      .run(replacement, JSON.stringify(value), key);
+    return replacement;
   }
   start() {
     if (this.timer) return;
@@ -358,27 +449,17 @@ export class TelegramDelivery {
   }
   private valid(value: Delivery) {
     if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
-    const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
-    const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
+    const pair = this.store.setting<Pairing>('telegram.pairing');
+    const room = this.store.setting<Room>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
     if (value.options.sessionRoute && value.options.groupId) {
       const groupId = value.options.groupId;
       const row = this.store.db.prepare('SELECT data FROM review_groups WHERE id=?').get(groupId);
       const group = row && (JSON.parse(String(row.data)) as ReviewGroup);
       if (!group || group.deletedAt) return false;
-      if (room && room.ownerId === pair?.userId) {
-        const row = this.store.db
-          .prepare('SELECT data FROM telegram_topics WHERE id=?')
-          .get(`${room.ownerId}:${room.chatId}:${groupId}`);
-        const topic = row && (JSON.parse(String(row.data)) as TelegramDestination);
-        return (
-          !!topic &&
-          topic.chatId === value.destination.chatId &&
-          topic.threadId === value.destination.threadId
-        );
-      }
-      if (value.destination.chatId !== pair?.chatId || value.destination.threadId !== undefined)
-        return false;
+      const route = pair && this.sessionDestination(groupId, pair, room);
+      if (!route || !sameDestination(route, value.destination)) return false;
+      if (route.threadId !== undefined) return true;
       const key = value.options.key;
       const id = key?.startsWith('dialog:') ? key.slice('dialog:'.length) : undefined;
       const message = id && this.store.messageById(groupId, id);
@@ -673,7 +754,9 @@ export class TelegramDelivery {
         return;
       }
       const mention =
-        options.mention && reminderOpen(this.store, options.mention.question)
+        !value.mentionDelivered &&
+        options.mention &&
+        reminderOpen(this.store, options.mention.question)
           ? options.mention
           : undefined;
       // Telegram edits do not generate a fresh mention. If the progress was already

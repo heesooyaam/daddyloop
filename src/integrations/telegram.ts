@@ -493,7 +493,7 @@ export class Telegram {
       return;
     }
   };
-  async handle(update: Update) {
+  async handle(update: Update, deferReplies = false) {
     const store = this.engine.store;
     const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
@@ -510,7 +510,7 @@ export class Telegram {
             /^\/(task|worker)(?:@\w+)?(?:\s|$)/.test(message.text.trim()))))
     ) {
       // Persist voice, conversation input and task commands before acknowledging the update.
-      const handled = await this.workspace.handle(update);
+      const handled = await this.workspace.handle(update, deferReplies);
       if (handled) this.queueAcceptedReaction(message);
       store.db
         .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
@@ -523,7 +523,7 @@ export class Telegram {
       from = message?.from ?? callback?.from;
     if (!chat || !from || from.is_bot) return;
     if (chat.type !== 'private') {
-      await this.workspace?.handle(update);
+      await this.workspace?.handle(update, deferReplies);
       return;
     }
     let pair = this.paired();
@@ -556,7 +556,7 @@ export class Telegram {
       }
       return;
     }
-    if (await this.workspace?.handle(update)) return;
+    if (await this.workspace?.handle(update, deferReplies)) return;
     try {
       if (callback) {
         await this.api.replaceCard(callback, async () => {
@@ -874,7 +874,7 @@ export class Telegram {
         );
         for (const update of updates) {
           if (this.stopped) break;
-          await this.handle(update);
+          await this.handle(update, true);
           store.transaction(() => {
             store.setSetting('telegram.offset', update.update_id + 1);
             store.setSetting('telegram.offsetAt', Date.now());

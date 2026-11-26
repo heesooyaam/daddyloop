@@ -102,6 +102,7 @@ function telegramReply(message: Update['message']): TelegramReply | undefined {
 }
 export class TelegramWorkspace {
   private pending = Promise.resolve();
+  private menuReplies = Promise.resolve();
   private stopped = false;
   private topics = new Map<string, Promise<Topic>>();
   private voice?: VoiceInbox;
@@ -573,26 +574,40 @@ export class TelegramWorkspace {
         : undefined;
     await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge, queuePage));
   }
+  private async orderedReply(deferred: boolean, action: () => Promise<void>) {
+    // Store notifications are published in microtasks. Capture earlier replies
+    // before returning to the poller, without waiting for delivery itself.
+    await Promise.resolve();
+    const earlier = this.pending;
+    const reply = this.menuReplies.then(() => earlier).then(action);
+    this.menuReplies = reply.catch((error) => {
+      this.store.setSetting('telegram.error', redact(String(error)));
+    });
+    if (!deferred) await reply;
+  }
   private async taskCommand(
     command: string,
     args: string,
     groupId: string,
     destination: Destination,
     receipt: string,
+    respond: (action: () => Promise<unknown>) => Promise<void>,
     replyTo?: TelegramReply,
   ) {
     const group = this.authorize(destination, groupId);
     const defaults = group.worker ?? this.daddy.engine.defaultAgents().worker;
     if (command === 'queue' || command === 'workers') {
-      await this.showTasks(groupId, destination, command);
+      await respond(() => this.showTasks(groupId, destination, command));
       return;
     }
     if (command === 'worker') {
       const input = parseWorkerInput(args);
       if (!input) {
-        await this.api.send(
-          destination,
-          this.t('Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.'),
+        await respond(() =>
+          this.api.send(
+            destination,
+            this.t('Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.'),
+          ),
         );
         return;
       }
@@ -606,16 +621,18 @@ export class TelegramWorkspace {
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
         force: input.force,
       });
-      await this.api.send(
-        destination,
-        this.t(
-          result.restarted
-            ? 'Worker {number} will resume the task · {profile}'
-            : 'Worker {number} model saved · {profile}',
-          { number: input.number, profile: profileText(profile) },
+      await respond(() =>
+        this.api.send(
+          destination,
+          this.t(
+            result.restarted
+              ? 'Worker {number} will resume the task · {profile}'
+              : 'Worker {number} model saved · {profile}',
+            { number: input.number, profile: profileText(profile) },
+          ),
+          undefined,
+          { key: receipt },
         ),
-        undefined,
-        { key: receipt },
       );
       return;
     }
@@ -629,7 +646,7 @@ export class TelegramWorkspace {
           409,
         );
       if (!tasks[0]) throw new AppError('not_found', 'Task not found in this session', 404);
-      await this.showTask(groupId, tasks[0].id, destination);
+      await respond(() => this.showTask(groupId, tasks[0].id, destination));
       return;
     }
     const request = parseTaskInput(
@@ -638,10 +655,12 @@ export class TelegramWorkspace {
       (group.architectProfile ?? group.daddy).engine,
     );
     if (!request) {
-      await this.api.send(
-        destination,
-        this.t(
-          'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. Plan checking is on by default. Use /task --no-plan -- DESCRIPTION to skip it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
+      await respond(() =>
+        this.api.send(
+          destination,
+          this.t(
+            'Use /task DESCRIPTION to queue work or /task DADDY-ID to check it. Plan checking is on by default. Use /task --no-plan -- DESCRIPTION to skip it. To choose a worker and model, send /task --worker NUMBER --model MODEL --effort EFFORT -- DESCRIPTION.',
+          ),
         ),
       );
       return;
@@ -659,9 +678,11 @@ export class TelegramWorkspace {
       workspace: next?.workspace,
     });
     if (next) this.store.setSetting(nextKey, null);
-    await this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
-      key: receipt,
-    });
+    await respond(() =>
+      this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
+        key: receipt,
+      }),
+    );
   }
   private sessionBoard(groupId: string, destination: Destination, link?: string) {
     const board = this.daddy.board(groupId);
@@ -675,8 +696,11 @@ export class TelegramWorkspace {
       notificationId: id,
     });
   }
-  private async home(destination: Destination) {
+  private home(destination: Destination) {
     this.store.setSetting(this.creationKey(destination), null);
+    return this.showHome(destination);
+  }
+  private async showHome(destination: Destination) {
     const groups = this.daddy.sessions();
     if (destination.chatId === this.pair()?.chatId) {
       await this.api.send(
@@ -1552,7 +1576,7 @@ export class TelegramWorkspace {
     await this.show(group.id, destination);
     return true;
   }
-  async handle(update: Update): Promise<boolean> {
+  async handle(update: Update, deferReplies = false): Promise<boolean> {
     const pair = this.pair(),
       message = update.message,
       callback = update.callback_query;
@@ -1571,8 +1595,27 @@ export class TelegramWorkspace {
       privateChat && replyTo?.messageId && !message?.text?.trimStart().startsWith('/')
         ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
         : undefined;
+    const rawText = message?.text?.trim();
+    const command = rawText?.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+    const orderedResponse =
+      /^\/(?:task|worker|queue|workers|help)(?:\s|$)/.test(command ?? '') ||
+      /^\/(?:status|sessions|modules|limits|models|presets|language|notifications|workspaces|pool)$/.test(
+        command ?? '',
+      );
+    const originGroup = privateChat ? undefined : this.groupAt(destination);
+    const respond = (action: () => Promise<unknown>) =>
+      this.orderedReply(deferReplies, async () => {
+        if (this.pair()?.userId !== pair.userId || this.pair()?.chatId !== pair.chatId) return;
+        if (
+          !privateChat &&
+          (this.room()?.chatId !== chat.id ||
+            (originGroup !== undefined && this.groupAt(destination) !== originGroup))
+        )
+          return;
+        await action();
+      });
     try {
-      if (callback || message?.text?.trimStart().startsWith('/')) {
+      if (callback || (rawText?.startsWith('/') && !orderedResponse)) {
         // Let the store publish already saved replies before generating a menu.
         await Promise.resolve();
         await this.pending;
@@ -1640,16 +1683,17 @@ export class TelegramWorkspace {
           .catch((error) => this.store.setSetting('telegram.error', redact(String(error))));
         return true;
       }
-      const rawText = message?.text?.trim();
-      if (!rawText) return false;
+      if (!rawText || !command) return false;
       const addressedTo = /^\/\w+@(\w+)(?=\s|$)/.exec(rawText)?.[1];
       if (addressedTo && addressedTo.toLowerCase() !== this.username.toLowerCase()) return false;
-      const text = rawText.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
+      const text = command;
       const help = /^\/help(?:\s+([\s\S]*))?$/i.exec(text);
       if (help) {
-        await this.api.send(
-          destination,
-          commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
+        await respond(() =>
+          this.api.send(
+            destination,
+            commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
+          ),
         );
         return true;
       }
@@ -1694,17 +1738,23 @@ export class TelegramWorkspace {
       }
 
       if (text === '/modules') {
-        await this.modules(destination);
+        await respond(() => this.modules(destination));
         return true;
       }
-      if (text === '/language') return await this.callback('language:show', destination);
+      if (text === '/language') {
+        await respond(() => this.callback('language:show', destination));
+        return true;
+      }
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
         setLocale(this.store, language[1] as 'en' | 'ru');
         await this.api.send(destination, this.t('Language updated.'));
         return true;
       }
-      if (text === '/notifications') return await this.callback('notifications:show', destination);
+      if (text === '/notifications') {
+        await respond(() => this.callback('notifications:show', destination));
+        return true;
+      }
       if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
         await this.api.send(destination, {
           ...new TelegramText().add(
@@ -1729,7 +1779,7 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/limits') {
-        await this.limits(destination);
+        await respond(() => this.limits(destination));
         return true;
       }
       if (text === '/group' && privateChat) {
@@ -1737,7 +1787,8 @@ export class TelegramWorkspace {
         return true;
       }
       if (['/sessions', '/start', '/start daddy'].includes(text)) {
-        await this.home(destination);
+        this.store.setSetting(this.creationKey(destination), null);
+        await respond(() => this.showHome(destination));
         return true;
       }
       if (/^\/new(?:\s|$)/.test(text) || text === '/workspaces') {
@@ -1752,7 +1803,8 @@ export class TelegramWorkspace {
           );
           return true;
         }
-        return this.callback('dad:workspaces', destination);
+        await respond(() => this.callback('dad:workspaces', destination));
+        return true;
       }
       const attach = text.match(/^\/attach\s+([a-f0-9-]{8,36})$/);
       if (attach && !privateChat && destination.threadId) {
@@ -1791,6 +1843,7 @@ export class TelegramWorkspace {
           groupId,
           destination,
           `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+          respond,
           replyTo,
         );
         return true;
@@ -1844,7 +1897,7 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/models' && groupId) {
-        await this.models(groupId, destination);
+        await respond(() => this.models(groupId, destination));
         return true;
       }
       if (/^\/(instructions|skill)(?:\s|$)/.test(text)) {
@@ -1865,14 +1918,16 @@ export class TelegramWorkspace {
         return true;
       }
       if (text === '/presets') {
-        await this.api.send(
-          destination,
-          new TelegramText()
-            .add('🧩 ' + this.t('Presets'), 'bold')
-            .add(
-              '\n\n' +
-                presetLines(new InstructionPresets(this.store).list(), this.locale()).join('\n'),
-            ),
+        await respond(() =>
+          this.api.send(
+            destination,
+            new TelegramText()
+              .add('🧩 ' + this.t('Presets'), 'bold')
+              .add(
+                '\n\n' +
+                  presetLines(new InstructionPresets(this.store).list(), this.locale()).join('\n'),
+              ),
+          ),
         );
         return true;
       }
@@ -1897,10 +1952,15 @@ export class TelegramWorkspace {
         return true;
       }
       if (pool && groupId) {
-        return this.callback(`dad:pool:${groupId}${pool[1] ? ':' + pool[1] : ''}`, destination);
+        if (pool[1]) return this.callback(`dad:pool:${groupId}:${pool[1]}`, destination);
+        await respond(() => this.callback(`dad:pool:${groupId}`, destination));
+        return true;
       }
-      if (text === '/status' && groupId) {
-        await this.showStatus(groupId, destination);
+      if (text === '/status' && (groupId || !privateChat)) {
+        await respond(async () => {
+          const selected = groupId ?? this.groupAt(destination);
+          if (selected) await this.showStatus(selected, destination);
+        });
         return true;
       }
       if (text === '/pause' && groupId) {
@@ -1977,12 +2037,15 @@ export class TelegramWorkspace {
               'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.',
             )
           : this.t(redact((error as Error).message));
-      await this.api.send(
-        destination,
-        new TelegramText()
-          .add('⚠️ ' + this.t('Could not complete the action'), 'bold')
-          .add('\n\n' + message),
-      );
+      const report = () =>
+        this.api.send(
+          destination,
+          new TelegramText()
+            .add('⚠️ ' + this.t('Could not complete the action'), 'bold')
+            .add('\n\n' + message),
+        );
+      if (orderedResponse) await respond(report);
+      else await report();
       return true;
     }
   }
@@ -2464,6 +2527,7 @@ export class TelegramWorkspace {
     await this.progress.stop();
     await this.voice?.stop();
     await this.pending;
+    await this.menuReplies;
     await Promise.allSettled([...this.topics.values()]);
   }
 }

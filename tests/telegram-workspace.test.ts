@@ -1440,3 +1440,118 @@ it.each([true, false])(
     }
   },
 );
+
+it('persists a task and text from a getUpdates batch while an earlier menu waits for delivery', async () => {
+  const f = daddyFixture();
+  const chatId = -10042;
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId, ownerId: 7 });
+  const a = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
+  const b = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
+  for (const [group, threadId] of [
+    [a, 17],
+    [b, 18],
+  ] as const)
+    f.store.db.prepare('INSERT INTO telegram_topics VALUES(?,?,?)').run(
+      `7:${chatId}:${group.id}`,
+      group.id,
+      JSON.stringify({
+        chatId,
+        threadId,
+        groupId: group.id,
+        ownerId: 7,
+        title: group.title,
+      }),
+    );
+  const input = (id: number, threadId: number, text: string): Update => ({
+    update_id: id,
+    message: {
+      message_id: id,
+      from: { id: 7 },
+      chat: { id: chatId, type: 'supergroup' },
+      message_thread_id: threadId,
+      text,
+    },
+  });
+  const delivered: Record<string, any>[] = [];
+  let nextId = 50;
+  let batchSent = false;
+  let markStarted!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+    const method = String(url).split('/').at(-1);
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (method === 'getUpdates') {
+      if (!batchSent) {
+        batchSent = true;
+        await started;
+        return Response.json({
+          ok: true,
+          result: [
+            input(91, 17, '/status'),
+            input(92, 17, '/modules'),
+            input(93, 18, '/task Persist this task'),
+            input(94, 17, 'Persist this owner text'),
+          ],
+        });
+      }
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+      });
+    }
+    if (method === 'sendMessage') {
+      if (body.text.includes('Held reply')) {
+        markStarted();
+        await wait;
+      }
+      delivered.push(body);
+    }
+    return Response.json({ ok: true, result: { message_id: ++nextId } });
+  });
+  const bot = new Telegram(f.engine, api, 'fixture_bot');
+  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
+  try {
+    f.store.finishDaddyReply(a.id, 'Held reply', 'wait');
+    bot.start();
+    await vi.waitFor(() => {
+      expect(f.store.tasks(b.id)).toEqual([
+        expect.objectContaining({ title: 'Persist this task' }),
+      ]);
+      expect(f.store.messages(a.id)).toContainEqual(
+        expect.objectContaining({ sender: 'user', text: 'Persist this owner text' }),
+      );
+      expect(f.store.setting('telegram.offset')).toBe(95);
+    });
+    expect(delivered.some((body) => body.text.includes('Held reply'))).toBe(false);
+    release();
+    await vi.waitFor(() => {
+      const reply = delivered.findIndex((body) => body.text.includes('Held reply'));
+      const menu = delivered.findIndex((body) =>
+        body.reply_markup?.inline_keyboard
+          ?.flat()
+          .some(
+            (button: { callback_data?: string }) => button.callback_data === `dad:open:${a.id}`,
+          ),
+      );
+      expect(reply).toBeGreaterThanOrEqual(0);
+      expect(menu).toBeGreaterThan(reply);
+      expect(
+        delivered.some(
+          (body) => body.message_thread_id === 18 && body.text.includes('Persist this task'),
+        ),
+      ).toBe(true);
+    });
+  } finally {
+    release();
+    // Unblock the simulated initial poll if setup failed before the reply started.
+    markStarted();
+    await bot.stop();
+    await f.close();
+  }
+});

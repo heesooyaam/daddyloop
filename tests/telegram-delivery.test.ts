@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import { TelegramDelivery, dialogKey } from '../src/integrations/telegram-delivery.js';
-import { TelegramText } from '../src/integrations/telegram-text.js';
+import { TelegramText, splitTelegramText } from '../src/integrations/telegram-text.js';
 import { daddyFixture } from './daddy-fixture.js';
 import { TelegramApi } from '../src/integrations/telegram.js';
 
@@ -50,7 +50,13 @@ const text = (value: string) => new TelegramText().add(value);
 it('keeps status edits delivering while a durable pin retries', async () => {
   const f = fixture();
   const target = { chatId: -10042, threadId: 4 };
-  const options = { key: 'status', replace: true, pin: true };
+  const options = {
+    key: 'status',
+    replace: true,
+    pin: true,
+    groupId: 'session',
+    sessionRoute: true,
+  };
   f.store.db
     .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
     .run('7:-10042:session', 'session', JSON.stringify(target));
@@ -850,6 +856,281 @@ it.each(['off', 'attention'] as const)(
       ]);
     } finally {
       await queue.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each(['shared prefix', 'delivered mention'] as const)(
+  'reopens the released file database with a %s',
+  async (variant) => {
+    const f = daddyFixture(true);
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const route = { chatId: 7 };
+    const head = 'Shared text '.repeat(500);
+    const a = head + 'Ending A';
+    const b = head + 'Ending B';
+    const card = (reply: string) =>
+      new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(reply);
+    let clock = Date.now();
+    let nativeId = 100;
+    const call = vi.fn(async (_method: string, _body?: any) => ({ message_id: ++nativeId }));
+    const queueFor = (store: Store) =>
+      new TelegramDelivery(
+        store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = queueFor(f.store);
+    let reopened: Store | undefined;
+    const limited = () =>
+      Object.assign(new Error('Flood wait'), { telegramStatus: 429, retryAfter: 10 });
+    try {
+      const first = f.store.daddyMessage(group.id, 'agent', a, 'old-queue', undefined, {
+        phase: 'progress',
+      });
+      const options = {
+        key: 'turn:old-queue',
+        groupId: group.id,
+        replace: true,
+        notificationId: `telegram:dialog:7:0:${first.id}:progress`,
+      };
+      if (variant === 'shared prefix')
+        call.mockResolvedValueOnce({ message_id: ++nativeId }).mockRejectedValueOnce(limited());
+      await queue.send(route, card(a), options);
+      const final = f.store.finishDaddyReply(
+        group.id,
+        variant === 'shared prefix' ? b : a,
+        'old-queue',
+        variant === 'delivered mention',
+      );
+      const notificationId = `telegram:dialog:7:0:${final.id}:final`;
+      f.store.db
+        .prepare('INSERT INTO notifications VALUES(?,?,?)')
+        .run(notificationId, 'pending', new Date(clock).toISOString());
+      const mention = new TelegramText().add('Please answer. ', 'text_link', {
+        url: 'tg://user?id=7',
+      });
+      if (variant === 'shared prefix') {
+        expect(splitTelegramText(card(a))[0]).toEqual(splitTelegramText(card(b))[0]);
+        await queue.send(route, card(b), { ...options, notificationId, final: true });
+      } else {
+        call.mockResolvedValueOnce({ message_id: ++nativeId }).mockRejectedValueOnce(limited());
+        await queue.send(route, new TelegramText().append(mention).append(card(a)), {
+          ...options,
+          key: notificationId,
+          notificationId,
+          final: true,
+        });
+      }
+      const before = call.mock.calls.length;
+      await queue.stop();
+      reopened = new Store(join(f.dir, 'state.sqlite'));
+      queue = queueFor(reopened);
+      await queue.flush();
+      expect(call).toHaveBeenCalledTimes(before);
+      clock += 10000;
+      await queue.flush();
+      if (variant === 'shared prefix') {
+        const partsA = splitTelegramText(card(a));
+        const partsB = splitTelegramText(card(b));
+        expect(call.mock.calls.slice(before).map(([method, body]) => [method, body.text])).toEqual(
+          [...partsA.slice(1), ...partsB].map((part) => ['sendMessage', part.text]),
+        );
+        expect(queue.replySession(7, 101, 7)).toBe(group.id);
+      } else {
+        expect(
+          reopened.db.prepare('SELECT status FROM notifications WHERE id=?').get(notificationId)
+            ?.status,
+        ).toBe('sent');
+        // Even if a final event is replayed, both the progress and mention IDs
+        // already belong to this reply; no second mention can be sent.
+        await queue.send(route, card(a), {
+          ...options,
+          key: dialogKey(final.id),
+          notificationId,
+          final: true,
+          sessionRoute: true,
+          mention: { question: { groupId: group.id, messageId: final.id }, text: mention },
+        });
+        await queue.flush();
+        expect(call).toHaveBeenCalledTimes(before);
+        for (const id of [101, 102, 103]) expect(queue.replySession(7, id, 7)).toBe(group.id);
+      }
+    } finally {
+      await queue.stop();
+      reopened?.close();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  ['before', 0],
+  ['before', 1],
+  ['after', 0],
+  ['after', 1],
+] as const)('keeps a legacy menu queued %s the second reply (%d ms)', async (position, gap) => {
+  const f = daddyFixture(true);
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const route = { chatId: 7 };
+  const at = Date.now();
+  let clock = at;
+  let nativeId = 100;
+  const call = vi.fn(async (_method: string, _body?: any) => ({ message_id: ++nativeId }));
+  const queueFor = (store: Store) =>
+    new TelegramDelivery(
+      store,
+      { call: call as unknown as TelegramApi['call'] },
+      'test_bot',
+      () => clock,
+    );
+  let queue = queueFor(f.store);
+  let reopened: Store | undefined;
+  const card = (reply: string) =>
+    new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(reply);
+  const menu = () =>
+    queue.send(route, { ...text('Menu'), buttons: [[{ text: 'Open', callback_data: 'open' }]] });
+  try {
+    const a = f.store.daddyMessage(group.id, 'agent', 'Reply A', 'turn', undefined, {
+      phase: 'progress',
+    });
+    const options = {
+      key: 'turn:turn',
+      groupId: group.id,
+      replace: true,
+      notificationId: `telegram:dialog:7:0:${a.id}:progress`,
+    };
+    await queue.send(route, card(a.text), options);
+    call.mockRejectedValueOnce(
+      Object.assign(new Error('Flood wait'), { telegramStatus: 429, retryAfter: 10 }),
+    );
+    if (position === 'before') await menu();
+    clock = position === 'before' ? at + gap : at;
+    const b = f.store.finishDaddyReply(group.id, 'Reply B', 'turn');
+    const notificationId = `telegram:dialog:7:0:${b.id}:final`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(notificationId, 'pending', new Date(clock).toISOString());
+    await queue.send(route, card(b.text), { ...options, notificationId, final: true });
+    if (position === 'after') {
+      clock += gap;
+      await menu();
+    }
+    await queue.stop();
+    reopened = new Store(join(f.dir, 'state.sqlite'));
+    queue = queueFor(reopened);
+    clock += 10000;
+    await queue.flush();
+    expect(call.mock.calls.slice(2).map(([method, body]) => [method, body.text])).toEqual(
+      (position === 'before' ? ['Menu', card(b.text).text] : [card(b.text).text, 'Menu']).map(
+        (content) => ['sendMessage', content],
+      ),
+    );
+    expect(queue.replySession(7, 101, 7)).toBe(group.id);
+  } finally {
+    await queue.stop();
+    reopened?.close();
+    await f.close();
+  }
+});
+
+it.each(['moved', 'unchanged', 'unknown'] as const)(
+  'routes a legacy child notice and rename using their original session (%s)',
+  async (state) => {
+    const f = daddyFixture(true);
+    const ownerId = 7;
+    const chatId = -10042;
+    f.store.setSetting('telegram.pairing', { chatId: ownerId, userId: ownerId });
+    f.store.setSetting('telegram.group', { chatId, ownerId });
+    const parent = f.daddy.create({ workspaceId: f.workspace.id });
+    const child = f.daddy.create({ workspaceId: f.workspace.id });
+    const next = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...child, parentGroupId: parent.id });
+    const bind = (groupId: string, threadId: number) =>
+      f.store.db
+        .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+        .run(
+          `${ownerId}:${chatId}:${groupId}`,
+          groupId,
+          JSON.stringify({ chatId, threadId, ownerId, groupId }),
+        );
+    bind(parent.id, 17);
+    if (state !== 'unknown')
+      f.store.db
+        .prepare('INSERT INTO operations VALUES(?,?,?,?,?)')
+        .run(
+          `telegram:topic:${ownerId}:${chatId}:${parent.id}`,
+          parent.id,
+          'done',
+          '{}',
+          JSON.stringify({ chatId, threadId: 17, ownerId, groupId: parent.id }),
+        );
+    const old = { chatId, threadId: 17 };
+    const key = `telegram:child-session:${child.id}`;
+    let clock = Date.now();
+    const call = vi.fn(async (_method: string, _body?: any) => ({ message_id: 51 }));
+    const connect = (store: Store) =>
+      new TelegramDelivery(
+        store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = connect(f.store);
+    let reopened: Store | undefined;
+    try {
+      call.mockRejectedValueOnce(
+        Object.assign(new Error('Flood wait'), { telegramStatus: 429, retryAfter: 10 }),
+      );
+      await queue.send(old, text('Rename parent'), {
+        key: 'topic-name:17',
+        operation: 'renameTopic',
+      });
+      await queue.send(old, text('New child'), { key, notificationId: key });
+      if (state !== 'unchanged') {
+        bind(parent.id, 18);
+        bind(next.id, 17);
+      }
+      await queue.stop();
+      reopened = new Store(join(f.dir, 'state.sqlite'));
+      queue = connect(reopened);
+      await queue.flush();
+      expect(call).toHaveBeenCalledTimes(1);
+      clock += 10000;
+      await queue.flush();
+      const destination = { chatId, threadId: state === 'unchanged' ? 17 : 18 };
+      expect(
+        await queue.send(destination, text('New child'), {
+          key,
+          groupId: parent.id,
+          sessionRoute: true,
+          notificationId: key,
+        }),
+      ).toMatchObject({ status: 'sent' });
+      const expected = [
+        [
+          'sendMessage',
+          expect.objectContaining({ message_thread_id: destination.threadId, text: 'New child' }),
+          expect.anything(),
+        ],
+      ];
+      if (state === 'unchanged')
+        expected.unshift([
+          'editForumTopic',
+          expect.objectContaining({ message_thread_id: 17, name: 'Rename parent' }),
+          expect.anything(),
+        ]);
+      expect(call.mock.calls.slice(1)).toEqual(expected);
+    } finally {
+      await queue.stop();
+      reopened?.close();
       await f.close();
     }
   },
