@@ -159,6 +159,8 @@ The scheduler publishes a finished native review and pushes a saved worker commi
 
 For a correction, the worker checks the behavior behind the published finding across affected entry points. A repeat reviewer can reuse verified coverage from the same target and an ancestor commit. The correction prompt includes related tasks and plans, the published feedback and the requested change. A full review is needed if the earlier baseline cannot be verified.
 
+A finding describes the unmet acceptance criterion, related failures and a check that demonstrates the expected outcome. On a recurring criterion, or from the third review with previous findings, the reviewer saves the diagnosis and revised correction strategy in the native summary before adding a new finding. This happens in the existing review turn. The worker receives that summary after publication. The next reviewer receives a bounded excerpt of the worker report when the saved correction matches both the reviewed and corrected commits.
+
 Work such as filing issues can produce a report with links and other evidence. When the task branch is still at its starting base, the service saves the report and queues an independent check by daddy. The task completes after the reviewer verifies the result against the original requirements. The run generation and pinned revision guard the result. daddy can then use the report to queue follow-up work.
 
 When the task branch has saved changes relative to that base, the service sends them to a PR through `TicketWorkflow`. This includes commits preserved from an earlier run. You can also attach an existing PR directly. Both paths use the same review loop.

@@ -301,7 +301,11 @@ describe('publication gates and revision safety', () => {
     const f = await fixture({ policy: { ...defaultPolicy, maxNoProgress: 1 } });
     const review = async () => {
       await f.engine.review(f.task.id);
-      await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'Same finding' });
+      const job = f.job();
+      await f.engine.broker.call(job, 'set_summary', {
+        body: 'The same acceptance check still fails.',
+      });
+      await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Same finding' });
       await f.run();
       await f.engine.publish(f.task.id);
     };
@@ -448,3 +452,43 @@ it('keeps a merged task open when verification fails or the merge identity chang
     f.store.close();
   }
 });
+
+it.each([
+  [2, 'delivery-order'],
+  [3, 'renamed-key'],
+] as const)(
+  'reconsiders published findings in the same review turn (round %s)',
+  async (round, key) => {
+    const f = await fixture();
+    try {
+      await f.engine.review(f.task.id);
+      const task = f.store.getTask(f.task.id);
+      task.feedback = {
+        ...(await f.provider.getReview(prRef(task), task.review!)),
+        status: 'published',
+        comments: [
+          {
+            id: 'old',
+            body: 'Earlier failure\n\n<!-- daddyloop:previous:comment:delivery-order -->',
+            url: task.ref.url,
+          },
+        ],
+      };
+      task.round = round;
+      f.store.saveTask(task);
+      const job = f.job();
+      const data = { key, body: 'Both failure orderings must preserve the queued reply.' };
+      await expect(f.engine.broker.call(job, 'add_comment', data)).rejects.toMatchObject({
+        code: 'review_strategy_needed',
+      });
+      expect((await f.provider.getReview(prRef(task), task.review!)).comments).toHaveLength(0);
+      await f.engine.broker.call(job, 'set_summary', {
+        body: 'The first fix only covered an unlocked database. Preserve the receipt across shutdown and test both orders.',
+      });
+      await f.engine.broker.call(job, 'add_comment', data);
+      expect((await f.provider.getReview(prRef(task), task.review!)).comments).toHaveLength(1);
+    } finally {
+      f.store.close();
+    }
+  },
+);

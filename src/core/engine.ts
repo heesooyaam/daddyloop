@@ -2094,7 +2094,7 @@ export class Engine {
         task,
         'author',
         'fix',
-        'Address exactly the published feedback snapshot. Explain disputes. Do not treat the reviewer’s private draft or old summary as additional requirements.',
+        'Deliver the original outcome using the published review as evidence. Read its current summary for the diagnosis, group related findings, fix the shared cause, and report the checks for each affected criterion. Explain disputes. Use only published feedback and recorded decisions.',
       );
     });
   }
