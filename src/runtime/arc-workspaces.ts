@@ -12,7 +12,7 @@ type Saved = ArcLease & {
   prepared?: boolean;
   targetBranch?: string;
 };
-type ArcFixIntent = { branch: string; parent: string; title: string };
+type ArcFixIntent = { branch: string; parent: string; title?: string; reportedHead?: string };
 export class ArcWorkspaces {
   protectedSources: () => string[] = () => [];
   private allocation = Promise.resolve();
@@ -300,35 +300,43 @@ export class ArcWorkspaces {
   }
   async recoverFix(task: Task, save: FixSave) {
     const path = this.fixReceipt(task, save);
-    try {
-      return readFileSync(path, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const intent: ArcFixIntent | undefined = existsSync(path + '.intent')
+      ? (JSON.parse(readFileSync(path + '.intent', 'utf8')) as ArcFixIntent)
+      : undefined;
+    if (existsSync(path)) {
+      const head = readFileSync(path, 'utf8');
+      if (head === intent?.reportedHead || (!intent && head === save.revision.head)) return head;
     }
-    const intent = JSON.parse(readFileSync(path + '.intent', 'utf8')) as ArcFixIntent;
     return this.confirmCommit(task, save, intent);
   }
   private async confirmCommit(
     task: Task,
     save: FixSave,
-    intent: ArcFixIntent,
+    intent: ArcFixIntent | undefined,
     signal?: AbortSignal,
   ) {
+    const head = intent?.reportedHead;
+    if (!intent || !head || !/^[a-f0-9]{40}$/.test(head))
+      throw new Error(
+        'Arc commit did not report an exact SHA for this fix run. The author copy was preserved.',
+      );
     const after = await this.checkedAuthor(task, signal);
     if (
       after.branch !== intent.branch ||
-      after.head === intent.parent ||
-      (await this.bridge.native(
-        ['log', '-n', '1', '--no-walk', '--format={title}', after.head],
-        after.saved.mount,
-        signal,
-      )) !== intent.title
+      after.head !== head ||
+      (intent.title &&
+        (head === intent.parent ||
+          (await this.bridge.native(
+            ['log', '-n', '1', '--no-walk', '--format={title}', head],
+            after.saved.mount,
+            signal,
+          )) !== intent.title))
     )
       throw new Error(
-        'Arc did not confirm that the current commit was created by this fix run. The author copy was preserved.',
+        'Arc did not confirm the commit reported by this fix run. The author copy was preserved.',
       );
-    privateWrite(this.fixReceipt(task, save), after.head);
-    return after.head;
+    privateWrite(this.fixReceipt(task, save), head);
+    return head;
   }
   async commit(task: Task, message: string, signal?: AbortSignal, save?: FixSave) {
     let attempted = false;
@@ -370,18 +378,34 @@ export class ArcWorkspaces {
         throw new Error('Ambiguous Arc status paths require manual review before committing');
       for (const path of files) await this.bridge.native(['add', path], saved.mount, signal);
       const title = save ? `${message.split('\n', 1)[0]} [daddyloop fix ${save.runId}]` : message;
-      const intent = { branch: before.branch, parent: before.head, title };
+      const intent: ArcFixIntent = { branch: before.branch, parent: before.head, title };
       if (save) privateWrite(this.fixReceipt(task, save) + '.intent', JSON.stringify(intent));
       committing();
-      await this.bridge.native(['commit', '-m', title], saved.mount, signal);
-      return save
-        ? this.confirmCommit(task, save, intent, signal)
-        : (await this.checkedAuthor(task, signal)).head;
+      const output = await this.bridge.native(['commit', '-m', title], saved.mount, signal);
+      if (!save) return (await this.checkedAuthor(task, signal)).head;
+
+      // Arc prints "[<branch> <full SHA>] <title>" for the commit created by this invocation.
+      const prefix = `[${before.branch} `;
+      const hashes = new Set(
+        output.split(/\r?\n/).flatMap((line) => {
+          if (!line.startsWith(prefix)) return [];
+          const match = /^([a-f0-9]{40})\] (.*)$/.exec(line.slice(prefix.length));
+          return match?.[2] === title ? [match[1]] : [];
+        }),
+      );
+      if (hashes.size === 1) {
+        intent.reportedHead = hashes.values().next().value;
+        privateWrite(this.fixReceipt(task, save) + '.intent', JSON.stringify(intent));
+      }
+      return this.confirmCommit(task, save, intent, signal);
     }
     const head = before.head;
     if (save) {
-      committing();
       const path = this.fixReceipt(task, save);
+      privateWrite(
+        path + '.intent',
+        JSON.stringify({ branch: before.branch, parent: head, reportedHead: head }),
+      );
       privateWrite(path, head);
     }
     return head;
@@ -392,13 +416,13 @@ export class ArcWorkspaces {
       if (author.head !== head)
         throw new Error('The Arc author branch changed after the fixes were saved');
       const branch = task.pr?.branch;
-      if (!branch?.startsWith('users/') || /\s/.test(branch))
+      if (!branch?.startsWith('users/') || /[:\s]/.test(branch) || !/^[a-f0-9]{40}$/.test(head))
         throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
       return { author, branch };
     })().catch((error) => {
       throw new AppError('fix_before_push', String(error));
     });
-    await this.bridge.native(['push', '-u', branch], author.saved.mount, signal);
+    await this.bridge.native(['push', `${head}:${branch}`], author.saved.mount, signal);
   }
   async planDocuments(task: Task, cwd: string) {
     const list = await this.bridge.native(

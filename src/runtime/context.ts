@@ -7,7 +7,7 @@ export function buildContext(
   task: Task,
   job: Job,
   additions: (string | false | undefined)[] = [],
-  earlierPublishedReviews?: ReviewSnapshot[],
+  publishedReviews?: ReviewSnapshot[],
 ): string {
   const group = task.groupId ? store.getGroup(task.groupId) : undefined;
   const ticket = task.ref.kind === 'ticket';
@@ -40,6 +40,9 @@ export function buildContext(
     : undefined;
   if (reportReview && !report)
     throw new AppError('report_missing', 'The saved worker report could not be loaded');
+  const earlierPublishedReviews = publishedReviews?.filter(
+    (review) => review.comments.length && review !== task.feedback && review !== task.snapshot,
+  );
   const material = {
     task: {
       title: task.title,
@@ -147,8 +150,24 @@ export function buildContext(
         : []),
       ...additions.filter(Boolean),
     ].join('\n\n');
-  const remaining =
-    codexInputLimit - render({ ...material, decisions: [], moreDecisions: false }).length;
-  if (remaining < 0) return render(material);
-  return render({ ...material, ...reviewDecisionContext(store, task, job.role, remaining) });
+  const budget = (context: object) =>
+    codexInputLimit - render({ ...context, decisions: [], moreDecisions: false }).length;
+  let context: object = material;
+  let remaining = budget(context);
+  if (remaining < 0 && job.role === 'reviewer' && publishedReviews?.length) {
+    context = {
+      ...material,
+      nativeReview: task.snapshot?.status === 'published' ? undefined : task.snapshot,
+      previousPublishedFeedback: undefined,
+      earlierPublishedReviews: undefined,
+      publishedReviewHistory: {
+        publicationCount: publishedReviews.length,
+        instruction:
+          'Use read_published_review for publications 0 through publicationCount - 1. Read every published finding needed for verification and report its native ID.',
+      },
+    };
+    remaining = budget(context);
+  }
+  if (remaining < 0) return render(context);
+  return render({ ...context, ...reviewDecisionContext(store, task, job.role, remaining) });
 }

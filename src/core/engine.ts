@@ -2123,7 +2123,9 @@ export class Engine {
       if (matches(publication.snapshot)) handles.set(publication.reviewId, handle);
       else if (!publication.snapshot && publication.comments && handle) {
         // Older partial-publication events retained a count without the native comment IDs.
-        const native = await this.provider(prRef(task)).getReview(prRef(task), handle);
+        const native = await this.provider(prRef(task)).getReview(prRef(task), handle, {
+          publishedEvidence: true,
+        });
         if (matches(native)) handles.set(publication.reviewId, handle);
       }
     }
@@ -2167,7 +2169,12 @@ export class Engine {
     const provider = this.provider(prRef(task));
     const read = new Map<string, ReviewSnapshot>();
     for (const handle of handles.values()) {
-      const native = await provider.getReview(prRef(task), handle);
+      const native = await provider.getReview(prRef(task), handle, { publishedEvidence: true });
+      if (job.kind === 'verify_merge' && native.status === 'missing')
+        throw new AppError(
+          'published_review_unavailable',
+          `Published review ${handle.id} could not be read. Its last snapshot was preserved.`,
+        );
       if (native.status !== 'published' || !sameRevision(native.revision, handle.revision))
         throw new AppError('feedback_unconfirmed', 'Could not confirm the published findings.');
       read.set(handle.id, native);
@@ -2179,7 +2186,16 @@ export class Engine {
     if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
       const current =
-        read.get(task.review.id) ?? (await provider.getReview(prRef(task), task.review));
+        read.get(task.review.id) ??
+        (await provider.getReview(prRef(task), task.review, { publishedEvidence: true }));
+      if (
+        current.status === 'missing' ||
+        (task.snapshot?.status === 'published' && current.status !== 'published')
+      )
+        throw new AppError(
+          'published_review_unavailable',
+          `Published review ${task.review.id} could not be read. Its last snapshot was preserved.`,
+        );
       if (current.status === 'partial')
         throw new AppError('feedback_unconfirmed', 'The latest review is partially published.');
       task.snapshot = current;
@@ -2307,12 +2323,21 @@ export class Engine {
     const noFindings =
       !task.feedback?.comments.length &&
       !(task.snapshot?.status === 'published' && task.snapshot.comments.length);
-    if (
-      coversPublications &&
-      (hasEvidence || noFindings) &&
-      (await this.currentFindingEvidence(task, { ...verified, kind: 'verify_merge' }))
-    )
-      return true;
+    try {
+      if (
+        coversPublications &&
+        (hasEvidence || noFindings) &&
+        (await this.currentFindingEvidence(task, { ...verified, kind: 'verify_merge' }))
+      )
+        return true;
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'published_review_unavailable')
+        throw error;
+      const state = task.state === 'awaiting_plan_approval' ? task.state : 'awaiting_checks';
+      if (task.state !== state || task.reason !== error.message)
+        this.state(task, state, error.message);
+      return false;
+    }
     delete task.verifiedMerge;
     this.state(task, 'needs_input', 'Published findings changed. Verify the merged result again.');
     return false;
@@ -3045,7 +3070,15 @@ export class Engine {
             requestsHumanInput(result) ? job : undefined,
           );
         } else {
-          const evidence = await this.currentFindingEvidence(task, job, true);
+          let evidence: ReviewSnapshot[] | undefined;
+          try {
+            evidence = await this.currentFindingEvidence(task, job, true);
+          } catch (error) {
+            if (!(error instanceof AppError) || error.code !== 'published_review_unavailable')
+              throw error;
+            this.state(task, 'needs_input', error.message);
+            return;
+          }
           if (
             result.disputedCommentIds?.length ||
             !evidence ||

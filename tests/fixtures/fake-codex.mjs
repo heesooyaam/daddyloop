@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -50,7 +51,10 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     }, 40);
   }
   if (m.method === 'turn/start') {
-    if (mode === 'input-limit' && m.params.input[0].text.length > 1_048_576) {
+    if (
+      ['input-limit', 'published-review-history'].includes(mode) &&
+      m.params.input[0].text.length > 1_048_576
+    ) {
       send({
         id: m.id,
         error: { code: -32602, message: 'Input exceeds the maximum length of 1048576 characters' },
@@ -84,7 +88,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
       disputedCommentIds: [],
     });
     if (mode === 'malformed') result = 'Agent said done, but no valid structured result';
-    if (mode === 'review-history') {
+    if (mode === 'review-history' || mode === 'published-review-history') {
       try {
         const { url, http_headers } = historyConfig;
         const denied = await fetch(url);
@@ -97,14 +101,50 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
         );
         try {
           const { tools } = await client.listTools();
-          if (tools.length !== 1 || tools[0].name !== 'read_review_decisions')
-            throw new Error('Expected exactly one read-only history tool');
-          const response = await client.callTool({
-            name: tools[0].name,
-            arguments: JSON.parse(process.argv[4]),
-          });
-          if (response.isError) throw new Error('History lookup failed');
-          result = JSON.stringify({ ...JSON.parse(result), summary: response.content[0].text });
+          if (mode === 'review-history') {
+            if (tools.length !== 1 || tools[0].name !== 'read_review_decisions')
+              throw new Error('Expected exactly one read-only history tool');
+            const response = await client.callTool({
+              name: tools[0].name,
+              arguments: JSON.parse(process.argv[4]),
+            });
+            if (response.isError) throw new Error('History lookup failed');
+            result = JSON.stringify({ ...JSON.parse(result), summary: response.content[0].text });
+          } else {
+            if (!tools.some((tool) => tool.name === 'read_published_review'))
+              throw new Error('Expected the read-only published review tool on a resumed thread');
+            const found = [];
+            async function record(publication, comment) {
+              let offset = 0,
+                json = '',
+                count;
+              do {
+                const response = await client.callTool({
+                  name: 'read_published_review',
+                  arguments: { publication, offset, ...(comment === undefined ? {} : { comment }) },
+                });
+                const pageText = response.content[0].text;
+                if (response.isError || Buffer.byteLength(pageText) > 4096)
+                  throw new Error('Expected a bounded evidence page');
+                const page = JSON.parse(pageText);
+                count = page.commentCount;
+                json += page.json;
+                offset = page.nextOffset;
+              } while (offset !== null);
+              return { count, value: JSON.parse(json) };
+            }
+            for (let p = 0; p < 2; p++) {
+              const summary = await record(p);
+              for (let c = 0; c < summary.count; c++) {
+                const { value } = await record(p, c);
+                found.push({
+                  id: value.id,
+                  digest: createHash('sha256').update(value.body).digest('hex'),
+                });
+              }
+            }
+            result = JSON.stringify({ ...JSON.parse(result), summary: JSON.stringify(found) });
+          }
         } finally {
           await client.close();
         }

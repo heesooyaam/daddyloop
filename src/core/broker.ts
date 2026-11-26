@@ -240,7 +240,7 @@ export class Broker {
       }
     });
   }
-  readDecisions(job: Job, pinned: Task, input: unknown) {
+  assertReviewHistoryAccess(job: Job, pinned: Task) {
     const task = this.store.getTask(job.taskId);
     if (
       task.id !== pinned.id ||
@@ -252,8 +252,11 @@ export class Broker {
     )
       throw new AppError(
         'stale_run',
-        'This run no longer has access to the pinned decision history',
+        'This run no longer has access to the pinned decision history or published review evidence',
       );
+  }
+  readDecisions(job: Job, pinned: Task, input: unknown) {
+    this.assertReviewHistoryAccess(job, pinned);
     return readReviewDecisions(this.store, pinned, job.role, reviewDecisionQuery.parse(input));
   }
   async call(

@@ -1,5 +1,5 @@
 import { startReviewHistory } from './review-history.js';
-import { reviewDecisionTool } from '../../../core/review-decisions.js';
+import { publishedReviewTool, reviewDecisionTool } from '../../../core/review-decisions.js';
 import { codexExecutable } from './executable.js';
 import { z } from 'zod';
 import { CodexConnection, type RpcMessage } from './protocol.js';
@@ -290,13 +290,14 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     });
     let history: Awaited<ReturnType<typeof startReviewHistory>> | undefined;
     const tools = input.tools ?? dynamicTools;
+    const isHistoryTool = (tool: { name: string }) =>
+      tool.name === reviewDecisionTool.name || tool.name === publishedReviewTool.name;
     try {
       if (input.signal.aborted) throw new AppError('run_cancelled', 'Run is already cancelled');
       await rpc.start(input.cwd, host, input.processScope?.env);
       // Dynamic schemas are persisted in Codex rollouts. Configure the read-only
       // MCP tool on both start and resume so older threads can discover it.
-      if (tools.some((tool) => tool.name === reviewDecisionTool.name))
-        history = await startReviewHistory(input);
+      if (tools.some(isHistoryTool)) history = await startReviewHistory(input);
       const config = {
         'features.apps': false,
         'features.multi_agent': false,
@@ -342,9 +343,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         const response = await rpc.request<{ thread: { id: string } }>('thread/start', {
           ...common,
           serviceName: 'daddyloop',
-          dynamicTools: (initialTools ?? tools).filter(
-            (tool) => tool.name !== reviewDecisionTool.name,
-          ),
+          dynamicTools: (initialTools ?? tools).filter((tool) => !isHistoryTool(tool)),
         });
         threadId = response.thread.id;
       }

@@ -21,7 +21,11 @@ export interface ReviewProvider {
     marker: string,
     confirmOwner?: (owner: string) => Promise<void>,
   ): Promise<ReviewHandle>;
-  getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
+  getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    options?: { publishedEvidence?: boolean },
+  ): Promise<ReviewSnapshot>;
   discardSupersededDraft?(
     ref: PRRef,
     review: ReviewHandle,

@@ -181,7 +181,11 @@ export class GitLabProvider implements ReviewProvider {
       baselineNoteId: Math.max(0, ...notes.map((n) => n.id)),
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    options?: { publishedEvidence?: boolean },
+  ): Promise<ReviewSnapshot> {
     const [drafts, notes] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
@@ -192,17 +196,19 @@ export class GitLabProvider implements ReviewProvider {
     const summary = drafts.find(isSummary) ?? notes.find((n) => isSummary(n) && ownAuthor(n));
     const draftComments = drafts.filter(isComment);
     const published = notes.filter((n) => isComment(n) && ownAuthor(n));
-    const unknown =
-      drafts.some((n) => !isSummary(n) && !isComment(n)) ||
-      notes.some(
-        (n) =>
-          ownAuthor(n) &&
-          !n.system &&
-          n.id > (review.baselineNoteId ?? Infinity) &&
-          !isSummary(n) &&
-          !isComment(n),
-      );
     const stillDraft = drafts.some(isSummary);
+    const publishedEvidence = options?.publishedEvidence && summary && !stillDraft;
+    const unknown =
+      !publishedEvidence &&
+      (drafts.some((n) => !isSummary(n) && !isComment(n)) ||
+        notes.some(
+          (n) =>
+            ownAuthor(n) &&
+            !n.system &&
+            n.id > (review.baselineNoteId ?? Infinity) &&
+            !isSummary(n) &&
+            !isComment(n),
+        ));
     return {
       status:
         unknown || (stillDraft && published.length > 0) || (!stillDraft && draftComments.length > 0)

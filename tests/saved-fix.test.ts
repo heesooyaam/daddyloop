@@ -1050,3 +1050,69 @@ it.each([
     f.store.close();
   }
 });
+
+it.each(['verification', 'CI', 'plan approval'] as const)(
+  'preserves a known published finding when its review is missing during %s',
+  async (phase) => {
+    const f = await fixture({
+      kind: phase === 'plan approval' ? 'plan' : 'code',
+      state: 'needs_input',
+    });
+    try {
+      const task = f.store.getTask(f.task.id);
+      const ref = prRef(task);
+      const review = await f.provider.createReview(ref, task.revision!, 'published-review');
+      const finding = await f.provider.createComment(ref, review, 'Mandatory finding', 'finding');
+      await f.provider.publish(ref, review);
+      const snapshot = await f.provider.getReview(ref, review);
+      task.review = review;
+      task.snapshot = snapshot;
+      f.store.saveTask(task);
+      const merged = {
+        ...task.pr,
+        state: 'merged',
+        mergeCommit: 'merge',
+        checks: phase === 'CI' ? 'pending' : 'passing',
+      };
+      f.store.setSetting('demo-pr:1', merged);
+      await f.engine.action(task.id, 'verify-merge');
+      const job = f.store.claim()!;
+      const current = f.store.getTask(task.id);
+      await f.engine.refreshFindingEvidence(current, job);
+      f.store.saveTask(current);
+      const missing = { ...snapshot, status: 'missing' as const, comments: [] };
+      const complete = async (verified: boolean) => {
+        await f.engine.completeJob(
+          job,
+          f.result({ verifiedCommentIds: verified ? [finding.id] : [] }),
+        );
+        f.store.saveJob({ ...job, status: 'completed' });
+      };
+      if (phase === 'verification') {
+        const read = vi.spyOn(f.provider, 'getReview').mockResolvedValue(missing);
+        await complete(false);
+        const held = f.store.getTask(task.id);
+        expect(held).toMatchObject({ state: 'needs_input', review, snapshot });
+        expect(held.verifiedMerge).toBeUndefined();
+        read.mockRestore();
+        await f.engine.action(task.id, 'verify-merge');
+        await f.run({ verifiedCommentIds: [finding.id] });
+      } else {
+        await complete(true);
+        const waiting = phase === 'CI' ? 'awaiting_checks' : 'awaiting_plan_approval';
+        expect(f.store.getTask(task.id).state).toBe(waiting);
+        f.store.setSetting('demo-pr:1', { ...merged, checks: 'passing' });
+        const read = vi.spyOn(f.provider, 'getReview').mockResolvedValue(missing);
+        const advance = () =>
+          phase === 'CI' ? f.engine.reconcile(task.id) : f.engine.action(task.id, 'approve-plan');
+        await advance();
+        expect(f.store.getTask(task.id)).toMatchObject({ state: waiting, review, snapshot });
+        read.mockRestore();
+        await advance();
+      }
+      expect(f.store.getTask(task.id).state).toBe('complete');
+    } finally {
+      f.store.close();
+    }
+  },
+);

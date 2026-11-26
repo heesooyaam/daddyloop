@@ -1,9 +1,14 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { dynamicTools } from '../src/core/broker.js';
-import { reviewDecisionTool } from '../src/core/review-decisions.js';
+import {
+  publishedReviewTool,
+  readPublishedReview,
+  reviewDecisionTool,
+} from '../src/core/review-decisions.js';
 import { codexInputLimit } from '../src/runtime/agent.js';
 import type { Decision } from '../src/core/types.js';
 import { CodexRuntime } from '../src/modules/agents/codex/runtime.js';
@@ -581,5 +586,69 @@ it('keeps linked task context and published findings on a correction without rep
     expect(context).not.toContain('An unrelated backlog item');
   } finally {
     await f.close();
+  }
+});
+
+it('fits two large published reviews into a Codex turn and provides their exact findings through history', async () => {
+  const f = await fixture();
+  const dir = mkdtempSync(join(tmpdir(), 'daddyloop-published-input-limit-'));
+  try {
+    const task = f.task;
+    const job = f.job();
+    task.reviewerThreadId = 'thread-fixture';
+    const publications = ['earlier', 'latest'].map((label) => ({
+      status: 'published' as const,
+      revision: task.revision!,
+      body: label + ' summary',
+      url: 'https://demo.local/review/' + label,
+      comments: Array.from({ length: 9 }, (_, index) => ({
+        id: `${label}-${index}`,
+        body:
+          label +
+          ' [reference](https://demo.local/)\n```ts\n' +
+          'x'.repeat(60_000) +
+          '\n``` — 🧪\r\n',
+        url: '',
+      })),
+    }));
+    for (const publication of publications) {
+      task.feedback = publication;
+      expect(buildContext(f.store, task, job, [], [publication])).not.toContain(
+        'publishedReviewHistory',
+      );
+    }
+    const prompt = buildContext(f.store, task, job, [], publications);
+    expect(prompt.length).toBeLessThanOrEqual(codexInputLimit);
+    expect(prompt).toContain('publishedReviewHistory');
+    const runtime = new CodexRuntime({
+      executable: process.execPath,
+      args: [resolve('tests/fixtures/fake-codex.mjs'), 'published-review-history'],
+      timeoutMs: 15_000,
+    });
+    const result = await runtime.run({
+      task,
+      job,
+      cwd: dir,
+      prompt,
+      signal: new AbortController().signal,
+      tools: [...dynamicTools, reviewDecisionTool, publishedReviewTool],
+      onEvent: () => {},
+      onSession: () => {},
+      onTool: async (name, args) => {
+        expect(name).toBe(publishedReviewTool.name);
+        return readPublishedReview(publications, args);
+      },
+    });
+    expect(JSON.parse(result.summary)).toEqual(
+      publications.flatMap((publication) =>
+        publication.comments.map((comment) => ({
+          id: comment.id,
+          digest: createHash('sha256').update(comment.body).digest('hex'),
+        })),
+      ),
+    );
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -142,7 +142,7 @@ it('recovers the saved Arc hash and refuses a push from a different checkout has
     const saved = await workspaces.commit(task, 'Save correction', undefined, save);
     await workspaces.pushSavedFix(task, saved);
     expect(bridge.calls.filter((args) => args[0] === 'push')).toEqual([
-      ['push', '-u', 'users/test/correction'],
+      ['push', `${saved}:users/test/correction`],
     ]);
     bridge.hash = 'd'.repeat(40);
     expect(await new ArcWorkspaces(dir, bridge).recoverFix(task, save)).toBe(saved);
@@ -156,68 +156,89 @@ it('recovers the saved Arc hash and refuses a push from a different checkout has
   }
 });
 
-it.each(['normal', 'branch moved', 'interrupted read'])(
-  'attributes an Arc commit only to the marked save after %s',
-  async (scenario) => {
-    const moved = scenario === 'branch moved';
-    const f = await fixture({ repoPath: '/fake/arc-source' });
-    const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-moved-save-'));
-    const bridge = new MountFixture();
-    const workspaces = new ArcWorkspaces(dir, bridge);
-    try {
-      const task = f.task;
-      await workspaces.prepare(task, 'author');
-      bridge.status = ' M fixed.txt';
-      const h2 = 'c'.repeat(40),
-        h3 = 'd'.repeat(40);
-      const native = bridge.native.bind(bridge);
-      let title = '';
-      let commits = 0;
-      let failRead = scenario === 'interrupted read';
-      bridge.native = async (args) => {
-        if (args[0] === 'commit') {
-          commits++;
-          title = args[2];
-          bridge.hash = moved ? h3 : h2;
-          if (moved) bridge.branch += '-different';
-          return '';
-        }
-        if (args[0] === 'log') {
-          if (failRead) {
-            failRead = false;
-            throw new Error('Interrupted commit read');
-          }
-          return args.at(-1) === h2 ? title : 'Unrelated commit';
-        }
-        return native(args);
-      };
-      const save = {
-        runId: 'fix-run',
-        generation: task.generation,
-        revision: task.revision!,
-        pr: task.pr!,
-        ref: task.ref,
-        summary: 'Saved correction',
-      };
-      const commit = workspaces.commit(task, 'Correct finding', undefined, save);
-      if (moved) {
-        await expect(commit).rejects.toThrow('did not confirm');
-        expect(bridge.hash).toBe(h3);
-        await expect(workspaces.recoverFix(task, save)).rejects.toThrow();
-      } else {
-        if (scenario === 'interrupted read')
-          await expect(commit).rejects.toThrow('Interrupted commit read');
-        else expect(await commit).toBe(h2);
-        const restarted = new ArcWorkspaces(dir, bridge);
-        expect(await restarted.recoverFix(task, save)).toBe(h2);
-        task.pr!.branch = 'users/test/correction';
-        await restarted.pushSavedFix(task, h2);
-        expect(bridge.calls.filter((args) => args[0] === 'push')).toHaveLength(1);
-        expect(commits).toBe(1);
+it.each([
+  'normal',
+  'branch moved',
+  'amended before confirmation',
+  'interrupted read',
+  'amended after interrupted read',
+  'missing command SHA',
+])('attributes an Arc commit only to the marked save after %s', async (scenario) => {
+  const moved = scenario === 'branch moved';
+  const amended = scenario === 'amended before confirmation';
+  const interrupted = scenario.includes('interrupted read');
+  const noSha = scenario === 'missing command SHA';
+  const f = await fixture({ repoPath: '/fake/arc-source' });
+  const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-moved-save-'));
+  const bridge = new MountFixture();
+  const workspaces = new ArcWorkspaces(dir, bridge);
+  try {
+    const task = f.task;
+    await workspaces.prepare(task, 'author');
+    bridge.status = ' M fixed.txt';
+    const h2 = 'c'.repeat(40),
+      h3 = 'd'.repeat(40);
+    const native = bridge.native.bind(bridge);
+    let title = '';
+    let commits = 0;
+    let failRead = interrupted;
+    bridge.native = async (args) => {
+      if (args[0] === 'commit') {
+        commits++;
+        title = args[2];
+        const branch = bridge.branch;
+        bridge.hash = moved || amended ? h3 : h2;
+        if (moved) bridge.branch += '-different';
+        return noSha ? '' : `[${branch} ${h2}] ${title}\n1 file changed`;
       }
-    } finally {
-      f.store.close();
-      rmSync(dir, { recursive: true, force: true });
+      if (args[0] === 'log') {
+        if (failRead) {
+          failRead = false;
+          throw new Error('Interrupted commit read');
+        }
+        return title;
+      }
+      return native(args);
+    };
+    const save = {
+      runId: 'fix-run',
+      generation: task.generation,
+      revision: task.revision!,
+      pr: task.pr!,
+      ref: task.ref,
+      summary: 'Saved correction',
+    };
+    const commit = workspaces.commit(task, 'Correct finding', undefined, save);
+    const restarted = new ArcWorkspaces(dir, bridge);
+    task.pr!.branch = 'users/test/correction';
+    if (moved || amended || noSha) {
+      await expect(commit).rejects.toThrow(
+        noSha ? 'did not report an exact SHA' : 'did not confirm',
+      );
+      await expect(restarted.recoverFix(task, save)).rejects.toThrow();
+    } else if (interrupted) {
+      await expect(commit).rejects.toThrow('Interrupted commit read');
+      if (scenario === 'amended after interrupted read') {
+        bridge.hash = h3;
+        await expect(restarted.recoverFix(task, save)).rejects.toThrow('did not confirm');
+      } else {
+        expect(await restarted.recoverFix(task, save)).toBe(h2);
+      }
+    } else expect(await commit).toBe(h2);
+    const held = moved || amended || noSha || scenario === 'amended after interrupted read';
+    if (!held) {
+      expect(await restarted.recoverFix(task, save)).toBe(h2);
+      await restarted.pushSavedFix(task, h2);
+    } else if (!noSha) {
+      expect(bridge.hash).toBe(h3);
+      await expect(restarted.pushSavedFix(task, h2)).rejects.toMatchObject({
+        code: 'fix_before_push',
+      });
     }
-  },
-);
+    expect(bridge.calls.filter((args) => args[0] === 'push')).toHaveLength(held ? 0 : 1);
+    expect(commits).toBe(1);
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

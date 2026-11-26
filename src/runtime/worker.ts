@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
-import { reviewDecisionTool } from '../core/review-decisions.js';
+import {
+  publishedReviewTool,
+  readPublishedReview,
+  reviewDecisionTool,
+} from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import {
   sameOpenTarget,
@@ -13,7 +17,7 @@ import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
 import type { FixSave, Job, ResourceStatus, ReviewSnapshot, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact, redactEvent } from '../core/security.js';
-import type { AgentRuntime } from './agent.js';
+import type { AgentRuntime, RuntimeTool } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
 import { buildContext } from './context.js';
@@ -727,12 +731,9 @@ export class Worker {
         return;
       }
 
-      let earlierPublishedReviews: ReviewSnapshot[] | undefined;
+      let publishedReviews: ReviewSnapshot[] | undefined;
       if (!isTicket(task) && (job.kind === 'review' || job.kind === 'verify_merge')) {
-        earlierPublishedReviews = (await this.engine.refreshFindingEvidence(task, job)).filter(
-          (review) =>
-            review.comments.length && review !== task.feedback && review !== task.snapshot,
-        );
+        publishedReviews = await this.engine.refreshFindingEvidence(task, job);
         if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'The task changed while findings were being read.');
         store.saveTask(task);
@@ -762,7 +763,7 @@ export class Worker {
       }
       const readOnlyWork =
         job.kind === 'plan' || (task.reportOnly && isTicket(task) && job.kind === 'implement');
-      const tools = readOnlyWork
+      const tools: RuntimeTool[] = readOnlyWork
         ? []
         : job.kind === 'verify_merge'
           ? [reviewDecisionTool]
@@ -771,6 +772,7 @@ export class Worker {
             : isTicket(task)
               ? dynamicTools
               : [...dynamicTools, reviewDecisionTool];
+      if (publishedReviews?.length) tools.push(publishedReviewTool);
       let unconfirmedTools: { name: string; args: unknown; error: GitHubRetryError }[] = [];
       const forgetRetry = (name: string, args: unknown) => {
         unconfirmedTools = unconfirmedTools.filter(
@@ -799,7 +801,7 @@ export class Worker {
               task.draftRecheck &&
               `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
           ],
-          earlierPublishedReviews,
+          publishedReviews,
         ),
         signal: abort.signal,
         tools,
@@ -859,6 +861,16 @@ export class Worker {
                   403,
                 );
               return this.engine.broker.readDecisions(job, task, args);
+            }
+            if (name === publishedReviewTool.name) {
+              if (!publishedReviews?.length || !tools.includes(publishedReviewTool))
+                throw new AppError(
+                  'role_forbidden',
+                  'Published evidence is unavailable to this run',
+                  403,
+                );
+              this.engine.broker.assertReviewHistoryAccess(job, task);
+              return readPublishedReview(publishedReviews, args);
             }
             const value = await this.engine.broker.call(job, name, args, callId);
             if (unconfirmedTools.length) forgetRetry(name, args);

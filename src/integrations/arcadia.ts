@@ -129,7 +129,9 @@ export class ArcBridge {
     await this.helper(['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
   }
   async native(args: string[], mount: string, signal?: AbortSignal) {
-    return (await command('arc', args, { cwd: mount, timeoutMs: 120000, signal })).stdout.trimEnd();
+    const result = await command('arc', args, { cwd: mount, timeoutMs: 120000, signal });
+    // The commit summary may be routed through Arc's user log.
+    return (args[0] === 'commit' ? result.stdout + '\n' + result.stderr : result.stdout).trimEnd();
   }
   async withMount<T>(fn: (mount: string) => Promise<T>) {
     if (

@@ -188,15 +188,22 @@ export class ArcadiaProvider implements ReviewProvider {
       revision,
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    options?: { publishedEvidence?: boolean },
+  ): Promise<ReviewSnapshot> {
     const [general, inline] = await this.notes(ref, review.nodeId!);
     const owned = (note: Note) => !note.deleted_at && note.author?.name === review.authorId;
     const summary = general.find((n) => owned(n) && n.content.includes(tag(review.marker)));
     const isFinding = (n: Note) => owned(n) && n.content.includes(`<!-- ${review.marker}:comment:`);
     const notes = [...general.filter(isFinding), ...inline.filter(isFinding)];
-    const unknown = [...general, ...inline].some(
-      (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
-    );
+    const publishedEvidence = options?.publishedEvidence && summary && !summary.is_draft;
+    const unknown =
+      !publishedEvidence &&
+      [...general, ...inline].some(
+        (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
+      );
     const partial =
       unknown || (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
     return {
