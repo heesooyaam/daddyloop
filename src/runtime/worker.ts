@@ -95,6 +95,10 @@ export class Worker {
   autoCleanup?: () => Promise<unknown>;
   refreshIssueSource?: (id: string) => Promise<void>;
   autoSubmit?: (id: string) => Promise<unknown>;
+  effectiveAgentLimit() {
+    return this.engine.store.setting<number>('worker.maxAgents') ?? this.maxAgents;
+  }
+
   constructor(
     readonly engine: Engine,
     private workspaces: Workspaces,

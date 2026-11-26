@@ -35,7 +35,7 @@ export class InstructionPresets {
     if (!preset) throw new AppError('preset_not_found', 'Preset not found', 404);
     return instructionPresetSchema.parse(preset);
   }
-  save(input: z.input<typeof presetInputSchema>, id?: string) {
+  save(input: z.input<typeof presetInputSchema>, id?: string, onCommit?: () => void) {
     const value = presetInputSchema.parse(input);
     return this.store.transaction(() => {
       const library = this.all(),
@@ -69,10 +69,11 @@ export class InstructionPresets {
           422,
         );
       this.store.setSetting(presetLibraryKey, next);
+      onCommit?.();
       return preset;
     });
   }
-  remove(id: string, expectedRevision: number) {
+  remove(id: string, expectedRevision: number, onCommit?: () => void) {
     return this.store.transaction(() => {
       const current = this.get(id);
       if (current.revision !== expectedRevision)
@@ -85,6 +86,7 @@ export class InstructionPresets {
         presetLibraryKey,
         this.all().filter((preset) => preset.id !== id),
       );
+      onCommit?.();
       return { deleted: true };
     });
   }

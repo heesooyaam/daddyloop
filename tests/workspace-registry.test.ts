@@ -88,6 +88,24 @@ it('registers a named Git workspace with a relative working directory without ch
     await workspaces.register({ name: saved.name, path: repo, base: 'release' }, saved.id);
     expect(store.getGroup(groupId).workspace).toEqual(saved);
     expect(workspaces.get(saved.id)).toMatchObject({ repoPath: repo, scope: '', base: 'release' });
+    const baseline = workspaces.defaults(workspaces.get(saved.id));
+    await workspaces.register({ ...baseline, base: 'stable' }, saved.id, baseline);
+    await workspaces.register(
+      { ...baseline, name: 'Renamed from stale editor' },
+      saved.id,
+      baseline,
+    );
+    expect(workspaces.get(saved.id)).toMatchObject({
+      name: 'Renamed from stale editor',
+      base: 'stable',
+    });
+    await expect(
+      workspaces.register({ ...baseline, base: 'other', name: 'Partial edit' }, saved.id, baseline),
+    ).rejects.toMatchObject({ code: 'settings_conflict' });
+    expect(workspaces.get(saved.id)).toMatchObject({
+      name: 'Renamed from stale editor',
+      base: 'stable',
+    });
     execFileSync('git', ['remote', 'set-url', 'origin', 'https://code.example.test/team/app.git'], {
       cwd: repo,
     });

@@ -357,6 +357,18 @@ export function TaskArchitectSettings({
 }) {
   const { t } = useLocale();
   const [profile, setProfile] = useState(initial);
+  const [expected, setExpected] = useState(() => {
+    const task = board.tasks.find(({ id }) => id === taskId)!;
+    return {
+      task: {
+        generation: task.generation,
+        head: task.revision?.head ?? '',
+        revision: task.revision,
+      },
+      groupGeneration: board.group.generation,
+      architectProfile: initial ?? null,
+    };
+  });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api, false);
@@ -367,7 +379,9 @@ export function TaskArchitectSettings({
     try {
       await api(`/daddy/sessions/${board.group.id}/tasks/${taskId}/architect`, {
         profile: profile ?? null,
+        expected,
       });
+      setExpected({ ...expected, architectProfile: profile ?? null });
       await onSaved();
     } catch (e) {
       setError((e as Error).message);
@@ -378,6 +392,19 @@ export function TaskArchitectSettings({
   return (
     <details
       onToggle={(event) => {
+        if (event.currentTarget.open) {
+          const task = board.tasks.find(({ id }) => id === taskId)!;
+          setProfile(initial);
+          setExpected({
+            task: {
+              generation: task.generation,
+              head: task.revision?.head ?? '',
+              revision: task.revision,
+            },
+            groupGeneration: board.group.generation,
+            architectProfile: initial ?? null,
+          });
+        }
         if (event.currentTarget.open && !catalogue.models.length) void load();
       }}
     >

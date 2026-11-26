@@ -1,3 +1,5 @@
+import { InstructionPresets } from '../src/core/instruction-presets.js';
+import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
@@ -169,7 +171,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       message: {
         ...upload.message!,
         text: undefined,
-        caption: '/import ' + other.id,
+        caption: '/import@fixture_bot ' + other.id,
         document: { file_id: 'instruction-test' },
       },
     });
@@ -751,6 +753,181 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       f.store.setSetting('github.quota:' + task!.ref.host, null);
     }
 
+    // Both command spellings acknowledge the update and leave the next command usable.
+    const poolUpdate = message('/pool 4');
+    await bot.handle(poolUpdate);
+    expect(f.daddy.board(group.id).workers.target).toBe(4);
+    expect(
+      f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(poolUpdate.update_id),
+    ).toBeDefined();
+    await bot.handle(message('/pool@fixture_bot 5'));
+    await bot.handle(message('/status'));
+    expect(f.daddy.board(group.id).workers.target).toBe(5);
+    await bot.handle(click(`dad:pool:${group.id}:8`));
+    expect(f.daddy.board(group.id).workers.target).toBe(5);
+
+    // A success followed by an interrupted acknowledgement cannot overwrite a subsequent web edit.
+    const oldInstructions = message('/instructions worker old');
+    const prepare = f.store.db.prepare.bind(f.store.db);
+    let receipts = 0;
+    const fault = vi.spyOn(f.store.db, 'prepare').mockImplementation((sql) => {
+      if (sql === 'INSERT OR IGNORE INTO bot_receipts VALUES(?,?)' && ++receipts === 2)
+        throw new Error('Interrupted acknowledgement');
+      return prepare(sql);
+    });
+    try {
+      await expect(bot.handle(oldInstructions)).rejects.toThrow('Interrupted acknowledgement');
+    } finally {
+      fault.mockRestore();
+    }
+    const savedInstructions = f.daddy.group(group.id).instructions!;
+    expect(savedInstructions.worker.prompt).toBe('old');
+    expect(
+      (await edit({ instructions: { ...savedInstructions, worker: { prompt: 'newer from web' } } }))
+        .statusCode,
+    ).toBe(200);
+    await bot.handle(oldInstructions);
+    expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('newer from web');
+
+    const crew = f.daddy.group(group.id);
+    crew.workerSlots = [{ number: 1, taskId: task!.id }];
+    f.store.saveGroup(crew);
+    await bot.handle(message('/worker 1 gpt-5.6-sol medium --force'));
+    const force = keyboard().find((button) =>
+      button.callback_data?.startsWith('dad:force:'),
+    )!.callback_data;
+    const reassigned = f.daddy.group(group.id);
+    reassigned.workerSlots = [{ number: 1, taskId: withPr.id }];
+    f.store.saveTask(withPr);
+    f.store.saveGroup(reassigned);
+    const configure = vi.spyOn(f.daddy, 'configureWorker');
+    await bot.handle(click(force));
+    expect(f.store.getTask(withPr.id).generation).toBe(withPr.generation);
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile).toBeUndefined();
+    await bot.handle(message('/worker 1 gpt-5.6-sol medium --force'));
+    expect(lastText()).toContain(withPr.title);
+    await bot.handle(
+      click(
+        keyboard().find((button) => button.callback_data?.startsWith('dad:force:'))!.callback_data,
+      ),
+    );
+    expect(configure).toHaveBeenLastCalledWith(
+      group.id,
+      1,
+      expect.objectContaining({ model: 'gpt-5.6-sol' }),
+      expect.objectContaining({ expectedTaskId: withPr.id }),
+    );
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile?.model).toBe('gpt-5.6-sol');
+    configure.mockRestore();
+
+    await bot.handle(privateMessage('/agents daddy codex'));
+    expect(f.engine.defaultAgents().daddy).toEqual({ engine: 'codex' });
+    await bot.handle(privateMessage('/agents worker codex'));
+    expect(f.engine.defaultAgents().worker).toEqual({ engine: 'codex' });
+    f.store.setSetting('telegram.currentDaddy', null);
+    await bot.handle(privateMessage('/task --no-plan -- Keep this queued request'));
+    await bot.handle(privateMessage('/session ' + other.id));
+    expect(
+      f.store
+        .tasks(other.id)
+        .filter(({ requirements }) => requirements === 'Keep this queued request'),
+    ).toHaveLength(1);
+
+    await bot.handle(privateMessage('/session ' + group.id));
+    await bot.handle(message('/export ' + other.id));
+    const exportLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    const exportStart = new URL(exportLink!.url!).searchParams.get('start');
+    const exportedBefore = documents.length;
+    await bot.handle(privateMessage('/start ' + exportStart));
+    expect(documents).toHaveLength(exportedBefore + 1);
+    expect(documents.at(-1)).toContain('From Telegram');
+    expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
+
+    await bot.handle(message('/concurrency@fixture_bot 3'));
+    const changeLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    const changeStart = new URL(changeLink!.url!).searchParams.get('start');
+    const limitBefore = f.daddy.maxConcurrentAgents();
+    await bot.handle(privateMessage('/start ' + changeStart));
+    expect(f.daddy.maxConcurrentAgents()).toBe(limitBefore);
+    const privateClick = click(
+      keyboard().find((button) => button.callback_data?.startsWith('dad:private:'))!.callback_data,
+    );
+    privateClick.callback_query!.message = { chat: { id: 7, type: 'private' } };
+    await bot.handle(privateClick);
+    expect(f.daddy.maxConcurrentAgents()).toBe(3);
+
+    const attachDocument = async (caption: string, update = privateMessage()) => {
+      await bot.handle({
+        ...update,
+        message: {
+          ...update.message!,
+          text: undefined,
+          caption,
+          document: { file_id: 'instruction-test', file_name: 'Skill.md' },
+        },
+      });
+    };
+    const downloadsBefore = sent.filter(({ method }) => method === 'getFile').length;
+    await attachDocument('/import@another_bot ' + other.id, message(''));
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore);
+    await attachDocument('/skill_file@fixture_bot ' + other.id + ' worker');
+    expect(f.daddy.group(other.id).instructions?.worker.skills).toHaveLength(1);
+    await attachDocument('/preset_create@fixture_bot From attachment');
+    const library = new InstructionPresets(f.store);
+    const preset = library.list().find((item) => item.name === 'From attachment')!;
+    await attachDocument('/preset_edit@fixture_bot ' + preset.id + ' 1 Renamed attachment');
+    expect(library.get(preset.id)).toMatchObject({ name: 'Renamed attachment', revision: 2 });
+
+    const selective = library.save({
+      name: 'Selective',
+      instructions: { daddy: { prompt: 'Keep this' }, worker: { prompt: 'Skip this' } },
+    });
+    await bot.handle(message('/preset Selective'));
+    await bot.handle(message('/preset_parts ' + selective.id + ' 1'));
+    const omitted = f.daddy
+      .group(group.id)
+      .instructions?.presets?.find((value) => value.preset.id === selective.id)?.omit;
+    expect(omitted).toHaveLength(1);
+    await bot.handle(message('/preset_parts ' + selective.id + ' off'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id),
+    ).toMatchObject({ enabled: false, omit: omitted });
+    await bot.handle(message('/preset Selective'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id),
+    ).toMatchObject({ enabled: true, omit: omitted });
+    await bot.handle(message('/preset_parts ' + selective.id + ' all'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id)?.omit,
+    ).toEqual([]);
+
+    const beforePause = f.daddy.group(group.id).generation;
+    const lifecycle = (action: string, expectedGeneration: number) =>
+      app.inject({
+        method: 'POST',
+        url: session + '/' + action,
+        payload: { expectedGeneration },
+      });
+    expect((await lifecycle('pause', beforePause)).statusCode).toBe(200);
+    const resumed = f.daddy.group(group.id).generation;
+    expect((await lifecycle('resume', resumed)).statusCode).toBe(200);
+    expect((await lifecycle('pause', beforePause)).statusCode).toBe(409);
+    expect(f.daddy.group(group.id).daddyState).toBe('active');
+    const target = f.daddy.board(group.id).workers.target;
+    expect((await edit({ workerLimit: 6, baseline: { workerLimit: target } })).statusCode).toBe(
+      200,
+    );
+    expect((await edit({ workerLimit: 4, baseline: { workerLimit: target } })).statusCode).toBe(
+      409,
+    );
+    expect(f.daddy.board(group.id).workers.target).toBe(6);
+
     const requestTask = {
       ...withPr,
       state: 'needs_input' as const,
@@ -764,7 +941,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const question = 'Choose the next step for task ten.';
     const destination = { chatId: -10042, threadId: 17 };
     await api.send(destination, question, undefined, {
-      key: `telegram:question:7:${withPr.id}:task-question`,
+      key: `telegram:question:7:${withPr.id}:${taskRequestKey(f.store, requestTask)}`,
       groupId: group.id,
     });
     await api.delivery!.flush();
@@ -785,7 +962,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       f.store.messages(group.id).find((item) => item.text === 'Continue task ten')?.origin?.replyTo
         ?.taskId,
     ).toBe(withPr.id);
-    f.store.saveTask({ ...requestTask, generation: requestTask.generation + 1 });
+    f.store.saveTask({ ...requestTask, revision: { ...withPr.revision!, head: 'c'.repeat(40) } });
     const staleReply = message('Answer to an old question');
     await bot.handle({
       ...staleReply,
@@ -794,6 +971,51 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(
       f.store.messages(group.id).every((item) => item.text !== 'Answer to an old question'),
     ).toBe(true);
+    const coordinator = f.daddy.group(group.id);
+    coordinator.daddyState = 'needs_input';
+    f.store.saveGroup(coordinator);
+    const followUp = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Coordinator question',
+      undefined,
+      undefined,
+      { phase: 'final', needsReply: true },
+    );
+    await api.send(destination, followUp.text, undefined, {
+      key: 'coordinator-question-test',
+      groupId: group.id,
+      question: { groupId: group.id, messageId: followUp.id },
+    });
+    await api.delivery!.flush();
+    const followUpId = sent.findIndex((item) => item.body.text === followUp.text) + 1;
+    expect(followUpId).toBeGreaterThan(0);
+    const wrong = message('Wrong coordinator topic', 7, 18);
+    await bot.handle({
+      ...wrong,
+      message: {
+        ...wrong.message!,
+        external_reply: { chat: wrong.message!.chat, message_id: followUpId },
+      },
+    });
+    expect(f.store.messages(other.id).some((item) => item.text === 'Wrong coordinator topic')).toBe(
+      false,
+    );
+    const right = message('Answer the coordinator');
+    await bot.handle({
+      ...right,
+      message: {
+        ...right.message!,
+        reply_to_message: {
+          chat: right.message!.chat,
+          message_id: followUpId,
+          message_thread_id: 17,
+        },
+      },
+    });
+    expect(f.store.messages(group.id).some((item) => item.text === 'Answer the coordinator')).toBe(
+      true,
+    );
   } finally {
     await localBotApi.close();
     await app.close();

@@ -1,3 +1,4 @@
+import { mergeSetting } from './settings-edit.js';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -310,34 +311,75 @@ export class WorkspaceRegistry {
       : workspace.id;
     return { ...selected, id, createdAt: workspace.createdAt };
   }
-  async register(input: z.infer<typeof workspaceSchema>, id?: string): Promise<Workspace> {
-    const previous = id ? this.get(id) : undefined;
-    const sameSource = previous && this.sameSource(input.path, previous.repoPath);
-    const workspace = await this.inspect({
-      ...input,
-      provider: input.provider ?? (sameSource ? previous.provider : undefined),
-      copyMode: input.copyMode ?? (sameSource ? previous.copyMode : undefined),
-    });
-    const existing = id
-      ? this.get(id)
-      : this.store
-          .workspaces()
-          .find(
-            (saved) => saved.repoPath === workspace.repoPath && saved.scope === workspace.scope,
-          );
-    if (previous && existing?.updatedAt !== previous.updatedAt)
-      throw new AppError(
-        'workspace_changed',
-        'This workspace changed. Reload it before saving.',
-        409,
-      );
-    if (existing) {
-      workspace.id = existing.id;
-      workspace.createdAt = existing.createdAt;
+  defaults(workspace: Workspace): z.infer<typeof workspaceSchema> {
+    return {
+      name: workspace.name,
+      path: workspace.repoPath,
+      scope: workspace.scope,
+      base: workspace.base,
+      provider: workspace.provider,
+      copyMode: workspace.copyMode,
+    };
+  }
+
+  async register(
+    input: z.infer<typeof workspaceSchema>,
+    id?: string,
+    baseline?: z.infer<typeof workspaceSchema>,
+    onCommit?: () => void,
+  ): Promise<Workspace> {
+    for (;;) {
+      const previous = id ? this.get(id) : undefined;
+      const edited =
+        previous && baseline
+          ? mergeSetting(
+              'repository',
+              this.normalizeDefaults(baseline),
+              this.normalizeDefaults(input),
+              this.defaults(previous),
+            )
+          : input;
+      const sameSource = previous && this.sameSource(edited.path, previous.repoPath);
+      const workspace = await this.inspect({
+        ...edited,
+        provider: edited.provider ?? (sameSource ? previous.provider : undefined),
+        copyMode: edited.copyMode ?? (sameSource ? previous.copyMode : undefined),
+      });
+      const existing = id
+        ? this.get(id)
+        : this.store
+            .workspaces()
+            .find(
+              (saved) => saved.repoPath === workspace.repoPath && saved.scope === workspace.scope,
+            );
+      if (previous && existing?.updatedAt !== previous.updatedAt) {
+        if (baseline) continue;
+        throw new AppError(
+          'workspace_changed',
+          'This workspace changed. Reload it before saving.',
+          409,
+        );
+      }
+      if (existing) {
+        workspace.id = existing.id;
+        workspace.createdAt = existing.createdAt;
+      }
+      this.store.transaction(() => {
+        this.store.saveWorkspace(workspace);
+        this.store.event('_system', 'workspace.saved', { id: workspace.id, name: workspace.name });
+        onCommit?.();
+      });
+      return workspace;
     }
-    this.store.saveWorkspace(workspace);
-    this.store.event('_system', 'workspace.saved', { id: workspace.id, name: workspace.name });
-    return workspace;
+  }
+  private normalizeDefaults(input: z.infer<typeof workspaceSchema>) {
+    return {
+      ...input,
+      base: input.base || undefined,
+      copyMode: input.copyMode,
+      provider: input.provider,
+      scope: input.scope ?? '',
+    };
   }
   async suggestions() {
     const candidates = new Set<string>();

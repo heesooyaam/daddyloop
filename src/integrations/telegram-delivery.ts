@@ -6,6 +6,7 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  question?: OwnerQuestion;
   reminder?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
@@ -100,7 +101,7 @@ export class TelegramDelivery {
     return this.store.db
       .prepare(
         `SELECT json_extract(value,'$.options.groupId') AS groupId,
-      json_extract(value,'$.options.key') AS deliveryKey, json_extract(value,'$.destination.threadId') AS threadId FROM settings
+      json_extract(value,'$.options.key') AS deliveryKey, json_extract(value,'$.options.question') AS question, json_extract(value,'$.destination.threadId') AS threadId FROM settings
       WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
         AND json_extract(value,'$.destination.chatId')=?
         AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,

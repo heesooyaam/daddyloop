@@ -6,6 +6,13 @@ import { notificationPreferences } from './notifications.js';
 export type OwnerQuestion =
   { groupId: string; taskId: string; request: string } | { groupId: string; messageId: string };
 export function taskRequestKey(store: Store, task: Task) {
+  const version = JSON.stringify([
+    task.generation,
+    task.revision?.head,
+    task.revision?.base,
+    task.revision?.start,
+    task.revision?.revisionId,
+  ]);
   if (task.state === 'awaiting_plan_approval')
     return `plan:${task.generation}:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.revision?.start}:${task.revision?.revisionId ?? ''}:${task.review?.id ?? ''}`;
   if (
@@ -14,13 +21,13 @@ export function taskRequestKey(store: Store, task: Task) {
     task.review &&
     !store.pendingReviewWrites(task.id, task.review.marker).length
   )
-    return 'inspect-draft:' + task.review.id;
+    return 'inspect-draft:' + task.review.id + ':' + version;
   if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
-    return task.inputRequest.runId;
+    return task.inputRequest.runId + ':' + version;
 }
 
-export function reminderOpen(store: Store, question: OwnerQuestion) {
-  if (!notificationPreferences(store).enabled) return false;
+export function reminderOpen(store: Store, question: OwnerQuestion, requireNotifications = true) {
+  if (requireNotifications && !notificationPreferences(store).enabled) return false;
   const group = store.groups().find((g) => g.id === question.groupId);
   if (!group) return false;
   if (

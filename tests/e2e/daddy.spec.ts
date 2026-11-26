@@ -1727,3 +1727,76 @@ test('sets the session architect and overrides it when queueing a task', async (
     validatePlan: true,
   });
 });
+
+test('an open task report follows live confirmation stages', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Live task report');
+  const session = '/api/daddy/sessions/' + group.id;
+  const response = await page.request.post(session + '/tasks', {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { requirements: 'Inspect changing task', requestId: randomUUID() },
+  });
+  expect(response.status()).toBe(201);
+  const { id } = await response.json();
+  const latest = (await (await page.request.get(session)).json()) as DaddyBoard;
+  const task = latest.tasks.find((task) => task.id === id)!;
+  const revision = { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) };
+  let state = task.state;
+  let deleting = false;
+  let unavailable = false;
+  let stage = 0;
+  await page.route('**' + session, (route) =>
+    unavailable
+      ? route.fulfill({ status: 503, json: { error: 'Snapshot unavailable' } })
+      : route.fulfill({
+          json: {
+            ...latest,
+            group: { ...latest.group, deletion: deleting ? { state: 'pending' } : undefined },
+            tasks: latest.tasks.map((entry) =>
+              entry.id === id
+                ? {
+                    ...task,
+                    state,
+                    statusLabel: 'Test stage ' + stage,
+                    revision,
+                    ref: {
+                      ...task.ref,
+                      kind: 'pull_request',
+                      number: 3,
+                      url: 'https://github.com/fixture/planning/pull/3',
+                    },
+                  }
+                : entry,
+            ),
+          },
+        }),
+  );
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-work-item').first().click();
+  const report = page.getByRole('dialog');
+  await expect(report.getByText('Read-only worker reports')).toBeVisible();
+  const actions = ['Verify merge', 'Waive CI checks', 'Approve plan'];
+  for (const [next, action] of [
+    ['needs_input', actions[0]],
+    ['awaiting_checks', actions[1]],
+    ['awaiting_plan_approval', actions[2]],
+    ['paused', undefined],
+    ['complete', undefined],
+    ['awaiting_checks', actions[1]],
+  ] as const) {
+    state = next;
+    stage++;
+    await expect(report.getByText('Test stage ' + stage)).toBeVisible();
+    for (const label of actions)
+      await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(
+        label === action ? 1 : 0,
+      );
+  }
+  unavailable = true;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(0);
+  unavailable = false;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(1);
+  deleting = true;
+  stage++;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(0);
+});

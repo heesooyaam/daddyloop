@@ -48,8 +48,8 @@ const commands: Command[] = [
     en: 'Change the profile of a numbered worker',
     ru: 'Изменить профиль воркера по номеру',
     detail: {
-      en: 'Without --force the profile applies to the next task. --force interrupts the current author turn and restarts it in the same working copy. Use /models for available profiles.',
-      ru: 'Обычно смена применяется к следующей задаче. --force прерывает текущий ход автора и запускает его заново в той же копии. Доступные модели показывает /models.',
+      en: 'Without --force the profile applies to the next task. --force asks you to confirm a specific active task before restarting its author turn in the same copy. Use /models for available profiles.',
+      ru: 'Обычно смена применяется к следующей задаче. --force запрашивает подтверждение для конкретной задачи перед перезапуском её хода в той же копии. Доступные модели показывает /models.',
     },
   },
   { name: 'status', en: 'Show the latest session progress', ru: 'Показать текущий этап сессии' },
@@ -72,7 +72,7 @@ const commands: Command[] = [
   },
   {
     name: 'agents',
-    args: '[daddy|worker ENGINE MODEL EFFORT]',
+    args: '[daddy|worker ENGINE [MODEL [EFFORT]]]',
     scope: 'private',
     en: 'Inspect or change the default agent profiles',
     ru: 'Посмотреть или сменить общие профили агентов',

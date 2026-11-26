@@ -605,7 +605,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className="daddy-button quiet"
                 aria-label={t(paused ? 'Resume' : 'Pause')}
                 title={t(paused ? 'Resume' : 'Pause')}
-                onClick={() => void model.action(paused ? 'resume' : 'pause')}
+                onClick={() =>
+                  void model.action(paused ? 'resume' : 'pause', {
+                    expectedGeneration: board?.group.generation,
+                  })
+                }
                 disabled={state.busy || !!board.group.deletion}
               >
                 {paused ? <Play size={15} /> : <Pause size={15} />}
@@ -693,7 +697,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               reason={preparation.error}
               retryLabel="Retry"
               onDetails={showNoticeDetails}
-              onRetry={() => void model.action('resume')}
+              onRetry={() =>
+                void model.action('resume', { expectedGeneration: board?.group.generation })
+              }
             />
           )}
           {deletion?.state === 'error' && (
@@ -1179,7 +1185,12 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             busy={state.busy}
-            onLimitChange={(workerLimit) => void model.action('settings', { workerLimit })}
+            onLimitChange={(workerLimit) =>
+              void model.action('settings', {
+                workerLimit,
+                baseline: { workerLimit: board.workers.target },
+              })
+            }
             onChange={() => model.refresh()}
           />
         </Dialog>
@@ -1257,7 +1268,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
+          <TaskReport
+            api={api}
+            id={inspect}
+            board={board}
+            connected={state.connected}
+            onChange={() => model.refresh()}
+          />
         </Dialog>
       )}
     </div>
@@ -1426,9 +1443,11 @@ function WorkspaceManager({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const editorVersion = useRef(0);
+  const original = useRef<Workspace>(undefined);
   const create = (path = '') => {
     editorVersion.current++;
     setEditing(undefined);
+    original.current = undefined;
     setName(path.split('/').at(-1) ?? '');
     setPath(path);
     setBase('');
@@ -1466,6 +1485,18 @@ function WorkspaceManager({
           provider,
           copyMode: provider === 'arcadia' ? copyMode : undefined,
           ...(base ? { base } : {}),
+          ...(original.current
+            ? {
+                baseline: {
+                  name: original.current.name,
+                  path: original.current.repoPath,
+                  scope: original.current.scope,
+                  base: original.current.base,
+                  copyMode: original.current.copyMode,
+                  provider: original.current.provider,
+                },
+              }
+            : {}),
         },
       );
       await onSaved(saved, isCurrentEditor);
@@ -1497,6 +1528,7 @@ function WorkspaceManager({
               onClick={() => {
                 editorVersion.current++;
                 setEditing(workspace.id);
+                original.current = workspace;
                 setName(workspace.name);
                 setPath(workspace.repoPath);
                 setScope(workspace.scope);
@@ -1950,11 +1982,13 @@ function TaskReport({
   api,
   id,
   board,
+  connected,
   onChange,
 }: {
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
+  connected: boolean;
   onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1962,6 +1996,8 @@ function TaskReport({
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
   const live = board?.tasks.find((task) => task.id === id);
+  const canAct =
+    connected && value?.task.id === id && !!live && !error && !!board && !board.group.deletion;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
   const request = live?.workerRequest ?? value?.task.workerRequest;
   const worker = slot?.number ?? request?.slot;
@@ -1981,17 +2017,19 @@ function TaskReport({
       active = false;
     };
   }, [id]);
-  const [waiverReason, setWaiverReason] = useState('');
+  const waiverKey = JSON.stringify([id, live?.state, live?.generation, live?.revision]);
+  const [waiver, setWaiver] = useState<{ key: string; reason: string }>();
+  const waiverReason = waiver?.key === waiverKey ? waiver.reason : '';
   const action = async (action: string) => {
-    if (!board || !value) return;
+    if (!board || !canAct || !live?.revision) return;
     setBusy(true);
     try {
       await api(`/daddy/sessions/${board.group.id}/task-action`, {
         taskId: id,
         action,
-        expectedHead: value.task.revision?.head ?? '',
-        expectedGeneration: value.task.generation,
-        expectedRevision: value.task.revision,
+        expectedHead: live.revision.head,
+        expectedGeneration: live.generation,
+        expectedRevision: live.revision,
         reason: action === 'waive-checks' ? waiverReason : undefined,
       });
       onChange();
@@ -2022,12 +2060,13 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? activityReason(value.task))}</p>
-          {board &&
+          {canAct &&
+            board &&
             live?.ref.kind === 'ticket' &&
             live.state !== 'complete' &&
             (value.task.planning || live.state === 'discussing') && (
               <TaskArchitectSettings
-                key={id + JSON.stringify(live.architectProfile)}
+                key={id}
                 api={api}
                 board={board}
                 taskId={id}
@@ -2040,13 +2079,24 @@ function TaskReport({
               {t('Auto-merge GitHub PRs')}
               <select
                 value={live.autoMerge.mode}
-                disabled={busy || !!board.group.deletion}
+                disabled={busy || !canAct}
                 onChange={async (event) => {
                   const mode = event.target.value;
                   setBusy(true);
                   setError('');
                   try {
-                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, {
+                      mode,
+                      expected: {
+                        task: {
+                          generation: live.generation,
+                          head: live.revision?.head ?? '',
+                          revision: live.revision,
+                        },
+                        groupGeneration: board.group.generation,
+                        mode: live.autoMerge.mode,
+                      },
+                    });
                     await onChange();
                   } catch (error) {
                     setError((error as Error).message);
@@ -2078,7 +2128,7 @@ function TaskReport({
               <ArrowUpRight size={15} />
             </a>
           )}
-          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+          {canAct && prUrl && live?.revision && live.state === 'needs_input' && (
             <button
               className="daddy-button outline"
               disabled={busy}
@@ -2087,7 +2137,7 @@ function TaskReport({
               {t('Verify merge')}
             </button>
           )}
-          {value.task.state === 'awaiting_checks' && value.task.revision && (
+          {canAct && live?.state === 'awaiting_checks' && live.revision && (
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -2099,7 +2149,7 @@ function TaskReport({
                 <input
                   value={waiverReason}
                   maxLength={2000}
-                  onChange={(event) => setWaiverReason(event.target.value)}
+                  onChange={(event) => setWaiver({ key: waiverKey, reason: event.target.value })}
                   required
                 />
               </label>
@@ -2108,7 +2158,7 @@ function TaskReport({
               </button>
             </form>
           )}
-          {value.task.state === 'awaiting_plan_approval' && (
+          {canAct && live?.state === 'awaiting_plan_approval' && live.revision && (
             <button
               disabled={busy}
               className="daddy-button primary"

@@ -1,3 +1,4 @@
+import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
@@ -339,6 +340,7 @@ it('shows shared limits and only the paired owner can confirm consuming a reset'
       },
     ],
   };
+  view.agents.push({ ...view.agents[0]!, engine: 'claude', name: 'Claude' });
   const id = '852c8b38-1a61-438c-a250-88098c430d5d';
   const plan = {
     id,
@@ -369,7 +371,12 @@ it('shows shared limits and only the paired owner can confirm consuming a reset'
   try {
     await workspace.handle(click('dad:limits'));
     expect(sent.at(-1).text).toContain('осталось 19%');
-    await workspace.handle(click('dad:limits:prepare'));
+    const selected = sent
+      .at(-1)
+      .buttons.find((row: { text: string }[]) => row[0].text.includes('Claude'))[0].callback_data;
+    await workspace.handle(click(selected));
+    expect(usage.prepare).toHaveBeenCalledWith('telegram:7:7:0', 'claude');
+    expect(sent.at(-1).text).toContain('Claude');
     expect(usage.consume).not.toHaveBeenCalled();
     const confirm = sent.at(-1).buttons[0][0].callback_data;
     await workspace.handle(click(confirm, 99));
@@ -427,20 +434,21 @@ it('creates a session from a group topic and isolates its wizard from another to
     await workspace.handle(message('/workspaces', a!.threadId));
     await workspace.handle(message('This is still the original conversation', a!.threadId));
     expect(f.store.messages(root.id).at(-1)?.text).toBe('This is still the original conversation');
-    await workspace.handle(message('/new Separate feature', a!.threadId));
+    await workspace.handle(message('/new Separate feature', 19));
     await workspace.handle(message('Keep this in the original peer session', b!.threadId));
     expect(f.store.messages(peer.id)[0].text).toBe('Keep this in the original peer session');
-    await workspace.handle(click(`dad:new:${f.workspace.id}`, a!.threadId));
+    await workspace.handle(click(`dad:new:${f.workspace.id}`, 19));
+    await workspace.handle(message('/repo default', 19));
     const use = sent.at(-1)!.card.buttons[0][0].callback_data;
     await workspace.handle(click(use, b!.threadId));
     expect(f.daddy.sessions()).toHaveLength(2);
-    await workspace.handle(click(use, a!.threadId));
+    await workspace.handle(click(use, 19));
     const created = f.daddy
       .sessions()
       .find((group) => group.id !== root.id && group.id !== peer.id)!;
     expect(created.title).toBe('Separate feature');
     expect(f.store.messages(created.id)[0].text).toBe('Separate feature');
-    expect(sent.at(-1)!.destination.threadId).toBe(a!.threadId);
+    expect(sent.at(-1)!.destination.threadId).toBe(19);
     expect(sent.at(-1)!.card.buttons[0][0].url).toContain('/22');
     await workspace.handle(message('Old topic still belongs to the old daddy', a!.threadId));
     expect(f.store.messages(root.id).at(-1)?.text).toBe('Old topic still belongs to the old daddy');
@@ -972,10 +980,14 @@ it('acknowledges an explicit reply to the matching task ping while its answer is
       inputRequest: { runId: 'question', role: 'author', generation: task.generation },
     });
     f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-    const q = { groupId: group.id, taskId: task.id, request: 'question' };
+    const q = {
+      groupId: group.id,
+      taskId: task.id,
+      request: taskRequestKey(f.store, f.store.getTask(task.id))!,
+    };
     f.store.setSetting('telegram.delivery:test', {
       destination: { chatId: -1001 },
-      options: { key: 'telegram:question:7:' + task.id + ':question' },
+      options: { key: 'telegram:question:7:' + task.id + ':' + q.request },
       messages: [{ id: 42 }],
     });
     f.store.daddyMessage(group.id, 'user', 'Another reply', undefined, undefined, {
@@ -1071,6 +1083,7 @@ it('offers an immediate model switch from the daddy effort picker', async () => 
         profiles: { daddy: expect.objectContaining({ model: 'gpt-5.6-sol' }) },
         forceDaddy: true,
       }),
+      expect.any(Function),
     );
   } finally {
     await bot.stop();

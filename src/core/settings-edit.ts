@@ -29,7 +29,18 @@ export function mergeSetting<T>(field: string, base: T, edit: T, current: T): T 
   if (key && [base, edit, current].every((value) => value === undefined || Array.isArray(value))) {
     const index = (value: T) =>
       Object.fromEntries(((value ?? []) as unknown[]).map((entry) => [key(entry), entry]));
-    return Object.values(mergeSetting(field, index(base), index(edit), index(current))) as T;
+    const merged = mergeSetting(field, index(base), index(edit), index(current));
+    if (field !== 'instructions.presets') return Object.values(merged) as T;
+    const ids = (value: T) => ((value ?? []) as unknown[]).map(key);
+    const initial = ids(base),
+      edited = ids(edit),
+      latest = ids(current);
+    const shared = new Set(initial.filter((id) => edited.includes(id) && latest.includes(id)));
+    const common = (order: string[]) => order.filter((id) => shared.has(id));
+    const reordered = !isDeepStrictEqual(common(initial), common(edited));
+    if (reordered) assertSetting(field + '.order', common(initial), common(edited), common(latest));
+    const order = new Set(reordered ? [...edited, ...latest] : [...latest, ...edited]);
+    return [...order].filter((id) => Object.hasOwn(merged, id)).map((id) => merged[id]) as T;
   }
   if (record(base) && record(edit) && record(current)) {
     const keys = new Set([...Object.keys(current), ...Object.keys(edit), ...Object.keys(base)]);

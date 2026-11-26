@@ -527,10 +527,13 @@ export class Telegram {
   };
   async handle(update: Update) {
     const store = this.engine.store;
-    if (update.message?.text) {
-      const text = normalizeTelegramText(update.message.text, this.username);
-      if (text === undefined) return;
-      update = { ...update, message: { ...update.message, text } };
+    if (update.message) {
+      const message = update.message;
+      const text = normalizeTelegramText(message.text, this.username);
+      const caption = normalizeTelegramText(message.caption, this.username);
+      if ((message.text && text === undefined) || (message.caption && caption === undefined))
+        return;
+      update = { ...update, message: { ...message, text, caption } };
     }
     const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;

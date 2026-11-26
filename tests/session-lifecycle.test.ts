@@ -195,6 +195,29 @@ it('rejects a stale deletion confirmation before cancelling work', async () => {
   }
 });
 
+it('validates the deletion generation after waiting behind a pause', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const locked = f.engine.lock('create-task:' + group.id, () => blocked);
+    const pause = f.daddy.pause(group.id);
+    const remove = expect(f.daddy.remove(group.id, group.generation)).rejects.toMatchObject({
+      code: 'stale_session',
+    });
+    release();
+    await Promise.all([locked, pause, remove]);
+    expect(f.store.getGroup(group.id).deletion).toBeUndefined();
+    expect(f.lifecycle.remove).not.toHaveBeenCalled();
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
 it('does not park completed copies while their session is exporting and deleting them', async () => {
   const f = fixture();
   try {

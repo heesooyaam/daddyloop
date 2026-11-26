@@ -8,6 +8,19 @@ import { sessionInstructionsSchema } from '../core/instructions.js';
 export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   const id = z.string().uuid();
   const workerNumber = z.number().int().min(1).max(8);
+  const generation = z.number().int().positive();
+  const revision = z
+    .object({
+      head: z.string(),
+      base: z.string(),
+      start: z.string(),
+      revisionId: z.string().optional(),
+    })
+    .strict();
+  const expectedTask = z
+    .object({ generation, head: z.string(), revision: revision.optional() })
+    .strict();
+  const sessionVersion = z.object({ expectedGeneration: generation.optional() }).strict();
 
   {
     const prefix = '/api/workspaces';
@@ -20,9 +33,12 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     app.post(prefix, async (request, reply) =>
       reply.code(201).send(await daddy.workspaces.register(workspaceSchema.parse(request.body))),
     );
-    app.post<{ Params: { id: string } }>(`${prefix}/:id/defaults`, async (request) =>
-      daddy.workspaces.register(workspaceSchema.parse(request.body), id.parse(request.params.id)),
-    );
+    app.post<{ Params: { id: string } }>(`${prefix}/:id/defaults`, async (request) => {
+      const { baseline, ...edit } = workspaceSchema
+        .extend({ baseline: workspaceSchema.optional() })
+        .parse(request.body);
+      return daddy.workspaces.register(edit, id.parse(request.params.id), baseline);
+    });
     app.post(`${prefix}/preview`, async (request) => {
       const input = z
         .object({
@@ -111,6 +127,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           .object({
             baseline: z
               .object({
+                workerLimit: workerNumber.optional(),
                 profiles: profilesSchema.partial().optional(),
                 architectProfile: profileSchema.nullable().optional(),
                 instructions: sessionInstructionsSchema.nullable().optional(),
@@ -118,6 +135,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
               })
               .strict()
               .optional(),
+            expectedGeneration: generation.optional(),
             workerLimit: workerNumber.optional(),
             profiles: profilesSchema.partial().optional(),
             architectProfile: profileSchema.nullable().optional(),
@@ -131,10 +149,16 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       ),
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/pause', async (request) =>
-    daddy.pause(id.parse(request.params.id)),
+    daddy.pause(
+      id.parse(request.params.id),
+      sessionVersion.parse(request.body ?? {}).expectedGeneration,
+    ),
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/resume', async (request) =>
-    daddy.resume(id.parse(request.params.id)),
+    daddy.resume(
+      id.parse(request.params.id),
+      sessionVersion.parse(request.body ?? {}).expectedGeneration,
+    ),
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/tasks', async (request, reply) => {
     const input = z
@@ -192,28 +216,51 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   app.post<{ Params: { id: string; taskId: string } }>(
     '/api/daddy/sessions/:id/tasks/:taskId/architect',
     (request) => {
-      const { profile } = z
-        .object({ profile: profileSchema.nullable() })
+      const { profile, expected } = z
+        .object({
+          profile: profileSchema.nullable(),
+          expected: z
+            .object({
+              task: expectedTask,
+              groupGeneration: generation,
+              architectProfile: profileSchema.nullable(),
+            })
+            .strict()
+            .optional(),
+        })
         .strict()
         .parse(request.body);
       return daddy.taskArchitect(
         id.parse(request.params.id),
         id.parse(request.params.taskId),
         profile,
+        undefined,
+        expected && { ...expected, task: { ...expected.task, groupId: request.params.id } },
       );
     },
   );
   app.post<{ Params: { id: string; taskId: string } }>(
     '/api/daddy/sessions/:id/tasks/:taskId/auto-merge',
     async (request) => {
-      const { mode } = z
-        .object({ mode: z.enum(['on', 'off', 'inherit']) })
+      const { mode, expected } = z
+        .object({
+          mode: z.enum(['on', 'off', 'inherit']),
+          expected: z
+            .object({
+              task: expectedTask,
+              groupGeneration: generation,
+              mode: z.enum(['on', 'off', 'inherit']),
+            })
+            .strict()
+            .optional(),
+        })
         .strict()
         .parse(request.body);
       return daddy.taskAutoMerge(
         id.parse(request.params.id),
         id.parse(request.params.taskId),
         mode,
+        expected && { ...expected, task: { ...expected.task, groupId: request.params.id } },
       );
     },
   );

@@ -188,9 +188,12 @@ export class Daddy {
     });
     return group;
   }
+  maxConcurrentAgents() {
+    return this.worker.effectiveAgentLimit();
+  }
   private raiseCapacity(workers: number) {
     // An explicit pool-size selection also grants the slots needed for that pool.
-    const current = this.store.setting<number>('worker.maxAgents') ?? 1;
+    const current = this.maxConcurrentAgents();
     if (workers > current) this.store.setSetting('worker.maxAgents', workers);
   }
   private availableWorkspaces(group: ReviewGroup, selected?: Workspace) {
@@ -268,6 +271,8 @@ export class Daddy {
           summary: task.summary,
           policy: task.policy,
           head: task.revision?.head,
+          revision: task.revision,
+          generation: task.generation,
           worker:
             (item.job?.role === 'author' && item.job.kind !== 'plan'
               ? item.job.profile
@@ -339,7 +344,12 @@ export class Daddy {
     id: string,
     number: number,
     profile: AgentProfile,
-    { force = false, expectedTaskId }: { force?: boolean; expectedTaskId?: string } = {},
+    {
+      force = false,
+      expectedTaskId,
+      check,
+      onCommit,
+    }: { force?: boolean; expectedTaskId?: string; check?: () => void; onCommit?: () => void } = {},
   ) {
     await this.catalogue.validate(profile);
     const readSlot = () => {
@@ -359,6 +369,7 @@ export class Daddy {
     const update = (lockedTaskId?: string) => {
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
+      check?.();
       const restarted = this.store.transaction(() => {
         slot.profile = profile;
         saveWorkerSlots(this.store, group, slots);
@@ -376,6 +387,7 @@ export class Daddy {
           taskId: lockedTaskId,
           restarted,
         });
+        onCommit?.();
         return restarted;
       });
       if (restarted && lockedTaskId) this.engine.onCancel(lockedTaskId);
@@ -500,8 +512,25 @@ export class Daddy {
     this.store.saveDaddyJob(job);
     this.store.event(group.id, 'daddy.queued', { trigger }, job.id);
   }
-  taskAutoMerge(groupId: string, taskId: string, mode: AutoMergeMode) {
-    return setTaskMergeMode(this.store, this.group(groupId), this.task(groupId, taskId), mode);
+  taskAutoMerge(
+    groupId: string,
+    taskId: string,
+    mode: AutoMergeMode,
+    expected?: { task: ExpectedTask; groupGeneration: number; mode: AutoMergeMode },
+  ) {
+    const group = this.group(groupId);
+    const task = this.task(groupId, taskId);
+    if (expected) {
+      this.checkSessionGeneration(group, expected.groupGeneration);
+      assertTaskVersion(task, expected.task);
+      assertSetting(
+        'autoMerge',
+        expected.mode,
+        mode,
+        autoMergeSettings(this.store, group, task).mode,
+      );
+    }
+    return setTaskMergeMode(this.store, group, task, mode);
   }
   async taskArchitect(
     groupId: string,
@@ -562,6 +591,7 @@ export class Daddy {
       instructions?: SessionInstructions;
       autoMerge?: boolean;
     },
+    onCommit?: () => void,
   ) {
     if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
     for (const profile of Object.values(input.profiles ?? {}))
@@ -730,6 +760,7 @@ export class Daddy {
         if (input.architectProfile !== undefined || changeDaddy)
           for (const task of tasks) this.store.refreshQueuedPlans(task, group);
         this.store.saveGroup(group);
+        onCommit?.();
         if (input.autoMerge !== undefined)
           this.store.setSetting('autoMerge.session:' + id, input.autoMerge);
         this.store.event(id, 'daddy.settings', {
@@ -762,30 +793,43 @@ export class Daddy {
       return lock(0);
     });
   }
-  async pause(id: string, expectedGeneration?: number) {
+  async pause(id: string, expectedGeneration?: number, onCommit?: () => void) {
     await this.withSessionTasks(id, (group, tasks) => {
-      if (expectedGeneration !== undefined && expectedGeneration !== group.generation)
-        throw new AppError('stale_session', 'This session changed. Open its settings again.');
+      this.checkSessionGeneration(group, expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-      if (group.daddyState === 'paused') return;
       const stopped = this.store.transaction(() => {
-        group.daddyState = 'paused';
-        delete group.resourceWait;
-        group.generation++;
-        if (group.workspacePreparation?.state === 'preparing')
-          group.workspacePreparation = { state: 'pending' };
-        this.store.saveGroup(group);
-        const stopped = pauseSessionWork(this.store, group, tasks);
-        this.store.event(id, 'daddy.paused', { snapshot: true });
+        const stopped = this.pauseLocked(group, tasks);
+        onCommit?.();
         return stopped;
       });
-      this.running.get(id)?.controller.abort();
-      this.maintenance.get(id)?.controller.abort();
-      for (const taskId of stopped) this.engine.onCancel(taskId);
+      this.cancelPaused(id, stopped);
     });
     return this.board(id);
   }
-  async resume(id: string, expectedGeneration?: number) {
+  private checkSessionGeneration(group: ReviewGroup, expected?: number) {
+    if (expected !== undefined && expected !== group.generation)
+      throw new AppError('stale_session', 'This session changed. Open its settings again.');
+  }
+  private pauseLocked(group: ReviewGroup, tasks: Task[]) {
+    if (group.daddyState === 'paused') return;
+    const id = group.id;
+    group.daddyState = 'paused';
+    delete group.resourceWait;
+    group.generation++;
+    if (group.workspacePreparation?.state === 'preparing')
+      group.workspacePreparation = { state: 'pending' };
+    this.store.saveGroup(group);
+    const stopped = pauseSessionWork(this.store, group, tasks);
+    this.store.event(id, 'daddy.paused', { snapshot: true });
+    return stopped;
+  }
+  private cancelPaused(id: string, stopped?: string[]) {
+    if (!stopped) return;
+    this.running.get(id)?.controller.abort();
+    this.maintenance.get(id)?.controller.abort();
+    for (const taskId of stopped) this.engine.onCancel(taskId);
+  }
+  async resume(id: string, expectedGeneration?: number, onCommit?: () => void) {
     await this.withSessionTasks(id, (group) => {
       if (expectedGeneration !== undefined && expectedGeneration !== group.generation)
         throw new AppError('stale_session', 'This session changed. Open its settings again.');
@@ -795,6 +839,7 @@ export class Daddy {
         throw new AppError('daddy_stopping', 'Wait for the previous daddy turn to stop');
       this.store.transaction(() => {
         restoreSessionWork(this.store, group);
+        onCommit?.();
         if (group.daddyState === 'active') return;
         group.daddyState = 'active';
         group.autoTurns = 0;
@@ -811,26 +856,34 @@ export class Daddy {
     });
     return this.board(id);
   }
-  async remove(id: string, expectedGeneration: number) {
-    let group = this.store.getGroup(id);
-    if (group.deletedAt) return { deleted: true, archivePath: group.deletion?.archivePath };
-    if (!group.orchestrated || !this.sessionWorkspaces?.supports(group))
-      throw new AppError(
-        'session_deletion_unavailable',
-        'This repository module does not support managed session deletion',
-        422,
-      );
-    if (group.deletion && group.deletion.state !== 'error') return this.board(id);
-    if (group.generation !== expectedGeneration)
-      throw new AppError(
-        'stale_session',
-        'The session changed. Open its current deletion confirmation.',
-      );
-    if (!group.deletion) await this.pause(id);
-    group = this.store.getGroup(id);
-    group.deletion = { ...group.deletion, state: 'pending', error: undefined };
-    this.store.saveGroup(group);
-    this.store.event(id, 'daddy.deletion_queued');
+  async remove(
+    id: string,
+    expectedGeneration: number,
+    authorize?: () => void,
+    onCommit?: () => void,
+  ) {
+    const deleted = this.store.getGroup(id);
+    if (deleted.deletedAt) return { deleted: true, archivePath: deleted.deletion?.archivePath };
+    await this.withSessionTasks(id, (group, tasks) => {
+      authorize?.();
+      if (group.deletion && group.deletion.state !== 'error') return;
+      this.checkSessionGeneration(group, expectedGeneration);
+      if (!group.orchestrated || !this.sessionWorkspaces?.supports(group))
+        throw new AppError(
+          'session_deletion_unavailable',
+          'This repository module does not support managed session deletion',
+          422,
+        );
+      const stopped = this.store.transaction(() => {
+        const stopped = !group.deletion ? this.pauseLocked(group, tasks) : undefined;
+        group.deletion = { ...group.deletion, state: 'pending', error: undefined };
+        this.store.saveGroup(group);
+        this.store.event(id, 'daddy.deletion_queued');
+        onCommit?.();
+        return stopped;
+      });
+      this.cancelPaused(id, stopped);
+    });
     this.tick();
     return this.board(id);
   }
