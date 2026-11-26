@@ -377,12 +377,16 @@ export class TelegramWorkspace {
   async setup() {
     const pair = this.pair();
     if (!pair) throw new Error('Pair the bot first');
-    const requestId = randomInt(1, 2147483647);
-    this.store.setSetting('telegram.workspaceRequest', {
-      id: requestId,
-      userId: pair.userId,
-      expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
-    });
+    const begin = () => {
+      const id = randomInt(1, 2147483647);
+      this.store.setSetting('telegram.workspaceRequest', {
+        id,
+        userId: pair.userId,
+        expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
+      });
+      return id;
+    };
+    const requestId = this.api.applyUpdateEffect?.(this.store, 'group-picker', begin) ?? begin();
     const rights = {
       is_anonymous: false,
       can_manage_chat: true,
@@ -398,15 +402,15 @@ export class TelegramWorkspace {
       can_manage_topics: true,
       can_pin_messages: false,
     };
-    await this.api.call('sendMessage', {
-      chat_id: pair.chatId,
-      text:
+    await this.api.send(pair.chatId, {
+      ...new TelegramText().add(
         this.t(
           'Create a Telegram group, enable Topics, then choose it below. The bot needs permission to manage topics. Allow it to pin messages to keep the session status visible.',
         ) +
-        '\n\n@' +
-        this.username,
-      reply_markup: {
+          '\n\n@' +
+          this.username,
+      ),
+      replyKeyboard: {
         keyboard: [
           [
             {
@@ -1158,11 +1162,16 @@ export class TelegramWorkspace {
       key = `telegram.newSession:${pair.userId}:${destination.chatId}:${destination.threadId ?? 0}`;
     return key;
   }
+  private updateLocale(locale: Locale) {
+    const apply = () => setLocale(this.store, locale);
+    return (this.api.applyUpdateEffect?.(this.store, 'locale', apply) ?? apply()).locale;
+  }
   async callback(data: string, destination: Destination): Promise<boolean> {
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
-      if (language[1] !== 'show') setLocale(this.store, language[1] as 'en' | 'ru');
-      await this.api.send(destination, languageCard(this.locale()));
+      const locale =
+        language[1] !== 'show' ? this.updateLocale(language[1] as Locale) : this.locale();
+      await this.api.send(destination, languageCard(locale));
       return true;
     }
     const notification = data.match(/^notifications:(show|on|off|all)$/);
@@ -1763,8 +1772,8 @@ export class TelegramWorkspace {
       }
       const language = text.match(/^\/language\s+(en|ru)$/);
       if (language) {
-        setLocale(this.store, language[1] as 'en' | 'ru');
-        await this.api.send(destination, this.t('Language updated.'));
+        const locale = this.updateLocale(language[1] as Locale);
+        await this.api.send(destination, translator(locale)('Language updated.'));
         return true;
       }
       if (text === '/notifications') {
@@ -2148,23 +2157,38 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.error', null);
     this.store.setSetting(key, null);
   }
+  private ownerLabelLookup?: Promise<string | undefined>;
+  private async readOwnerLabel(pair: Pair) {
+    try {
+      const user = await this.api.call<{ id: number; username?: string; first_name?: string }>(
+        'getChat',
+        { chat_id: pair.chatId },
+      );
+      if (this.stopped) return;
+      const current = this.pair();
+      if (
+        user?.id !== pair.userId ||
+        current?.userId !== pair.userId ||
+        current.chatId !== pair.chatId
+      )
+        return;
+      if (current.ownerLabel) return current.ownerLabel;
+      const label = user.username ? '@' + user.username : user.first_name;
+      if (label) this.store.setSetting('telegram.pairing', { ...current, ownerLabel: label });
+      return label;
+    } catch {
+      // A numeric mention still identifies the owner.
+    }
+  }
   private async ownerMention(pair: Pair) {
     let label = pair.ownerLabel;
     if (!label) {
-      // Older pairings only recorded the bot name. The owner's private chat is authoritative.
-      try {
-        const user = await this.api.call<{ id: number; username?: string; first_name?: string }>(
-          'getChat',
-          { chat_id: pair.chatId },
-        );
-        if (user?.id === pair.userId && this.pair()?.userId === pair.userId) {
-          label = user.username ? '@' + user.username : user.first_name;
-          if (label)
-            this.store.setSetting('telegram.pairing', { ...this.pair(), ownerLabel: label });
-        }
-      } catch {
-        /* The numeric mention also works without a display name. */
-      }
+      const lookup = (this.ownerLabelLookup ??= this.readOwnerLabel(pair).finally(() => {
+        this.ownerLabelLookup = undefined;
+      }));
+      // The owner ID is sufficient to send the mention. Fetch the optional
+      // display label independently so it cannot hold up the input poll.
+      if (!this.api.delivery?.drainingInBackground) label = await lookup;
     }
     return new TelegramText().add(label || this.t('Session owner'), 'text_link', {
       url: `tg://user?id=${pair.userId}`,

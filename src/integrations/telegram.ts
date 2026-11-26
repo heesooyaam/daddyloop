@@ -5,6 +5,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { Store } from '../core/store.js';
 import type { Engine } from '../core/engine.js';
 import { AppError, now, type Event } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
@@ -135,6 +136,29 @@ export class TelegramApi {
   private replyRoute = new AsyncLocalStorage<TelegramDestination & { groupId: string }>();
   fromUpdate<T>(id: number, action: () => Promise<T>) {
     return this.incoming.run({ id, replies: 0 }, action);
+  }
+  private updateEffectPrefix(store: Store, id: number) {
+    return `telegram.updateEffect:${store.setting<number>('telegram.botId') ?? 'local'}:${id}:`;
+  }
+  applyUpdateEffect<T>(store: Store, name: string, apply: () => T): T {
+    const update = this.incoming.getStore();
+    if (!update) return apply();
+    const key = this.updateEffectPrefix(store, update.id) + name;
+    return store.transaction(() => {
+      const prior = store.setting<{ result: T }>(key);
+      if (prior) return prior.result;
+      const result = apply();
+      store.setSetting(key, { result });
+      return result;
+    });
+  }
+  acknowledgeUpdate(store: Store, id: number) {
+    store.transaction(() => {
+      store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(id, now());
+      store.db
+        .prepare('DELETE FROM settings WHERE key GLOB ?')
+        .run(this.updateEffectPrefix(store, id) + '*');
+    });
   }
   forSessionReply<T>(route: TelegramDestination & { groupId: string }, action: () => Promise<T>) {
     return this.replyRoute.run(route, action);
@@ -352,7 +376,8 @@ export class TelegramApi {
     const chatId = typeof destination === 'number' ? destination : destination.chatId;
     const value = typeof content === 'string' ? new TelegramText().add(content) : content;
     const chunks = splitTelegramText(value);
-    const keyboard = buttons ?? (value as TelegramCard).buttons;
+    const card: TelegramCard = value;
+    const keyboard = buttons ?? card.buttons;
     if (this.delivery) {
       const navigation = this.navigation.getStore();
       const target = typeof destination === 'number' ? { chatId: destination } : destination;
@@ -392,8 +417,8 @@ export class TelegramApi {
         text: chunk.text,
         ...(chunk.entities.length ? { entities: chunk.entities } : {}),
         link_preview_options: { is_disabled: true },
-        ...(keyboard && i === chunks.length - 1
-          ? { reply_markup: { inline_keyboard: keyboard } }
+        ...(i === chunks.length - 1 && (card.replyKeyboard || keyboard)
+          ? { reply_markup: card.replyKeyboard ?? { inline_keyboard: keyboard } }
           : {}),
       });
     }
@@ -523,7 +548,7 @@ export class Telegram {
     const store = this.engine.store;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
     await this.api.fromUpdate(update.update_id, () => this.processUpdate(update));
-    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    this.api.acknowledgeUpdate(store, update.update_id);
   }
   private async processUpdate(update: Update) {
     const store = this.engine.store;
@@ -602,8 +627,12 @@ export class Telegram {
       }
       const language = text.match(/^\/language(?:\s+(en|ru))?$/i);
       if (language) {
-        if (language[1]) setLocale(store, language[1].toLowerCase() as Locale);
-        await this.api.send(chat.id, languageCard(this.locale()));
+        const locale = language[1]
+          ? this.api.applyUpdateEffect(store, 'locale', () =>
+              setLocale(store, language[1].toLowerCase() as Locale),
+            ).locale
+          : this.locale();
+        await this.api.send(chat.id, languageCard(locale));
         return;
       }
       if (text === '/models') {
@@ -692,8 +721,13 @@ export class Telegram {
     }
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
-      if (language[1] !== 'show') setLocale(this.engine.store, language[1] as Locale);
-      await this.api.send(chatId, languageCard(this.locale()));
+      const locale =
+        language[1] !== 'show'
+          ? this.api.applyUpdateEffect(this.engine.store, 'locale', () =>
+              setLocale(this.engine.store, language[1] as Locale),
+            ).locale
+          : this.locale();
+      await this.api.send(chatId, languageCard(locale));
       return true;
     }
     if (data === 'models:refresh') {

@@ -75,7 +75,7 @@ function snapshot(path) {
   }
 }
 
-async function run(path, menuFirst, gap = 0) {
+async function run(path, menuFirst, gap = 0, scenario = 'status') {
   clock = at;
   const store = new Store(path);
   const sent = [];
@@ -91,16 +91,21 @@ async function run(path, menuFirst, gap = 0) {
     const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
       const method = new URL(url).pathname.split('/').at(-1);
       const body = JSON.parse(init.body);
-      assert.equal(method, 'sendMessage');
+      if (method === 'answerCallbackQuery') return Response.json({ ok: true, result: true });
+      assert.ok(['sendMessage', 'editMessageText'].includes(method));
       sent.push({ chat: body.chat_id, text: body.text });
-      return body.chat_id === 7
-        ? Response.json({
-            ok: false,
-            error_code: 429,
-            description: 'Flood wait',
-            parameters: { retry_after: 10 },
-          })
-        : Response.json({ ok: true, result: { message_id: 101 } });
+      const limited =
+        body.chat_id === 7 ||
+        (scenario === 'third' && body.text.endsWith('Reply C')) ||
+        (scenario.endsWith('delayed') && sent.length === 1);
+      if (limited)
+        return Response.json({
+          ok: false,
+          error_code: 429,
+          description: 'Flood wait',
+          parameters: { retry_after: 10 },
+        });
+      return Response.json({ ok: true, result: { message_id: 101 } });
     });
     const bot = new Telegram({ store }, api, 'offline_fixture');
     // The workspace only reads this session; no workers or real provider run.
@@ -111,6 +116,7 @@ async function run(path, menuFirst, gap = 0) {
         group,
         JSON.stringify({
           id,
+          taskId: group,
           text,
           phase,
           sender: 'agent',
@@ -123,16 +129,17 @@ async function run(path, menuFirst, gap = 0) {
       await bot.workspace.pending;
     };
     const menu = async () => {
-      await bot.handle({
-        update_id: 17,
-        message: {
-          message_id: 15,
-          text: '/status',
-          chat: { id: topic.chatId, type: 'supergroup' },
-          from: { id: 7, first_name: 'Owner' },
-          message_thread_id: topic.threadId,
-        },
-      });
+      const chat = { id: topic.chatId, type: 'supergroup' };
+      const from = { id: 7, first_name: 'Owner' };
+      const message = { message_id: 15, chat, message_thread_id: topic.threadId };
+      await bot.handle(
+        scenario === 'language'
+          ? {
+              update_id: 17,
+              callback_query: { id: 'language-dialog', data: 'language:ru', from, message },
+            }
+          : { update_id: 17, message: { ...message, from, text: '/status' } },
+      );
       // Same persisted cursor write as the released getUpdates loop.
       store.transaction(() => {
         store.setSetting('telegram.offset', 18);
@@ -141,28 +148,41 @@ async function run(path, menuFirst, gap = 0) {
     };
     await reply('A', 'Reply A', 'progress');
     clock += 1;
-    await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
-    if (menuFirst) {
+    if (scenario === 'third') {
+      await reply('B', 'Reply B', 'progress');
+      await reply('C', 'Reply C', 'final');
       await menu();
-      clock += gap;
-    }
-    await reply('B', 'Reply B', 'final');
-    if (!menuFirst) {
-      clock += gap;
-      await menu();
+      assert.equal(sent.length, 3);
+    } else if (scenario.startsWith('duplicate')) {
+      if (scenario.endsWith('acknowledged'))
+        await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+      await reply('B', 'Reply A', 'progress');
+      if (!scenario.includes('tail')) await reply('C', 'Reply C', 'final');
+      assert.equal(sent.length, scenario.endsWith('acknowledged') ? 2 : 1);
+    } else {
+      await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+      if (menuFirst) {
+        await menu();
+        clock += gap;
+      }
+      await reply('B', 'Reply B', 'final');
+      if (!menuFirst) {
+        clock += gap;
+        await menu();
+      }
+      assert.deepEqual(sent, [
+        { chat: topic.chatId, text: '👨‍💻 [daddy]\n\nReply A' },
+        { chat: 7, text: 'Other chat triggers 429' },
+      ]);
     }
     await bot.stop();
-    assert.deepEqual(sent, [
-      { chat: topic.chatId, text: '👨‍💻 [daddy]\n\nReply A' },
-      { chat: 7, text: 'Other chat triggers 429' },
-    ]);
   } finally {
     store.close();
   }
   return snapshot(path);
 }
 
-async function replay(path) {
+async function replay(path, acknowledgedReply) {
   const { Store: CurrentStore } = await import('../../src/core/store.ts');
   const { TelegramDelivery } = await import('../../src/integrations/telegram-delivery.ts');
   const store = new CurrentStore(path);
@@ -172,7 +192,14 @@ async function replay(path) {
     {
       async call(method, body) {
         if (body.chat_id === -10042 && method === 'sendMessage')
-          actions.push(body.text.endsWith('Reply B') ? 'B' : '/status');
+          actions.push(
+            /Reply ([ABC])$/.exec(body.text)?.[1] ??
+              (body.reply_markup?.inline_keyboard?.[0]?.some(({ callback_data }) =>
+                callback_data?.startsWith('language:'),
+              )
+                ? 'language:ru'
+                : '/status'),
+          );
         return { message_id: 102 + actions.length };
       },
     },
@@ -184,6 +211,15 @@ async function replay(path) {
     assert.deepEqual(actions, []);
     clock += 10_000;
     await delivery.flush();
+    if (acknowledgedReply) {
+      const receipt = store.db
+        .prepare(
+          `SELECT value FROM settings WHERE key GLOB 'telegram.delivery:*'
+        AND json_extract(value,'$.options.key')=?`,
+        )
+        .get('dialog:' + acknowledgedReply);
+      assert.equal(JSON.parse(receipt.value).messages[0].id, 101);
+    }
     return actions;
   } finally {
     await delivery.stop();
@@ -227,6 +263,36 @@ try {
   const laterMenu = join(directory, 'later-menu.sqlite');
   await run(laterMenu, false, 1);
   assert.deepEqual(await replay(laterMenu), ['B', '/status']);
+  const languageFirst = join(directory, 'language-then-b.sqlite');
+  const bFirst = join(directory, 'b-then-language.sqlite');
+  const languageThenB = await run(languageFirst, true, 0, 'language');
+  const bThenLanguage = await run(bFirst, false, 0, 'language');
+  assert.deepEqual(
+    languageThenB.events.map(({ type }) => type),
+    ['daddy.message', 'preferences.changed', 'daddy.message'],
+  );
+  assert.deepEqual(
+    bThenLanguage.events.map(({ type }) => type),
+    ['daddy.message', 'daddy.message', 'preferences.changed'],
+  );
+  assert.deepEqual(await replay(languageFirst), ['language:ru', 'B']);
+  clock = at + 1;
+  assert.deepEqual(await replay(bFirst), ['B', 'language:ru']);
+  const third = join(directory, 'c-then-menu.sqlite');
+  await run(third, false, 0, 'third');
+  assert.deepEqual(await replay(third), ['C', '/status']);
+  const duplicateAcknowledged = join(directory, 'duplicate-acknowledged.sqlite');
+  await run(duplicateAcknowledged, false, 0, 'duplicate acknowledged');
+  assert.deepEqual(await replay(duplicateAcknowledged, 'A'), ['A', 'C']);
+  const duplicateDelayed = join(directory, 'duplicate-delayed.sqlite');
+  await run(duplicateDelayed, false, 0, 'duplicate delayed');
+  assert.deepEqual(await replay(duplicateDelayed), ['A', 'A', 'C']);
+  const tailAcknowledged = join(directory, 'duplicate-tail-acknowledged.sqlite');
+  await run(tailAcknowledged, false, 0, 'duplicate tail acknowledged');
+  assert.deepEqual(await replay(tailAcknowledged, 'A'), ['A']);
+  const tailDelayed = join(directory, 'duplicate-tail-delayed.sqlite');
+  await run(tailDelayed, false, 0, 'duplicate tail delayed');
+  assert.deepEqual(await replay(tailDelayed), ['A', 'A']);
   console.log(
     JSON.stringify(
       {
@@ -249,6 +315,15 @@ try {
           .update(JSON.stringify(menuThenB))
           .digest('hex'),
         tablesCompared: Object.keys(menuThenB),
+        languageReplay: [
+          ['language:ru', 'B'],
+          ['B', 'language:ru'],
+        ],
+        attemptedThirdReplay: ['C', '/status'],
+        duplicateReplay: [
+          ['A', 'C'],
+          ['A', 'A', 'C'],
+        ],
       },
       null,
       2,

@@ -1164,9 +1164,14 @@ it.each([
   },
 );
 
-it.each([false, true])(
-  'replays every superseded legacy reply with a confirmed prefix = %s',
-  async (confirmed) => {
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const)(
+  'replays superseded and identical legacy replies (confirmed prefix = %s, identical = %s)',
+  async (confirmed, identical) => {
     const f = daddyFixture(true);
     f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
     f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
@@ -1184,8 +1189,8 @@ it.each([false, true])(
       );
     let queue = connect(f.store);
     let reopened: Store | undefined;
-    const cards = ['A'.repeat(5000), 'Reply B', 'Reply C'].map((reply) =>
-      new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(reply),
+    const cards = ['A'.repeat(5000), identical ? 'A'.repeat(5000) : 'Reply B', 'Reply C'].map(
+      (reply) => new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(reply),
     );
     try {
       if (confirmed) call.mockResolvedValueOnce({ message_id: ++id });
@@ -1207,19 +1212,22 @@ it.each([false, true])(
         f.store.db
           .prepare('INSERT INTO notifications VALUES(?,?,?)')
           .run(notificationId, 'pending', new Date(clock++).toISOString());
-        await queue.send(route, card, {
+        const result = await queue.send(route, card, {
           key: 'turn:legacy',
           groupId: session.id,
           replace: true,
           notificationId,
           final: index === 2,
         });
+        f.store.db
+          .prepare('UPDATE notifications SET status=? WHERE id=?')
+          .run(result.status, notificationId);
       }
       expect(
         f.store.db
           .prepare("SELECT count(*) AS count FROM notifications WHERE status='superseded'")
           .get()?.count,
-      ).toBe(2);
+      ).toBe(identical ? 1 : 2);
       const before = call.mock.calls.length;
       await queue.stop();
       reopened = new Store(join(f.dir, 'state.sqlite'));
@@ -1449,6 +1457,91 @@ it.each([
           .filter(([, body]) => body.chat_id === target.chatId)
           .map(([, body]) => body.text),
       ).toEqual(expected);
+    } finally {
+      await queue.stop();
+      restored?.close();
+      await f.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'delivers a child announcement once across a round trip to the original topic (already acknowledged = %s)',
+  async (acknowledged) => {
+    const f = daddyFixture(true);
+    const chatId = -10042;
+    const ownerId = 7;
+    f.store.setSetting('telegram.group', { chatId, ownerId });
+    f.store.setSetting('telegram.pairing', { chatId: ownerId, userId: ownerId });
+    const parent = f.daddy.create({ workspaceId: f.workspace.id });
+    const child = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...child, parentGroupId: parent.id });
+    const bind = (groupId: string, threadId: number) =>
+      f.store.db
+        .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+        .run(
+          `7:${chatId}:${groupId}`,
+          groupId,
+          JSON.stringify({ chatId, ownerId, threadId, groupId }),
+        );
+    const options = {
+      key: `telegram:child-session:${child.id}`,
+      groupId: parent.id,
+      sessionRoute: true,
+    };
+    const call = vi.fn(async (_method: string, _body?: any) => ({ message_id: 51 }));
+    let clock = Date.now();
+    const connect = (store: Store) =>
+      new TelegramDelivery(
+        store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = connect(f.store);
+    let restored: Store | undefined;
+    try {
+      bind(parent.id, 17);
+      bind(child.id, 21);
+      const notice = {
+        ...text('New child'),
+        buttons: [[{ text: 'Open', url: 'https://t.me/c/42/21' }]],
+      };
+      const limited = () =>
+        Object.assign(new Error('Flood wait'), { telegramStatus: 429, retryAfter: 10 });
+      if (!acknowledged) call.mockRejectedValueOnce(limited());
+      await queue.send({ chatId, threadId: 17 }, notice, options);
+      if (acknowledged) {
+        call.mockRejectedValueOnce(limited());
+        await queue.send({ chatId: 7 }, text('Other chat'), { key: 'limit' });
+      }
+      bind(parent.id, 18);
+      await queue.send({ chatId, threadId: 18 }, notice, options);
+      await queue.stop();
+      restored = new Store(join(f.dir, 'state.sqlite'));
+      queue = connect(restored);
+      bind(parent.id, 17);
+      bind(child.id, 22);
+      const before = call.mock.calls.length;
+      clock += 10000;
+      await queue.flush();
+      expect(call.mock.calls.slice(before).filter(([, body]) => body.text === 'New child')).toEqual(
+        acknowledged
+          ? []
+          : [
+              [
+                'sendMessage',
+                expect.objectContaining({
+                  message_thread_id: 17,
+                  reply_markup: {
+                    inline_keyboard: [[{ text: 'Open', url: 'https://t.me/c/42/22' }]],
+                  },
+                }),
+                expect.anything(),
+              ],
+            ],
+      );
+      expect(queue.status().pending).toBe(0);
     } finally {
       await queue.stop();
       restored?.close();

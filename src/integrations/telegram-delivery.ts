@@ -8,6 +8,7 @@ import type { Message, ReviewGroup } from '../core/types.js';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
 import { clipTitle } from '../core/session-title.js';
+import { languageCard } from './telegram-meta.js';
 import {
   TelegramText,
   splitTelegramText,
@@ -86,7 +87,10 @@ const partBody = (
   text: chunks[index].text,
   entities: chunks[index].entities,
   link_preview_options: { is_disabled: true },
-  reply_markup: { inline_keyboard: index === chunks.length - 1 ? (content.buttons ?? []) : [] },
+  reply_markup:
+    index === chunks.length - 1
+      ? (content.replyKeyboard ?? { inline_keyboard: content.buttons ?? [] })
+      : { inline_keyboard: [] },
 });
 
 export function deliveryStatus(result: unknown) {
@@ -254,11 +258,26 @@ export class TelegramDelivery {
           ),
         };
       });
+    const latestIndex = candidates.findIndex(({ message }) => message.id === latest.id);
+    const represented = candidates.slice(0, latestIndex + 1);
+    const latestFingerprint = digest(represented.at(-1)!.fingerprints);
+    let end = latestIndex + 1;
+    while (end < candidates.length) {
+      const candidate = candidates[end];
+      if (
+        candidate.message.needsReply ||
+        !candidate.history.length ||
+        digest(candidate.fingerprints) !== latestFingerprint
+      )
+        break;
+      // A trailing duplicate could leave the legacy turn pointing at its predecessor.
+      end++;
+    }
     const retained = new Map<string, Delivery['messages']>();
     if (value.status !== 'sent')
       value.messages = value.messages.map((part, index) => {
         if (!part) return null;
-        const matches = candidates.filter(
+        const matches = represented.filter(
           (candidate) => candidate.fingerprints[index] === part.fingerprint,
         );
         // A queued edit describes proposed content. An older matching message
@@ -289,15 +308,26 @@ export class TelegramDelivery {
         }
         return null;
       });
-    const previous = candidates.slice(
-      0,
-      candidates.findIndex(({ message }) => message.id === latest.id),
-    );
-    for (const [index, candidate] of previous.entries()) {
+    const previous = candidates.slice(0, latestIndex);
+    for (const [index, candidate] of candidates.slice(0, end).entries()) {
+      if (index === latestIndex) continue;
       const { message, content, chunks, history } = candidate;
       const parts = retained.get(message.id);
       const superseded = history.find(({ status }) => status === 'superseded');
-      if (!parts && (!superseded || history.some(({ status }) => status === 'sent'))) continue;
+      const prior = candidates[index - 1];
+      // The old equality check returned the previous delivery status without
+      // saving a new receipt or superseding an identical independent reply.
+      const identicalToPrevious =
+        prior &&
+        history.length > 0 &&
+        digest(prior.fingerprints) === digest(candidate.fingerprints);
+      if (
+        !parts &&
+        !identicalToPrevious &&
+        (!superseded || history.some(({ status }) => status === 'sent'))
+      )
+        continue;
+      const pending = history.find(({ status }) => status !== 'sent') ?? history[0];
       const key = dialogKey(message.id);
       const storageKey = deliveryKey(this.bot, value.destination, key);
       if (this.store.setting<Delivery>(storageKey)) continue;
@@ -305,7 +335,7 @@ export class TelegramDelivery {
       const order =
         index === 0
           ? { createdAt: value.createdAt, queuePosition: position }
-          : this.legacyReplacementOrder(value, message, position, superseded?.at, index, false);
+          : this.legacyReplacementOrder(value, message, position, pending?.at, index, false);
       const sent = !!parts && chunks.every((_, index) => parts[index]);
       this.store.setSetting(storageKey, {
         ...value,
@@ -327,8 +357,7 @@ export class TelegramDelivery {
     }
     if (previous.length && value.status !== 'sent') {
       const proposed = notification.get(value.options.notificationId!);
-      const firstWasSent =
-        previous.length === 1 && previous[0].history.some(({ status }) => status === 'sent');
+      const firstWasSent = previous.at(-1)?.history.some(({ status }) => status === 'sent');
       Object.assign(
         value,
         this.legacyReplacementOrder(
@@ -337,7 +366,7 @@ export class TelegramDelivery {
           position,
           proposed?.at,
           previous.length,
-          firstWasSent && value.attempts > 0,
+          !!firstWasSent && value.attempts > 0,
         ),
       );
     }
@@ -354,22 +383,62 @@ export class TelegramDelivery {
     const createdAt = Number.isFinite(queuedAt)
       ? Math.max(value.createdAt, queuedAt)
       : value.createdAt;
-    // In the released schema an edit overwrote the old queue row. For exact
-    // timestamp ties without a recorded attempt, preserve known menu slots.
-    const earlier = this.store.db
+    // The released sender overwrote the turn row. A language callback has
+    // a separate event that can disambiguate a timestamp tie with a reply.
+    const replyEvent = this.store.db
       .prepare(
-        `SELECT MAX(rowid) AS position FROM settings WHERE key GLOB 'telegram.delivery:*'
+        `SELECT MIN(id) AS id FROM events WHERE task_id=? AND type='daddy.message'
+       AND json_extract(data,'$.messageId')=?`,
+      )
+      .get(message.taskId, message.id);
+    const tied = this.store.db
+      .prepare(
+        `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
        AND json_extract(value,'$.bot')=? AND json_extract(value,'$.destination')=?
        AND json_extract(value,'$.createdAt')=?
        AND json_extract(value,'$.status') IN ('queued','sending')
-       AND json_extract(value,'$.options.operation') IS NULL
-       AND (?=0 OR json_extract(value,'$.attempts')>0)`,
+       AND json_extract(value,'$.options.operation') IS NULL ORDER BY rowid`,
       )
-      .get(this.bot, JSON.stringify(value.destination), createdAt, Number(attempted));
-    return {
-      createdAt,
-      queuePosition: Math.max(position, Number(earlier?.position ?? 0)) + index / (index + 1),
-    };
+      .all(this.bot, JSON.stringify(value.destination), createdAt);
+    let earlier = position;
+    let later = Infinity;
+    for (const row of tied) {
+      const menu = JSON.parse(String(row.value)) as Delivery;
+      const event = replyEvent?.id != null ? this.legacyLanguageEvent(menu) : undefined;
+      const precedes =
+        event !== undefined ? event < Number(replyEvent!.id) : !attempted || menu.attempts > 0;
+      if (precedes) earlier = Math.max(earlier, Number(row.position));
+      else later = Math.min(later, Number(row.position));
+    }
+    earlier = Math.min(earlier, later - 1);
+    return { createdAt, queuePosition: earlier + index / (index + 1) };
+  }
+  private legacyLanguageEvent(menu: Delivery): number | undefined {
+    if (menu.options.key || !menu.options.deletePrevious) return;
+    const locale = (['ru', 'en'] as const).find(
+      (locale) => digest(menu.content) === digest(languageCard(locale)),
+    );
+    if (!locale) return;
+    // Match only a unique card and a unique compatible event. If the old
+    // records cannot establish the pairing, keep the recorded menu slot.
+    const cards = this.store.db
+      .prepare(
+        `SELECT count(*) AS n FROM settings WHERE key GLOB 'telegram.delivery:*'
+       AND json_extract(value,'$.bot')=?
+       AND json_extract(value,'$.createdAt')=?
+       AND json_extract(value,'$.options.key') IS NULL
+       AND json_extract(value,'$.options.deletePrevious') IS NOT NULL
+       AND json_extract(value,'$.content')=?`,
+      )
+      .get(this.bot, menu.createdAt, JSON.stringify(menu.content));
+    if (Number(cards?.n) !== 1) return;
+    const events = this.store.db
+      .prepare(
+        `SELECT id FROM events WHERE type='preferences.changed' AND task_id='_system'
+       AND at=? AND json_extract(data,'$.locale')=?`,
+      )
+      .all(new Date(menu.createdAt).toISOString(), locale);
+    if (events.length === 1) return Number(events[0].id);
   }
   private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
     const { chatId, threadId } = value.destination;
@@ -460,6 +529,19 @@ export class TelegramDelivery {
     const { options } = value;
     if (!options.key?.startsWith(childSession) || !options.groupId || value.messages.some(Boolean))
       return key;
+    const acknowledged = this.store.db
+      .prepare(
+        `SELECT 1 FROM settings WHERE key GLOB 'telegram.delivery:*' AND key<>?
+       AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+       AND json_extract(value,'$.options.key')=?
+       AND EXISTS (SELECT 1 FROM json_each(settings.value,'$.messages')
+         WHERE json_extract(json_each.value,'$.id') IS NOT NULL) LIMIT 1`,
+      )
+      .get(key, this.bot, value.ownerId ?? null, options.key);
+    if (acknowledged) {
+      value.status = 'cancelled';
+      return key;
+    }
     const pair = this.store.setting<Pairing>('telegram.pairing');
     if (!pair || value.ownerId !== pair.userId) return key;
     const route = this.sessionDestination(
@@ -469,9 +551,21 @@ export class TelegramDelivery {
     );
     if (!route || sameDestination(route, value.destination)) return key;
     const replacement = deliveryKey(this.bot, route, options.key);
-    if (this.store.setting<Delivery>(replacement)) {
-      value.status = 'cancelled';
-      return key;
+    const destination = this.store.setting<Delivery>(replacement);
+    if (destination) {
+      if (destination.status !== 'cancelled' || destination.messages.some(Boolean)) {
+        value.status = 'cancelled';
+        return key;
+      }
+      // The earlier route was cancelled before Telegram acknowledged it.
+      // Revive its slot with the pending operation and preserve its backoff.
+      const revived = { ...value, destination: route };
+      this.store.transaction(() => {
+        this.store.setSetting(replacement, revived);
+        this.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
+      });
+      value.destination = route;
+      return replacement;
     }
     value.destination = route;
     this.store.db
@@ -1011,7 +1105,7 @@ export class TelegramDelivery {
         }
       }
       if (
-        options.operation === 'reaction' &&
+        (options.operation === 'reaction' || original.replyKeyboard) &&
         status >= 400 &&
         status < 500 &&
         status !== 408 &&
