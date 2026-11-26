@@ -213,6 +213,7 @@ export class TelegramApi {
         const outgoing = body as { chat_id?: number; message_thread_id?: number };
         if (
           method === 'sendMessage' &&
+          !signal &&
           navigation?.active &&
           outgoing?.chat_id === navigation.chatId &&
           outgoing.message_thread_id === navigation.threadId
@@ -259,7 +260,7 @@ export class TelegramApi {
     } finally {
       navigation.active = false;
     }
-    if (navigation.replied && !this.delivery) {
+    if (navigation.replied) {
       try {
         await this.call('deleteMessage', {
           chat_id: navigation.chatId,
@@ -343,10 +344,15 @@ export class TelegramApi {
         target.threadId === navigation.threadId
           ? { chatId: navigation.chatId, messageId: navigation.messageId }
           : undefined;
-      return this.delivery.send(
-        target,
-        { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-        { ...delivery, deletePrevious: cleanup },
+      const queue = this.delivery;
+      // The queue owns cleanup for its writes. Only direct Bot API calls use
+      // the callback's synchronous acknowledgement.
+      return this.navigation.exit(() =>
+        queue.send(
+          target,
+          { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
+          { ...delivery, deletePrevious: cleanup },
+        ),
       );
     }
     let result: unknown;

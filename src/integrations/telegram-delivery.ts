@@ -1,5 +1,10 @@
-import { reminderOpen, type OwnerQuestion } from './telegram-reminders.js';
+import {
+  privateAgentReplyAllowed,
+  reminderOpen,
+  type OwnerQuestion,
+} from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Message, ReviewGroup } from '../core/types.js';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
 import {
@@ -40,9 +45,10 @@ type Delivery = {
   status: 'queued' | 'sending' | 'sent' | 'cancelled';
   attempts: number;
   mentionOnPromotion?: boolean;
+  pinPermissionDenied?: boolean;
   nextAttemptAt: number;
   error?: string;
-  messages: { id: number; fingerprint: string }[];
+  messages: ({ id: number; fingerprint: string } | null)[];
 };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
@@ -55,6 +61,26 @@ const isIndependent = ({ options }: Delivery) =>
 export const dialogKey = (messageId: string) => `dialog:${messageId}`;
 const deliveryKey = (bot: string, route: TelegramDestination, key: string) =>
   prefix + digest([bot, route, key]);
+
+const legacyDialog = /^telegram:dialog:-?\d+:\d+:([^:]+)(?::(?:progress|final))?$/;
+const topicOwner = (value: Delivery) => `${value.ownerId}:${value.destination.chatId}`;
+const pinPermissionDenied = (error: unknown) =>
+  Number((error as { telegramStatus?: number })?.telegramStatus) === 403 ||
+  /not enough rights|CHAT_ADMIN_REQUIRED|not permitted to pin|forbidden|\b403\b/i.test(
+    String(error),
+  );
+const partBody = (
+  destination: TelegramDestination,
+  content: TelegramCard,
+  chunks: FormattedText[],
+  index: number,
+) => ({
+  chat_id: destination.chatId,
+  text: chunks[index].text,
+  entities: chunks[index].entities,
+  link_preview_options: { is_disabled: true },
+  reply_markup: { inline_keyboard: index === chunks.length - 1 ? (content.buttons ?? []) : [] },
+});
 
 export function deliveryStatus(result: unknown) {
   return (result as { status?: string })?.status ?? 'sent';
@@ -81,7 +107,9 @@ export class TelegramDelivery {
       const value = JSON.parse(String(row.value)) as Delivery;
       if (!value || value.bot !== bot || !['queued', 'sending'].includes(value.status)) continue;
       value.status = 'queued';
-      this.pending.set(String(row.key), value);
+      const adopted = this.adoptLegacyRoute(value);
+      if (!adopted) value.status = 'cancelled';
+      this.save(String(row.key), value);
     }
     this.rateLimitUntil = store.setting<number>(`telegram.deliveryLimit:${bot}`) ?? 0;
   }
@@ -92,7 +120,7 @@ export class TelegramDelivery {
        AND json_extract(value,'$.bot')=?
        AND json_extract(value,'$.options.key') NOT GLOB 'dialog:*'
        AND json_extract(value,'$.options.notificationId') GLOB 'telegram:dialog:*'
-       ORDER BY json_extract(value,'$.options.final') DESC, rowid DESC`,
+       ORDER BY (json_extract(value,'$.options.key') GLOB 'turn:*') DESC, rowid`,
       )
       .all(this.bot);
     if (!rows.length) return;
@@ -100,11 +128,7 @@ export class TelegramDelivery {
       for (const row of rows) {
         const value = JSON.parse(String(row.value)) as Delivery;
         const { options, destination } = value;
-        // Legacy progress and final notifications can share a turn receipt.
-        // Its notificationId identifies the content, including an in-flight edit.
-        const match = options.notificationId?.match(
-          /^telegram:dialog:-?\d+:\d+:([^:]+)(?::(?:progress|final))?$/,
-        );
+        const match = options.notificationId?.match(legacyDialog);
         if (!match) continue;
         if (!options.groupId && options.key?.startsWith('turn:')) {
           const job = this.store.db
@@ -117,14 +141,31 @@ export class TelegramDelivery {
         if (message?.sender !== 'agent') continue;
         const key = dialogKey(message.id);
         const storageKey = deliveryKey(this.bot, destination, key);
-        if (this.store.setting<Delivery>(storageKey)) {
-          // Earlier versions could send a final mention as well as a progress card.
-          // Keep the old native receipts for reply routing, but stop queued duplicates.
-          if (['queued', 'sending'].includes(value.status)) {
-            value.status = 'cancelled';
-            this.store.setSetting(String(row.key), value);
+        if (options.key?.startsWith('turn:')) this.separateTurnReceipts(value, message);
+        const prior = this.store.setting<Delivery>(storageKey);
+        let sourceKey = String(row.key);
+        if (prior) {
+          if (
+            prior.messages.some(Boolean) &&
+            !value.messages.some(Boolean) &&
+            value.status !== 'sent' &&
+            options.final &&
+            options.notificationId &&
+            message.needsReply
+          ) {
+            // A pending standalone mention may follow a confirmed progress card.
+            value.messages = prior.messages;
+            value.createdAt = prior.createdAt;
+            value.mentionOnPromotion = true;
+            this.store.db.prepare('DELETE FROM settings WHERE key=?').run(sourceKey);
+            sourceKey = storageKey;
+          } else {
+            if (['queued', 'sending'].includes(value.status)) {
+              value.status = 'cancelled';
+              this.store.setSetting(String(row.key), value);
+            }
+            continue;
           }
-          continue;
         }
         options.key = key;
         options.sessionRoute = true;
@@ -147,9 +188,159 @@ export class TelegramDelivery {
         // Change the key in place to preserve FIFO order for equal timestamps.
         this.store.db
           .prepare('UPDATE settings SET key=?,value=? WHERE key=?')
-          .run(storageKey, JSON.stringify(value), row.key);
+          .run(storageKey, JSON.stringify(value), sourceKey);
       }
     });
+  }
+  private separateTurnReceipts(value: Delivery, latest: Message) {
+    if (value.status === 'sent' || !value.messages.some(Boolean)) return;
+    const groupId = value.options.groupId!;
+    const candidates = this.store
+      .messages(groupId)
+      .filter((message) => message.sender === 'agent' && message.runId === latest.runId)
+      .map((message) => {
+        const content =
+          message.id === latest.id
+            ? value.content
+            : new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(message.text);
+        const chunks = splitTelegramText(content);
+        return {
+          message,
+          content,
+          chunks,
+          fingerprints: chunks.map((_, index) =>
+            digest(partBody(value.destination, content, chunks, index)),
+          ),
+        };
+      });
+    if (candidates.length < 2) return;
+    const current = candidates.find((candidate) => candidate.message.id === latest.id)!;
+    const retained = new Map<string, Delivery['messages']>();
+    value.messages = value.messages.map((part, index) => {
+      if (!part) return null;
+      const matches = candidates.filter(
+        (candidate) => candidate.fingerprints[index] === part.fingerprint,
+      );
+      // A queued edit describes proposed content. An older matching message
+      // already recorded as sent is stronger evidence, even for identical text.
+      const confirmed = matches.find(
+        ({ message }) =>
+          message.id !== latest.id &&
+          (['progress', 'final', undefined] as const).some((phase) =>
+            this.store.db
+              .prepare("SELECT 1 FROM notifications WHERE id=? AND status='sent'")
+              .get(this.legacyDialogId(value, message, phase)),
+          ),
+      );
+      const owner = confirmed ?? (matches.includes(current) ? current : matches[0]);
+      if (owner?.message.id === latest.id) return part;
+      if (owner) {
+        const parts = retained.get(owner.message.id) ?? [];
+        while (parts.length <= index) parts.push(null);
+        parts[index] = part;
+        retained.set(owner.message.id, parts);
+      } else {
+        // An unrecognizable receipt cannot authorize editing the proposed reply.
+        this.store.setSetting(
+          deliveryKey(this.bot, value.destination, `legacy-receipt:${part.id}`),
+          {
+            ...value,
+            id: randomUUID(),
+            status: 'cancelled',
+            options: { groupId: value.options.groupId },
+            messages: [part],
+          },
+        );
+      }
+      return null;
+    });
+    for (const candidate of candidates) {
+      const { message, content, chunks } = candidate;
+      const messages = retained.get(message.id);
+      if (!messages) continue;
+      const key = dialogKey(message.id);
+      const storageKey = deliveryKey(this.bot, value.destination, key);
+      if (this.store.setting<Delivery>(storageKey)) continue;
+      this.store.setSetting(storageKey, {
+        ...value,
+        id: randomUUID(),
+        content,
+        options: {
+          key,
+          groupId,
+          sessionRoute: true,
+          replace: true,
+          final: message.phase !== 'progress',
+          order: message.at,
+          notificationId: this.legacyDialogId(value, message, message.phase),
+        },
+        createdAt: value.createdAt - 1,
+        status: chunks.every((_, index) => messages[index]) ? 'sent' : 'queued',
+        messages,
+      });
+    }
+  }
+  private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
+    const { chatId, threadId } = value.destination;
+    return `telegram:dialog:${chatId}:${threadId ?? 0}:${message.id}${phase ? ':' + phase : ''}`;
+  }
+  private adoptLegacyRoute(value: Delivery) {
+    const { options, destination } = value;
+    const key = options.key ?? '';
+    const question = key.match(/^telegram:question:(\d+):([^:]+):(.+?)(?::reminder:\d+)?$/);
+    if (question && !options.reminder) {
+      const task = this.store.tasks().find((task) => task.id === question[2]);
+      const groupId = options.groupId ?? task?.groupId;
+      if (!groupId || Number(question[1]) !== value.ownerId) return false;
+      options.reminder = { groupId, taskId: question[2], request: question[3] };
+    }
+    if (options.sessionRoute !== undefined) return true;
+    const status = key.startsWith('progress:') || options.operation === 'pin';
+    const board = key.startsWith('telegram:daddy-intro:');
+    const resources = key.startsWith('resources:');
+    const rename = options.operation === 'renameTopic';
+    const dialog = key.startsWith('telegram:dialog:') || key.startsWith('turn:');
+    if (!status && !board && !resources && !rename && !dialog && !options.reminder) return true;
+    let groupId = options.groupId ?? options.reminder?.groupId;
+    if (!groupId && board) groupId = key.split(':')[3];
+    if (!groupId && resources) groupId = key.slice('resources:'.length);
+    if (!groupId && status) {
+      let progressKey = key;
+      if (options.operation === 'pin') {
+        const card = this.store.db
+          .prepare(
+            `SELECT json_extract(value,'$.options.key') AS progressKey FROM settings
+           WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=?
+           AND json_extract(value,'$.destination.chatId')=?
+           AND json_extract(value,'$.options.key') GLOB 'progress:*'
+           AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m
+             WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
+          )
+          .get(this.bot, destination.chatId, options.pinMessageId ?? null);
+        progressKey = String(card?.progressKey ?? '');
+      }
+      if (progressKey.startsWith('progress:')) {
+        const card = this.store.db
+          .prepare(
+            "SELECT key FROM settings WHERE key GLOB 'telegram.progress:*' AND json_extract(value,'$.id')=?",
+          )
+          .get(progressKey.slice('progress:'.length));
+        if (card) groupId = String(card.key).split(':')[2];
+      }
+    }
+    if (!groupId && destination.threadId !== undefined && (rename || status)) {
+      const topic = this.store.db
+        .prepare(
+          `SELECT group_id FROM telegram_topics WHERE id GLOB ?
+         AND json_extract(data,'$.threadId')=?`,
+        )
+        .get(topicOwner(value) + ':*', destination.threadId);
+      if (typeof topic?.group_id === 'string') groupId = topic.group_id;
+    }
+    if (!groupId) return destination.threadId === undefined;
+    options.groupId = groupId;
+    options.sessionRoute = !board || destination.threadId !== undefined;
+    return true;
   }
   start() {
     if (this.timer) return;
@@ -173,7 +364,8 @@ export class TelegramDelivery {
     if (value.options.sessionRoute && value.options.groupId) {
       const groupId = value.options.groupId;
       const row = this.store.db.prepare('SELECT data FROM review_groups WHERE id=?').get(groupId);
-      if (!row || JSON.parse(String(row.data)).deletedAt) return false;
+      const group = row && (JSON.parse(String(row.data)) as ReviewGroup);
+      if (!group || group.deletedAt) return false;
       if (room && room.ownerId === pair?.userId) {
         const row = this.store.db
           .prepare('SELECT data FROM telegram_topics WHERE id=?')
@@ -185,7 +377,16 @@ export class TelegramDelivery {
           topic.threadId === value.destination.threadId
         );
       }
-      return value.destination.chatId === pair?.chatId && value.destination.threadId === undefined;
+      if (value.destination.chatId !== pair?.chatId || value.destination.threadId !== undefined)
+        return false;
+      const key = value.options.key;
+      const id = key?.startsWith('dialog:') ? key.slice('dialog:'.length) : undefined;
+      const message = id && this.store.messageById(groupId, id);
+      return (
+        !message ||
+        message.sender !== 'agent' ||
+        privateAgentReplyAllowed(this.store, group, message)
+      );
     }
     return (
       !pair ||
@@ -271,10 +472,16 @@ export class TelegramDelivery {
       if (existing.status === 'sent') return;
       const staleRoute = existing.status === 'cancelled' && !existing.error;
       const legacy = !existing.options.pinWarning && !!options.pinWarning;
-      if (!staleRoute && !legacy) return;
+      const recovering =
+        existing.pinPermissionDenied ||
+        (existing.status === 'cancelled' && pinPermissionDenied(existing.error));
+      if (!staleRoute && !legacy && !recovering) return;
       // Older pin jobs did not carry the status card's route or warning.
       existing.options = pinOptions;
-      if (existing.status === 'cancelled') existing.status = 'queued';
+      if (existing.status === 'cancelled' || recovering) {
+        existing.status = 'queued';
+        existing.nextAttemptAt = this.clock();
+      }
       this.save(key, existing);
       return;
     }
@@ -309,8 +516,11 @@ export class TelegramDelivery {
           value.options.pin,
           value.options.mention,
         ]) === digest([content, options.final, options.pinWarning, options.pin, options.mention])
-      )
+      ) {
+        if (value.status === 'sent' && options.pin && value.messages[0])
+          this.enqueuePin(destination, value.messages[0].id, options);
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
+      }
       if (
         value.options.notificationId &&
         value.options.notificationId !== options.notificationId &&
@@ -386,7 +596,8 @@ export class TelegramDelivery {
           .find(([key]) => !attempted.has(key));
         if (!ready) break;
         attempted.add(ready[0]);
-        await this.attempt(...ready);
+        const retry = await this.attempt(...ready);
+        if (retry) attempted.delete(ready[0]);
       }
     })().catch((error) => this.store.setSetting('telegram.deliveryError', redact(String(error))));
     try {
@@ -475,19 +686,14 @@ export class TelegramDelivery {
       const chunks = splitTelegramText(content);
       for (let i = 0; i < chunks.length; i++) {
         if (value.revision !== revision || !this.valid(value)) break;
-        const chunk = chunks[i];
-        const body = {
-          chat_id: value.destination.chatId,
-          text: chunk.text,
-          entities: chunk.entities,
-          link_preview_options: { is_disabled: true },
-          reply_markup: {
-            inline_keyboard:
-              i === chunks.length - 1 ? ((content as TelegramCard).buttons ?? []) : [],
-          },
-        };
+        if (mention && !mentionAsReply && !reminderOpen(this.store, mention.question)) {
+          value.status = 'queued';
+          this.save(key, value);
+          return true;
+        }
+        const body = partBody(value.destination, content, chunks, i);
         const fingerprint = digest(body);
-        let existing: Delivery['messages'][number] | undefined = value.messages[i];
+        const existing = value.messages[i];
         if (existing?.fingerprint === fingerprint) continue;
         if (existing) {
           try {
@@ -497,8 +703,14 @@ export class TelegramDelivery {
               this.controller.signal,
             );
           } catch (error) {
-            if (/message to edit not found/i.test(String(error))) existing = undefined;
-            else if (!/message is not modified/i.test(String(error))) throw error;
+            if (/message to edit not found/i.test(String(error))) {
+              value.messages[i] = null;
+              value.status = 'queued';
+              this.save(key, value);
+              // Rebuild from current routing and notification state before resending.
+              return true;
+            }
+            if (!/message is not modified/i.test(String(error))) throw error;
           }
         }
         if (existing) {
@@ -535,7 +747,11 @@ export class TelegramDelivery {
         this.valid(value) &&
         value.messages.length > chunks.length
       ) {
-        const part = value.messages.at(-1)!;
+        const part = value.messages.at(-1);
+        if (!part) {
+          value.messages.pop();
+          continue;
+        }
         try {
           await this.api.call(
             'deleteMessage',
@@ -571,7 +787,10 @@ export class TelegramDelivery {
           this.store.db
             .prepare("UPDATE notifications SET status='sent',at=? WHERE id=?")
             .run(new Date(this.clock()).toISOString(), options.notificationId);
-        if (options.deletePrevious) {
+        if (
+          options.deletePrevious &&
+          !value.messages.some((part) => part?.id === options.deletePrevious!.messageId)
+        ) {
           try {
             await this.api.call(
               'deleteMessage',
@@ -598,11 +817,10 @@ export class TelegramDelivery {
           this.save(key, value);
           return;
         }
-        if (
-          status === 403 ||
-          /not enough rights|CHAT_ADMIN_REQUIRED|not permitted to pin/i.test(description)
-        ) {
-          value.status = 'cancelled';
+        if (pinPermissionDenied(error)) {
+          value.status = 'queued';
+          value.nextAttemptAt = this.clock() + 60000;
+          value.pinPermissionDenied = true;
           value.error = redact(description);
           if (options.pinWarning) {
             const warning = deliveryKey(

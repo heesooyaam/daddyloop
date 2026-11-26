@@ -1143,16 +1143,17 @@ it('binds the current turn to the quoted Telegram parent even after an unrelated
   }
 });
 
-it.each(['topic', 'private'])(
+it.each(['topic', 'legacy denied pin', 'private'])(
   'keeps each public reply in order across throttling and restart in %s',
   async (where) => {
     const f = daddyFixture();
-    const isTopic = where === 'topic';
+    const isTopic = where !== 'private';
     const chatId = isTopic ? -10042 : 7;
     const requests: { method: string; body: Record<string, any>; id?: number }[] = [];
     let nextId = 100;
     let clock = 1000;
     let rateLimited = false;
+    let canPin = false;
     const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
       const method = String(url).split('/').at(-1)!;
       const body = JSON.parse(String(options?.body ?? '{}'));
@@ -1160,7 +1161,7 @@ it.each(['topic', 'private'])(
       requests.push(call);
       if (method === 'createForumTopic')
         return Response.json({ ok: true, result: { message_thread_id: 31 } });
-      if (method === 'pinChatMessage')
+      if (method === 'pinChatMessage' && !canPin)
         return Response.json({
           ok: false,
           error_code: 403,
@@ -1203,6 +1204,11 @@ it.each(['topic', 'private'])(
     try {
       const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Work' });
       f.store.setSetting('telegram.currentDaddy', group.id);
+      if (isTopic) {
+        await menu(9);
+        await api.delivery!.flush(30);
+        expect(requests.filter(({ method }) => method === 'pinChatMessage')).toHaveLength(1);
+      }
       const run = 'first-turn';
       f.store.daddyMessage(group.id, 'agent', 'Inspecting the queue', run, undefined, {
         phase: 'progress',
@@ -1232,9 +1238,14 @@ it.each(['topic', 'private'])(
       const before = requests.length;
       await bot.stop();
       await api.delivery!.stop();
+      if (where === 'legacy denied pin')
+        f.store.db.exec(`UPDATE settings
+          SET value=json_set(json_remove(value,'$.pinPermissionDenied'),'$.status','cancelled')
+          WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.operation')='pin'`);
       bot = connect();
       await api.delivery!.flush();
       expect(requests).toHaveLength(before);
+      canPin = true;
       clock += 10000;
       await api.delivery!.flush(30);
       bot.replay();
@@ -1260,7 +1271,7 @@ it.each(['topic', 'private'])(
           requests
             .filter(({ method }) => method === 'pinChatMessage')
             .map(({ body }) => body.message_id),
-        ).toEqual([messages[0].id]);
+        ).toEqual([messages[0].id, messages[0].id]);
         expect(messages.filter(({ body }) => body.text.includes('permission to pin'))).toHaveLength(
           1,
         );
@@ -1272,6 +1283,159 @@ it.each(['topic', 'private'])(
       f.store.changes.off('event', listener);
       await bot.stop();
       await api.delivery!.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each(['sendMessage', 'getChat'] as const)(
+  'persists owner messages while %s is in flight and keeps menu order',
+  async (heldMethod) => {
+    const f = daddyFixture();
+    const pair = { chatId: 7, userId: 7 };
+    const room = { chatId: -10042, ownerId: 7 };
+    f.store.setSetting('telegram.pairing', pair);
+    f.store.setSetting('telegram.group', room);
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const a = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
+    const b = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
+    f.store.saveGroup({ ...a, daddyState: 'needs_input' });
+    for (const [group, threadId] of [
+      [a, 17],
+      [b, 18],
+    ] as const)
+      f.store.db
+        .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+        .run(
+          `7:-10042:${group.id}`,
+          group.id,
+          JSON.stringify({ ...room, threadId, groupId: group.id, title: group.title }),
+        );
+    const delivered: Record<string, any>[] = [];
+    let markCalled!: () => void;
+    let releaseRequest!: () => void;
+    const called = new Promise<void>((resolve) => {
+      markCalled = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    let nextId = 50;
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+      const method = String(url).split('/').at(-1);
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (
+        method === heldMethod &&
+        (method === 'getChat' || body.text.includes('Decision question'))
+      ) {
+        markCalled();
+        await release;
+      }
+      if (method === 'getChat')
+        return Response.json({ ok: true, result: { id: 7, first_name: 'Owner' } });
+      if (method === 'sendMessage') delivered.push(body);
+      return Response.json({ ok: true, result: { message_id: ++nextId } });
+    });
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    const listener = (event: Parameters<typeof workspace.onEvent>[0]) => workspace.onEvent(event);
+    f.store.changes.on('event', listener);
+    let update = 1;
+    const input = (threadId: number, text: string): Update => ({
+      update_id: ++update,
+      message: {
+        message_id: update,
+        from: { id: 7 },
+        chat: { id: room.chatId, type: 'supergroup' },
+        message_thread_id: threadId,
+        text,
+      },
+    });
+    try {
+      f.store.finishDaddyReply(a.id, 'Decision question', 'test-run', heldMethod === 'getChat');
+      await called;
+      const target = heldMethod === 'sendMessage' ? b : a;
+      const incoming = workspace.handle(
+        input(target === b ? 18 : 17, 'Owner text saved during network wait'),
+      );
+      await vi.waitFor(() =>
+        expect(
+          f.store
+            .messages(target.id)
+            .some(
+              (message) =>
+                message.sender === 'user' &&
+                message.text === 'Owner text saved during network wait',
+            ),
+        ).toBe(true),
+      );
+      await incoming;
+      const menu = workspace.handle(input(17, '/status'));
+      releaseRequest();
+      await menu;
+      await api.delivery.flush();
+      const reply = delivered.findIndex((body) => body.text.includes('Decision question'));
+      const status = delivered.findIndex((body) =>
+        body.reply_markup?.inline_keyboard
+          ?.flat()
+          .some(
+            (button: { callback_data?: string }) => button.callback_data === `dad:open:${a.id}`,
+          ),
+      );
+      expect(reply).toBeGreaterThanOrEqual(0);
+      expect(status).toBeGreaterThan(reply);
+      expect(
+        delivered
+          .flatMap((body) => body.entities ?? [])
+          .some((entity) => entity.url === 'tg://user?id=7'),
+      ).toBe(false);
+    } finally {
+      releaseRequest();
+      f.store.changes.off('event', listener);
+      await workspace.stop();
+      await api.delivery.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each([true, false])(
+  'cleans the group-picker callback only after its direct send succeeds (%s)',
+  async (accepted) => {
+    const f = daddyFixture();
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    const requests: { method: string; body: Record<string, unknown> }[] = [];
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      requests.push({ method, body });
+      if (method === 'sendMessage' && body.reply_markup?.keyboard && !accepted)
+        return Response.json({ ok: false, error_code: 400, description: 'Picker refused' });
+      return Response.json({ ok: true, result: { message_id: 98 } });
+    });
+    api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot');
+    const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+    try {
+      await workspace.handle({
+        update_id: 1,
+        callback_query: {
+          id: 'group-picker',
+          data: 'dad:group',
+          from: { id: 7 },
+          message: { message_id: 77, chat: { id: 7, type: 'private' } },
+        },
+      });
+      const picker = requests.findIndex(
+        ({ body }) => 'keyboard' in ((body.reply_markup as object | undefined) ?? {}),
+      );
+      expect(picker).toBeGreaterThanOrEqual(0);
+      expect(requests.filter(({ method }) => method === 'deleteMessage')).toEqual(
+        accepted ? [{ method: 'deleteMessage', body: { chat_id: 7, message_id: 77 } }] : [],
+      );
+      if (accepted) expect(requests.at(-1)?.method).toBe('deleteMessage');
+    } finally {
+      await workspace.stop();
+      await api.delivery.stop();
       await f.close();
     }
   },

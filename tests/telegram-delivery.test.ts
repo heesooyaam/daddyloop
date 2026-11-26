@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import { TelegramDelivery, dialogKey } from '../src/integrations/telegram-delivery.js';
@@ -50,6 +51,10 @@ it('keeps status edits delivering while a durable pin retries', async () => {
   const f = fixture();
   const target = { chatId: -10042, threadId: 4 };
   const options = { key: 'status', replace: true, pin: true };
+  f.store.db
+    .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+    .run('7:-10042:session', 'session', JSON.stringify(target));
+  f.store.saveGroup({ id: 'session' } as Parameters<Store['saveGroup']>[0]);
   let restored: TelegramDelivery | undefined;
   try {
     await f.queue.send(target, text('Waiting'), options);
@@ -340,6 +345,7 @@ it('does not shorten a Telegram flood wait longer than one day', async () => {
 it('adopts sent and partially delivered turn receipts from the released format', async () => {
   const f = daddyFixture();
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
   const group = f.daddy.create({ workspaceId: f.workspace.id });
   const target = { chatId: 7 };
   let clock = 1000;
@@ -514,3 +520,337 @@ it('mentions a new decision by replying to the already delivered public message'
     await f.close();
   }
 });
+
+it.each(['new reply', 'final mention'] as const)(
+  'reopens confirmed legacy parts through a throttled %s',
+  async (variant) => {
+    const f = daddyFixture(true);
+    const reopened = () => new Store(join(f.dir, 'state.sqlite'));
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    const target = { chatId: 7 };
+    const chatText = (value: string) =>
+      new TelegramText().add('👨‍💻 [daddy]', 'bold').add('\n\n').markdown(value);
+    const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 51 }));
+    let clock = 1000;
+    const connect = (store: Store) =>
+      new TelegramDelivery(
+        store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = connect(f.store);
+    let disk: Store | undefined;
+    try {
+      const first = f.store.daddyMessage(
+        group.id,
+        'agent',
+        'Original reply',
+        'legacy-run',
+        undefined,
+        { phase: 'progress' },
+      );
+      const notification = (id: string, phase: string) => `telegram:dialog:7:0:${id}:${phase}`;
+      const legacyOptions = {
+        groupId: group.id,
+        key: 'turn:legacy-run',
+        replace: true,
+        notificationId: notification(first.id, 'progress'),
+      };
+      await queue.send(target, chatText(first.text), legacyOptions);
+      const second = f.store.finishDaddyReply(
+        group.id,
+        variant === 'new reply' ? 'Independent reply' : first.text,
+        'legacy-run',
+        variant === 'final mention',
+      );
+      expect(second.id === first.id).toBe(variant === 'final mention');
+      const newId = notification(second.id, 'final');
+      call.mockRejectedValueOnce(
+        Object.assign(new Error('Too Many Requests'), { retryAfter: 10, telegramStatus: 429 }),
+      );
+      if (variant === 'new reply') {
+        await queue.send(target, chatText(second.text), {
+          ...legacyOptions,
+          notificationId: newId,
+          final: true,
+        });
+      } else {
+        const ping = new TelegramText()
+          .add('Your reply is needed.\n\n')
+          .append(chatText(second.text));
+        await queue.send(target, ping, {
+          key: newId,
+          groupId: group.id,
+          notificationId: newId,
+          final: true,
+        });
+      }
+      await queue.stop();
+      expect(call).toHaveBeenCalledTimes(2);
+      disk = reopened();
+      queue = connect(disk);
+      await queue.flush();
+      expect(call).toHaveBeenCalledTimes(2);
+      clock += 10000;
+      call.mockResolvedValueOnce({ message_id: 52 });
+      await queue.flush();
+      expect(call.mock.calls.slice(2)).toEqual([
+        [
+          'sendMessage',
+          variant === 'new reply'
+            ? expect.objectContaining({ text: '👨‍💻 [daddy]\n\nIndependent reply' })
+            : expect.objectContaining({
+                text: 'Your reply is needed.\n\n',
+                reply_parameters: expect.objectContaining({ message_id: 51 }),
+              }),
+          expect.anything(),
+        ],
+      ]);
+      expect(queue.replySession(7, 51, 7)).toBe(group.id);
+      expect(queue.replySession(7, 52, 7)).toBe(group.id);
+    } finally {
+      await queue.stop();
+      disk?.close();
+      await f.close();
+    }
+  },
+);
+
+it.each(['legacy', 'current'] as const)(
+  'cancels all deferred session writes to a replaced %s topic',
+  async (format) => {
+    const f = daddyFixture();
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    const question = f.store.finishDaddyReply(group.id, 'Still open?', 'turn', true);
+    const route = (threadId: number) => ({ chatId: -10042, threadId });
+    const bind = (threadId: number) =>
+      f.store.db
+        .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+        .run(`7:-10042:${group.id}`, group.id, JSON.stringify(route(threadId)));
+    const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 51 }));
+    let clock = 0;
+    const connect = () =>
+      new TelegramDelivery(
+        f.store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = connect();
+    const scope = { groupId: group.id, sessionRoute: true };
+    const oldScope = format === 'legacy' ? {} : scope;
+    try {
+      bind(17);
+      f.store.setSetting(`telegram.progress:test_bot:${group.id}`, {
+        id: 'status-card',
+        route: { ...route(17), ownerId: 7 },
+      });
+      await queue.send(route(17), text('Original status'), {
+        ...oldScope,
+        key: 'progress:status-card',
+        replace: true,
+        pin: true,
+      });
+      call.mockRejectedValueOnce(
+        Object.assign(new Error('Flood wait'), { retryAfter: 10, telegramStatus: 429 }),
+      );
+      await queue.flush();
+      await queue.send(route(17), text('Delayed status'), {
+        ...oldScope,
+        key: 'progress:status-card',
+        replace: true,
+        pin: true,
+      });
+      await queue.send(route(17), text('Delayed menu'), {
+        ...oldScope,
+        key: `telegram:daddy-intro:-10042:${group.id}`,
+      });
+      await queue.send(route(17), text('Waiting for resources'), {
+        ...oldScope,
+        key: `resources:${group.id}`,
+      });
+      await queue.send(route(17), text('Renamed topic'), {
+        ...oldScope,
+        key: 'topic-name:17',
+        operation: 'renameTopic',
+      });
+      await queue.send(route(17), text('Reminder'), {
+        ...oldScope,
+        reminder: { groupId: group.id, messageId: question.id },
+      });
+      bind(18);
+      if (format === 'legacy') {
+        await queue.stop();
+        queue = connect();
+      }
+      await queue.send(route(18), text('Current status'), {
+        ...scope,
+        key: 'progress:current',
+        pin: true,
+      });
+      await queue.send(route(18), text('Current menu'), { ...scope, key: 'menu' });
+      await queue.send(route(18), text('Still open?'), { ...scope, key: dialogKey(question.id) });
+      expect(call).toHaveBeenCalledTimes(2);
+      clock += 10000;
+      call.mockResolvedValueOnce({ message_id: 52 });
+      await queue.flush();
+      expect(call.mock.calls.slice(2)).toEqual([
+        [
+          'sendMessage',
+          expect.objectContaining({ message_thread_id: 18, text: 'Current status' }),
+          expect.anything(),
+        ],
+        [
+          'sendMessage',
+          expect.objectContaining({ message_thread_id: 18, text: 'Current menu' }),
+          expect.anything(),
+        ],
+        [
+          'sendMessage',
+          expect.objectContaining({ message_thread_id: 18, text: 'Still open?' }),
+          expect.anything(),
+        ],
+        ['pinChatMessage', expect.objectContaining({ message_id: 52 }), expect.anything()],
+      ]);
+    } finally {
+      await queue.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each(['same topic', 'changed topic'] as const)(
+  'revalidates a deleted-message replacement in the %s',
+  async (variant) => {
+    const f = daddyFixture();
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.saveGroup({ ...group, daddyState: 'needs_input' });
+    const message = f.store.finishDaddyReply(group.id, 'Choose one?', 'turn', true);
+    const target = { chatId: -10042, threadId: 17 };
+    const bind = (threadId: number) =>
+      f.store.db
+        .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+        .run(`7:-10042:${group.id}`, group.id, JSON.stringify({ ...target, threadId }));
+    const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 51 }));
+    const queue = new TelegramDelivery(
+      f.store,
+      { call: call as unknown as TelegramApi['call'] },
+      'test_bot',
+    );
+    const options = {
+      key: dialogKey(message.id),
+      groupId: group.id,
+      sessionRoute: true,
+      replace: true,
+      final: true,
+    };
+    let rejectEdit: ((error: Error) => void) | undefined;
+    try {
+      bind(17);
+      await queue.send(target, text(message.text), options);
+      call.mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectEdit = reject;
+          }),
+      );
+      const update = queue.send(target, text(message.text), {
+        ...options,
+        mention: {
+          question: { groupId: group.id, messageId: message.id },
+          text: text('Please answer. '),
+        },
+      });
+      await vi.waitFor(() => expect(call.mock.calls[1]?.[0]).toBe('editMessageText'));
+      f.store.daddyMessage(group.id, 'user', 'Answered');
+      if (variant === 'changed topic') bind(18);
+      rejectEdit!(new Error('Bad Request: message to edit not found'));
+      await update;
+      await queue.flush();
+      expect(call.mock.calls.slice(2)).toEqual(
+        variant === 'changed topic'
+          ? []
+          : [
+              [
+                'sendMessage',
+                expect.objectContaining({ message_thread_id: 17, text: 'Choose one?' }),
+                expect.anything(),
+              ],
+            ],
+      );
+      expect(queue.status().pending).toBe(0);
+    } finally {
+      rejectEdit?.(new Error('Released test request'));
+      await queue.stop();
+      await f.close();
+    }
+  },
+);
+
+it.each(['off', 'attention'] as const)(
+  'checks private notification mode %s and an older closed task after replay',
+  async (mode) => {
+    const f = daddyFixture();
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    f.daddy.chat(group.id, 'Please reply.', 'cli-test');
+    const run = f.store.daddyJobs(group.id).find((job) => job.trigger === 'user')!;
+    const direct = f.store.finishDaddyReply(group.id, 'Direct answer', run.id);
+    const background = f.store.finishDaddyReply(group.id, 'Background update', 'worker-run');
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Task for old ping',
+      requestId: 'old-ping',
+    });
+    const call = vi.fn(async (_method: string, _body: unknown) => ({ message_id: 51 }));
+    let clock = 0;
+    const connect = () =>
+      new TelegramDelivery(
+        f.store,
+        { call: call as unknown as TelegramApi['call'] },
+        'test_bot',
+        () => clock,
+      );
+    let queue = connect();
+    const recipient = { chatId: 7 };
+    try {
+      call.mockRejectedValueOnce(
+        Object.assign(new Error('Flood wait'), { retryAfter: 10, telegramStatus: 429 }),
+      );
+      for (const reply of [background, direct])
+        await queue.send(recipient, text(reply.text), {
+          groupId: group.id,
+          sessionRoute: true,
+          key: dialogKey(reply.id),
+        });
+      const id = `telegram:question:7:${task.id}:closed-request`;
+      await queue.send(recipient, text('Old ping'), { notificationId: id, key: id });
+      await queue.stop();
+      f.store.setSetting('notifications.telegram', { enabled: mode !== 'off', mode: 'attention' });
+      queue = connect();
+      clock += 10000;
+      await queue.flush();
+      expect(call.mock.calls.slice(1)).toEqual([
+        [
+          'sendMessage',
+          expect.objectContaining({ chat_id: 7, text: 'Direct answer' }),
+          expect.anything(),
+        ],
+      ]);
+    } finally {
+      await queue.stop();
+      await f.close();
+    }
+  },
+);

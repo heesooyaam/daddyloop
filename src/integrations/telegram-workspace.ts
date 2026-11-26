@@ -2,6 +2,7 @@ import {
   taskRequestKey,
   reminderOpen,
   nextReminderId,
+  privateAgentReplyAllowed,
   type OwnerQuestion,
 } from './telegram-reminders.js';
 import { commandHelp } from './telegram-commands.js';
@@ -301,6 +302,8 @@ export class TelegramWorkspace {
           const result = await this.api.delivery.send(existing, new TelegramText().add(title), {
             key: `topic-name:${existing.threadId}`,
             operation: 'renameTopic',
+            groupId: group.id,
+            sessionRoute: true,
             replace: true,
             order: group.updatedAt,
           });
@@ -665,6 +668,8 @@ export class TelegramWorkspace {
     const id = `telegram:daddy-intro:${destination.chatId}:${groupId}`;
     return this.api.send(destination, daddyBoard(this.locale(), board, link), undefined, {
       key: id,
+      groupId,
+      sessionRoute: destination.threadId !== undefined,
       replace: true,
       order: board.group.updatedAt,
       notificationId: id,
@@ -1567,10 +1572,17 @@ export class TelegramWorkspace {
         ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
         : undefined;
     try {
-      // Store events are published in a microtask. Queue their replies before
-      // the menu for this update, even if both arrived in the same tick.
-      await Promise.resolve();
-      await this.pending;
+      if (callback || message?.text?.trimStart().startsWith('/')) {
+        // Let the store publish already saved replies before generating a menu.
+        await Promise.resolve();
+        await this.pending;
+        if (
+          this.pair()?.userId !== pair.userId ||
+          this.pair()?.chatId !== pair.chatId ||
+          (!privateChat && this.room()?.chatId !== chat.id)
+        )
+          return false;
+      }
       if (callback) {
         if (
           !callback.data?.startsWith('dad:') &&
@@ -2011,7 +2023,7 @@ export class TelegramWorkspace {
         ],
       },
       undefined,
-      { key: id, notificationId: id },
+      { key: id, notificationId: id, groupId: group.parentGroupId, sessionRoute: true },
     );
     this.store.db
       .prepare('UPDATE notifications SET status=? WHERE id=?')
@@ -2191,6 +2203,8 @@ export class TelegramWorkspace {
             );
           await this.api.send(topic ?? { chatId: pair.chatId }, text, undefined, {
             key: `resources:${group.id}`,
+            groupId: group.id,
+            sessionRoute: true,
             replace: true,
             order: event.at,
           });
@@ -2285,19 +2299,12 @@ export class TelegramWorkspace {
           message.origin.threadId === destination.threadId
         )
           return;
-        if (!topic && !ping && message?.sender === 'agent') {
-          const job = message.runId
-            ? this.store.daddyJobs(group.id).find((job) => job.id === message.runId)
-            : undefined;
-          const prefs = notificationPreferences(this.store);
-          if (job?.trigger !== 'user') {
-            if (!prefs.enabled) return;
-            if (prefs.mode === 'attention' && group.daddyState !== 'needs_input') {
-              const tasks = this.store.tasks().filter((task) => task.groupId === group.id);
-              if (!tasks.length || tasks.some((task) => task.state !== 'complete')) return;
-            }
-          }
-        }
+        if (
+          !topic &&
+          message?.sender === 'agent' &&
+          !privateAgentReplyAllowed(this.store, group, message)
+        )
+          return;
         const originalId = task
           ? `telegram:question:${pair.userId}:${task.id}:${request}`
           : `telegram:dialog:${destination.chatId}:${destination.threadId ?? 0}:${message!.id}${message!.phase ? ':' + message!.phase : ''}`;

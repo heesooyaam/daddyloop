@@ -1,5 +1,5 @@
 import type { Store } from '../core/store.js';
-import type { Task } from '../core/types.js';
+import type { Message, ReviewGroup, Task } from '../core/types.js';
 import { draftInspectionRequired } from '../core/task-activity.js';
 import { notificationPreferences } from './notifications.js';
 
@@ -64,6 +64,21 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
   if (!job?.waitingTaskId) return false;
   const task = store.tasks(group.id).find((t) => t.id === job.waitingTaskId);
   return task?.state === 'needs_input' && !taskRequestKey(store, task);
+}
+
+export function privateAgentReplyAllowed(store: Store, group: ReviewGroup, message: Message) {
+  const job = message.runId && store.daddyJobs(group.id).find((job) => job.id === message.runId);
+  if (job && job.trigger === 'user') return true;
+  const prefs = notificationPreferences(store);
+  if (!prefs.enabled) return false;
+  if (
+    prefs.mode !== 'attention' ||
+    group.daddyState === 'needs_input' ||
+    (message.needsReply && reminderOpen(store, { groupId: group.id, messageId: message.id }))
+  )
+    return true;
+  const tasks = store.tasks(group.id);
+  return tasks.length > 0 && tasks.every((task) => task.state === 'complete');
 }
 
 export function nextReminderId(store: Store, originalId: string, time: number) {
