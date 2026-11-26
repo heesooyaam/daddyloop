@@ -37,7 +37,11 @@ export class Worker {
   private runningJobs = new Map<string, Job>();
   private finalizing = new Set<string>();
   private pendingRuns = new Set<Promise<void>>();
-  private pendingJobOutcomes = new Map<string, { job: Job; failure?: unknown }>();
+  private pendingJobOutcomes = new Map<
+    string,
+    { job: Job; failure?: unknown; rejectionPath?: string }
+  >();
+  private pendingSavedFixResults = new Map<string, { head: string; revision: Revision }>();
   private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
@@ -218,16 +222,7 @@ export class Worker {
       const poll = Date.now() - this.lastPoll > this.pollMs;
       if (poll) {
         this.lastPoll = Date.now();
-        for (const job of store.pendingFixSaves()) {
-          if (this.active.has(job.taskId) || this.pendingJobOutcomes.has(job.id)) continue;
-          try {
-            await this.engine.recoverPendingSavedFix(job, (task, revision) =>
-              this.workspaces.inspectSavedFixHead(task, revision),
-            );
-          } catch (error) {
-            if (!isSqliteBusy(error)) throw error;
-          }
-        }
+        await this.recoverSavedFixes();
         const tasks = store.tasks();
         for (const task of tasks.filter(confirmedSupersededDraft)) {
           if (
@@ -545,8 +540,34 @@ export class Worker {
       finishTick();
     }
   }
+  private async recoverSavedFixes(knownOnly = false) {
+    const store = this.engine.store;
+    if (knownOnly && !this.pendingSavedFixResults.size) return;
+    for (const job of store.pendingFixSaves()) {
+      const known = this.pendingSavedFixResults.get(job.id);
+      if (
+        this.active.has(job.taskId) ||
+        this.pendingJobOutcomes.has(job.id) ||
+        (knownOnly && !known)
+      )
+        continue;
+      try {
+        await this.engine.recoverPendingSavedFix(
+          job,
+          (task, revision) => this.workspaces.inspectSavedFixHead(task, revision),
+          known,
+        );
+        this.pendingSavedFixResults.delete(job.id);
+      } catch (error) {
+        if (!isSqliteBusy(error))
+          console.error('Could not recover saved fix:', redact(String(error)));
+      }
+    }
+  }
+
   private writeJobOutcome(job: Job, failure?: unknown) {
     const store = this.engine.store;
+    const pending = this.pendingJobOutcomes.get(job.id);
     try {
       store.transaction(() => {
         if (failure !== undefined) this.engine.failJob(job, failure);
@@ -554,9 +575,22 @@ export class Worker {
         store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
       });
       this.pendingJobOutcomes.delete(job.id);
+      if (pending?.rejectionPath) store.clearFixEvidence(pending.rejectionPath);
     } catch (error) {
       if (!isSqliteBusy(error)) throw error;
-      this.pendingJobOutcomes.set(job.id, { job, failure });
+      const outcome = pending ?? { job, failure, rejectionPath: undefined };
+      this.pendingJobOutcomes.set(job.id, outcome);
+      try {
+        outcome.rejectionPath ??= store.stageRejectedFix(job);
+      } catch (journalError) {
+        // The in-memory finalization can still commit when SQLite becomes writable again.
+        if (
+          !['ENOSPC', 'EDQUOT', 'EROFS', 'EACCES', 'EPERM'].includes(
+            (journalError as NodeJS.ErrnoException).code ?? '',
+          )
+        )
+          throw journalError;
+      }
     }
   }
 
@@ -968,8 +1002,10 @@ export class Worker {
         try {
           await this.engine.recordSavedFix(job, savedFix);
         } catch (receiptError) {
-          if (!isSqliteBusy(receiptError)) throw receiptError;
-          // The receipt or the durable save intent remains available to the next poll.
+          if (!isSqliteBusy(receiptError))
+            console.error('Could not journal saved fix:', redact(String(receiptError)));
+          // A later inspection of the copy cannot replace this run's returned SHA.
+          this.pendingSavedFixResults.set(job.id, savedFix);
           awaitingReceiptRecovery = true;
           return;
         }
@@ -1039,5 +1075,6 @@ export class Worker {
     // Pending outcomes still have their durable save intent if SQLite remains busy.
     for (const { job, failure } of [...this.pendingJobOutcomes.values()])
       this.writeJobOutcome(job, failure);
+    await this.recoverSavedFixes(true);
   }
 }

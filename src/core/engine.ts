@@ -397,11 +397,14 @@ export class Engine {
   async recoverPendingSavedFix(
     job: Job,
     inspect: (task: Task, revision: Revision) => Promise<string>,
+    knownFix?: { head: string; revision: Revision },
   ) {
     return this.lock(job.taskId, async () => {
       const current = this.store.jobs(job.taskId).find(({ id }) => id === job.id);
       const revision = current?.fixSaveRevision;
       if (!current || !revision || rejectedBeforeCommit(current)) return;
+      if (knownFix && sameRevision(knownFix.revision, revision))
+        await this.recordSavedFix(current, knownFix);
       const task = this.store.getTask(job.taskId);
       const readable = this.store.restoreSavedFixReceipts(task.id, job.id);
       const recorded = this.store.db
@@ -422,12 +425,14 @@ export class Engine {
             'stale_revision',
             'The task revision changed after the worker began saving',
           );
-        head =
-          recorded?.run_id === job.id && typeof recorded.head === 'string'
-            ? recorded.head
-            : await inspect(task, revision);
-        if (head !== revision.head && recorded?.run_id !== job.id)
-          await this.recordSavedFix(current, { head, revision });
+        if (typeof recorded?.head !== 'string') {
+          const observed = await inspect(task, revision);
+          throw new AppError(
+            'saved_fix_unconfirmed',
+            `No receipt proves the result of this worker run. Its starting SHA was ${revision.head}; the copy now shows ${observed}. Confirm the saved commit before retrying review.`,
+          );
+        }
+        head = recorded.head;
         reason =
           head === revision.head
             ? 'The interrupted worker save did not produce a new commit.'
@@ -846,6 +851,7 @@ export class Engine {
   private async refreshRetiredReviewFeedback(
     task: Task,
     successor?: ReviewHandle,
+    unpublishedCurrentMarker?: string,
   ): Promise<boolean> {
     const retired = task.retiredReviewHandles;
     if (!retired?.length) return true;
@@ -853,6 +859,9 @@ export class Engine {
     const provider = this.provider(ref);
     for (const review of retired) {
       const snapshot = await provider.getReview(ref, review, successor, retired);
+      // An attached draft on an externally merged PR need not be published to
+      // verify that merge. Check it on every read in case the owner publishes it.
+      if (snapshot.status === 'draft' && review.marker === unpublishedCurrentMarker) continue;
       if (snapshot.status === 'draft' || snapshot.status === 'partial') {
         this.state(
           task,
@@ -1982,11 +1991,8 @@ export class Engine {
 
   private async prepareMergeVerificationFeedback(task: Task, pr: PullRequest): Promise<boolean> {
     this.recoverSavedFixReviews(task);
-    if (
-      task.review?.revision.head === pr.head &&
-      (task.pendingAuthorHead === pr.head || task.snapshot?.status === 'published')
-    )
-      this.trackRecoveredReview(task, task.review, task.snapshot);
+    const attached = task.review?.revision.head === pr.head ? task.review : undefined;
+    if (attached) this.trackRecoveredReview(task, attached, task.snapshot);
     if (task.pendingAuthorHead === pr.head) {
       const stale = task.pendingAuthorFix?.staleDraft;
       if (stale) {
@@ -1996,7 +2002,11 @@ export class Engine {
       if (hasSharedDraftSlot(task) && !(await this.recoverReviewBeforeMerge(task, pr)))
         return false;
     }
-    return this.refreshRetiredReviewFeedback(task);
+    const unpublishedCurrentMarker =
+      task.pendingAuthorHead !== pr.head && task.snapshot?.status !== 'published'
+        ? attached?.marker
+        : undefined;
+    return this.refreshRetiredReviewFeedback(task, undefined, unpublishedCurrentMarker);
   }
 
   private async recoverReviewBeforeMerge(task: Task, pr: PullRequest): Promise<boolean> {
@@ -4666,6 +4676,22 @@ export class Engine {
           this.savedFixEvent(task)?.run_id !== job.id
         )
           job.fixSaveRevision ??= task.revision;
+        const rejection =
+          !head && receiptsReadable && job.role === 'author' && job.kind === 'fix'
+            ? this.store.rejectedFix(job)
+            : undefined;
+        if (rejection && task.generation === job.generation && task.state === 'fixing') {
+          this.store.transaction(() => {
+            job.status = 'failed';
+            job.errorCode = rejection.code;
+            job.error = 'The worker stopped before committing. The working copy was preserved.';
+            job.finishedAt = now();
+            this.failJob(job, new AppError(rejection.code, job.error));
+            this.store.saveJob(job);
+          });
+          this.store.clearFixEvidence(rejection.path);
+          continue;
+        }
         const restartReason =
           'Server restarted during this run. Its external effects must be reconciled before retry.';
         const reason = head ? `${restartReason} Saved fix ${head} is preserved.` : restartReason;

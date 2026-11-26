@@ -3160,9 +3160,16 @@ it.each(['short', 'restart', 'live'] as const)(
   },
 );
 
-it.each(['SQLite available', 'both writes fail'] as const)(
-  'recovers a fix when the receipt file cannot be written (%s)',
-  async (scenario) => {
+it.each([
+  ['SQLite available', 'H2'],
+  ['live', 'H1'],
+  ['live', 'H2'],
+  ['live', 'H3'],
+  ['restart', 'H1'],
+  ['restart', 'H3'],
+] as const)(
+  'protects the original fix when the receipt file cannot be written (%s, copy: %s)',
+  async (scenario, copy) => {
     const dir = mkdtempSync(join(tmpdir(), 'daddy-receipt-file-failure-'));
     const path = join(dir, 'state.sqlite');
     const f = await fixture({}, path);
@@ -3172,10 +3179,12 @@ it.each(['SQLite available', 'both writes fail'] as const)(
     const saved = 'f'.repeat(40);
     const workspaces = new Workspaces(dir);
     vi.spyOn(workspaces, 'prepare').mockResolvedValue(dir);
-    const inspect = vi.spyOn(workspaces, 'inspectSavedFixHead').mockResolvedValue(saved);
+    const observed = copy === 'H1' ? f.task.revision!.head : copy === 'H2' ? saved : 'e'.repeat(40);
+    const inspect = vi.spyOn(workspaces, 'inspectSavedFixHead').mockResolvedValue(observed);
     const runtime = { run: vi.fn(async () => f.result()) };
     const worker = new Worker(f.engine, workspaces, runtime, runtime, healthy, 0);
     let locked = false;
+    let stopped = false;
     try {
       // A non-directory at this path reliably refuses the file write, even when run as root.
       writeFileSync(path + '.saved-fixes', '');
@@ -3184,7 +3193,7 @@ it.each(['SQLite available', 'both writes fail'] as const)(
       const task = store.getTask(f.task.id);
       store.saveTask({ ...task, ref: { ...prRef(task), provider: 'github' } });
       vi.spyOn(workspaces, 'commitFix').mockImplementation(async () => {
-        if (scenario === 'both writes fail') {
+        if (scenario !== 'SQLite available') {
           other.exec('BEGIN IMMEDIATE');
           locked = true;
         }
@@ -3205,30 +3214,39 @@ it.each(['SQLite available', 'both writes fail'] as const)(
         }
       });
       await worker.tick();
-      if (scenario === 'both writes fail') {
+      if (scenario !== 'SQLite available') {
         await vi.waitFor(() => expect(failedWrites).toBe(10));
         expect(store.pendingFixSaves(task.id)).toHaveLength(1);
-        // Restore the receipt directory path before opening a new Engine on the same database.
-        rmSync(path + '.saved-fixes');
-        await worker.stop();
-        store.close();
-        store = new Store(path);
-        engine = new Engine(store, () => new DemoProvider(store));
-        const recovery = new Worker(engine, workspaces, runtime, runtime, healthy, 0);
-        try {
-          engine.recoverInterruptedJobs();
-          await expect(engine.review(task.id, true)).rejects.toMatchObject({
-            code: 'fix_pending',
-            message: expect.stringContaining('worker copy must be checked'),
-          });
-          await recovery.tick();
-          expect(inspect).toHaveBeenCalledOnce();
+        if (scenario === 'live') {
+          await worker.tick();
+          expect(inspect).not.toHaveBeenCalled();
           expect(store.getTask(task.id)).toMatchObject({
             state: 'needs_input',
             reason: expect.stringContaining(saved),
           });
-        } finally {
-          await recovery.stop();
+        } else {
+          // Stop before either store can accept the receipt, then reopen SQLite.
+          other.exec('BEGIN IMMEDIATE');
+          locked = true;
+          await worker.stop();
+          stopped = true;
+          other.exec('ROLLBACK');
+          locked = false;
+          store.close();
+          store = new Store(path);
+          engine = new Engine(store, () => new DemoProvider(store));
+          const recovery = new Worker(engine, workspaces, runtime, runtime, healthy, 0);
+          try {
+            engine.recoverInterruptedJobs();
+            await recovery.tick();
+            expect(inspect).toHaveBeenCalledOnce();
+            expect(store.getTask(task.id)).toMatchObject({
+              state: 'needs_input',
+              reason: expect.stringContaining(`the copy now shows ${observed}`),
+            });
+          } finally {
+            await recovery.stop();
+          }
         }
       } else {
         await vi.waitFor(() =>
@@ -3239,18 +3257,24 @@ it.each(['SQLite available', 'both writes fail'] as const)(
         );
         expect(inspect).not.toHaveBeenCalled();
       }
-      expect(
-        store.events(task.id).filter(({ type }) => type === 'author.fixes_saved'),
-      ).toHaveLength(1);
-      store.restoreSavedFixReceipts(task.id);
+      const saves = store.events(task.id).filter(({ type }) => type === 'author.fixes_saved');
+      if (scenario === 'restart') expect(saves).toHaveLength(0);
+      else {
+        expect(saves).toHaveLength(1);
+        expect(saves[0].data).toMatchObject({ head: saved });
+      }
+      const create = vi.spyOn(f.provider, 'createReview');
       await expect(engine.review(task.id, true)).rejects.toMatchObject({
         code: 'fix_pending',
-        message: expect.stringContaining(saved),
+        message: expect.stringContaining(
+          scenario === 'restart' ? 'worker copy must be checked' : saved,
+        ),
       });
+      expect(create).not.toHaveBeenCalled();
       expect(store.activeJobs(task.id)).toHaveLength(0);
     } finally {
       if (locked) other.exec('ROLLBACK');
-      await worker.stop();
+      if (!stopped) await worker.stop();
       other.close();
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -3525,7 +3549,7 @@ it.each([true, false])(
   },
 );
 
-it.each(['poll', 'shutdown and restart'] as const)(
+it.each(['poll', 'shutdown and restart', 'locked through shutdown'] as const)(
   'persists a blocked pre-commit rejection after SQLite recovers (%s)',
   async (recovery) => {
     const dir = mkdtempSync(join(tmpdir(), 'daddy-locked-outcome-')),
@@ -3551,10 +3575,11 @@ it.each(['poll', 'shutdown and restart'] as const)(
       });
       const job = f.store.claim()!;
       await worker['run'](job);
+      if (recovery === 'locked through shutdown') await worker.stop();
       lock.exec('ROLLBACK');
       locked = false;
-      if (recovery === 'shutdown and restart') {
-        await worker.stop();
+      if (recovery !== 'poll') {
+        if (recovery === 'shutdown and restart') await worker.stop();
         store.close();
         store = new Store(path);
         engine = new Engine(store, () => new DemoProvider(store));
@@ -3569,7 +3594,7 @@ it.each(['poll', 'shutdown and restart'] as const)(
       expect(store.activeJobs(t.id)).toHaveLength(1);
     } finally {
       if (locked) lock.exec('ROLLBACK');
-      await worker.stop();
+      if (store === f.store) await worker.stop();
       lock.close();
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -3710,6 +3735,85 @@ it.skipIf(process.getuid?.() === 0).each([
       chmodSync(receipts, 0o700);
       f.store.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([
+  ['before verification', 'added'],
+  ['during preparation', 'edited'],
+  ['during preparation', 'deleted'],
+  ['during review', 'added'],
+  ['during review', 'edited'],
+] as const)(
+  'reads a review published outside the service on the merged PR (%s, %s)',
+  async (when, change) => {
+    const f = await fixture();
+    const ws = new Workspaces('/tmp');
+    const runtime = { run: vi.fn(async (_input: AgentInput) => f.result()) };
+    const worker = new Worker(f.engine, ws, runtime, runtime, healthy, 0);
+    try {
+      const initial = f.store.getTask(f.task.id);
+      const ref = { ...prRef(initial), provider: 'github' as const };
+      f.store.saveTask({ ...initial, ref });
+      const reviewing = await f.engine.review(initial.id);
+      const handle = reviewing.review!;
+      const finding = await f.provider.createComment(
+        ref,
+        handle,
+        'Original finding',
+        handle.marker + ':comment:R1',
+      );
+      await f.run();
+      const awaiting = f.store.getTask(initial.id);
+      expect(awaiting.snapshot?.status).toBe('draft');
+      const merged = { ...awaiting.pr!, state: 'merged' as const, mergeCommit: 'merged' };
+      f.store.setSetting('demo-pr:1', merged);
+      f.store.saveTask({ ...awaiting, state: 'needs_input' });
+
+      const publish = async () => {
+        if (change === 'added')
+          await f.provider.createComment(
+            ref,
+            handle,
+            'Added finding',
+            handle.marker + ':comment:R2',
+          );
+        else if (change === 'edited')
+          await f.provider.updateComment(ref, handle, finding.id, 'Updated finding');
+        else await f.provider.deleteComment(ref, handle, finding.id);
+        await f.provider.publish(ref, handle);
+      };
+      if (when === 'before verification') await publish();
+      vi.spyOn(ws, 'prepare').mockImplementation(async () => {
+        if (when === 'during preparation') await publish();
+        return '/tmp';
+      });
+      runtime.run.mockImplementation(async (input) => {
+        const comments = input.task.feedback?.comments ?? [];
+        if (when === 'during review') await publish();
+        return f.result({ verifiedCommentIds: comments.map(({ id }) => id) });
+      });
+      expect(await f.engine.action(initial.id, 'verify-merge')).toMatchObject({
+        state: 'reviewing',
+      });
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.activeJobs(initial.id)).toHaveLength(0));
+      expect(runtime.run).toHaveBeenCalledOnce();
+      const shown = runtime.run.mock.calls[0][0].task.feedback?.comments ?? [];
+      expect(shown.map(({ body }) => body.split('\n')[0])).toEqual(
+        when === 'during review' || change === 'deleted'
+          ? []
+          : change === 'added'
+            ? ['Original finding', 'Added finding']
+            : ['Updated finding'],
+      );
+      expect(f.store.getTask(initial.id).state).toBe(
+        when === 'during review' ? 'needs_input' : 'complete',
+      );
+    } finally {
+      await worker.stop();
+      f.store.close();
     }
   },
 );

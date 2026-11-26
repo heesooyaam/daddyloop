@@ -14,6 +14,7 @@ import { EventEmitter } from 'node:events';
 import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
+  sameRevision,
   now,
   type Task,
   type Event,
@@ -185,17 +186,75 @@ export class Store {
     );
   }
   stageSavedFixReceipt(job: Job, fix: { head: string; revision: Revision }): string | undefined {
+    return this.stageFixEvidence(job, '', { fix });
+  }
+
+  private stageFixEvidence(job: Job, suffix: string, evidence: object) {
     if (!this.savedFixDirectory) return;
     mkdirSync(this.savedFixDirectory, { recursive: true, mode: 0o700 });
-    const path = join(this.savedFixDirectory, this.savedFixFile(job.taskId, job.id));
+    const path = join(this.savedFixDirectory, this.savedFixFile(job.taskId, job.id) + suffix);
     const temporary = path + '.' + randomUUID() + '.tmp';
-    writeFileSync(temporary, JSON.stringify({ taskId: job.taskId, runId: job.id, fix }), {
+    writeFileSync(temporary, JSON.stringify({ taskId: job.taskId, runId: job.id, ...evidence }), {
       flag: 'wx',
       flush: true,
       mode: 0o600,
     });
     renameSync(temporary, path);
     return path;
+  }
+
+  stageRejectedFix(job: Job) {
+    if (
+      job.kind !== 'fix' ||
+      job.role !== 'author' ||
+      !job.fixSaveRevision ||
+      !['fix_precommit_rejected', 'unresolved_merge'].includes(job.errorCode ?? '')
+    )
+      return;
+    return this.stageFixEvidence(job, '.rejected', {
+      generation: job.generation,
+      code: job.errorCode,
+      revision: job.fixSaveRevision,
+    });
+  }
+
+  rejectedFix(job: Job) {
+    if (!this.savedFixDirectory || !job.fixSaveRevision) return;
+    const path = join(this.savedFixDirectory, this.savedFixFile(job.taskId, job.id) + '.rejected');
+    let receipt;
+    try {
+      receipt = JSON.parse(readFileSync(path, 'utf8'));
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(
+          (error as NodeJS.ErrnoException).code ?? '',
+        )
+      )
+        return;
+      throw error;
+    }
+    if (
+      receipt?.taskId === job.taskId &&
+      receipt.runId === job.id &&
+      receipt.generation === job.generation &&
+      sameRevision(receipt.revision, job.fixSaveRevision) &&
+      ['fix_precommit_rejected', 'unresolved_merge'].includes(receipt.code)
+    )
+      return { code: String(receipt.code), path };
+  }
+
+  clearFixEvidence(path: string) {
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      if (
+        !['ENOENT', 'EACCES', 'EPERM', 'EROFS'].includes(
+          (error as NodeJS.ErrnoException).code ?? '',
+        )
+      )
+        throw error;
+    }
   }
 
   journalSavedFix(
@@ -211,14 +270,7 @@ export class Store {
       .get(taskId, runId, fix.head);
     if (!recorded) this.event(taskId, 'author.fixes_saved', fix, runId);
     // A rolled-back event must not consume the only durable copy.
-    if (path && !this.db.isTransaction) {
-      try {
-        unlinkSync(path);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (!['ENOENT', 'EACCES', 'EPERM', 'EROFS'].includes(code ?? '')) throw error;
-      }
-    }
+    if (path && !this.db.isTransaction) this.clearFixEvidence(path);
   }
 
   restoreSavedFixReceipts(taskId: string, runId?: string) {
