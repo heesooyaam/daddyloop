@@ -865,6 +865,44 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       );
     }
 
+    // A second settings save on another part of the list must keep the explicit first move.
+    const original = [presetA, presetB, presetC, presetD, presetE].map((p) => p.id);
+    const afterD = [presetA, presetB, presetC, presetE, presetD].map((p) => p.id);
+    const afterA = [presetB, presetA, presetC, presetE, presetD].map((p) => p.id);
+    for (const removed of [presetD, presetE]) {
+      const group = f.daddy.create({
+        workspaceId: f.workspace.id,
+        instructions: {
+          daddy: {},
+          worker: {},
+          presets: [presetA, presetB, presetC, presetD, presetE].map((p) => selected(p)),
+        },
+      });
+      for (const [before, after, id] of [
+        [original, afterD, presetD.id],
+        [afterD, afterA, presetA.id],
+      ] as const) {
+        const response = await patchInstructions(group.id, [
+          { target: 'preset-order', before, after, moved: [id] },
+        ]);
+        expect(response.statusCode, response.body).toBe(200);
+      }
+      const response = await patchInstructions(group.id, [
+        { target: 'worker.prompt', before: null, after: 'only when the removal is accepted' },
+        { target: 'preset', id: removed.id, before: state(removed), after: null },
+        {
+          target: 'preset-order',
+          before: original,
+          after: original.filter((id) => id !== removed.id),
+          moved: [],
+        },
+      ]);
+      expect(response.statusCode, removed.name).toBe(removed === presetD ? 409 : 200);
+      expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe(
+        removed === presetD ? undefined : 'only when the removal is accepted',
+      );
+    }
+
     for (const removed of [presetD, presetE])
       for (const reverse of [false, true]) {
         const adjacent = f.daddy.create({

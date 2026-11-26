@@ -55,11 +55,15 @@ import { InstructionPresets } from './instruction-presets.js';
 import {
   sessionInstructionsSchema,
   applyInstructionChanges,
+  movedPresetIds,
   effectiveInstructions,
   withInstructions,
   type SessionInstructionChange,
   type SessionInstructions,
 } from './instructions.js';
+
+type PresetOrderStep = { before: string[]; after: string[]; moved: string[] };
+type PresetOrderHistory = PresetOrderStep & { firstEvent?: number; initialOrder?: PresetOrderStep };
 
 export class Daddy {
   private running = new Map<
@@ -700,23 +704,50 @@ export class Daddy {
     });
     return this.board(id);
   }
+  private presetMovesSince(
+    id: string,
+    before: string[],
+    current: string[],
+    previous?: PresetOrderHistory,
+  ) {
+    if (!previous || JSON.stringify(previous.after) !== JSON.stringify(current)) return;
+    const baseline = JSON.stringify(before);
+    if (JSON.stringify(current) === baseline) return [];
+    let expected = JSON.stringify(current);
+    const moved = new Set<string>();
+    if (previous.firstEvent !== undefined) {
+      const rows = this.store.db.prepare(
+        `SELECT json_extract(data,'$.presetOrder') AS step FROM events
+         WHERE task_id=? AND id>=? AND type='daddy.settings'
+         AND json_type(data,'$.presetOrder')='object' ORDER BY id DESC`,
+      );
+      for (const row of rows.iterate(id, previous.firstEvent)) {
+        const step = JSON.parse(String(row.step)) as PresetOrderStep;
+        if (JSON.stringify(step.after) !== expected) return;
+        for (const id of step.moved) moved.add(id);
+        expected = JSON.stringify(step.before);
+        if (expected === baseline) return [...moved];
+      }
+    }
+    const initial =
+      previous.initialOrder ?? (previous.firstEvent === undefined ? previous : undefined);
+    if (
+      initial &&
+      JSON.stringify(initial.after) === expected &&
+      JSON.stringify(initial.before) === baseline
+    ) {
+      for (const id of movedPresetIds(initial.before, initial.after, initial.moved)) moved.add(id);
+      return [...moved];
+    }
+  }
   async changeInstructions(id: string, changes: SessionInstructionChange[]) {
     await this.withSessionTasks(id, (group) => {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       const order = changes.find((change) => change.target === 'preset-order'),
         currentOrder = (group.instructions?.presets ?? []).map((entry) => entry.preset.id),
-        previousOrder = this.store.setting<{
-          before: string[];
-          after: string[];
-          moved: string[];
-        }>('instructions.order:' + id),
+        previousOrder = this.store.setting<PresetOrderHistory>('instructions.order:' + id),
         concurrentMoved =
-          order &&
-          previousOrder &&
-          JSON.stringify(previousOrder.before) === JSON.stringify(order.before) &&
-          JSON.stringify(previousOrder.after) === JSON.stringify(currentOrder)
-            ? previousOrder.moved
-            : [];
+          order && this.presetMovesSince(id, order.before, currentOrder, previousOrder);
       let instructions: SessionInstructions;
       try {
         const library = new InstructionPresets(this.store);
@@ -747,19 +778,39 @@ export class Daddy {
       this.store.transaction(() => {
         group.instructions = instructions;
         this.store.saveGroup(group);
-        if (order)
-          this.store.setSetting('instructions.order:' + id, {
-            before: order.before,
-            after: (instructions.presets ?? []).map((entry) => entry.preset.id),
-            moved: order.moved ?? [],
-          });
-        this.store.event(id, 'daddy.settings', {
+        const after = (instructions.presets ?? []).map((entry) => entry.preset.id);
+        const presetOrder =
+          JSON.stringify(currentOrder) === JSON.stringify(after)
+            ? undefined
+            : {
+                before: currentOrder,
+                after,
+                moved: order ? movedPresetIds(order.before, order.after, order.moved) : [],
+              };
+        const event = this.store.event(id, 'daddy.settings', {
+          ...(presetOrder && { presetOrder }),
           workerLimit: group.workerLimit,
           requestedWorkerLimit: group.requestedWorkerLimit,
           autoMerge: sessionAutoMerge(this.store, id),
           restartReviews: [],
           restartCoordinator: false,
         });
+        if (presetOrder)
+          this.store.setSetting('instructions.order:' + id, {
+            ...presetOrder,
+            firstEvent: previousOrder?.firstEvent ?? event.id,
+            initialOrder:
+              previousOrder?.initialOrder ??
+              (previousOrder?.firstEvent === undefined &&
+              previousOrder &&
+              JSON.stringify(previousOrder.after) === JSON.stringify(currentOrder)
+                ? {
+                    before: previousOrder.before,
+                    after: previousOrder.after,
+                    moved: previousOrder.moved,
+                  }
+                : undefined),
+          });
       });
     });
     return this.board(id);

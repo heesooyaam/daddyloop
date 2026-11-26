@@ -191,6 +191,18 @@ const commonSubsequence = (left: string[], right: string[]) => {
   }
   return result;
 };
+export function movedPresetIds(before: string[], after: string[], declared: string[] = []) {
+  const shared = before.filter((id) => after.includes(id));
+  const moved = new Set(declared.filter((id) => shared.includes(id)));
+  const untouched = shared.filter((id) => !moved.has(id));
+  const anchors = commonSubsequence(
+    untouched,
+    after.filter((id) => untouched.includes(id)),
+  );
+  for (const id of untouched) if (!anchors.includes(id)) moved.add(id);
+  return [...moved];
+}
+
 /** Combine the two editors' relative-order constraints on the small preset list. */
 function mergePresetOrder(
   before: string[],
@@ -298,7 +310,7 @@ export function applyInstructionChanges(
   current: SessionInstructions | undefined,
   changes: SessionInstructionChange[],
   resolvePreset: (id: string, revision: number) => InstructionPreset,
-  concurrentMoved: string[] = [],
+  concurrentMoved?: string[],
 ): SessionInstructions {
   const next = structuredClone(current ?? { daddy: {}, worker: {} });
   const selection = (entry: AppliedPreset | undefined) =>
@@ -330,22 +342,8 @@ export function applyInstructionChanges(
     const presetChanges = new Map(
         changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
       ),
-      shared = order.before.filter((id) => order.after.includes(id)),
-      orderAnchors = commonSubsequence(
-        order.before.filter((candidate) => shared.includes(candidate)),
-        order.after.filter((candidate) => shared.includes(candidate)),
-      ),
-      moved = order.moved ?? shared.filter((id) => !orderAnchors.includes(id)),
-      actualPresent = order.before.filter((id) => orderActual.includes(id)),
-      actualAnchors = commonSubsequence(
-        actualPresent,
-        orderActual.filter((id) => order.before.includes(id)),
-      ),
-      actualMoved = new Set(
-        concurrentMoved.length
-          ? concurrentMoved
-          : actualPresent.filter((id) => !actualAnchors.includes(id)),
-      );
+      moved = movedPresetIds(order.before, order.after, order.moved),
+      actualMoved = new Set(concurrentMoved ?? movedPresetIds(order.before, orderActual));
     if (
       new Set(order.before).size !== order.before.length ||
       new Set(order.after).size !== order.after.length
