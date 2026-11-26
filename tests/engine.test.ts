@@ -301,7 +301,11 @@ describe('publication gates and revision safety', () => {
     const f = await fixture({ policy: { ...defaultPolicy, maxNoProgress: 1 } });
     const review = async () => {
       await f.engine.review(f.task.id);
-      await f.engine.broker.call(f.job(), 'add_comment', { key: 'R1', body: 'Same finding' });
+      const job = f.job();
+      await f.engine.broker.call(job, 'set_summary', {
+        body: 'The same acceptance check still fails.',
+      });
+      await f.engine.broker.call(job, 'add_comment', { key: 'R1', body: 'Same finding' });
       await f.run();
       await f.engine.publish(f.task.id);
     };
