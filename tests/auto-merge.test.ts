@@ -1283,7 +1283,7 @@ describe('opt-in GitHub merging', () => {
       t.pr = { ...t.pr!, head };
       t.revision = { ...t.revision!, head };
       t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
-      f.setRemote({ head, mergeConflict: true });
+      f.setRemote({ head });
       const key = 'demo-review:' + old.id,
         snapshot = await f.provider.getReview(prRef(t), old);
       const draft = {

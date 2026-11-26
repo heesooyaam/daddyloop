@@ -87,6 +87,9 @@ const repairableStates = new Set<Task['state']>([
   'awaiting_merge',
   'complete',
 ]);
+export const confirmedAutoMergeConflict = (pr: PullRequest, enabled: boolean) =>
+  enabled && pr.draft === false && pr.mergeConflict === true;
+
 const wait = (reason: string): PrAction => ({ kind: 'wait', reason });
 
 // Pure routing policy. All callers describe the observed work, independently of who noticed the PR.
@@ -127,7 +130,7 @@ export function nextPrAction(
       task.pendingAuthorHead !== pinned?.head)
   )
     return { kind: 'confirm-fix' };
-  const conflict = enabled && pr.draft === false && pr.mergeConflict === true;
+  const conflict = confirmedAutoMergeConflict(pr, enabled);
   const recovered = staleConflictPreparation(task);
   if (
     task.fixingMergeConflict &&

@@ -572,6 +572,13 @@ export class Worker {
           ? undefined
           : await this.engine.provider(prRef(task)).getPR(prRef(task));
       if (
+        job.kind === 'fix' &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) ||
+          task.pr?.targetCloneUrl !== startingPR.targetCloneUrl)
+      )
+        throw new AppError('stale_feedback', 'The PR branches changed before the author started');
+      if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
         !(
@@ -690,28 +697,42 @@ export class Worker {
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if (job.kind === 'fix') {
-        const provider = this.engine.provider(prRef(task));
-        const actual = await provider.getReview(prRef(task), task.review!);
-        const freshPR = await provider.getPR(prRef(task));
+      }
+      if (job.kind === 'fix') {
+        const ref = prRef(task);
+        const provider = this.engine.provider(ref);
+        const handle = repairingConflict ? task.conflictFeedbackReview : task.review;
+        const actual = handle && (await provider.getReview(ref, handle));
+        const freshPR = await provider.getPR(ref);
         if (
-          actual.status !== 'published' ||
-          !sameRevision(actual.revision, task.review!.revision) ||
-          (task.review!.authorId && actual.authorId !== task.review!.authorId) ||
-          !sameOpenTarget(startingPR, freshPR) ||
+          (!repairingConflict && !handle) ||
+          (handle &&
+            (actual?.status !== 'published' ||
+              actual.revision.head !== freshPR.head ||
+              !sameRevision(actual.revision, handle.revision) ||
+              (ref.provider === 'github' &&
+                handle.authorId &&
+                actual.authorId !== handle.authorId))) ||
+          !sameOpenTarget(task.pr, freshPR) ||
+          task.pr?.targetCloneUrl !== freshPR.targetCloneUrl ||
           !sameRevision(startingPR, freshPR) ||
-          startingPR?.targetCloneUrl !== freshPR.targetCloneUrl ||
           freshPR.draft
         )
-          throw new Error(
-            'The published review changed before the author started; feedback was not released.',
+          throw new AppError(
+            'stale_feedback',
+            'The published review or PR changed before the author started; feedback was not released.',
           );
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        task.feedback = actual;
-        store.saveTask(task);
-        store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+        if (actual) {
+          task.feedback = actual;
+          store.saveTask(task);
+          store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+        } else {
+          // A legacy conflict job can have historical text without its native review ID.
+          task.feedback = undefined;
+        }
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {

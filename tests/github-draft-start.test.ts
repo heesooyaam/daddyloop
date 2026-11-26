@@ -9,6 +9,10 @@ import { expect, it, vi } from 'vitest';
 import { fixture } from './helpers.js';
 import { Engine } from '../src/core/engine.js';
 import { GitHubProvider } from '../src/providers/github.js';
+import { GitLabProvider } from '../src/providers/gitlab.js';
+import { ArcadiaProvider } from '../src/providers/arcadia.js';
+import { ArcBridge } from '../src/integrations/arcadia.js';
+import { tag } from '../src/providers/provider.js';
 import { AppError, prRef } from '../src/core/types.js';
 import { activityStatus } from '../src/core/task-activity.js';
 
@@ -45,6 +49,7 @@ async function reviewFixture() {
     pageTwo: false,
     readFailure: false,
     directReadFailure: false,
+    missing: undefined as 'review' | 'comments' | undefined,
     firstPostStatus: 502,
     firstPostAccepted: true,
     owner: 12,
@@ -54,11 +59,17 @@ async function reviewFixture() {
     const { pathname } = endpoint;
     if (init?.method !== 'GET') writeAttempts.push(init?.method ?? 'GET');
     if (pathname.endsWith('/user')) return Response.json({ id: options.owner });
-    if (pathname.endsWith('/reviews/123') && init?.method === 'GET') {
+    if (/\/reviews\/\d+$/.test(pathname) && init?.method === 'GET') {
       if (options.directReadFailure) return new Response(null, { status: 503 });
-      return reviews.length ? Response.json(reviews[0]) : new Response(null, { status: 404 });
+      const review = reviews.find((review) => pathname.endsWith('/' + review.id));
+      return review && options.missing !== 'review'
+        ? Response.json(review)
+        : new Response(null, { status: 404 });
     }
-    if (pathname.endsWith('/comments')) return Response.json(comments);
+    if (pathname.endsWith('/comments'))
+      return options.missing === 'comments'
+        ? new Response(null, { status: 404 })
+        : Response.json(comments);
     if (init?.method === 'GET' && pathname.endsWith('/reviews')) {
       if (options.readFailure) return new Response(null, { status: 503 });
       if (options.hidden) return Response.json([]);
@@ -77,7 +88,7 @@ async function reviewFixture() {
       const body = JSON.parse(String(init.body));
       posts.push(body.body);
       const review = {
-        id: 123,
+        id: 123 + reviews.length,
         user: { id: options.owner },
         commit_id: body.commit_id,
         state: 'PENDING',
@@ -108,6 +119,34 @@ async function reviewFixture() {
     get engine() {
       return engine;
     },
+    enableAutoMerge() {
+      const current = store.getTask(task.id);
+      current.groupId = 'auto-merge';
+      store.saveGroup({
+        id: current.groupId,
+        title: 'Test',
+        requirements: '',
+        rootTaskId: task.id,
+        daddy: engine.defaultAgents().daddy,
+        generation: 1,
+        createdAt: current.createdAt,
+        updatedAt: current.updatedAt,
+        workspace: {
+          id: 'test',
+          name: 'Test',
+          repoPath: '/tmp',
+          scope: '',
+          vcs: 'git',
+          provider: 'github',
+          host: 'github.com',
+          repo: 'test/repo',
+          createdAt: current.createdAt,
+          updatedAt: current.updatedAt,
+        },
+      });
+      store.saveTask(current);
+      store.setSetting('autoMerge.session:' + current.groupId, true);
+    },
     due() {
       const saved = store.getTask(task.id);
       expect(saved.state).toBe('queued');
@@ -129,9 +168,10 @@ async function reviewFixture() {
   };
 }
 
-function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>) {
+function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>, engine = f.engine) {
   const workspaces = new Workspaces('/tmp');
   const prepare = vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const prepareConflict = vi.spyOn(workspaces, 'prepareConflict').mockResolvedValue(undefined);
   const runtime = {
     run: vi.fn<ConstructorParameters<typeof Worker>[2]['run']>(async () => ({
       status: 'incomplete' as const,
@@ -142,7 +182,7 @@ function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>) {
     })),
   };
   const worker = new Worker(
-    f.engine,
+    engine,
     workspaces,
     runtime,
     runtime,
@@ -156,7 +196,7 @@ function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>) {
     }),
     0,
   );
-  return { worker, prepare, run: runtime.run };
+  return { worker, prepare, prepareConflict, run: runtime.run };
 }
 
 it('recovers the original paginated draft after restart and starts exactly one reviewer', async () => {
@@ -432,47 +472,268 @@ it('repins the unstarted reviewer after the target advances while preparing its 
   }
 });
 
-it.each([false, true])(
-  'checks current published feedback before an author run (retargeted: %s)',
-  async (retargeted) => {
+it.each([
+  ['ordinary', 'current'],
+  ['ordinary', 'redirected before claim'],
+  ['ordinary', 'redirected during preparation'],
+  ['ordinary', 'author changed'],
+  ['conflict', 'current'],
+  ['conflict', 'redirected during preparation'],
+] as const)('checks published feedback before an %s fix (%s)', async (kind, scenario) => {
+  const f = await reviewFixture();
+  try {
+    if (kind === 'conflict') f.enableAutoMerge();
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    f.due();
+    await f.engine.review(f.task.id);
+    const task = f.store.getTask(f.task.id);
+    f.store.cancelJobs(task.id);
+    delete task.reviewAdmission;
+    task.reviewFinished = true;
+    f.reviews[0].state = 'COMMENTED';
+    f.comments.push({ id: 456, body: 'Old comment', html_url: f.task.ref.url });
+    task.snapshot = task.feedback = await f.github.getReview(prRef(task), task.review!);
+    const originalId = task.review!.id;
+    if (kind === 'conflict') {
+      f.remote.mergeConflict = true;
+      await f.engine.applyRepair(task, f.remote, { kind: 'repair', preparation: 'clean' });
+      expect(f.store.getTask(task.id).conflictFeedbackReview?.id).toBe(originalId);
+    } else {
+      task.state = 'fixing';
+      f.store.saveTask(task);
+      f.store.enqueue(task, 'author', 'fix', 'Address published feedback');
+    }
+
+    const { worker, prepare, prepareConflict, run } = reviewer(f);
+    if (scenario === 'redirected before claim') f.remote.targetBranch = 'release';
+    const duringPreparation = () => {
+      f.comments[0].body = '**Current comment**\nPreserve this Markdown';
+      if (scenario === 'redirected during preparation') f.remote.targetBranch = 'release';
+      if (scenario === 'author changed') f.reviews[0].user.id = 99;
+    };
+    if (kind === 'conflict')
+      prepareConflict.mockImplementation(async () => {
+        duringPreparation();
+      });
+    else
+      prepare.mockImplementation(async () => {
+        duringPreparation();
+        return '/tmp';
+      });
+    try {
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
+      if (scenario === 'current') {
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
+          { id: '456', body: f.comments[0].body },
+        ]);
+      } else {
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.getTask(task.id).feedback?.comments[0].body).toBe('Old comment');
+      }
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['gitlab', 'arcadia'] as const)(
+  'releases current verified notes from %s to a fix worker',
+  async (kind) => {
+    const f = await reviewFixture();
+    try {
+      const task = f.store.getTask(f.task.id);
+      task.ref.provider = kind;
+      task.state = 'fixing';
+      task.reviewFinished = true;
+      task.review = {
+        id: '5',
+        nodeId: '9',
+        marker: 'test',
+        authorId: '7',
+        revision: task.revision!,
+      };
+      let body = 'Old comment';
+      const gitlab = new GitLabProvider('gitlab.com', 'fake', async (url) =>
+        Response.json(
+          String(url).includes('draft_notes')
+            ? []
+            : [
+                { id: 5, body: tag('test'), author: { id: 7 } },
+                { id: 6, body: body + '\n' + tag('test:comment:note'), author: { id: 7 } },
+              ],
+        ),
+      );
+      const bridge = new ArcBridge();
+      vi.spyOn(bridge, 'api').mockImplementation(async (args) =>
+        args[0] === 'pr'
+          ? [
+              { id: 5, content: tag('test'), author: { name: '7' } },
+              { id: 6, content: body + '\n' + tag('test:comment:note'), author: { name: '7' } },
+            ]
+          : [],
+      );
+      const provider = kind === 'gitlab' ? gitlab : new ArcadiaProvider(bridge);
+      vi.spyOn(provider, 'getPR').mockResolvedValue(f.remote);
+      task.snapshot = task.feedback = await provider.getReview(prRef(task), task.review);
+      expect(task.feedback.authorId).toBeUndefined();
+      f.store.saveTask(task);
+      f.store.enqueue(task, 'author', 'fix', 'Address published feedback');
+      const { worker, prepare, run } = reviewer(f, new Engine(f.store, () => provider));
+      prepare.mockImplementation(async () => {
+        body = 'Current **Markdown**';
+        return '/tmp';
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0].task.feedback?.comments[0].body).toBe(
+          body + '\n' + tag('test:comment:note'),
+        );
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['review', 'comments'] as const)(
+  'rechecks the known draft after a transient 404 on %s at admission',
+  async (missing) => {
     const f = await reviewFixture();
     try {
       await f.engine.review(f.task.id);
       f.options.hidden = false;
       f.due();
       await f.engine.review(f.task.id);
-      const task = f.store.getTask(f.task.id);
-      f.store.cancelJobs(task.id);
-      delete task.reviewAdmission;
-      task.state = 'fixing';
-      task.reviewFinished = true;
-      f.reviews[0].state = 'COMMENTED';
-      f.comments.push({ id: 456, body: 'Old comment', html_url: f.task.ref.url });
-      task.snapshot = task.feedback = await f.github.getReview(prRef(task), task.review!);
-      f.store.saveTask(task);
-      f.store.enqueue(task, 'author', 'fix', 'Address published feedback');
-
-      const { worker, prepare, run } = reviewer(f);
-      prepare.mockImplementation(async () => {
-        f.comments[0].body = '**Current comment**\nPreserve this Markdown';
-        if (retargeted) f.remote.targetBranch = 'release';
-        return '/tmp';
-      });
+      const { worker, run } = reviewer(f);
       try {
+        const [original] = f.store.activeJobs(f.task.id);
+        f.options.missing = missing;
         await worker.tick();
-        await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
-        if (retargeted) {
-          expect(run).not.toHaveBeenCalled();
-          expect(f.store.getTask(task.id).feedback?.comments[0].body).toBe('Old comment');
-        } else {
-          expect(run).toHaveBeenCalledTimes(1);
-          expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
-            { id: '456', body: f.comments[0].body },
+        const [deferred] = await vi.waitFor(() => {
+          const jobs = f.store.activeJobs(f.task.id);
+          expect(jobs).toMatchObject([
+            { id: original.id, status: 'queued', notBefore: expect.any(String) },
           ]);
-        }
+          return jobs;
+        });
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.getTask(f.task.id).review?.id).toBe('123');
+        f.options.missing = undefined;
+        f.store.saveJob({ ...deferred, notBefore: undefined });
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(f.posts).toHaveLength(1);
       } finally {
         await worker.stop();
       }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['open', 'merged'] as const)(
+  'supports explicit retry after an early publication (PR state: %s)',
+  async (state) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.reviews[0].body = 'Owner published this Markdown\n' + f.reviews[0].body;
+      const original = { ...f.reviews[0] };
+      f.due();
+      await f.engine.review(f.task.id);
+      const held = await f.engine.reconcile(f.task.id);
+      expect(held).toMatchObject({
+        state: 'needs_input',
+        reviewFinished: false,
+        review: { id: '123' },
+      });
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      f.remote.state = state;
+      if (state === 'merged') f.remote.mergeCommit = 'f'.repeat(40);
+      const retried = await f.engine.review(f.task.id, true);
+      expect(retried.state).toBe('reviewing');
+      expect(f.reviews[0]).toEqual(original);
+      if (state === 'open') {
+        expect(retried).toMatchObject({ round: held.round + 1, review: { id: '124' } });
+        expect(f.store.setting('review.archive:' + f.task.id + ':123')).toMatchObject({
+          body: original.body,
+        });
+        expect(f.posts).toHaveLength(2);
+      } else {
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+        expect(f.posts).toHaveLength(1);
+      }
+      const { worker, run } = reviewer(f);
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        expect(run.mock.calls[0][0].job.kind).toBe(state === 'open' ? 'review' : 'verify_merge');
+        expect(f.reviews[0]).toEqual(original);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['refused', 'visible', 'admission'] as const)(
+  'respects newly confirmed auto-merge conflict (%s)',
+  async (when) => {
+    const f = await reviewFixture();
+    try {
+      f.enableAutoMerge();
+      if (when === 'refused') {
+        f.options.firstPostAccepted = false;
+        f.options.firstPostStatus = 422;
+        await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'provider_422' });
+        await f.engine.action(f.task.id, 'resume');
+        f.remote.mergeConflict = true;
+        await f.engine.review(f.task.id);
+        expect(f.store.getTask(f.task.id).draftStart).toBeUndefined();
+        await f.engine.review(f.task.id);
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'fix' }]);
+      } else {
+        await f.engine.review(f.task.id);
+        f.options.hidden = false;
+        f.due();
+        if (when === 'visible') f.remote.mergeConflict = true;
+        await f.engine.review(f.task.id);
+        if (when === 'admission') {
+          const { worker, prepare, run } = reviewer(f);
+          prepare.mockImplementation(async () => {
+            f.remote.mergeConflict = true;
+            return '/tmp';
+          });
+          try {
+            await worker.tick();
+            await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+            expect(run).not.toHaveBeenCalled();
+          } finally {
+            await worker.stop();
+          }
+        }
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          review: { id: '123' },
+        });
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      }
+      expect(f.writeAttempts).toEqual(['POST']);
     } finally {
       f.close();
     }

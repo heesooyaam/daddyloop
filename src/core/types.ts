@@ -332,6 +332,8 @@ export interface Task {
   resumeState?: State;
   lastFeedbackHash?: string;
   feedback?: ReviewSnapshot;
+  /** The published review to reread before starting a conflict repair. */
+  conflictFeedbackReview?: ReviewHandle;
   createdAt: string;
   updatedAt: string;
 }

@@ -4,6 +4,7 @@ import {
   hasReleasedReview,
   sameOpenTarget,
   staleConflictPreparation,
+  confirmedAutoMergeConflict,
   type PrAction,
   type PrEvidence,
 } from './pr-routing.js';
@@ -257,7 +258,7 @@ export class Engine {
   async review(id: string, retry = false, clarification?: string) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
-      const entryGeneration = task.generation;
+      let entryGeneration = task.generation;
       const entryGroupGeneration = task.groupId
         ? this.store.getGroup(task.groupId).generation
         : undefined;
@@ -296,13 +297,52 @@ export class Engine {
         if (clarification !== undefined) task.draftStart.clarification = clarification;
         return this.startGitHubDraft(task, provider);
       }
-      if (task.reviewAdmission) {
-        if (!retry && task.state !== 'queued')
+      if (task.reviewAdmission && !retry) {
+        if (task.state !== 'queued')
           throw new AppError('review_exists', 'Retry the original GitHub review.');
         return this.enqueueReview(task, retry, clarification);
       }
-      const pr = await provider.getPR(prRef(task));
+      let pr = await provider.getPR(prRef(task));
       if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
+      if (task.reviewAdmission) {
+        const handle = task.review!;
+        const ref = prRef(task);
+        const native = await provider.getReview(ref, handle);
+        const owner = native.status === 'published' ? await provider.reviewAccount?.() : undefined;
+        const latestPR = native.status === 'published' ? await provider.getPR(ref) : pr;
+        const latest = this.store.getTask(id);
+        if (
+          !this.currentReviewStart(task) ||
+          (latest.groupId &&
+            this.store.getGroup(latest.groupId).generation !== entryGroupGeneration)
+        )
+          return latest;
+        if (native.status !== 'published') return this.enqueueReview(task, retry, clarification);
+        if (
+          !owner ||
+          owner !== handle.authorId ||
+          owner !== native.authorId ||
+          !sameRevision(handle.revision, native.revision) ||
+          !sameOpenTarget(task.pr, latestPR) ||
+          task.pr?.targetCloneUrl !== latestPR.targetCloneUrl ||
+          latestPR.draft ||
+          !sameRevision(pr, latestPR)
+        )
+          throw new AppError('draft_changed', draftInspectionRequired);
+        if (confirmedAutoMergeConflict(latestPR, autoMergeEnabled(this.store, task))) return task;
+        pr = latestPR;
+        this.store.transaction(() => {
+          this.store.setSetting('review.archive:' + task.id + ':' + handle.id, native);
+          this.invalidate(task, latestPR);
+          task.feedback = native;
+          this.state(
+            task,
+            'queued',
+            'Starting a new review after inspection of the published review',
+          );
+        });
+        entryGeneration = task.generation;
+      }
       if (confirmedSupersededDraft(task)) {
         if (pr.head !== task.pendingAuthorHead || !sameOpenTarget(task.pr, pr)) {
           this.holdSavedFix(task, pr);
@@ -435,8 +475,7 @@ export class Engine {
     const openTarget = (pr: PullRequest) =>
       sameOpenTarget(target, pr) && pr.targetCloneUrl === target?.targetCloneUrl && !pr.draft;
     const ready = (pr: PullRequest) =>
-      openTarget(pr) &&
-      (sameRevision(intent.revision, pr) || this.prAction(task, pr).kind !== 'repair');
+      openTarget(pr) && !confirmedAutoMergeConflict(pr, autoMergeEnabled(this.store, task));
     try {
       if (
         intent.ref &&
@@ -596,8 +635,16 @@ export class Engine {
             group.daddyState === 'archived'))
       )
         return false;
+      if (snapshot.status === 'missing' && !snapshot.authorId)
+        throw new AppError(
+          'draft_lookup_pending',
+          'Waiting for the original GitHub review to become visible.',
+        );
       const open =
-        sameOpenTarget(task.pr, pr) && task.pr?.targetCloneUrl === pr.targetCloneUrl && !pr.draft;
+        sameOpenTarget(task.pr, pr) &&
+        task.pr?.targetCloneUrl === pr.targetCloneUrl &&
+        !pr.draft &&
+        !confirmedAutoMergeConflict(pr, autoMergeEnabled(this.store, task));
       if (open && this.initialDraftMatches(task, snapshot, owner)) {
         if (sameRevision(task.revision, pr)) {
           delete task.reviewAdmission;
@@ -624,6 +671,7 @@ export class Engine {
             !sameRevision(pr, latest) ||
             !sameOpenTarget(pr, latest) ||
             latest.draft ||
+            confirmedAutoMergeConflict(latest, autoMergeEnabled(this.store, task)) ||
             pr.targetCloneUrl !== latest.targetCloneUrl
           )
             throw new AppError(
@@ -995,6 +1043,7 @@ export class Engine {
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
     delete task.reviewAdmission;
+    delete task.conflictFeedbackReview;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
@@ -1490,6 +1539,7 @@ export class Engine {
       task.pr = pr;
       task.verifiedMerge = undefined;
       task.pendingFix = undefined;
+      delete task.reviewAdmission;
       task.reviewerThreadId = undefined;
       this.state(task, 'reviewing', 'Checking the merged result');
       this.store.enqueue(
@@ -1537,14 +1587,23 @@ export class Engine {
         throw new Error('Conflict repair requires a checkpoint of the author changes');
       checkpoint = await options.checkpoint(task);
     }
-    const feedback = options.snapshot ?? task.snapshot;
+    const feedback = options.snapshot ?? task.snapshot ?? task.feedback;
+    const feedbackReview = task.review ?? task.conflictFeedbackReview;
+    const applicableFeedback =
+      feedback?.status === 'published' &&
+      feedback.revision.head === pr.head &&
+      sameRevision(feedback.revision, feedbackReview?.revision) &&
+      sameOpenTarget(task.pr, pr) &&
+      task.pr?.targetCloneUrl === pr.targetCloneUrl;
     this.store.transaction(() => {
       if (action.preparation !== 'resume') {
         this.invalidate(task, pr, !options.finishingRun);
         task.pendingFix = undefined;
         task.conflictCheckpoint = checkpoint;
-        if (feedback?.status === 'published' && feedback.revision.head === pr.head)
+        if (applicableFeedback) {
           task.feedback = feedback;
+          task.conflictFeedbackReview = feedbackReview;
+        }
       }
       task.fixingMergeConflict = true;
       this.state(task, 'fixing', 'Worker assigned to resolve the GitHub merge conflict');
