@@ -73,7 +73,9 @@ async function reviewFixture() {
         : Response.json(
             pathname.endsWith('/100/comments')
               ? [{ id: 700, body: 'Unrelated publication', html_url: task.ref.url }]
-              : comments,
+              : pathname.endsWith('/123/comments')
+                ? comments
+                : [],
           );
     if (init?.method === 'GET' && pathname.endsWith('/reviews')) {
       if (options.readFailure) return new Response(null, { status: 503 });
@@ -155,9 +157,10 @@ async function reviewFixture() {
     due() {
       const saved = store.getTask(task.id);
       expect(saved.state).toBe('queued');
-      expect(saved.draftStart!.retryAt).toBeGreaterThan(Date.now());
+      const pending = saved.mergeVerificationRequest ?? saved.draftStart!;
+      expect(pending.retryAt).toBeGreaterThan(Date.now());
       expect(activityStatus({ task: saved })).toMatch(/retry at/);
-      saved.draftStart!.retryAt = Date.now() - 1;
+      pending.retryAt = Date.now() - 1;
       store.saveTask(saved);
     },
     restart() {
@@ -1083,6 +1086,117 @@ it.each(['verify-merge', 'retry'] as const)(
   },
 );
 
+it.each([
+  'immediate',
+  'first PR read only',
+  'review 503',
+  'account 503',
+  'PR recheck 503',
+  'review 404',
+  'comments 404',
+] as const)('preserves a bound retry and its clarification through %s', async (failure) => {
+  const f = await reviewFixture();
+  try {
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    f.reviews[0].state = 'COMMENTED';
+    f.comments.push({ id: 456, body: '**Earlier Markdown**', html_url: f.task.ref.url });
+    f.due();
+    const held = await f.engine.review(f.task.id);
+    expect(held).toMatchObject({ state: 'needs_input', reviewAdmission: '123' });
+
+    const clarification = 'Include the original rollout checklist';
+    if (failure !== 'immediate')
+      vi.mocked(f.github.getPR).mockRejectedValueOnce(
+        new AppError('provider_503', 'First PR read failed'),
+      );
+    await f.engine.review(f.task.id, true, clarification);
+    f.restart();
+    f.comments[0].body = '**Current Markdown**';
+    const { worker, run } = reviewer(f);
+    try {
+      if (failure !== 'immediate') {
+        f.due();
+        if (failure === 'review 503') f.options.directReadFailure = true;
+        if (failure === 'account 503')
+          vi.spyOn(f.github, 'reviewAccount').mockRejectedValueOnce(
+            new AppError('provider_503', 'Account read failed'),
+          );
+        if (failure === 'PR recheck 503')
+          vi.mocked(f.github.getPR)
+            .mockResolvedValueOnce({ ...f.remote })
+            .mockRejectedValueOnce(new AppError('provider_503', 'PR recheck failed'));
+        if (failure === 'review 404' || failure === 'comments 404')
+          f.options.missing = failure === 'review 404' ? 'review' : 'comments';
+        await worker.tick();
+        if (failure !== 'first PR read only') {
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'queued',
+            reviewAdmission: '123',
+            mergeVerificationRequest: { kind: 'retry', clarification },
+          });
+          expect(run).not.toHaveBeenCalled();
+          expect(f.writeAttempts).toEqual(['POST']);
+          f.options.directReadFailure = false;
+          f.options.missing = undefined;
+          f.due();
+          await worker.tick();
+        }
+      } else await worker.tick();
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+      expect(run.mock.calls[0][0]).toMatchObject({
+        job: { kind: 'review' },
+        task: {
+          round: held.round + 1,
+          review: { id: '124' },
+          latestClarification: { text: clarification },
+          feedback: {
+            comments: [
+              {
+                id: '456',
+                body: failure === 'immediate' ? '**Earlier Markdown**' : f.comments[0].body,
+              },
+            ],
+          },
+        },
+      });
+      expect(f.store.getTask(f.task.id).mergeVerificationRequest).toBeUndefined();
+      expect(f.writeAttempts).toEqual(['POST', 'POST']);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it('keeps the clarification of a retry received before the original draft becomes visible', async () => {
+  const f = await reviewFixture();
+  try {
+    await f.engine.review(f.task.id);
+    const clarification = 'Include the original rollout checklist';
+    await f.engine.review(f.task.id, true, clarification);
+    f.restart();
+    expect(f.store.getTask(f.task.id).draftStart).toMatchObject({ retry: true, clarification });
+    f.options.hidden = false;
+    f.due();
+    const { worker, run } = reviewer(f);
+    try {
+      await worker.tick();
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+      expect(run.mock.calls[0][0]).toMatchObject({
+        job: { kind: 'review' },
+        task: { review: { id: '123' }, latestClarification: { text: clarification } },
+      });
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
 it.each(['ambiguous', 'refused'] as const)(
   'allows open-PR retry after a deferred merge request (%s)',
   async (outcome) => {
@@ -1435,12 +1549,28 @@ it.each([
   ['disk', 'legacy'],
   ['shutdown', 'current'],
   ['restart after claim', 'current'],
+  ['manual', 'transient'],
+  ['disk', 'transient'],
+  ['shutdown', 'transient'],
+  ['restart after claim', 'transient'],
+  ['restart after claim', 'bound transient'],
 ] as const)(
   'resumes a merge verifier without a review after %s (%s record)',
   async (pause, record) => {
     const f = await reviewFixture();
     try {
-      await verifyAfterRefusedDraft(f);
+      const bound = record === 'bound transient';
+      if (bound) {
+        await f.engine.review(f.task.id);
+        f.options.hidden = false;
+        f.reviews[0].state = 'COMMENTED';
+        f.comments.push({ id: 456, body: '**Original Markdown**', html_url: f.task.ref.url });
+        f.due();
+        await f.engine.review(f.task.id);
+        f.remote.state = 'merged';
+        f.remote.mergeCommit = 'f'.repeat(40);
+        await f.engine.action(f.task.id, 'verify-merge');
+      } else await verifyAfterRefusedDraft(f);
       if (pause === 'restart after claim') {
         expect(f.store.claim()).toMatchObject({ kind: 'verify_merge', status: 'running' });
       } else {
@@ -1474,19 +1604,34 @@ it.each([
         f.store.saveTask(saved);
       }
       f.restart();
+      const transient = record.endsWith('transient');
+      if (transient)
+        vi.mocked(f.github.getPR).mockRejectedValueOnce(
+          new AppError('provider_503', 'Resume PR read failed'),
+        );
       await f.engine.action(f.task.id, 'resume');
-      expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+      if (transient) {
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'queued',
+          mergeVerificationRequest: { kind: 'resume' },
+        });
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+        f.restart();
+        f.due();
+      } else expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
       const after = reviewer(f);
       after.run.mockResolvedValue({
         status: 'completed',
         summary: 'Verified merge',
         checkedHead: f.remote.head,
+        verifiedCommentIds: bound ? ['456'] : [],
       });
       try {
         await after.worker.tick();
         await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('complete'));
         expect(after.run).toHaveBeenCalledTimes(1);
-        expect(after.run.mock.calls[0][0].task.review).toBeUndefined();
+        expect(after.run.mock.calls[0][0].job.kind).toBe('verify_merge');
+        expect(after.run.mock.calls[0][0].task.review?.id).toBe(bound ? '123' : undefined);
         expect(f.writeAttempts).toEqual(['POST']);
       } finally {
         await after.worker.stop();
@@ -1497,9 +1642,14 @@ it.each([
   },
 );
 
-it.each(['awaiting_checks', 'awaiting_plan_approval'] as const)(
-  'resumes the %s gate after verification without a review completed',
-  async (gate) => {
+it.each([
+  ['awaiting_checks', 'current'],
+  ['awaiting_plan_approval', 'current'],
+  ['awaiting_checks', 'transient'],
+  ['awaiting_plan_approval', 'transient'],
+] as const)(
+  'resumes the %s gate after verification without a review completed (%s)',
+  async (gate, record) => {
     const f = await reviewFixture();
     try {
       await verifyAfterRefusedDraft(f);
@@ -1521,7 +1671,27 @@ it.each(['awaiting_checks', 'awaiting_plan_approval'] as const)(
       expect(f.store.getTask(task.id).state).toBe(gate);
       await f.engine.action(task.id, 'pause');
       f.restart();
-      expect((await f.engine.action(task.id, 'resume')).state).toBe(gate);
+      if (record === 'transient') {
+        vi.mocked(f.github.getPR).mockRejectedValueOnce(
+          new AppError('provider_503', 'Resume PR read failed'),
+        );
+        await f.engine.action(task.id, 'resume');
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'queued',
+          mergeVerificationRequest: { kind: 'resume' },
+          resumeState: gate,
+        });
+        f.restart();
+        f.due();
+        const { worker, run } = reviewer(f);
+        try {
+          await worker.tick();
+          expect(run).not.toHaveBeenCalled();
+          expect(f.store.getTask(task.id).state).toBe(gate);
+        } finally {
+          await worker.stop();
+        }
+      } else expect((await f.engine.action(task.id, 'resume')).state).toBe(gate);
       expect(f.store.activeJobs(task.id)).toHaveLength(0);
       if (gate === 'awaiting_checks') {
         f.remote.checks = 'passing';
