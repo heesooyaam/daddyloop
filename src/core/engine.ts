@@ -3,6 +3,7 @@ import {
   completionGate,
   hasReleasedReview,
   sameOpenTarget,
+  sameReviewTarget,
   staleConflictPreparation,
   confirmedAutoMergeConflict,
   type PrAction,
@@ -10,6 +11,7 @@ import {
 } from './pr-routing.js';
 import { draftInspectionRequired, draftSyncPending } from './task-activity.js';
 import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
+import { isDeepStrictEqual } from 'node:util';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
@@ -308,8 +310,10 @@ export class Engine {
         const handle = task.review!;
         const ref = prRef(task);
         const native = await provider.getReview(ref, handle);
-        const owner = native.status === 'published' ? await provider.reviewAccount?.() : undefined;
-        const latestPR = native.status === 'published' ? await provider.getPR(ref) : pr;
+        const publication =
+          native.status === 'published'
+            ? await this.readHeldPublication(task, pr, native)
+            : undefined;
         const latest = this.store.getTask(id);
         if (
           !this.currentReviewStart(task) ||
@@ -317,19 +321,16 @@ export class Engine {
             this.store.getGroup(latest.groupId).generation !== entryGroupGeneration)
         )
           return latest;
-        if (native.status !== 'published') return this.enqueueReview(task, retry, clarification);
-        if (
-          !owner ||
-          owner !== handle.authorId ||
-          owner !== native.authorId ||
-          !sameRevision(handle.revision, native.revision) ||
-          !sameOpenTarget(task.pr, latestPR) ||
-          task.pr?.targetCloneUrl !== latestPR.targetCloneUrl ||
-          latestPR.draft ||
-          !sameRevision(pr, latestPR)
-        )
-          throw new AppError('draft_changed', draftInspectionRequired);
-        if (confirmedAutoMergeConflict(latestPR, autoMergeEnabled(this.store, task))) return task;
+        if (!publication) return this.enqueueReview(task, retry, clarification);
+        const latestPR = publication.pr;
+        if (confirmedAutoMergeConflict(latestPR, autoMergeEnabled(this.store, task))) {
+          const action = this.prAction({ ...task, state: 'queued', snapshot: native }, latestPR);
+          if (action.kind === 'repair') {
+            this.store.setSetting('review.archive:' + task.id + ':' + handle.id, native);
+            await this.applyRepair(task, latestPR, action, { snapshot: native });
+          }
+          return task;
+        }
         pr = latestPR;
         this.store.transaction(() => {
           this.store.setSetting('review.archive:' + task.id + ':' + handle.id, native);
@@ -1516,7 +1517,89 @@ export class Engine {
   async reconcile(id: string) {
     return this.lock(id, () => this.reconcileLocked(id));
   }
-  private queueMergeVerification(task: Task, pr: PullRequest) {
+  async publicationRevisionApplies(task: Task, revision: Revision, pr: PullRequest) {
+    return (
+      sameReviewTarget(task.pr, pr) &&
+      (sameRevision(revision, pr) ||
+        (revision.head === pr.head &&
+          revision.base !== pr.base &&
+          (await this.provider(prRef(task)).targetAdvanced?.(
+            prRef(task),
+            revision.base,
+            pr.base,
+          )) === true))
+    );
+  }
+
+  async readHeldPublication(task: Task, observed: PullRequest, snapshot?: ReviewSnapshot) {
+    const ref = prRef(task);
+    const provider = this.provider(ref);
+    const handle = task.review;
+    if (
+      !handle?.authorId ||
+      handle.id !== task.reviewAdmission ||
+      !sameReviewTarget(task.pr, observed) ||
+      observed.draft
+    )
+      throw new AppError('draft_changed', draftInspectionRequired);
+    const native = snapshot ?? (await provider.getReview(ref, handle));
+    const owner = await provider.reviewAccount?.();
+    if (
+      native.status !== 'published' ||
+      owner !== handle.authorId ||
+      native.authorId !== handle.authorId ||
+      !sameRevision(native.revision, handle.revision) ||
+      !(await this.publicationRevisionApplies(task, native.revision, observed))
+    )
+      throw new AppError('draft_changed', draftInspectionRequired);
+    const pr = await provider.getPR(ref);
+    if (
+      !sameReviewTarget(observed, pr) ||
+      !sameRevision(observed, pr) ||
+      pr.state !== observed.state ||
+      pr.draft ||
+      pr.mergeCommit !== observed.mergeCommit
+    )
+      throw new AppError('draft_changed', draftInspectionRequired);
+    return { snapshot: native, pr };
+  }
+
+  conflictPublication(task: Task) {
+    if (task.conflictFeedbackReview) return task.conflictFeedbackReview;
+    const feedback = task.feedback;
+    if (feedback?.status !== 'published' || feedback.revision.head !== task.revision?.head) return;
+    const rows = this.store.db
+      .prepare(
+        "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published')",
+      )
+      .all(task.id);
+    const ids = new Set<string>();
+    for (const row of rows) {
+      const event = JSON.parse(String(row.data)) as {
+        reviewId?: string;
+        snapshot?: ReviewSnapshot;
+        revision?: Revision;
+        comments?: number;
+      };
+      if (typeof event.reviewId !== 'string' || !/^\d+$/.test(event.reviewId)) continue;
+      const matches = event.snapshot
+        ? isDeepStrictEqual(event.snapshot, feedback)
+        : sameRevision(event.revision, feedback.revision) &&
+          event.comments === feedback.comments.length;
+      if (matches) ids.add(event.reviewId);
+    }
+    const [id] = ids;
+    if (ids.size === 1 && feedback.authorId)
+      return { id, revision: feedback.revision, authorId: feedback.authorId, marker: '' };
+    if (feedback.comments.length)
+      throw new AppError(
+        'unconfirmed_feedback',
+        'Cannot identify the original published review. Findings awaiting verification: ' +
+          feedback.comments.map((comment) => comment.id).join(', '),
+      );
+  }
+
+  private async queueMergeVerification(task: Task, pr: PullRequest) {
     if (task.state !== 'needs_input' || this.store.busy(task.id))
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
     if (pr.state !== 'merged' || pr.head !== task.revision?.head)
@@ -1529,6 +1612,14 @@ export class Engine {
         'unsubmitted_changes',
         'Inspect the saved worker changes before verifying this merge',
       );
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const original = task.reviewAdmission ? await this.readHeldPublication(task, pr) : undefined;
+    if (original) {
+      const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (!this.currentReviewStart(task) || currentGroup?.generation !== group?.generation)
+        return this.store.getTask(task.id);
+      pr = original.pr;
+    }
     this.store.transaction(() => {
       if (!sameRevision(task.revision, pr)) {
         task.approvedAt = undefined;
@@ -1539,7 +1630,7 @@ export class Engine {
       task.pr = pr;
       task.verifiedMerge = undefined;
       task.pendingFix = undefined;
-      delete task.reviewAdmission;
+      if (original) task.snapshot = original.snapshot;
       task.reviewerThreadId = undefined;
       this.state(task, 'reviewing', 'Checking the merged result');
       this.store.enqueue(
@@ -2748,13 +2839,21 @@ export class Engine {
         return;
       }
       if (job.kind === 'verify_merge') {
+        const sameMerge =
+          pr.state === 'merged' &&
+          sameRevision(task.revision, pr) &&
+          pr.mergeCommit === task.pr?.mergeCommit &&
+          result.checkedHead === pr.head;
+        const publication =
+          sameMerge && task.reviewAdmission && result.status === 'completed'
+            ? await this.readHeldPublication(task, pr)
+            : undefined;
+        if (publication) {
+          const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+          if (!this.currentReviewStart(task) || group?.generation !== job.groupGeneration) return;
+        }
         this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
-        if (
-          pr.state !== 'merged' ||
-          !sameRevision(task.revision, pr) ||
-          pr.mergeCommit !== task.pr?.mergeCommit ||
-          result.checkedHead !== pr.head
-        ) {
+        if (!sameMerge) {
           this.state(task, 'needs_input', 'The merged revision changed during verification');
         } else if (result.status !== 'completed') {
           this.state(
@@ -2762,6 +2861,15 @@ export class Engine {
             'needs_input',
             result.question || result.summary,
             requestsHumanInput(result) ? job : undefined,
+          );
+        } else if (
+          publication &&
+          !isDeepStrictEqual(task.snapshot, JSON.parse(JSON.stringify(publication.snapshot)))
+        ) {
+          this.state(
+            task,
+            'needs_input',
+            'The published review changed during verification. Retry with the current findings.',
           );
         } else if (
           result.disputedCommentIds?.length ||
@@ -2778,6 +2886,7 @@ export class Engine {
           task.summary = result.summary;
           task.pr = pr;
           task.verifiedMerge = { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
+          delete task.reviewAdmission;
           await this.finish(task);
         }
         return;

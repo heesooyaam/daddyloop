@@ -1455,6 +1455,13 @@ describe('opt-in GitHub merging', () => {
         { head, base: original, start: original, branch: 'feature', cloneUrl },
         repo,
       );
+      const targetAdvanced = vi.fn(async (_ref: unknown, before: string, after: string) =>
+        command('merge-base', '--is-ancestor', before, after).then(
+          () => true,
+          () => false,
+        ),
+      );
+      Object.assign(f.provider, { targetAdvanced });
       f.setRemote({ base, start: base, mergeable: false, mergeConflict: true, checks: 'missing' });
       await f.poll();
       expect(f.store.busy(f.task.id)).toBe(false);
@@ -1500,11 +1507,6 @@ describe('opt-in GitHub merging', () => {
       });
       f.store.saveJob({ ...retry, notBefore: undefined });
       const newerBase = await commit('later upstream');
-      const targetAdvanced = vi.fn(
-        async (_ref: unknown, before: string, after: string) =>
-          before === base && after === newerBase,
-      );
-      Object.assign(f.provider, { targetAdvanced });
       f.setRemote({ base: newerBase, start: newerBase });
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.cwd).toBe(previousCopy);

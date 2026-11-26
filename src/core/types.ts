@@ -267,7 +267,7 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
-  /** Native review ID awaiting its first reviewer admission check. */
+  /** Native review ID held until reviewer admission or verification of an early publication. */
   reviewAdmission?: string;
   draftStart?: {
     marker: string;

@@ -478,6 +478,10 @@ it.each([
   ['ordinary', 'redirected during preparation'],
   ['ordinary', 'author changed'],
   ['conflict', 'current'],
+  ['conflict', 'advanced'],
+  ['conflict', 'rewritten'],
+  ['conflict', 'legacy'],
+  ['conflict', 'ambiguous publication'],
   ['conflict', 'redirected during preparation'],
 ] as const)('checks published feedback before an %s fix (%s)', async (kind, scenario) => {
   const f = await reviewFixture();
@@ -495,10 +499,29 @@ it.each([
     f.comments.push({ id: 456, body: 'Old comment', html_url: f.task.ref.url });
     task.snapshot = task.feedback = await f.github.getReview(prRef(task), task.review!);
     const originalId = task.review!.id;
+    const originalRevision = task.revision!;
     if (kind === 'conflict') {
+      task.state = 'awaiting_publication';
+      f.store.saveTask(task);
       f.remote.mergeConflict = true;
-      await f.engine.applyRepair(task, f.remote, { kind: 'repair', preparation: 'clean' });
+      if (scenario === 'advanced' || scenario === 'rewritten') {
+        f.remote.base = f.remote.start = 'e'.repeat(40);
+        vi.mocked(f.github.targetAdvanced).mockResolvedValue(scenario === 'advanced');
+      }
+      await f.engine.reconcile(task.id);
       expect(f.store.getTask(task.id).conflictFeedbackReview?.id).toBe(originalId);
+      if (scenario === 'legacy' || scenario === 'ambiguous publication') {
+        const current = f.store.getTask(task.id);
+        delete current.conflictFeedbackReview;
+        f.store.saveTask(current);
+        f.store.event(task.id, 'review.published', {
+          reviewId: originalId,
+          snapshot: task.snapshot,
+        });
+        if (scenario === 'ambiguous publication')
+          f.store.event(task.id, 'review.published', { reviewId: '124', snapshot: task.snapshot });
+        f.restart();
+      }
     } else {
       task.state = 'fixing';
       f.store.saveTask(task);
@@ -524,14 +547,25 @@ it.each([
     try {
       await worker.tick();
       await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
-      if (scenario === 'current') {
+      if (scenario === 'advanced' || scenario === 'rewritten')
+        expect(f.github.targetAdvanced).toHaveBeenCalledWith(
+          prRef(task),
+          originalRevision.base,
+          f.remote.base,
+        );
+      if (scenario === 'current' || scenario === 'advanced' || scenario === 'legacy') {
         expect(run).toHaveBeenCalledTimes(1);
         expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
           { id: '456', body: f.comments[0].body },
         ]);
       } else {
         expect(run).not.toHaveBeenCalled();
-        expect(f.store.getTask(task.id).feedback?.comments[0].body).toBe('Old comment');
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'needs_input',
+          feedback: { comments: [{ id: '456', body: 'Old comment' }] },
+        });
+        if (scenario === 'ambiguous publication' || scenario === 'rewritten')
+          expect(f.store.getTask(task.id).reason).toContain('Findings awaiting verification: 456');
       }
     } finally {
       await worker.stop();
@@ -642,54 +676,131 @@ it.each(['review', 'comments'] as const)(
   },
 );
 
-it.each(['open', 'merged'] as const)(
-  'supports explicit retry after an early publication (PR state: %s)',
-  async (state) => {
-    const f = await reviewFixture();
-    try {
-      await f.engine.review(f.task.id);
-      f.options.hidden = false;
-      f.reviews[0].state = 'COMMENTED';
-      f.reviews[0].body = 'Owner published this Markdown\n' + f.reviews[0].body;
-      const original = { ...f.reviews[0] };
-      f.due();
-      await f.engine.review(f.task.id);
-      const held = await f.engine.reconcile(f.task.id);
-      expect(held).toMatchObject({
+it.each([
+  'open',
+  'conflict',
+  'merged',
+  'merged verified',
+  'redirected retry',
+  'redirected verify',
+  'changed during verification',
+] as const)('checks the original publication on explicit retry (%s)', async (scenario) => {
+  const f = await reviewFixture();
+  try {
+    if (scenario === 'conflict') f.enableAutoMerge();
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    f.reviews[0].state = 'COMMENTED';
+    f.reviews[0].body = 'Owner published this Markdown\n' + f.reviews[0].body;
+    const original = { ...f.reviews[0] };
+    f.due();
+    await f.engine.review(f.task.id);
+    const held = await f.engine.reconcile(f.task.id);
+    expect(held).toMatchObject({
+      state: 'needs_input',
+      reviewFinished: false,
+      review: { id: '123' },
+    });
+    expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+    if (scenario === 'conflict') f.remote.mergeConflict = true;
+    else if (scenario !== 'open') {
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+    }
+    if (scenario === 'redirected retry' || scenario === 'redirected verify') {
+      f.remote.targetBranch = 'release';
+      const result =
+        scenario === 'redirected retry'
+          ? f.engine.review(f.task.id, true)
+          : f.engine.action(f.task.id, 'verify-merge');
+      await expect(result).rejects.toMatchObject({ code: 'draft_changed' });
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      expect(f.store.getTask(f.task.id)).toMatchObject({
         state: 'needs_input',
-        reviewFinished: false,
+        reviewAdmission: '123',
         review: { id: '123' },
       });
-      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
-      f.remote.state = state;
-      if (state === 'merged') f.remote.mergeCommit = 'f'.repeat(40);
-      const retried = await f.engine.review(f.task.id, true);
-      expect(retried.state).toBe('reviewing');
-      expect(f.reviews[0]).toEqual(original);
-      if (state === 'open') {
-        expect(retried).toMatchObject({ round: held.round + 1, review: { id: '124' } });
-        expect(f.store.setting('review.archive:' + f.task.id + ':123')).toMatchObject({
-          body: original.body,
-        });
-        expect(f.posts).toHaveLength(2);
-      } else {
-        expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
-        expect(f.posts).toHaveLength(1);
-      }
-      const { worker, run } = reviewer(f);
-      try {
-        await worker.tick();
-        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
-        expect(run.mock.calls[0][0].job.kind).toBe(state === 'open' ? 'review' : 'verify_merge');
-        expect(f.reviews[0]).toEqual(original);
-      } finally {
-        await worker.stop();
-      }
-    } finally {
-      f.close();
+      expect(f.posts).toHaveLength(1);
+      return;
     }
-  },
-);
+    if (scenario !== 'open')
+      f.comments.push({ id: 456, body: '**Added after the hold**', html_url: f.task.ref.url });
+    const retried = await f.engine.review(f.task.id, true);
+    expect(f.reviews[0]).toEqual(original);
+    if (scenario === 'open') {
+      expect(retried).toMatchObject({
+        state: 'reviewing',
+        round: held.round + 1,
+        review: { id: '124' },
+      });
+      expect(f.store.setting('review.archive:' + f.task.id + ':123')).toMatchObject({
+        body: original.body,
+      });
+    } else if (scenario === 'conflict') {
+      expect(retried).toMatchObject({ state: 'fixing', conflictFeedbackReview: { id: '123' } });
+      expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'fix' }]);
+      expect(f.store.setting('review.archive:' + f.task.id + ':123')).toMatchObject({
+        body: original.body,
+      });
+    } else {
+      expect(retried.state).toBe('reviewing');
+      expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+    }
+    expect(f.posts).toHaveLength(scenario === 'open' ? 2 : 1);
+    const { worker, run, prepare } = reviewer(f);
+    if (f.remote.state === 'merged') {
+      prepare.mockImplementation(async () => {
+        f.comments[0].body += '\nFresh at reviewer admission';
+        return '/tmp';
+      });
+      run.mockImplementation(async ({ task }) => {
+        expect(task.snapshot?.comments).toMatchObject([{ id: '456', body: f.comments[0].body }]);
+        if (scenario === 'changed during verification')
+          f.comments[0].body += '\nEdited during review';
+        return {
+          status: 'completed',
+          checkedHead: f.remote.head,
+          summary: 'Checked merged result',
+          verifiedCommentIds: scenario === 'merged' ? [] : ['456'],
+        };
+      });
+    }
+    try {
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(run.mock.calls[0][0].job.kind).toBe(
+        scenario === 'open' ? 'review' : scenario === 'conflict' ? 'fix' : 'verify_merge',
+      );
+      if (scenario === 'conflict')
+        expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
+          { id: '456', body: f.comments[0].body },
+        ]);
+      if (scenario === 'merged verified') {
+        const completed = f.store.getTask(f.task.id);
+        expect(completed).toMatchObject({
+          state: 'complete',
+          verifiedMerge: { head: f.remote.head },
+        });
+        expect(completed.reviewAdmission).toBeUndefined();
+      } else if (f.remote.state === 'merged')
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          reviewAdmission: '123',
+          reason: expect.stringContaining(
+            scenario === 'merged'
+              ? 'verified all previously published findings'
+              : 'review changed during verification',
+          ),
+        });
+      expect(f.reviews[0]).toEqual(original);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
 
 it.each(['refused', 'visible', 'admission'] as const)(
   'respects newly confirmed auto-merge conflict (%s)',

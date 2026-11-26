@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
-import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
+import { sameOpenTarget, sameReviewTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
@@ -695,13 +695,24 @@ export class Worker {
       }
 
       let preservedCopy: string | undefined;
+      const conflictReview = repairingConflict ? this.engine.conflictPublication(task) : undefined;
       if (repairingConflict) {
+        if (
+          conflictReview &&
+          startingPR &&
+          !(await this.engine.publicationRevisionApplies(task, conflictReview.revision, startingPR))
+        )
+          throw new AppError(
+            'stale_feedback',
+            'Cannot confirm that the published review applies to the current target history. Findings awaiting verification: ' +
+              (task.feedback?.comments.map((comment) => comment.id).join(', ') || 'none recorded'),
+          );
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
       }
       if (job.kind === 'fix') {
         const ref = prRef(task);
         const provider = this.engine.provider(ref);
-        const handle = repairingConflict ? task.conflictFeedbackReview : task.review;
+        const handle = repairingConflict ? conflictReview : task.review;
         const actual = handle && (await provider.getReview(ref, handle));
         const freshPR = await provider.getPR(ref);
         if (
@@ -714,7 +725,7 @@ export class Worker {
                 handle.authorId &&
                 actual.authorId !== handle.authorId))) ||
           !sameOpenTarget(task.pr, freshPR) ||
-          task.pr?.targetCloneUrl !== freshPR.targetCloneUrl ||
+          !sameReviewTarget(startingPR, freshPR) ||
           !sameRevision(startingPR, freshPR) ||
           freshPR.draft
         )
@@ -727,12 +738,34 @@ export class Worker {
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
         if (actual) {
           task.feedback = actual;
+          if (repairingConflict) task.conflictFeedbackReview = handle;
           store.saveTask(task);
           store.event(task.id, 'author.feedback_snapshot', actual, job.id);
         } else {
-          // A legacy conflict job can have historical text without its native review ID.
+          // The stored feedback can belong to an earlier PR head.
           task.feedback = undefined;
         }
+      }
+      if (job.kind === 'verify_merge' && task.reviewAdmission && startingPR) {
+        const publication = await this.engine.readHeldPublication(task, startingPR);
+        const current = store.getTask(job.taskId);
+        const currentGroup = current.groupId ? store.getGroup(current.groupId) : undefined;
+        if (
+          current.generation !== job.generation ||
+          abort.signal.aborted ||
+          (currentGroup &&
+            (currentGroup.generation !== job.groupGeneration ||
+              currentGroup.deletedAt ||
+              currentGroup.deletion ||
+              currentGroup.daddyState === 'paused' ||
+              currentGroup.daddyState === 'archived'))
+        ) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = current;
+        task.snapshot = publication.snapshot;
+        store.saveTask(task);
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {

@@ -7,17 +7,23 @@ import {
   type Task,
 } from './types.js';
 
-export function sameOpenTarget(
-  expected: Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl'> | undefined,
-  current: PullRequest,
-) {
+type BranchTarget = Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl'>;
+
+function sameBranchTarget(expected: BranchTarget | undefined, current: PullRequest) {
   return (
-    current.state === 'open' &&
     !!expected &&
     current.branch === expected.branch &&
     current.targetBranch === expected.targetBranch &&
     current.cloneUrl === expected.cloneUrl
   );
+}
+
+export function sameOpenTarget(expected: BranchTarget | undefined, current: PullRequest) {
+  return current.state === 'open' && sameBranchTarget(expected, current);
+}
+
+export function sameReviewTarget(expected: PullRequest | undefined, current: PullRequest) {
+  return sameBranchTarget(expected, current) && expected?.targetCloneUrl === current.targetCloneUrl;
 }
 
 export function hasReleasedReview(task: Task) {
