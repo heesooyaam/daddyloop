@@ -344,6 +344,33 @@ export class Daddy {
     });
   }
 
+  async prepareWorkerProfile(
+    profile: AgentProfile,
+    inheritedFrom?: AgentProfile,
+  ): Promise<AgentProfile> {
+    try {
+      await this.catalogue.validate(profile);
+      return profile;
+    } catch (error) {
+      if (
+        !inheritedFrom ||
+        !profile.effort ||
+        !(error instanceof AppError) ||
+        error.code !== 'effort_unavailable'
+      )
+        throw error;
+      if (profile.effort !== inheritedFrom.effort)
+        throw new AppError(
+          'settings_conflict',
+          'The reasoning effort changed and the selected model does not support it. Open the worker settings again.',
+          409,
+        );
+      const next = { engine: profile.engine, model: profile.model };
+      await this.catalogue.validate(next);
+      return next;
+    }
+  }
+
   async configureWorker(
     id: string,
     number: number,
@@ -354,6 +381,7 @@ export class Daddy {
       expectedGeneration,
       baseline,
       inheritedEffort = false,
+      confirmedProfile,
       check,
       expected,
       onCommit,
@@ -363,6 +391,7 @@ export class Daddy {
       expectedGeneration?: number;
       baseline?: AgentProfile;
       inheritedEffort?: boolean;
+      confirmedProfile?: AgentProfile;
       expected?: { groupGeneration: number; task: ExpectedTask };
       check?: () => void;
       onCommit?: () => void;
@@ -433,20 +462,10 @@ export class Daddy {
     for (;;) {
       const { group, slot } = readSlot();
       const resolved = resolve(group, slot);
-      let profile = resolved;
-      try {
-        await this.catalogue.validate(profile);
-      } catch (error) {
-        if (
-          !inheritedEffort ||
-          !resolved.effort ||
-          !(error instanceof AppError) ||
-          error.code !== 'effort_unavailable'
-        )
-          throw error;
-        profile = { engine: resolved.engine, model: resolved.model };
-        await this.catalogue.validate(profile);
-      }
+      const confirmed = confirmedProfile && sameAgentProfile(resolved, requested);
+      const profile = confirmed
+        ? await this.prepareWorkerProfile(confirmedProfile)
+        : await this.prepareWorkerProfile(resolved, inheritedEffort ? baseline : undefined);
       const taskId = force ? slot.taskId : undefined;
       const result = taskId
         ? await this.engine.lock(taskId, async () => update(profile, resolved, taskId))

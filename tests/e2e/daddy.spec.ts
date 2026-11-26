@@ -557,6 +557,25 @@ test('supports the phone task board, pool controls and workspace directory choos
   expect(fresh.request().postDataJSON().expectedGeneration).toBe(resumed);
   expect(fresh.status()).toBe(200);
   await expect(slot).toContainText('gpt-6-astra · medium');
+  await slot.click();
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption({ label: 'Default' });
+  expect((await save()).status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra');
+  expect((await board()).workers.slots[2]?.profile).toEqual({
+    engine: 'codex',
+    model: 'gpt-6-astra',
+  });
+  await choose();
+  expect((await save()).status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra · medium');
+  await slot.click();
+  await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption({ label: 'Default' });
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workers.slots[2]?.profile).toEqual({
+    engine: 'codex',
+    model: 'gpt-5.6-sol',
+  });
   await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();

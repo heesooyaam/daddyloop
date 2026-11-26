@@ -951,15 +951,34 @@ export class TelegramWorkspace {
       const profile = {
         engine,
         model: input.model,
-        effort: inheritedEffort ? baseline.effort : input.effort,
+        effort: inheritedEffort
+          ? baseline.effort
+          : input.effort === 'default'
+            ? undefined
+            : input.effort,
+      };
+      const owner = this.pair()?.userId;
+      const expectedGeneration = this.update.getStore()?.expectedGeneration ?? group.generation;
+      const checkRoute = () => {
+        if (this.pair()?.userId !== owner)
+          throw new Error(this.t('This action expired. Open a fresh card.'));
+        this.authorize(destination, groupId);
       };
       if (input.force && slot.taskId) {
         const task = this.daddy.task(groupId, slot.taskId);
+        const confirmedProfile = await this.daddy.prepareWorkerProfile(
+          profile,
+          inheritedEffort ? baseline : undefined,
+        );
+        checkRoute();
+        if (this.daddy.group(groupId).generation !== expectedGeneration)
+          throw new AppError('stale_session', 'This session changed. Open its settings again.');
         const key = this.actionKey(destination, {
           kind: 'force-worker',
           groupId,
           number: input.number,
           profile,
+          confirmedProfile,
           baseline,
           inheritedEffort,
           groupGeneration: group.generation,
@@ -974,21 +993,20 @@ export class TelegramWorkspace {
         await this.api.send(destination, {
           ...new TelegramText()
             .add(this.t('Confirm') + ' · ' + taskReference(task) + ' · ' + task.title)
-            .add('\n' + profileText(profile)),
+            .add(
+              '\n' +
+                profileText(confirmedProfile) +
+                (confirmedProfile.effort ? '' : ' · ' + this.t('Default')),
+            ),
           buttons: [[{ text: this.t('Confirm'), callback_data: 'dad:force:' + key }]],
         });
         return;
       }
-      const owner = this.pair()?.userId;
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
         baseline,
         inheritedEffort,
-        expectedGeneration: this.update.getStore()?.expectedGeneration ?? group.generation,
-        check: () => {
-          if (this.pair()?.userId !== owner)
-            throw new Error(this.t('This action expired. Open a fresh card.'));
-          this.authorize(destination, groupId);
-        },
+        expectedGeneration,
+        check: checkRoute,
         onCommit: this.receipt,
       });
       await this.api.send(
@@ -1992,19 +2010,21 @@ export class TelegramWorkspace {
         groupId: string;
         number: number;
         profile: AgentProfile;
+        confirmedProfile?: AgentProfile;
         baseline?: AgentProfile;
         inheritedEffort?: boolean;
         taskId: string;
         groupGeneration: number;
         expected: ExpectedTask;
       }>(key, destination);
-      if (action.kind !== 'force-worker' || !action.baseline)
+      if (action.kind !== 'force-worker' || !action.baseline || !action.confirmedProfile)
         throw new Error(this.t('This action expired. Open a fresh card.'));
       await this.daddy.configureWorker(action.groupId, action.number, action.profile, {
         force: true,
         expectedTaskId: action.taskId,
         expectedGeneration: action.groupGeneration,
         baseline: action.baseline,
+        confirmedProfile: action.confirmedProfile,
         inheritedEffort: action.inheritedEffort,
         onCommit: () => {
           this.finishAction(key);

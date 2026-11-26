@@ -998,22 +998,25 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       .spyOn(f.daddy.catalogue, 'validate')
       .mockImplementation(async (profile) => {
         if (
-          (profile.model === 'standard' || profile.model === 'limited') &&
+          (profile.model === 'standard' ||
+            profile.model === 'limited' ||
+            profile.model === 'high-only') &&
           profile.effort &&
-          !(profile.model === 'limited' && profile.effort === 'medium')
+          !(profile.model === 'limited' && profile.effort === 'medium') &&
+          !(profile.model === 'high-only' && profile.effort === 'high')
         )
           throw new AppError('effort_unavailable', 'The model does not support that effort', 422);
       });
     try {
+      const url = '/api/daddy/sessions/' + other.id + '/workers/1';
+      const set = (profile: { engine: string; model: string; effort?: string }) =>
+        app.inject({
+          method: 'POST',
+          url,
+          payload: { profile, expectedGeneration: f.daddy.group(other.id).generation },
+        });
+      const initial = { engine: 'claude', model: 'sonnet', effort: 'high' };
       for (const model of ['standard', 'limited']) {
-        const url = '/api/daddy/sessions/' + other.id + '/workers/1';
-        const set = (profile: { engine: string; model: string; effort?: string }) =>
-          app.inject({
-            method: 'POST',
-            url,
-            payload: { profile, expectedGeneration: f.daddy.group(other.id).generation },
-          });
-        const initial = { engine: 'claude', model: 'sonnet', effort: 'high' };
         const target = { engine: 'claude', model };
         expect((await set(initial)).statusCode).toBe(200);
         await bot.handle(message('/worker 1 ' + model + ' high', 7, 18));
@@ -1024,6 +1027,35 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         expect((await set(target)).statusCode).toBe(200);
         expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
       }
+      for (const model of ['sonnet', 'high-only']) {
+        const target = { engine: 'claude', model };
+        expect((await set(initial)).statusCode).toBe(200);
+        await bot.handle(message('/worker 1 ' + model + ' default', 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+      }
+
+      expect((await set(initial)).statusCode).toBe(200);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      catalogueEfforts.mockImplementationOnce(() => blocked);
+      catalogueEfforts.mockClear();
+      const delayed = bot.handle(message('/worker 1 high-only', 7, 18));
+      const later = { ...initial, effort: 'medium' };
+      try {
+        await vi.waitFor(() => expect(catalogueEfforts).toHaveBeenCalledOnce());
+        expect((await set(later)).statusCode).toBe(200);
+      } finally {
+        release();
+        await delayed;
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(later);
+      await bot.handle(message('/worker 1 high-only', 7, 18));
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual({
+        engine: 'claude',
+        model: 'high-only',
+      });
     } finally {
       catalogueEfforts.mockRestore();
     }
