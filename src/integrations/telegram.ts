@@ -23,7 +23,12 @@ import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
 import type { RuntimeUpdaters, RuntimeUpdateOperation } from '../core/runtime-updater.js';
 import type { Daddy } from '../core/daddy.js';
 import { TelegramWorkspace } from './telegram-workspace.js';
-import { TelegramDelivery, deliveryStatus, type DeliveryOptions } from './telegram-delivery.js';
+import {
+  TelegramDelivery,
+  deliveryStatus,
+  type DeliveryOptions,
+  type TelegramDestination,
+} from './telegram-delivery.js';
 import { daddyHome } from './daddy-cards.js';
 import type { Speech } from '../runtime/speech.js';
 import type { ResourceStatus } from '../core/types.js';
@@ -126,6 +131,20 @@ export class TelegramApi {
     replied: boolean;
     active: boolean;
   }>();
+  private incoming = new AsyncLocalStorage<{ id: number; replies: number }>();
+  private replyRoute = new AsyncLocalStorage<TelegramDestination & { groupId: string }>();
+  fromUpdate<T>(id: number, action: () => Promise<T>) {
+    return this.incoming.run({ id, replies: 0 }, action);
+  }
+  forSessionReply<T>(route: TelegramDestination & { groupId: string }, action: () => Promise<T>) {
+    return this.replyRoute.run(route, action);
+  }
+  async answerCallback(id: string) {
+    const acknowledgement = this.call('answerCallbackQuery', { callback_query_id: id });
+    if (this.delivery?.drainingInBackground)
+      void acknowledgement.catch(() => {}); // The transient acknowledgement does not gate the action.
+    else await acknowledgement;
+  }
   delivery?: TelegramDelivery;
   onCleanupError?: (error: unknown) => void;
   constructor(
@@ -344,6 +363,13 @@ export class TelegramApi {
         target.threadId === navigation.threadId
           ? { chatId: navigation.chatId, messageId: navigation.messageId }
           : undefined;
+      const route = this.replyRoute.getStore();
+      const routeOptions =
+        route && target.chatId === route.chatId && target.threadId === route.threadId
+          ? { groupId: route.groupId, sessionRoute: true }
+          : undefined;
+      const update = this.incoming.getStore();
+      const key = delivery?.key ?? (update && `update:${update.id}:${update.replies++}`);
       const queue = this.delivery;
       // The queue owns cleanup for its writes. Only direct Bot API calls use
       // the callback's synchronous acknowledgement.
@@ -351,7 +377,7 @@ export class TelegramApi {
         queue.send(
           target,
           { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-          { ...delivery, deletePrevious: cleanup },
+          { ...routeOptions, ...delivery, key, deletePrevious: cleanup },
         ),
       );
     }
@@ -493,10 +519,15 @@ export class Telegram {
       return;
     }
   };
-  async handle(update: Update, deferReplies = false) {
+  async handle(update: Update) {
+    const store = this.engine.store;
+    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    await this.api.fromUpdate(update.update_id, () => this.processUpdate(update));
+    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+  }
+  private async processUpdate(update: Update) {
     const store = this.engine.store;
     const message = update.message;
-    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
     const sender = update.callback_query?.from ?? message?.from;
     const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
     const paired = this.paired();
@@ -510,20 +541,16 @@ export class Telegram {
             /^\/(task|worker)(?:@\w+)?(?:\s|$)/.test(message.text.trim()))))
     ) {
       // Persist voice, conversation input and task commands before acknowledging the update.
-      const handled = await this.workspace.handle(update, deferReplies);
+      const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
-      store.db
-        .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
-        .run(update.update_id, now());
       return;
     }
-    store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
     if (!chat || !from || from.is_bot) return;
     if (chat.type !== 'private') {
-      await this.workspace?.handle(update, deferReplies);
+      await this.workspace?.handle(update);
       return;
     }
     let pair = this.paired();
@@ -556,11 +583,11 @@ export class Telegram {
       }
       return;
     }
-    if (await this.workspace?.handle(update, deferReplies)) return;
+    if (await this.workspace?.handle(update)) return;
     try {
       if (callback) {
         await this.api.replaceCard(callback, async () => {
-          await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          await this.api.answerCallback(callback.id);
           if (!(await this.navigate(callback.data ?? '', chat.id)))
             throw new Error('Unknown action. Open the current menu with /start.');
         });
@@ -874,7 +901,7 @@ export class Telegram {
         );
         for (const update of updates) {
           if (this.stopped) break;
-          await this.handle(update, true);
+          await this.handle(update);
           store.transaction(() => {
             store.setSetting('telegram.offset', update.update_id + 1);
             store.setSetting('telegram.offsetAt', Date.now());

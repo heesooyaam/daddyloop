@@ -574,7 +574,7 @@ export class TelegramWorkspace {
         : undefined;
     await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge, queuePage));
   }
-  private async orderedReply(deferred: boolean, action: () => Promise<void>) {
+  private async orderedReply(action: () => Promise<void>) {
     // Store notifications are published in microtasks. Capture earlier replies
     // before returning to the poller, without waiting for delivery itself.
     await Promise.resolve();
@@ -583,7 +583,7 @@ export class TelegramWorkspace {
     this.menuReplies = reply.catch((error) => {
       this.store.setSetting('telegram.error', redact(String(error)));
     });
-    if (!deferred) await reply;
+    await reply;
   }
   private async taskCommand(
     command: string,
@@ -1576,7 +1576,7 @@ export class TelegramWorkspace {
     await this.show(group.id, destination);
     return true;
   }
-  async handle(update: Update, deferReplies = false): Promise<boolean> {
+  async handle(update: Update): Promise<boolean> {
     const pair = this.pair(),
       message = update.message,
       callback = update.callback_query;
@@ -1590,10 +1590,26 @@ export class TelegramWorkspace {
     const privateChat = chat.type === 'private' && chat.id === pair.chatId;
     if (!privateChat && (chat.type !== 'supergroup' || this.room()?.chatId !== chat.id))
       return false;
+    const originGroup = privateChat ? undefined : this.groupAt(destination);
+    const execute = () =>
+      this.handlePairedUpdate(update, pair, destination, privateChat, originGroup);
+    return originGroup && this.api.forSessionReply
+      ? this.api.forSessionReply({ ...destination, groupId: originGroup }, execute)
+      : execute();
+  }
+  private async handlePairedUpdate(
+    update: Update,
+    pair: Pair,
+    destination: Destination,
+    privateChat: boolean,
+    originGroup?: string,
+  ): Promise<boolean> {
+    const { message, callback_query: callback } = update;
+    const chatId = destination.chatId;
     const replyTo = telegramReply(message);
     const replyGroup =
       privateChat && replyTo?.messageId && !message?.text?.trimStart().startsWith('/')
-        ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
+        ? this.api.delivery?.replySession(chatId, replyTo.messageId, pair.userId)
         : undefined;
     const rawText = message?.text?.trim();
     const command = rawText?.replace(/^\/(\w+)@\w+(?=\s|$)/, '/$1');
@@ -1602,13 +1618,12 @@ export class TelegramWorkspace {
       /^\/(?:status|sessions|modules|limits|models|presets|language|notifications|workspaces|pool)$/.test(
         command ?? '',
       );
-    const originGroup = privateChat ? undefined : this.groupAt(destination);
     const respond = (action: () => Promise<unknown>) =>
-      this.orderedReply(deferReplies, async () => {
+      this.orderedReply(async () => {
         if (this.pair()?.userId !== pair.userId || this.pair()?.chatId !== pair.chatId) return;
         if (
           !privateChat &&
-          (this.room()?.chatId !== chat.id ||
+          (this.room()?.chatId !== chatId ||
             (originGroup !== undefined && this.groupAt(destination) !== originGroup))
         )
           return;
@@ -1622,7 +1637,7 @@ export class TelegramWorkspace {
         if (
           this.pair()?.userId !== pair.userId ||
           this.pair()?.chatId !== pair.chatId ||
-          (!privateChat && this.room()?.chatId !== chat.id)
+          (!privateChat && this.room()?.chatId !== chatId)
         )
           return false;
       }
@@ -1636,7 +1651,8 @@ export class TelegramWorkspace {
         )
           return false;
         await this.api.replaceCard(callback, async () => {
-          await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          if (this.api.answerCallback) await this.api.answerCallback(callback.id);
+          else await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
           await this.callback(callback.data!, destination);
         });
         return true;
@@ -1660,7 +1676,7 @@ export class TelegramWorkspace {
           throw new Error(this.t('Resume daddy before sending another message'));
         const created = this.store.transaction(() => {
           const created = this.voice!.enqueue(
-            `telegram:${chat.id}:${message.message_id ?? update.update_id}`,
+            `telegram:${chatId}:${message.message_id ?? update.update_id}`,
             route,
             {
               fileId: message.voice!.file_id,
@@ -1842,7 +1858,7 @@ export class TelegramWorkspace {
           task[2] ?? '',
           groupId,
           destination,
-          `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+          `telegram:${task[1]}:${chatId}:${message?.message_id ?? update.update_id}`,
           respond,
           replyTo,
         );
@@ -2003,7 +2019,7 @@ export class TelegramWorkspace {
         this.store.transaction(() => {
           if (
             this.voice!.enqueue(
-              `telegram:${chat.id}:${message?.message_id ?? update.update_id}`,
+              `telegram:${chatId}:${message?.message_id ?? update.update_id}`,
               route,
               { text, replyTo, messageId: message?.message_id },
             )
@@ -2012,7 +2028,7 @@ export class TelegramWorkspace {
         });
         return true;
       }
-      const receipt = `telegram:${chat.id}:${message?.message_id ?? update.update_id}`;
+      const receipt = `telegram:${chatId}:${message?.message_id ?? update.update_id}`;
       if (this.store.setting(`daddy.receipt:${receipt}`)) return true;
       const nextKey = this.repoKey(destination, groupId),
         next = this.store.setting<{ workspace: Workspace; expiresAt: string }>(nextKey);

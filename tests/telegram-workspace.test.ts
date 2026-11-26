@@ -1,3 +1,6 @@
+import { join } from 'node:path';
+import { Store } from '../src/core/store.js';
+import { Engine } from '../src/core/engine.js';
 import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
@@ -1441,117 +1444,243 @@ it.each([true, false])(
   },
 );
 
-it('persists a task and text from a getUpdates batch while an earlier menu waits for delivery', async () => {
-  const f = daddyFixture();
-  const chatId = -10042;
-  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-  f.store.setSetting('telegram.group', { chatId, ownerId: 7 });
-  const a = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
-  const b = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
-  for (const [group, threadId] of [
-    [a, 17],
-    [b, 18],
-  ] as const)
-    f.store.db.prepare('INSERT INTO telegram_topics VALUES(?,?,?)').run(
-      `7:${chatId}:${group.id}`,
-      group.id,
-      JSON.stringify({
-        chatId,
-        threadId,
-        groupId: group.id,
-        ownerId: 7,
-        title: group.title,
-      }),
-    );
-  const input = (id: number, threadId: number, text: string): Update => ({
-    update_id: id,
-    message: {
-      message_id: id,
-      from: { id: 7 },
-      chat: { id: chatId, type: 'supergroup' },
-      message_thread_id: threadId,
-      text,
-    },
-  });
-  const delivered: Record<string, any>[] = [];
-  let nextId = 50;
-  let batchSent = false;
-  let markStarted!: () => void;
-  let release!: () => void;
-  const started = new Promise<void>((resolve) => {
-    markStarted = resolve;
-  });
-  const wait = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
-    const method = String(url).split('/').at(-1);
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    if (method === 'getUpdates') {
-      if (!batchSent) {
-        batchSent = true;
-        await started;
-        return Response.json({
-          ok: true,
-          result: [
-            input(91, 17, '/status'),
-            input(92, 17, '/modules'),
-            input(93, 18, '/task Persist this task'),
-            input(94, 17, 'Persist this owner text'),
-          ],
+it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] as const)(
+  'stages %s and a task durably before acknowledging a held getUpdates batch',
+  async (command) => {
+    const f = daddyFixture(true);
+    const chatId = -10042;
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.group', { chatId, ownerId: 7 });
+    const a = f.daddy.create({ workspaceId: f.workspace.id, title: 'First session' });
+    const b = f.daddy.create({ workspaceId: f.workspace.id, title: 'Second session' });
+    for (const [group, threadId] of [
+      [a, 17],
+      [b, 18],
+    ] as const)
+      f.store.db.prepare('INSERT INTO telegram_topics VALUES(?,?,?)').run(
+        `7:${chatId}:${group.id}`,
+        group.id,
+        JSON.stringify({
+          chatId,
+          threadId,
+          groupId: group.id,
+          ownerId: 7,
+          title: group.title,
+        }),
+      );
+    const input = (id: number, threadId: number, text: string): Update => ({
+      update_id: id,
+      message: {
+        message_id: id,
+        from: { id: 7 },
+        chat: { id: chatId, type: 'supergroup' },
+        message_thread_id: threadId,
+        text,
+      },
+    });
+    const menu: Update =
+      command === 'home callback'
+        ? {
+            update_id: 91,
+            callback_query: {
+              id: 'menu',
+              data: 'dad:home',
+              from: { id: 7 },
+              message: {
+                message_id: 91,
+                chat: { id: chatId, type: 'supergroup' },
+                message_thread_id: 17,
+              },
+            },
+          }
+        : input(91, 17, command);
+    const batch = [
+      menu,
+      input(93, 18, '/task Persist this task'),
+      input(94, 17, 'Persist this owner text'),
+    ];
+    const delivered: Record<string, any>[] = [];
+    let nextId = 50;
+    let batchSent = false;
+    let markStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+      const method = String(url).split('/').at(-1);
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (method === 'getUpdates') {
+        if (!batchSent) {
+          batchSent = true;
+          await started;
+          return Response.json({
+            ok: true,
+            result: batch,
+          });
+        }
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
+            once: true,
+          });
         });
       }
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
-      });
-    }
-    if (method === 'sendMessage') {
-      if (body.text.includes('Held reply')) {
-        markStarted();
-        await wait;
+      if (method === 'sendMessage') {
+        if (body.text.includes('Held reply')) {
+          markStarted();
+          await wait;
+        }
+        delivered.push(body);
       }
-      delivered.push(body);
+      return Response.json({ ok: true, result: { message_id: ++nextId } });
+    });
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
+    try {
+      f.store.finishDaddyReply(a.id, 'Held reply', 'wait');
+      bot.start();
+      await vi.waitFor(() => {
+        expect(f.store.tasks(b.id)).toEqual([
+          expect.objectContaining({ title: 'Persist this task' }),
+        ]);
+        expect(f.store.messages(a.id)).toContainEqual(
+          expect.objectContaining({ sender: 'user', text: 'Persist this owner text' }),
+        );
+        expect(f.store.setting('telegram.offset')).toBe(95);
+      });
+      expect(delivered.some((body) => body.text.includes('Held reply'))).toBe(false);
+      const replyRows = f.store.db
+        .prepare(
+          `SELECT json_extract(value,'$.content.text') AS text
+      FROM settings WHERE key GLOB 'telegram.delivery:*'
+      AND json_extract(value,'$.options.key') IN ('update:91:0',?)
+      ORDER BY rowid`,
+        )
+        .all(`telegram:task:${chatId}:93`);
+      expect(replyRows).toHaveLength(2);
+
+      // Reopen a snapshot taken after offset advancement but before the first
+      // native receipt. It contains both outgoing cards and the accepted input.
+      const database = join(f.dir, 'restart.sqlite');
+      f.store.db.prepare('VACUUM INTO ?').run(database);
+      const recovered = new Store(database);
+      const sent: { method: string; body: any }[] = [];
+      const restoredApi = new TelegramApi(
+        '123456:abcdefghijklmnopqrstuvwxyz123456',
+        async (url, init) => {
+          sent.push({
+            method: String(url).split('/').at(-1)!,
+            body: JSON.parse(String(init?.body ?? '{}')),
+          });
+          return Response.json({ ok: true, result: { message_id: ++nextId } });
+        },
+      );
+      const restored = new Telegram(
+        new Engine(recovered, () => {
+          throw new Error('Offline');
+        }),
+        restoredApi,
+        'fixture_bot',
+      );
+      try {
+        for (const update of batch) await restored.handle(update);
+        await restoredApi.delivery!.flush(30);
+        const messages = sent
+          .filter(({ method }) => method === 'sendMessage')
+          .map(({ body }) => body.text);
+        const held = messages.findIndex((body) => body.includes('Held reply'));
+        expect(held).toBeGreaterThanOrEqual(0);
+        expect(messages.slice(held + 1)).toEqual(replyRows.map(({ text }) => text));
+        expect(recovered.tasks(b.id)).toHaveLength(1);
+        expect(recovered.messages(a.id).filter(({ sender }) => sender === 'user')).toHaveLength(1);
+        expect(sent.filter(({ method }) => method === 'deleteMessage')).toEqual(
+          command === 'home callback'
+            ? [{ method: 'deleteMessage', body: { chat_id: chatId, message_id: 91 } }]
+            : [],
+        );
+      } finally {
+        await restoredApi.delivery!.stop();
+        recovered.close();
+      }
+    } finally {
+      release();
+      // Unblock the simulated initial poll if setup failed before the reply started.
+      markStarted();
+      await bot.stop();
+      await f.close();
     }
-    return Response.json({ ok: true, result: { message_id: ++nextId } });
+  },
+);
+
+it.each(
+  ['/status', '/queue', '/workers', '/task Check receipts', '/pool', '/models'].flatMap((command) =>
+    (['same topic', 'moved', 'private'] as const).map((route) => [command, route] as const),
+  ),
+)('validates a queued %s card when it retries on %s', async (command, route) => {
+  const f = daddyFixture();
+  const chatId = -10042;
+  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Bound session' });
+  f.store.setSetting('telegram.currentDaddy', group.id);
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId, ownerId: 7 });
+  const bind = (threadId: number) =>
+    f.store.db
+      .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+      .run(
+        `7:${chatId}:${group.id}`,
+        group.id,
+        JSON.stringify({ chatId, threadId, ownerId: 7, groupId: group.id }),
+      );
+  bind(17);
+  let clock = Date.now();
+  const cards: Record<string, any>[] = [];
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+    if (!String(url).endsWith('/sendMessage')) return Response.json({ ok: true, result: true });
+    cards.push(JSON.parse(String(init?.body ?? '{}')));
+    return cards.length === 1
+      ? Response.json({
+          ok: false,
+          error_code: 429,
+          description: 'Flood wait',
+          parameters: { retry_after: 10 },
+        })
+      : Response.json({ ok: true, result: { message_id: 42 } });
   });
-  const bot = new Telegram(f.engine, api, 'fixture_bot');
-  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
+  api.delivery = new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  const personal = route === 'private';
   try {
-    f.store.finishDaddyReply(a.id, 'Held reply', 'wait');
-    bot.start();
-    await vi.waitFor(() => {
-      expect(f.store.tasks(b.id)).toEqual([
-        expect.objectContaining({ title: 'Persist this task' }),
-      ]);
-      expect(f.store.messages(a.id)).toContainEqual(
-        expect.objectContaining({ sender: 'user', text: 'Persist this owner text' }),
-      );
-      expect(f.store.setting('telegram.offset')).toBe(95);
+    await workspace.handle({
+      update_id: 51,
+      message: {
+        message_id: 51,
+        text: command,
+        from: { id: 7 },
+        chat: { id: personal ? 7 : chatId, type: personal ? 'private' : 'supergroup' },
+        message_thread_id: personal ? undefined : 17,
+      },
     });
-    expect(delivered.some((body) => body.text.includes('Held reply'))).toBe(false);
-    release();
-    await vi.waitFor(() => {
-      const reply = delivered.findIndex((body) => body.text.includes('Held reply'));
-      const menu = delivered.findIndex((body) =>
-        body.reply_markup?.inline_keyboard
-          ?.flat()
-          .some(
-            (button: { callback_data?: string }) => button.callback_data === `dad:open:${a.id}`,
-          ),
-      );
-      expect(reply).toBeGreaterThanOrEqual(0);
-      expect(menu).toBeGreaterThan(reply);
-      expect(
-        delivered.some(
-          (body) => body.message_thread_id === 18 && body.text.includes('Persist this task'),
-        ),
-      ).toBe(true);
-    });
+    expect(cards).toHaveLength(1);
+    if (route !== 'same topic') bind(18);
+    await api.delivery.flush();
+    expect(cards).toHaveLength(1);
+    clock += 10000;
+    await api.delivery.flush();
+    expect(cards).toHaveLength(route === 'moved' ? 1 : 2);
+    if (route !== 'moved') expect(cards[1]).toEqual(cards[0]);
+    expect(cards[0].chat_id).toBe(personal ? 7 : chatId);
+    expect(cards[0].message_thread_id).toBe(personal ? undefined : 17);
+    expect(api.delivery.status().pending).toBe(0);
   } finally {
-    release();
-    // Unblock the simulated initial poll if setup failed before the reply started.
-    markStarted();
-    await bot.stop();
+    await workspace.stop();
+    await api.delivery.stop();
     await f.close();
   }
 });

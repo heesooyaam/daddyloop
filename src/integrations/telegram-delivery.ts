@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Message, ReviewGroup } from '../core/types.js';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
+import { clipTitle } from '../core/session-title.js';
 import {
   TelegramText,
   splitTelegramText,
@@ -225,8 +226,15 @@ export class TelegramDelivery {
     });
   }
   private separateTurnReceipts(value: Delivery, latest: Message, position: number) {
-    if (value.status === 'sent' || !value.messages.some(Boolean)) return;
     const groupId = value.options.groupId!;
+    const notification = this.store.db.prepare('SELECT status,at FROM notifications WHERE id=?');
+    const records = (message: Message) =>
+      (['progress', 'final', undefined] as const).flatMap((phase) => {
+        const row = notification.get(this.legacyDialogId(value, message, phase));
+        return row
+          ? [{ id: this.legacyDialogId(value, message, phase), status: row.status, at: row.at }]
+          : [];
+      });
     const candidates = this.store
       .messages(groupId)
       .filter((message) => message.sender === 'agent' && message.runId === latest.runId)
@@ -238,6 +246,7 @@ export class TelegramDelivery {
         const chunks = splitTelegramText(content);
         return {
           message,
+          history: records(message),
           content,
           chunks,
           fingerprints: chunks.map((_, index) =>
@@ -246,53 +255,61 @@ export class TelegramDelivery {
         };
       });
     const retained = new Map<string, Delivery['messages']>();
-    value.messages = value.messages.map((part, index) => {
-      if (!part) return null;
-      const matches = candidates.filter(
-        (candidate) => candidate.fingerprints[index] === part.fingerprint,
-      );
-      // A queued edit describes proposed content. An older matching message
-      // already recorded as sent is stronger evidence, even for identical text.
-      const confirmed = matches.find(
-        ({ message }) =>
-          message.id !== latest.id &&
-          (['progress', 'final', undefined] as const).some((phase) =>
-            this.store.db
-              .prepare("SELECT 1 FROM notifications WHERE id=? AND status='sent'")
-              .get(this.legacyDialogId(value, message, phase)),
-          ),
-      );
-      const owner = confirmed ?? matches[0];
-      if (owner?.message.id === latest.id) return part;
-      if (owner) {
-        const parts = retained.get(owner.message.id) ?? [];
-        while (parts.length <= index) parts.push(null);
-        parts[index] = part;
-        retained.set(owner.message.id, parts);
-      } else {
-        // An unrecognizable receipt cannot authorize editing the proposed reply.
-        this.store.setSetting(
-          deliveryKey(this.bot, value.destination, `legacy-receipt:${part.id}`),
-          {
-            ...value,
-            id: randomUUID(),
-            status: 'cancelled',
-            options: { groupId: value.options.groupId },
-            messages: [part],
-          },
+    if (value.status !== 'sent')
+      value.messages = value.messages.map((part, index) => {
+        if (!part) return null;
+        const matches = candidates.filter(
+          (candidate) => candidate.fingerprints[index] === part.fingerprint,
         );
-      }
-      return null;
-    });
-    for (const candidate of candidates) {
-      const { message, content, chunks } = candidate;
-      const messages = retained.get(message.id);
-      if (!messages) continue;
+        // A queued edit describes proposed content. An older matching message
+        // already recorded as sent is stronger evidence, even for identical text.
+        const confirmed = matches.find(
+          ({ message, history }) =>
+            message.id !== latest.id && history.some(({ status }) => status === 'sent'),
+        );
+        const owner = confirmed ?? matches[0];
+        if (owner?.message.id === latest.id) return part;
+        if (owner) {
+          const parts = retained.get(owner.message.id) ?? [];
+          while (parts.length <= index) parts.push(null);
+          parts[index] = part;
+          retained.set(owner.message.id, parts);
+        } else {
+          // An unrecognizable receipt cannot authorize editing the proposed reply.
+          this.store.setSetting(
+            deliveryKey(this.bot, value.destination, `legacy-receipt:${part.id}`),
+            {
+              ...value,
+              id: randomUUID(),
+              status: 'cancelled',
+              options: { groupId: value.options.groupId },
+              messages: [part],
+            },
+          );
+        }
+        return null;
+      });
+    const previous = candidates.slice(
+      0,
+      candidates.findIndex(({ message }) => message.id === latest.id),
+    );
+    for (const [index, candidate] of previous.entries()) {
+      const { message, content, chunks, history } = candidate;
+      const parts = retained.get(message.id);
+      const superseded = history.find(({ status }) => status === 'superseded');
+      if (!parts && (!superseded || history.some(({ status }) => status === 'sent'))) continue;
       const key = dialogKey(message.id);
       const storageKey = deliveryKey(this.bot, value.destination, key);
       if (this.store.setting<Delivery>(storageKey)) continue;
+      const notificationId = this.legacyDialogId(value, message, message.phase);
+      const order =
+        index === 0
+          ? { createdAt: value.createdAt, queuePosition: position }
+          : this.legacyReplacementOrder(value, message, position, superseded?.at, index, false);
+      const sent = !!parts && chunks.every((_, index) => parts[index]);
       this.store.setSetting(storageKey, {
         ...value,
+        ...order,
         id: randomUUID(),
         content,
         options: {
@@ -302,32 +319,57 @@ export class TelegramDelivery {
           replace: true,
           final: message.phase !== 'progress',
           order: message.at,
-          notificationId: this.legacyDialogId(value, message, message.phase),
+          notificationId,
         },
-        queuePosition: position,
-        status: chunks.every((_, index) => messages[index]) ? 'sent' : 'queued',
-        messages,
+        status: sent ? 'sent' : 'queued',
+        messages: parts ?? [],
       });
     }
-    if (retained.size) {
-      const notification = this.store.db
-        .prepare('SELECT at FROM notifications WHERE id=?')
-        .get(value.options.notificationId!);
-      const queuedAt = Date.parse(String(notification?.at ?? latest.at));
-      if (Number.isFinite(queuedAt)) value.createdAt = Math.max(value.createdAt, queuedAt);
-      // An attempted write on the same route is evidence of precedence over
-      // the replacement under the old FIFO, even within a single millisecond.
-      const earlier = this.store.db
-        .prepare(
-          `SELECT MAX(rowid) AS position FROM settings WHERE key GLOB 'telegram.delivery:*'
-         AND json_extract(value,'$.bot')=? AND json_extract(value,'$.destination')=?
-         AND json_extract(value,'$.createdAt')=? AND json_extract(value,'$.attempts')>0
-         AND json_extract(value,'$.status') IN ('queued','sending')
-         AND json_extract(value,'$.options.operation') IS NULL`,
-        )
-        .get(this.bot, JSON.stringify(value.destination), value.createdAt);
-      value.queuePosition = Math.max(position, Number(earlier?.position ?? 0)) + 0.5;
+    if (previous.length && value.status !== 'sent') {
+      const proposed = notification.get(value.options.notificationId!);
+      const firstWasSent =
+        previous.length === 1 && previous[0].history.some(({ status }) => status === 'sent');
+      Object.assign(
+        value,
+        this.legacyReplacementOrder(
+          value,
+          latest,
+          position,
+          proposed?.at,
+          previous.length,
+          firstWasSent && value.attempts > 0,
+        ),
+      );
     }
+  }
+  private legacyReplacementOrder(
+    value: Delivery,
+    message: Message,
+    position: number,
+    recordedAt: unknown,
+    index: number,
+    attempted: boolean,
+  ) {
+    const queuedAt = Date.parse(String(recordedAt ?? message.at));
+    const createdAt = Number.isFinite(queuedAt)
+      ? Math.max(value.createdAt, queuedAt)
+      : value.createdAt;
+    // In the released schema an edit overwrote the old queue row. For exact
+    // timestamp ties without a recorded attempt, preserve known menu slots.
+    const earlier = this.store.db
+      .prepare(
+        `SELECT MAX(rowid) AS position FROM settings WHERE key GLOB 'telegram.delivery:*'
+       AND json_extract(value,'$.bot')=? AND json_extract(value,'$.destination')=?
+       AND json_extract(value,'$.createdAt')=?
+       AND json_extract(value,'$.status') IN ('queued','sending')
+       AND json_extract(value,'$.options.operation') IS NULL
+       AND (?=0 OR json_extract(value,'$.attempts')>0)`,
+      )
+      .get(this.bot, JSON.stringify(value.destination), createdAt, Number(attempted));
+    return {
+      createdAt,
+      queuePosition: Math.max(position, Number(earlier?.position ?? 0)) + index / (index + 1),
+    };
   }
   private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
     const { chatId, threadId } = value.destination;
@@ -394,7 +436,11 @@ export class TelegramDelivery {
          AND json_extract(result,'$.ownerId')=? AND json_extract(result,'$.groupId')=task_id`,
         )
         .all(destination.chatId, destination.threadId ?? null, value.ownerId ?? null);
-      if (sources.length === 1) groupId = String(sources[0].task_id);
+      if (sources.length === 1 && options.order) {
+        const source = this.store.groups().find((group) => group.id === sources[0].task_id);
+        if (source?.updatedAt === options.order && clipTitle(source.title) === value.content.text)
+          groupId = source.id;
+      }
     }
     if (!groupId) return !rename && destination.threadId === undefined;
     options.groupId = groupId;
@@ -432,6 +478,29 @@ export class TelegramDelivery {
       .prepare('UPDATE settings SET key=?,value=? WHERE key=?')
       .run(replacement, JSON.stringify(value), key);
     return replacement;
+  }
+  private currentChildCard(value: Delivery): TelegramCard {
+    const content: TelegramCard = structuredClone(value.content);
+    const key = value.options.key;
+    if (!key?.startsWith(childSession) || value.messages.some(Boolean)) return content;
+    const childId = key.slice(childSession.length);
+    const pair = this.store.setting<Pairing>('telegram.pairing');
+    const route =
+      pair && this.sessionDestination(childId, pair, this.store.setting<Room>('telegram.group'));
+    content.buttons = content.buttons?.map((row) =>
+      row.map(({ text }) =>
+        route?.threadId === undefined
+          ? { text, callback_data: `dad:open:${childId}` }
+          : {
+              text,
+              url: `https://t.me/c/${String(route.chatId).replace(/^-100/, '')}/${route.threadId}`,
+            },
+      ),
+    );
+    return content;
+  }
+  get drainingInBackground() {
+    return this.timer !== undefined;
   }
   start() {
     if (this.timer) return;
@@ -632,8 +701,10 @@ export class TelegramDelivery {
         other.nextAttemptAt = this.clock();
         this.save(otherKey, other);
       }
-    if (!this.running && !this.stopped) await this.flush(1);
-    else if (this.running && !this.stopped)
+    if (!this.running && !this.stopped) {
+      const sending = this.flush(1);
+      if (!this.drainingInBackground) await sending;
+    } else if (this.running && !this.stopped)
       void this.running.then(() => {
         if (!this.stopped) return this.flush(1);
       });
@@ -688,7 +759,13 @@ export class TelegramDelivery {
     }
   }
   private async attempt(key: string, value: Delivery) {
-    if (!this.valid(value)) {
+    const restored = this.restoreChildDestination(key, value);
+    if (restored !== key) {
+      this.pending.delete(key);
+      this.save(restored, value);
+      return;
+    }
+    if (value.status === 'cancelled' || !this.valid(value)) {
       value.status = 'cancelled';
       value.error = undefined;
       if (
@@ -704,7 +781,7 @@ export class TelegramDelivery {
       return;
     }
     const revision = value.revision,
-      original = structuredClone(value.content),
+      original = this.currentChildCard(value),
       options = { ...value.options };
     value.status = 'sending';
     this.save(key, value);
