@@ -266,8 +266,10 @@ export class Daddy {
           policy: task.policy,
           head: task.revision?.head,
           worker:
-            (item.job?.role === 'author' ? item.job.profile : undefined) ??
-            this.engine.effectiveAgents(task).worker,
+            (item.job?.role === 'author' && item.job.kind !== 'plan'
+              ? item.job.profile
+              : undefined) ?? this.engine.effectiveAgents(task).worker,
+          architectProfile: task.architectProfile,
           workerRequest: task.workerRequest,
           running: item.job?.status === 'running',
           queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
@@ -292,6 +294,7 @@ export class Daddy {
     input: {
       requirements: string;
       validatePlan?: boolean;
+      architectProfile?: AgentProfile;
       replyTo?: TelegramReply;
       requestId: string;
       workspace?: Workspace;
@@ -311,6 +314,7 @@ export class Daddy {
       const requirements = input.requirements.trim();
       if (!requirements || requirements.length > 20000)
         throw new AppError('invalid_message', 'Send a message between 1 and 20000 characters', 400);
+      if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
       if (input.workerRequest?.profile) await this.catalogue.validate(input.workerRequest.profile);
       return this.tickets.local({
         workspace: input.workspace ?? group.workspace!,
@@ -323,6 +327,7 @@ export class Daddy {
         workerRequest: input.workerRequest,
         startImplementation: true,
         validatePlan: input.validatePlan ?? true,
+        architectProfile: input.architectProfile,
       });
     });
   }
@@ -495,17 +500,43 @@ export class Daddy {
   taskAutoMerge(groupId: string, taskId: string, mode: AutoMergeMode) {
     return setTaskMergeMode(this.store, this.group(groupId), this.task(groupId, taskId), mode);
   }
+  async taskArchitect(
+    groupId: string,
+    taskId: string,
+    profile: AgentProfile | null,
+    actionId?: string,
+  ) {
+    if (profile) await this.catalogue.validate(profile);
+    return this.engine.lock(taskId, async () => {
+      const group = this.group(groupId);
+      const task = this.task(groupId, taskId);
+      if (group.deletion || group.deletedAt)
+        throw new AppError('session_deleting', 'This session is being deleted');
+      if (!isTicket(task) || task.state === 'complete')
+        throw new AppError('planning_finished', 'Choose a task that can still enter planning', 409);
+      this.store.transaction(() => {
+        task.architectProfile = profile ?? undefined;
+        this.store.saveTask(task);
+        this.store.refreshQueuedPlans(task, group);
+        this.store.event(task.id, 'architect.configured', { profile }, actionId);
+      });
+      return { taskId, architectProfile: task.architectProfile };
+    });
+  }
+
   async settings(
     id: string,
     input: {
       workerLimit?: number;
       profiles?: Partial<AgentProfiles>;
+      architectProfile?: AgentProfile | null;
       forceDaddy?: boolean;
       applyWorkers?: boolean;
       instructions?: SessionInstructions;
       autoMerge?: boolean;
     },
   ) {
+    if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
     for (const profile of Object.values(input.profiles ?? {}))
       await this.catalogue.validate(profile);
     if (input.instructions)
@@ -618,6 +649,10 @@ export class Daddy {
             }
           }
         }
+        if (input.architectProfile !== undefined)
+          group.architectProfile = input.architectProfile ?? undefined;
+        if (input.architectProfile !== undefined || changeDaddy)
+          for (const task of tasks) this.store.refreshQueuedPlans(task, group);
         this.store.saveGroup(group);
         if (input.autoMerge !== undefined)
           this.store.setSetting('autoMerge.session:' + id, input.autoMerge);
@@ -1332,6 +1367,7 @@ export class Daddy {
           requirements: task.requirements,
           clarification: task.latestClarification,
           architecturePlan: task.planning?.result,
+          architectProfile: task.architectProfile ?? group.architectProfile ?? group.daddy,
           source: task.source,
           ref: task.ref,
           state: task.state,
@@ -1403,6 +1439,7 @@ export class Daddy {
           );
         if (this.board(group.id).tasks.length >= 100)
           throw new AppError('session_full', 'Start another daddy session after 100 tasks');
+        if (options.architectProfile) await this.catalogue.validate(options.architectProfile);
         const dependsOn = this.dependencies(group.id, undefined, options.dependsOn ?? []);
         const requirements = [options.requirements, options.architecturePlan]
           .filter(Boolean)
@@ -1459,6 +1496,7 @@ export class Daddy {
           createdByAction: actionId,
           dependsOn,
           validatePlan: options.validatePlan,
+          architectProfile: options.architectProfile,
           discussedBrief: !!options.architecturePlan,
           reportOnly: options.reportOnly,
         });
@@ -1512,6 +1550,12 @@ export class Daddy {
       if (taskId) {
         const task = this.task(group.id, taskId);
         if (
+          (name === 'set_architect_model' &&
+            this.store.db
+              .prepare(
+                "SELECT 1 FROM events WHERE task_id=? AND run_id=? AND type='architect.configured' LIMIT 1",
+              )
+              .get(task.id, actionId)) ||
           (name === 'submit_task' && task.ref.kind !== 'ticket') ||
           (name === 'pause_task' && task.state === 'paused') ||
           (name === 'set_dependencies' &&
@@ -1648,6 +1692,7 @@ export class Daddy {
           instruction?: string;
           clarification?: string;
           validatePlan?: boolean;
+          architectProfile?: AgentProfile;
           reason?: string;
           dependsOn?: string[];
           profile?: AgentProfile;
@@ -1667,7 +1712,14 @@ export class Daddy {
               'already_submitted',
               'This task already has a native PR; inspect its review state',
             );
-          await this.engine.implement(task.id, actionId, options.instruction, options.validatePlan);
+          if (options.architectProfile) await this.catalogue.validate(options.architectProfile);
+          await this.engine.implement(
+            task.id,
+            actionId,
+            options.instruction,
+            options.validatePlan,
+            options.architectProfile,
+          );
         } else if (name === 'message_worker') {
           if (task.pendingFix || task.state === 'awaiting_push') {
             const current = await this.engine.chat(
@@ -1726,6 +1778,13 @@ export class Daddy {
               'Read the actual question in read_task.blocker and supply the clarification before repeating this review.',
             );
           await this.engine.review(task.id, true, options.clarification);
+        } else if (name === 'set_architect_model') {
+          await this.taskArchitect(
+            group.id,
+            task.id,
+            daddySchemas.set_architect_model.parse(input).profile,
+            actionId,
+          );
         } else if (name === 'set_worker_model') {
           await this.catalogue.validate(options.profile!);
           this.active(job, signal);

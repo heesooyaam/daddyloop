@@ -30,7 +30,7 @@ export const taskReferenceId = (text: string) =>
     .find(Boolean)
     ?.toLowerCase();
 
-export function parseTaskInput(args: string, engine: string) {
+export function parseTaskInput(args: string, engine: string, architectEngine = engine) {
   if (!args) return;
   if (!args.startsWith('--')) return { requirements: args };
   const separator = /(?:^|\s)--\s+/.exec(args);
@@ -48,13 +48,18 @@ export function parseTaskInput(args: string, engine: string) {
       options: {
         plan: { type: 'boolean' },
         'no-plan': { type: 'boolean' },
+        'architect-model': { type: 'string' },
+        'architect-engine': { type: 'string' },
+        'architect-effort': { type: 'string' },
         worker: { type: 'string' },
         engine: { type: 'string' },
         model: { type: 'string' },
         effort: { type: 'string' },
       },
     });
-    if (values.plan && values['no-plan']) return;
+    if ((values.plan || values['architect-model']) && values['no-plan']) return;
+    if (!values['architect-model'] && (values['architect-engine'] || values['architect-effort']))
+      return;
     if (values.worker && !/^[1-8]$/.test(values.worker)) return;
     if (!values.model && (values.engine || values.effort)) return;
     const workerRequest: WorkerRequest = {
@@ -63,7 +68,18 @@ export function parseTaskInput(args: string, engine: string) {
         ? { engine: values.engine ?? engine, model: values.model, effort: values.effort }
         : undefined,
     };
-    return { requirements, workerRequest, validatePlan: values['no-plan'] ? false : values.plan };
+    return {
+      requirements,
+      workerRequest,
+      validatePlan: values['no-plan'] ? false : values.plan,
+      architectProfile: values['architect-model']
+        ? {
+            engine: values['architect-engine'] ?? architectEngine,
+            model: values['architect-model'],
+            effort: values['architect-effort'],
+          }
+        : undefined,
+    };
   } catch {
     return;
   }
@@ -296,6 +312,12 @@ export function taskCard(
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
   const buttons = [queueButtons(task.groupId!, locale, queuePage)];
+  if (
+    task.ref.kind === 'ticket' &&
+    task.state !== 'complete' &&
+    (task.planning || task.state === 'discussing')
+  )
+    buttons.push([{ text: t('Architect'), callback_data: `dad:arch-task:${task.id}` }]);
   if (merge) {
     text.add('\n\n' + t('Auto-merge GitHub PRs') + ' · ' + t(merge.enabled ? 'On' : 'Off'));
     if (merge.result && (merge.enabled || merge.result.state !== 'waiting'))

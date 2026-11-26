@@ -53,6 +53,8 @@ The website and CLI send text over HTTP. Regular Telegram messages call the same
 
 Direct queueing starts a read-only architecture check by default. The planner validates the ticket against the repository and returns a Markdown plan for the pinned base. The engine stores the plan and queues implementation in one transaction. A stale or incomplete plan cannot advance the task. The coordinator path records the agreed coding brief in the GitHub issue first and starts implementation directly unless a separate plan check was requested. See [task controls](../tasks/en.md#architecture-before-implementation).
 
+A plan uses the task architect override, then the session architect override, then the session reviewer profile. The worker slot selects the developer profile independently. Compatible planning and implementation turns resume the same task thread with their own per-turn permissions. A legacy planner-only thread can finish its clarification, and an incompatible engine receives the saved plan in its own context. See [queue selection](../../src/core/store.ts) and [native thread selection](../../src/modules/agents/registry.ts).
+
 The coordinator receives the goal, task board and recent messages. It uses tools to read older conversation or task details. For example, `create_task` creates “Fix search” and `dispatch` assigns implementation. The service first checks the selected workspace, the task's session and its dependencies.
 
 When a worker finishes, an event queues another coordinator turn. That is how it learns about the result and can assign more work or ask you a question.

@@ -44,7 +44,7 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
   try {
     await bot.handle(message(`/attach ${group.id.slice(0, 8)}`));
     const command =
-      '/task@fixture_bot --worker 2 --model gpt-5.6-sol --effort medium -- Fix search\nKeep old filters.';
+      '/task@fixture_bot --worker 2 --model gpt-5.6-sol --effort medium --architect-model gpt-6-astra --architect-effort max -- Fix search\nKeep old filters.';
     await bot.handle(message(command, 7, 18));
     await bot.handle(message(command, 99));
     await bot.handle(message(command.replace('@fixture_bot', '@other_bot')));
@@ -108,6 +108,62 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         },
       },
     });
+    const queuedPlan = () => f.store.activeJobs(task!.id).find((job) => job.kind === 'plan')!;
+    expect(queuedPlan().profile).toMatchObject({ model: 'gpt-6-astra', effort: 'max' });
+    const architectUrl = session + '/tasks/' + task!.id + '/architect';
+    const updated = await app.inject({
+      method: 'POST',
+      url: architectUrl,
+      payload: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
+    });
+    expect(updated.statusCode).toBe(200);
+    await bot.handle(click(`dad:arch-reset:t:${task!.id}`, 7, 18));
+    expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
+    await bot.handle(click(`dad:arch-reset:t:${task!.id}`));
+    expect((await app.inject(session)).json().tasks[0].architectProfile).toBeUndefined();
+    expect(queuedPlan().profile).toEqual(group.daddy);
+    await bot.handle(click(`dad:arch-task:${task!.id}`));
+    const keyboard = () =>
+      (
+        sent.filter((x) => x.method === 'sendMessage').at(-1)?.body.reply_markup as {
+          inline_keyboard: { text: string; callback_data: string }[][];
+        }
+      ).inline_keyboard.flat();
+    await bot.handle(click(keyboard().find((b) => b.text.includes('gpt-5.6-sol'))!.callback_data));
+    await bot.handle(click(keyboard().find((b) => b.text === 'max')!.callback_data));
+    expect((await app.inject(session)).json().tasks[0].architectProfile).toMatchObject({
+      model: 'gpt-5.6-sol',
+      effort: 'max',
+    });
+    const many = Array.from({ length: 31 }, (_, i) => ({
+      id: `architect-${i}`,
+      engine: 'codex',
+      name: `Architect model ${i}`,
+      efforts: [],
+      defaultEffort: '',
+      isDefault: false,
+    }));
+    const list = vi
+      .spyOn(f.daddy.catalogue, 'list')
+      .mockResolvedValueOnce(many)
+      .mockResolvedValueOnce(many);
+    try {
+      await bot.handle(click(`dad:models:${group.id}:architect`));
+      await bot.handle(click(keyboard().find((b) => b.text === 'Next page')!.callback_data));
+      await bot.handle(
+        click(keyboard().find((b) => b.text.includes('Architect model 30'))!.callback_data),
+      );
+      await bot.handle(click(keyboard().find((b) => b.text === 'Default')!.callback_data));
+      expect(f.store.getGroup(group.id).architectProfile).toEqual({
+        engine: 'codex',
+        model: 'architect-30',
+      });
+      expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
+      await bot.handle(click(`dad:arch-reset:g:${group.id}`));
+      expect(f.store.getGroup(group.id).architectProfile).toBeUndefined();
+    } finally {
+      list.mockRestore();
+    }
     await bot.handle(click(`dad:sm:${group.id}:on`, 99));
     expect((await app.inject(session)).json().group.autoMerge).toBe(false);
     await bot.handle(click(`dad:sm:${group.id}:on`));

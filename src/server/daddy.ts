@@ -111,6 +111,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           .object({
             workerLimit: workerNumber.optional(),
             profiles: profilesSchema.partial().optional(),
+            architectProfile: profileSchema.nullable().optional(),
             forceDaddy: z.boolean().optional(),
             applyWorkers: z.boolean().optional(),
             autoMerge: z.boolean().optional(),
@@ -133,6 +134,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         requestId: id,
         repository: repositorySelectionSchema.optional(),
         validatePlan: z.boolean().optional(),
+        architectProfile: profileSchema.optional(),
         workerRequest: z
           .object({ slot: workerNumber.optional(), profile: profileSchema.optional() })
           .strict()
@@ -150,6 +152,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       requestId: `web:task:${input.requestId}`,
       workerRequest: input.workerRequest,
       validatePlan: input.validatePlan,
+      architectProfile: input.architectProfile,
       workspace,
     });
     return reply.code(201).send({ id: task.id });
@@ -177,6 +180,20 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const result = await daddy.remove(id.parse(request.params.id), input.expectedGeneration);
     return reply.code(202).send(result);
   });
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/architect',
+    (request) => {
+      const { profile } = z
+        .object({ profile: profileSchema.nullable() })
+        .strict()
+        .parse(request.body);
+      return daddy.taskArchitect(
+        id.parse(request.params.id),
+        id.parse(request.params.taskId),
+        profile,
+      );
+    },
+  );
   app.post<{ Params: { id: string; taskId: string } }>(
     '/api/daddy/sessions/:id/tasks/:taskId/auto-merge',
     async (request) => {

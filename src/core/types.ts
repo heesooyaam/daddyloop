@@ -49,6 +49,10 @@ export interface AgentProfile {
 export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
   return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
 }
+/** Only planning follows the session reviewer by default. */
+export function architectProfileFor(task: Task, group?: ReviewGroup) {
+  return task.architectProfile ?? group?.architectProfile ?? group?.daddy ?? task.agents?.daddy;
+}
 export interface AgentProfiles {
   worker: AgentProfile;
   daddy: AgentProfile;
@@ -98,6 +102,7 @@ export interface ReviewGroup {
   workerTasks?: string[];
   /** Occupied slots survive author turns, review, pauses and restarts. */
   workerSlots?: WorkerSlot[];
+  architectProfile?: AgentProfile;
   /** Snapshot: later edits to workspace defaults affect new sessions only. */
   workspace?: Workspace;
   worker?: AgentProfile;
@@ -227,6 +232,7 @@ export interface Task {
   createdByAction?: string;
   agents?: AgentProfiles;
   workerRequest?: WorkerRequest;
+  architectProfile?: AgentProfile;
   ticketRepository?: { baseHead: string; baseBranch: string; cloneUrl?: string; branch: string };
   repoPath: string;
   policy: Policy;
@@ -304,6 +310,8 @@ export interface Task {
   reportOnly?: boolean;
   planning?: {
     activeRunId?: string;
+    /** This thread can also serve author turns (older planner-only threads lack their tools). */
+    sharedThread?: boolean;
     instruction?: string;
     threadId?: string;
     result?: { text: string; revision: Revision; runId: string };

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DaddyApi } from '../client/daddy.js';
 import type { ModelOption } from '../core/agents.js';
+import { profileText } from '../core/task-activity.js';
 import type { AgentProfile } from '../core/types.js';
 import { useLocale } from './i18n.js';
 
@@ -124,5 +125,44 @@ export function AgentProfileFields({
         </select>
       </label>
     </>
+  );
+}
+
+export function ArchitectProfileFields({
+  profile,
+  inherited,
+  session,
+  catalogue,
+  onChange,
+}: {
+  profile?: AgentProfile;
+  inherited: AgentProfile;
+  session?: boolean;
+  catalogue: Catalogue;
+  onChange: (profile: AgentProfile | undefined) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <fieldset>
+      <legend>{t('Architect')}</legend>
+      <label className="daddy-toggle">
+        <input
+          type="checkbox"
+          checked={!profile}
+          onChange={(e) => onChange(e.target.checked ? undefined : { ...inherited })}
+        />
+        {t(session ? 'Use the shared reviewer profile' : 'Use the session architect profile')} ·{' '}
+        {profileText(inherited)}
+      </label>
+      {profile && (
+        <AgentProfileFields
+          label={t('Architect')}
+          profile={profile}
+          catalogue={catalogue}
+          onChange={onChange}
+          selectDefaultEffort
+        />
+      )}
+    </fieldset>
   );
 }

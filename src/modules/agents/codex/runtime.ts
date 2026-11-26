@@ -82,7 +82,19 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
       session.onSession(id, turn);
     };
     try {
-      return await this.execute({ ...session, onSession }, executable, deadline);
+      // Codex saves dynamic tool schemas on thread/start. The author will need
+      // these on a later turn of the same thread; the plan itself has no tool grants.
+      const initialTools =
+        input.job.kind === 'plan'
+          ? dynamicTools.filter((t) => t.name === 'read_review' || t.name === 'record_decision')
+          : undefined;
+      return await this.execute(
+        { ...session, onSession },
+        executable,
+        deadline,
+        false,
+        initialTools,
+      );
     } catch (error) {
       if (
         !(error instanceof AppError) ||
@@ -118,6 +130,7 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
     executable: string,
     deadline: number,
     compacting = false,
+    initialTools?: SessionInput['tools'],
   ): Promise<AgentResult> {
     const rpc = new CodexConnection(executable, this.options.args);
     const profile = input.profile,
@@ -200,6 +213,12 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
                 });
                 if (input.signal.aborted)
                   throw new AppError('run_cancelled', 'Run is no longer active');
+                if (!tools.some((t) => t.name === params.tool))
+                  throw new AppError(
+                    'role_forbidden',
+                    'This tool is unavailable in the current turn',
+                    403,
+                  );
                 const result = await input.onTool(
                   String(params.tool),
                   params.arguments,
@@ -323,7 +342,9 @@ export class CodexRuntime implements AgentRuntime, SessionRuntime {
         const response = await rpc.request<{ thread: { id: string } }>('thread/start', {
           ...common,
           serviceName: 'daddyloop',
-          dynamicTools: tools.filter((tool) => tool.name !== reviewDecisionTool.name),
+          dynamicTools: (initialTools ?? tools).filter(
+            (tool) => tool.name !== reviewDecisionTool.name,
+          ),
         });
         threadId = response.thread.id;
       }

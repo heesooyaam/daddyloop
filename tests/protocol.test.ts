@@ -333,3 +333,75 @@ it.each(['host', 'sandbox'] as const)(
     }
   },
 );
+
+it('starts a read-only plan and resumes the same Codex thread with the developer model and permissions', async () => {
+  const f = await fixture(),
+    dir = mkdtempSync(join(tmpdir(), 'architect-thread-')),
+    log = join(dir, 'rpc.jsonl');
+  try {
+    const runtime = new CodexRuntime({
+      executable: process.execPath,
+      args: [resolve('tests/fixtures/fake-codex.mjs'), 'tool-grants', log],
+    });
+    const onTool = vi.fn(async () => ({}));
+    const task = { ...f.task, planning: {} };
+    const input = {
+      task,
+      cwd: dir,
+      prompt: 'Plan',
+      execution: 'sandbox' as const,
+      signal: new AbortController().signal,
+      onEvent: () => {},
+      onSession: (id: string) => {
+        task.authorThreadId = id;
+      },
+      onTool,
+    };
+    const job = {
+      ...f.job('author'),
+      kind: 'plan' as const,
+      profile: { engine: 'codex', model: 'architect-model', effort: 'high' },
+    };
+    await runtime.run({ ...input, job, tools: [] });
+    expect(onTool).not.toHaveBeenCalled();
+    await runtime.run({
+      ...input,
+      job: {
+        ...job,
+        kind: 'implement',
+        profile: { engine: 'codex', model: 'developer-model', effort: 'medium' },
+      },
+    });
+    const packets = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const start = packets.filter((p) => p.method === 'thread/start');
+    expect(start).toHaveLength(1);
+    expect(start[0].params.dynamicTools.map((t: { name: string }) => t.name)).toEqual([
+      'read_review',
+      'record_decision',
+    ]);
+    expect(
+      packets.filter((p) => p.method === 'thread/resume').map((p) => p.params.threadId),
+    ).toEqual(['thread-fixture']);
+    expect(packets.filter((p) => p.method === 'turn/start').map((p) => p.params)).toMatchObject([
+      {
+        threadId: 'thread-fixture',
+        model: 'architect-model',
+        effort: 'high',
+        sandboxPolicy: { type: 'readOnly' },
+      },
+      {
+        threadId: 'thread-fixture',
+        model: 'developer-model',
+        effort: 'medium',
+        sandboxPolicy: { type: 'workspaceWrite' },
+      },
+    ]);
+    expect(onTool).toHaveBeenCalledTimes(1);
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

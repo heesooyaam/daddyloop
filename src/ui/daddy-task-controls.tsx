@@ -5,7 +5,11 @@ import type { DaddyApi, DaddyBoard } from '../client/daddy.js';
 import { sameAgentProfile, type AgentProfile, type WorkerSlot } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import { profileText, taskReference } from '../core/task-activity.js';
-import { AgentProfileFields, useAgentCatalogue } from './agent-profile-fields.js';
+import {
+  AgentProfileFields,
+  ArchitectProfileFields,
+  useAgentCatalogue,
+} from './agent-profile-fields.js';
 import { WorkspaceFields } from './workspace-fields.js';
 import { useLocale } from './i18n.js';
 
@@ -26,6 +30,7 @@ export function QueueTaskForm({
   const [repository, setRepository] = useState<RepositorySelection>();
   const [editingRepository, setEditingRepository] = useState(false);
   const [validatePlan, setValidatePlan] = useState(true);
+  const [architect, setArchitect] = useState<AgentProfile>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const { catalogue, load } = useAgentCatalogue(api, false);
@@ -35,6 +40,7 @@ export function QueueTaskForm({
     const input = {
       requirements: requirements.trim(),
       validatePlan,
+      architectProfile: validatePlan ? architect : undefined,
       repository,
       workerRequest: {
         slot: slot ? Number(slot) : undefined,
@@ -119,6 +125,14 @@ export function QueueTaskForm({
           onChange={setProfile}
           modelPlaceholder="Use the worker model"
         />
+        {validatePlan && (
+          <ArchitectProfileFields
+            profile={architect}
+            inherited={board.group.architectProfile ?? board.group.daddy}
+            catalogue={catalogue}
+            onChange={setArchitect}
+          />
+        )}
         <button type="button" className="daddy-text-button" onClick={() => void load(true)}>
           <RefreshCw size={14} />
           {t('Refresh model list')}
@@ -325,5 +339,72 @@ function WorkerProfileForm({
         </button>
       </div>
     </form>
+  );
+}
+
+export function TaskArchitectSettings({
+  api,
+  board,
+  taskId,
+  initial,
+  onSaved,
+}: {
+  api: DaddyApi;
+  board: DaddyBoard;
+  taskId: string;
+  initial?: AgentProfile;
+  onSaved: () => Promise<void>;
+}) {
+  const { t } = useLocale();
+  const [profile, setProfile] = useState(initial);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const { catalogue, load } = useAgentCatalogue(api, false);
+  const inherited = board.group.architectProfile ?? board.group.daddy;
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/daddy/sessions/${board.group.id}/tasks/${taskId}/architect`, {
+        profile: profile ?? null,
+      });
+      await onSaved();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <details
+      onToggle={(event) => {
+        if (event.currentTarget.open && !catalogue.models.length) void load();
+      }}
+    >
+      <summary>
+        {t('Architect')} · {profileText(initial ?? inherited)}
+      </summary>
+      <ArchitectProfileFields
+        profile={profile}
+        inherited={inherited}
+        catalogue={catalogue}
+        onChange={setProfile}
+      />
+      <button
+        type="button"
+        className="daddy-button"
+        onClick={() => void save()}
+        disabled={
+          busy || !!board.group.deletion || JSON.stringify(profile) === JSON.stringify(initial)
+        }
+      >
+        {t('Apply to the next planning turn')}
+      </button>
+      {(error || catalogue.error) && (
+        <p role="alert" className="daddy-field-error">
+          {t(error || catalogue.error!)}
+        </p>
+      )}
+    </details>
   );
 }

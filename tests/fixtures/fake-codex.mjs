@@ -9,6 +9,7 @@ const threadId = 'thread-fixture',
 let result;
 let compacted = false;
 let historyConfig;
+let expectToolSuccess = true;
 createInterface({ input: process.stdin }).on('line', async (line) => {
   const m = JSON.parse(line);
   if (process.argv[3])
@@ -112,7 +113,8 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
         return;
       }
     }
-    if (mode === 'tool') {
+    if (mode === 'tool' || mode === 'tool-grants') {
+      expectToolSuccess = mode !== 'tool-grants' || m.params.sandboxPolicy.type !== 'readOnly';
       send({ id: m.id, result: { turn: { id: turnId } } });
       send({
         id: 'tool-1',
@@ -133,7 +135,8 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     }
   }
   if (m.id === 'tool-1' && m.result) {
-    if (!m.result.success || m.result.contentItems[0].type !== 'inputText') process.exit(3);
+    if (m.result.success !== expectToolSuccess || m.result.contentItems[0].type !== 'inputText')
+      process.exit(3);
     complete();
   }
 });

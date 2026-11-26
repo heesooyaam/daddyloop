@@ -1686,3 +1686,44 @@ for (const locale of ['en', 'ru'] as const) {
     await expect(page.getByLabel(t('Message daddy'))).toBeEditable();
   });
 }
+
+test('sets the session architect and overrides it when queueing a task', async ({ page }) => {
+  await login(page);
+  await create(page, 'Architecture profiles', Date.now());
+  await page.getByRole('button', { name: 'Session settings', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Session settings' });
+  const inherit = settings.getByRole('checkbox', { name: /Use the shared reviewer profile/ });
+  await expect(inherit).toBeChecked();
+  await inherit.uncheck();
+  await settings.getByLabel('Architect Model', { exact: true }).selectOption('gpt-5.6-sol');
+  await settings.getByLabel('Architect Reasoning effort', { exact: true }).selectOption('max');
+  const updated = page.waitForResponse(
+    (r) => r.url().endsWith('/settings') && r.request().method() === 'POST',
+  );
+  await settings.getByRole('button', { name: 'Save settings', exact: true }).click();
+  expect((await updated).request().postDataJSON().architectProfile).toMatchObject({
+    model: 'gpt-5.6-sol',
+    effort: 'max',
+  });
+  await expect(settings).not.toBeVisible();
+  await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
+  const queue = page.getByRole('dialog', { name: 'Queue task' });
+  await queue.getByLabel('Task description').fill('Plan the filter change');
+  await queue.getByText('Choose a model', { exact: true }).click();
+  const sessionArchitect = queue.getByRole('checkbox', {
+    name: /Use the session architect profile/,
+  });
+  await expect(sessionArchitect).toBeChecked();
+  await sessionArchitect.uncheck();
+  await queue.getByLabel('Architect Model', { exact: true }).selectOption('gpt-6-astra');
+  const submitted = page.waitForResponse(
+    (r) => r.url().endsWith('/tasks') && r.request().method() === 'POST',
+  );
+  await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const response = await submitted;
+  expect(response.ok()).toBe(true);
+  expect(response.request().postDataJSON()).toMatchObject({
+    architectProfile: { model: 'gpt-6-astra' },
+    validatePlan: true,
+  });
+});

@@ -35,12 +35,18 @@ export const daddySchemas = {
       architecturePlan: text.optional(),
       reportOnly: z.boolean().optional(),
       validatePlan: z.boolean().optional(),
+      architectProfile: profileSchema.optional(),
       workspaceId: id.optional(),
       dependsOn: z.array(id).max(20).optional(),
     })
     .strict(),
   dispatch: z
-    .object({ taskId: id, instruction: text.optional(), validatePlan: z.boolean().optional() })
+    .object({
+      taskId: id,
+      instruction: text.optional(),
+      validatePlan: z.boolean().optional(),
+      architectProfile: profileSchema.optional(),
+    })
     .strict(),
   message_worker: z.object({ taskId: id, instruction: text }).strict(),
   set_dependencies: z.object({ taskId: id, dependsOn: z.array(id).max(20) }).strict(),
@@ -48,6 +54,7 @@ export const daddySchemas = {
   resume_task: z.object({ taskId: id }).strict(),
   submit_task: z.object({ taskId: id }).strict(),
   retry_review: z.object({ taskId: id, clarification: text.optional() }).strict(),
+  set_architect_model: z.object({ taskId: id, profile: profileSchema.nullable() }).strict(),
   set_worker_model: z.object({ taskId: id, profile: profileSchema }).strict(),
 };
 const descriptions: Record<keyof typeof daddySchemas, string> = {
@@ -83,6 +90,8 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
     'Submit or reconcile a completed implementation when its automatic-push policy allows it. An uncertain native PR creation is reconciled, never repeated blindly.',
   retry_review:
     'Retry an incomplete review of a worker report or a pinned native revision after inspecting task state.',
+  set_architect_model:
+    'Choose an architect profile for one task. Pass null to inherit the session architect, which defaults to the shared reviewer. Applies to queued and future planning turns.',
   set_worker_model:
     'Choose a validated model/effort for one idle task worker. Does not change daddy or other workers.',
 };

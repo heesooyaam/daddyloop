@@ -1,4 +1,8 @@
 export const daddyRu: Record<string, string> = {
+  Architect: 'Архитектор',
+  'Use the shared reviewer profile': 'Как у общего ревьюера',
+  'Use the session architect profile': 'Как у архитектора сессии',
+  'Apply to the next planning turn': 'Применить к следующему ходу планирования',
   'Check architecture and plan before implementation': 'Проверить архитектуру и план до реализации',
   'Checking architecture and implementation plan': 'Проверяет архитектуру и план реализации',
   Presets: 'Пресеты',

@@ -182,3 +182,54 @@ it('keeps a healthy engine catalogue usable when another enabled engine is offli
     registry.metadata().modules?.find((module) => module.engine === 'broken')?.error,
   ).toContain('CLI offline');
 });
+
+it('selects a task thread for the current engine and keeps the reviewer independent', async () => {
+  const first = module('first'),
+    second = module('second'),
+    router = new AgentRegistry([first, second]);
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.daddy.createTask(group.id, {
+      requirements: 'Keep existing filters',
+      requestId: 'threads',
+    });
+    task.authorThreadId = sessionHandle('first', 'development');
+    task.planning = { threadId: sessionHandle('second', 'architecture'), sharedThread: true };
+    task.reviewerThreadId = sessionHandle('first', 'review');
+    const plan = f.store.jobs(task.id)[0];
+    const run = (kind: 'plan' | 'implement', engine: string) =>
+      router.run({
+        task,
+        job: { ...plan, kind, profile: { engine, model: 'same-model' } },
+        cwd: f.dir,
+        prompt: 'Check the plan',
+        signal: new AbortController().signal,
+        onSession: () => {},
+        onEvent: () => {},
+        onTool: async () => ({}),
+      });
+    await run('plan', 'second');
+    expect(vi.mocked(second.runtime.run).mock.calls.at(-1)?.[0].task.planning?.threadId).toBe(
+      'architecture',
+    );
+    await run('implement', 'first');
+    expect(vi.mocked(first.runtime.run).mock.calls.at(-1)?.[0].task.authorThreadId).toBe(
+      'development',
+    );
+    await run('plan', 'first');
+    expect(vi.mocked(first.runtime.run).mock.calls.at(-1)?.[0].task.planning?.threadId).toBe(
+      'development',
+    );
+    task.authorThreadId = undefined;
+    await run('implement', 'first');
+    expect(vi.mocked(first.runtime.run).mock.calls.at(-1)?.[0].task.authorThreadId).toBeUndefined();
+    await run('implement', 'second');
+    expect(vi.mocked(second.runtime.run).mock.calls.at(-1)?.[0].task.authorThreadId).toBe(
+      'architecture',
+    );
+    expect(task.reviewerThreadId).toBe('first:review');
+  } finally {
+    await f.close();
+  }
+});
