@@ -120,3 +120,38 @@ it('recovers the lease journal after interrupted checkout and refuses to start a
     rmSync(dir, { recursive: true });
   }
 });
+
+it('recovers the saved Arc hash and refuses a push from a different checkout hash', async () => {
+  const f = await fixture({ repoPath: '/fake/arc-source' });
+  const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-fix-'));
+  const bridge = new MountFixture();
+  const workspaces = new ArcWorkspaces(dir, bridge);
+  try {
+    const task = f.task;
+    task.pr!.branch = 'users/test/correction';
+    await workspaces.prepare(task, 'author');
+    bridge.hash = 'c'.repeat(40);
+    const save = {
+      runId: 'fix-run',
+      generation: task.generation,
+      revision: task.revision!,
+      pr: task.pr!,
+      ref: task.ref,
+      summary: 'Saved correction',
+    };
+    const saved = await workspaces.commit(task, 'Save correction', undefined, save);
+    await workspaces.pushSavedFix(task, saved);
+    expect(bridge.calls.filter((args) => args[0] === 'push')).toEqual([
+      ['push', '-u', 'users/test/correction'],
+    ]);
+    bridge.hash = 'd'.repeat(40);
+    expect(await new ArcWorkspaces(dir, bridge).recoverFix(task, save)).toBe(saved);
+    await expect(workspaces.pushSavedFix(task, saved)).rejects.toMatchObject({
+      code: 'fix_before_push',
+    });
+    expect(bridge.calls.filter((args) => args[0] === 'push')).toHaveLength(1);
+  } finally {
+    f.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

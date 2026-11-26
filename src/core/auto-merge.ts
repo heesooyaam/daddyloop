@@ -1,3 +1,4 @@
+import { samePullRequestTarget } from './pr-routing.js';
 import { githubWait, type githubBackoff } from '../providers/github-quota.js';
 import type { Engine } from './engine.js';
 import type { Store } from './store.js';
@@ -206,8 +207,24 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
         const provider = engine.provider(ref);
         const pr = await provider.getPR(ref);
         if (pr.state === 'merged') {
-          if (pr.head !== revision.head)
-            return record('waiting', 'GitHub merged a different revision');
+          if (!sameRevision(pr, revision) || !samePullRequestTarget(task.pr, pr) || !pr.mergeCommit)
+            return record(
+              'waiting',
+              'GitHub has not confirmed a merge of the reviewed revision and target',
+            );
+          const snapshot = task.review && (await provider.getReview(ref, task.review));
+          if (
+            snapshot?.status !== 'published' ||
+            snapshot.comments.length ||
+            !sameRevision(snapshot.revision, revision) ||
+            pr.checks !== 'passing'
+          )
+            return record(
+              'waiting',
+              'Waiting for published review and passing CI on the merged revision',
+            );
+          if (!(await engine.completedReviewFindingsCurrent(task)))
+            return record('waiting', 'Published findings changed. Retry review before completing.');
           if (pr.mergeCommit && store.db.prepare('SELECT 1 FROM operations WHERE id=?').get(key)) {
             const commit = pr.mergeCommit;
             await engine.broker.outbox.perform(
@@ -273,6 +290,8 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
         ]);
         const final = await observe(fresh, review);
         if (final !== 'merge') return final === 'refresh';
+        if (!(await engine.completedReviewFindingsCurrent(task)))
+          return record('waiting', 'Published findings changed. Retry review before merging.');
         if (stopping() || !enabled(store, store.getTask(task.id))) return;
         const commit = await engine.broker.outbox.perform(
           task.id,
@@ -284,7 +303,10 @@ export async function pollAutoMerge(engine: Engine, stopping: () => boolean) {
           },
           async () => {
             const remote = await provider.getPR(ref);
-            return remote.state === 'merged' && remote.head === revision.head && remote.mergeCommit
+            return remote.state === 'merged' &&
+              sameRevision(remote, revision) &&
+              samePullRequestTarget(task.pr, remote) &&
+              remote.mergeCommit
               ? { found: true, value: remote.mergeCommit }
               : { found: false };
           },

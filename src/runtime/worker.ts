@@ -2,11 +2,15 @@ import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
-import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
+import {
+  sameOpenTarget,
+  samePullRequestTarget,
+  staleConflictPreparation,
+} from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
-import type { Job, ResourceStatus, Task } from '../core/types.js';
+import type { FixSave, Job, ResourceStatus, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact, redactEvent } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
@@ -104,6 +108,7 @@ export class Worker {
     private pollMs = 15000,
     private maxAgents = 1,
   ) {
+    engine.readFixSave = (task, save) => this.workspaces.recoverFix(task, save);
     engine.onCancel = (id) => this.active.get(id)?.abort();
   }
   start() {
@@ -216,6 +221,28 @@ export class Worker {
           }
         }
         for (const task of tasks) {
+          if (
+            task.fixSave &&
+            task.state !== 'paused' &&
+            resources.ok &&
+            !this.active.has(task.id)
+          ) {
+            const group = task.groupId ? store.getGroup(task.groupId) : undefined;
+            if (
+              !group ||
+              (!group.deletedAt &&
+                !group.deletion &&
+                !['paused', 'archived'].includes(group.daddyState ?? ''))
+            )
+              try {
+                await this.engine.recoverFixSave(task.id);
+              } catch (error) {
+                store.event(task.id, 'author.save_recovery_failed', {
+                  error: redact(String(error)),
+                });
+              }
+            continue;
+          }
           if (githubWait(store, task.ref)) continue;
           if (
             this.refreshIssueSource &&
@@ -599,9 +626,13 @@ export class Worker {
           'The PR changed before the queued job started. Reconcile and review the new revision.',
         );
       }
+      if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR))
+        throw new AppError('stale_revision', 'The PR target changed before review started.');
       if (
         job.kind === 'verify_merge' &&
-        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+        (startingPR?.state !== 'merged' ||
+          !samePullRequestTarget(task.pr, startingPR) ||
+          startingPR.mergeCommit !== task.pr?.mergeCommit)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
@@ -686,6 +717,13 @@ export class Worker {
         return;
       }
 
+      if (!isTicket(task) && (job.kind === 'review' || job.kind === 'verify_merge')) {
+        await this.engine.refreshFindingEvidence(task, job);
+        if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'The task changed while findings were being read.');
+        store.saveTask(task);
+        store.saveJob(job);
+      }
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
@@ -698,7 +736,7 @@ export class Worker {
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        task.feedback = actual;
+        this.engine.setFeedback(task, actual);
         store.saveTask(task);
         store.event(task.id, 'author.feedback_snapshot', actual, job.id);
       }
@@ -854,13 +892,14 @@ export class Worker {
           await new DemoProvider(store).advance(prRef(task));
         const saveFix =
           !demo && job.kind === 'fix'
-            ? (current: Task) =>
+            ? (current: Task, save?: FixSave) =>
                 this.workspaces.commitFix(
                   current,
                   repairingConflict
                     ? 'Resolve conflict with the target branch'
                     : `Address review feedback (round ${current.round})`,
                   abort.signal,
+                  save,
                 )
             : undefined;
         try {

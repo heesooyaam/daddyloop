@@ -1,3 +1,4 @@
+import { findingVersion } from './review-decisions.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -467,8 +468,12 @@ export class Store {
       .map((row) => JSON.parse(row.data as string));
   }
   decision(task: Task, data: Omit<Decision, 'id' | 'taskId' | 'head' | 'at'>) {
+    const finding =
+      task.feedback?.comments.find((comment) => comment.id === data.commentId) ??
+      task.snapshot?.comments.find((comment) => comment.id === data.commentId);
     const item: Decision = {
       ...data,
+      commentVersion: finding && findingVersion(finding),
       id: randomUUID(),
       taskId: task.id,
       head: task.revision?.head ?? '',

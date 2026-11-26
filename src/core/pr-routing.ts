@@ -7,14 +7,18 @@ import {
   type Task,
 } from './types.js';
 
-export function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+export function samePullRequestTarget(expected: PullRequest | undefined, current: PullRequest) {
   return (
-    current.state === 'open' &&
     !!expected &&
     current.branch === expected.branch &&
     current.targetBranch === expected.targetBranch &&
-    current.cloneUrl === expected.cloneUrl
+    current.cloneUrl === expected.cloneUrl &&
+    (!expected.targetCloneUrl || current.targetCloneUrl === expected.targetCloneUrl)
   );
+}
+
+export function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+  return current.state === 'open' && samePullRequestTarget(expected, current);
 }
 
 export function hasReleasedReview(task: Task) {

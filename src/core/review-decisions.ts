@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Store } from './store.js';
 import { AppError, type Decision, type Job, type Task } from './types.js';
@@ -189,4 +190,21 @@ export function readReviewDecisions(
     page.nextBefore = nextBefore;
   }
   return page;
+}
+
+export function findingVersion(comment: import('./types.js').ReviewComment) {
+  const { body, location, resolved } = comment;
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        body,
+        location?.path,
+        location?.line,
+        location?.side,
+        location?.oldPath,
+        location?.startLine,
+        resolved ?? false,
+      ]),
+    )
+    .digest('hex');
 }

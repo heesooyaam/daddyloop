@@ -200,7 +200,9 @@ The service publishes a completed review and pushes the saved commit automatical
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
-The worker records a saved correction and its starting revision under the task lock. The service submits that exact commit and verifies the PR head before starting another review. A changed target or an unconfirmed submission leaves the task waiting with the saved commit ID. Earlier native drafts stay available for inspection.
+When a worker fixes H1, the service records the run, starting revision and PR in SQLite before saving. Git keeps the resulting H2 under a ref for that run in the task’s object store. The ref travels with the standard backup. After a restart, the service can recover and submit H2 even if the author copy has moved. If it cannot identify the saved commit or confirm its delivery to the pinned PR, it leaves the task open and preserves the author copy. Arc submission checks the leased branch and saved hash. A portable Arc restore preserves recovery files and requires a new lease.
+
+The independent reviewer opens a clean copy at the confirmed PR revision. The service checks the version of each published finding before accepting a verification or using a recorded decision. A changed finding needs a fresh check. Earlier native drafts stay available for inspection.
 
 For example, GitHub may still be calculating mergeability when findings are published. The service waits for the result. A confirmed conflict assigns one integration job to the existing worker. The same decision applies at review start and during the final merge check. With no conflict the author can address the published findings. A merge request requires a fresh published review with no findings and passing CI on the pinned revision. An uncertain previous write is reconciled with GitHub first.
 

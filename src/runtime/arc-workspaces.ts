@@ -2,7 +2,7 @@ import { realpathSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { privateWrite } from '../ops/config.js';
 import { randomUUID } from 'node:crypto';
-import type { Task, Role } from '../core/types.js';
+import type { Task, Role, FixSave } from '../core/types.js';
 import { AppError } from '../core/types.js';
 import { ArcBridge, type ArcLease } from '../integrations/arcadia.js';
 type Saved = ArcLease & {
@@ -293,7 +293,31 @@ export class ArcWorkspaces {
       );
     return { saved, head: before.hash };
   }
-  async commit(task: Task, message: string, signal?: AbortSignal) {
+  private fixReceipt(task: Task, save: FixSave) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(save.runId)) throw new Error('Invalid fix run ID');
+    return join(this.dataDir, 'workspaces', task.id, 'arc-fixes', save.runId);
+  }
+  async recoverFix(task: Task, save: FixSave) {
+    return readFileSync(this.fixReceipt(task, save), 'utf8');
+  }
+  async commit(task: Task, message: string, signal?: AbortSignal, save?: FixSave) {
+    let attempted = false;
+    try {
+      return await this.commitCorrection(task, message, signal, save, () => {
+        attempted = true;
+      });
+    } catch (error) {
+      if (save && !attempted) throw new AppError('fix_before_commit', String(error));
+      throw error;
+    }
+  }
+  private async commitCorrection(
+    task: Task,
+    message: string,
+    signal: AbortSignal | undefined,
+    save: FixSave | undefined,
+    committing: () => void,
+  ) {
     const { saved } = await this.checkedAuthor(task, signal);
     const status = await this.bridge.native(['status', '--short'], saved.mount, signal);
     if (status) {
@@ -314,6 +338,7 @@ export class ArcWorkspaces {
       )
         throw new Error('Ambiguous Arc status paths require manual review before committing');
       for (const path of files) await this.bridge.native(['add', path], saved.mount, signal);
+      committing();
       await this.bridge.native(['commit', '-m', message], saved.mount, signal);
     }
     const head = (
@@ -321,15 +346,26 @@ export class ArcWorkspaces {
         hash: string;
       }
     ).hash;
+    if (save) {
+      committing();
+      const path = this.fixReceipt(task, save);
+      privateWrite(path, head);
+    }
     return head;
   }
   async pushSavedFix(task: Task, head: string, signal?: AbortSignal) {
-    const author = await this.checkedAuthor(task, signal);
-    if (author.head !== head)
-      throw new Error('The Arc author branch changed after the fixes were saved');
-    if (!task.pr?.branch.startsWith('users/') || /\s/.test(task.pr.branch))
-      throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
-    await this.bridge.native(['push', '-u', task.pr.branch], author.saved.mount, signal);
+    const { author, branch } = await (async () => {
+      const author = await this.checkedAuthor(task, signal);
+      if (author.head !== head)
+        throw new Error('The Arc author branch changed after the fixes were saved');
+      const branch = task.pr?.branch;
+      if (!branch?.startsWith('users/') || /\s/.test(branch))
+        throw new Error('Expected an explicit Arc users/<login>/<branch> push target');
+      return { author, branch };
+    })().catch((error) => {
+      throw new AppError('fix_before_push', String(error));
+    });
+    await this.bridge.native(['push', '-u', branch], author.saved.mount, signal);
   }
   async planDocuments(task: Task, cwd: string) {
     const list = await this.bridge.native(

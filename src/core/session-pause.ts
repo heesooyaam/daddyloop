@@ -153,7 +153,8 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
     const history = new Map(store.jobs(task.id).map((job) => [job.id, job]));
     for (const id of item.jobs) {
       const job = history.get(id);
-      if (!job || job.generation !== task.generation - 1) continue;
+      if (!job || job.generation !== task.generation - 1 || (job.kind === 'fix' && task.fixSave))
+        continue;
       const retry: Job = {
         ...job,
         id: randomUUID(),

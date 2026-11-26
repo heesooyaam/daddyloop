@@ -1,6 +1,18 @@
+import { Worker } from '../src/runtime/worker.js';
+import { DemoRuntime } from '../src/runtime/demo.js';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { Store } from '../src/core/store.js';
+import { Engine } from '../src/core/engine.js';
+import { DemoProvider } from '../src/providers/demo.js';
+import { git, Workspaces } from '../src/runtime/workspaces.js';
+import { allRepositories } from '../src/modules/repositories/index.js';
+import { createBackup, restoreBackup } from '../src/ops/backup/snapshot.js';
+import { configSchema } from '../src/ops/config.js';
 import { expect, it, vi } from 'vitest';
 import { fixture } from './helpers.js';
-import { prRef } from '../src/core/types.js';
+import { AppError, prRef, type Task } from '../src/core/types.js';
 
 const savedHead = 'f'.repeat(40);
 
@@ -220,6 +232,279 @@ it('retains a worker message through push confirmation and delivers it once on t
     f.store.saveJob({ ...job, status: 'completed' });
     await f.engine.deliverWorkerInstruction(f.task.id);
     expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each(['restart onto H1', 'restore onto H3'])(
+  'recovers the exact Git save after %s and independently reviews the pushed object',
+  async (scenario) => {
+    const root = mkdtempSync(join(tmpdir(), 'daddyloop-fix-save-'));
+    const data = join(root, 'data'),
+      source = join(root, 'source'),
+      remote = join(root, 'remote');
+    mkdirSync(source);
+    mkdirSync(remote);
+    mkdirSync(data);
+    const registry = allRepositories();
+    const transport = registry.get('github').git!;
+    const url = 'https://github.com/owner/pull-source.git';
+    const environment = vi.spyOn(transport, 'environment').mockReturnValue({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
+      GIT_CONFIG_VALUE_0: url,
+    });
+    let store = new Store(join(data, 'daddyloop.sqlite'));
+    let worker: Worker | undefined;
+    const ref = {
+      provider: 'github',
+      host: 'github.com',
+      repo: 'owner/target',
+      number: 159,
+      url: 'https://github.com/owner/target/pull/159',
+    };
+    const open = (directory: string) => {
+      const workspaces = new Workspaces(directory, registry);
+      const provider = new DemoProvider(store);
+      const engine = new Engine(store, () => provider);
+      engine.readFixSave = (task, save) => workspaces.recoverFix(task, save);
+      return { workspaces, provider, engine };
+    };
+    try {
+      await git(['init'], source);
+      await git(['init', '--bare'], remote);
+      const commit = (cwd: string, subject: string) =>
+        git(
+          ['-c', 'user.name=Fixture', '-c', 'user.email=test@localhost', 'commit', '-am', subject],
+          cwd,
+        );
+      writeFileSync(join(source, 'tracked'), 'original\n');
+      await git(['add', '.'], source);
+      await commit(source, 'H1');
+      const h1 = await git(['rev-parse', 'HEAD'], source);
+      await git(['push', remote, 'HEAD:refs/heads/worker'], source);
+      const original = open(data);
+      const pr = {
+        ...(await original.provider.getPR(ref)),
+        head: h1,
+        base: h1,
+        start: h1,
+        branch: 'worker',
+        cloneUrl: url,
+        draft: false,
+      };
+      store.setSetting('demo-pr:159', pr);
+      const task = await original.engine.create({
+        ref,
+        repoPath: source,
+        requirements: 'Fix tracked file',
+      });
+      const author = await original.workspaces.prepare(task, 'author');
+      task.state = 'fixing';
+      store.saveTask(task);
+      store.enqueue(task, 'author', 'fix', 'Apply published feedback');
+      const run = store.claim()!;
+      writeFileSync(join(author, 'tracked'), 'corrected\n');
+      let h2 = '';
+      const result = { status: 'completed' as const, summary: 'Saved the fix', checkedHead: h1 };
+      await expect(
+        original.engine.completeJob(run, result, async (current, save) => {
+          expect(store.getTask(task.id).fixSave?.runId).toBe(run.id);
+          h2 = await original.workspaces.commitFix(current, 'H2', undefined, save);
+          throw new Error('Process interrupted before SQLite finalization');
+        }),
+      ).rejects.toThrow('interrupted');
+      expect(store.getTask(task.id).pendingAuthorHead).toBeUndefined();
+      const portable = scenario === 'restore onto H3';
+      if (portable) {
+        writeFileSync(join(author, 'tracked'), 'separate follow-up\n');
+        await commit(author, 'H3');
+      } else {
+        await git(['checkout', '--detach', h1], author);
+      }
+      const later = await git(['rev-parse', 'HEAD'], author);
+      expect(later).not.toBe(h2);
+      writeFileSync(join(author, 'notes'), 'untracked work');
+      store.close();
+      let directory = data;
+      if (portable) {
+        directory = join(root, 'restored');
+        const archive = join(root, 'snapshot.tar.gz');
+        await createBackup(data, archive, configSchema.parse({ modules: ['codex', 'github'] }), 1);
+        await restoreBackup(archive, directory, {}, 1, 0);
+      }
+      store = new Store(join(directory, 'daddyloop.sqlite'));
+      const restarted = open(directory);
+      store.setSetting('demo-pr:159', pr);
+      restarted.engine.recoverInterruptedJobs();
+      if (portable)
+        await restarted.engine.action(task.id, 'resume', '', {
+          generation: store.getTask(task.id).generation,
+          head: h1,
+        });
+      const send = vi.fn(async (current: Task, head: string) => {
+        expect(head).toBe(h2);
+        await restarted.workspaces.pushSavedFix(current, head);
+        expect(await git(['rev-parse', 'refs/heads/worker'], remote)).toBe(h2);
+        store.setSetting('demo-pr:159', { ...pr, head });
+        throw new Error('Response lost after push');
+      });
+      const runtime = {
+        run: vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+          expect(input.job.role).toBe('reviewer');
+          expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(h2);
+          return { ...result, checkedHead: h2 };
+        }),
+      };
+      worker = new Worker(
+        restarted.engine,
+        restarted.workspaces,
+        runtime,
+        new DemoRuntime(),
+        () => ({
+          ok: true,
+          reasons: [],
+          diskAvailableGiB: 20,
+          diskUsedPercent: 50,
+          memoryAvailableGiB: 10,
+          memoryTotalGiB: 20,
+        }),
+        0,
+      );
+      worker.autoSubmit = (id) => restarted.engine.submitSavedFix(id, send);
+      await worker.tick();
+      await vi.waitFor(() => expect(store.getTask(task.id).revision?.head).toBe(h2));
+      await worker.tick();
+      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('awaiting_publication'));
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(runtime.run).toHaveBeenCalledTimes(1);
+      const queued = store.getTask(task.id);
+      expect(queued.review?.revision.head).toBe(h2);
+      const reviewer = await restarted.workspaces.prepare(queued, 'reviewer');
+      expect(await git(['rev-parse', 'HEAD'], reviewer)).toBe(h2);
+      expect(readFileSync(join(reviewer, 'tracked'), 'utf8')).toBe('corrected\n');
+      expect(await git(['rev-parse', 'HEAD'], queued.authorWorktree!)).toBe(later);
+      expect(readFileSync(join(queued.authorWorktree!, 'notes'), 'utf8')).toBe('untracked work');
+      writeFileSync(join(reviewer, 'unexpected'), 'changed reviewer workspace');
+      await expect(restarted.workspaces.prepare(queued, 'reviewer')).rejects.toMatchObject({
+        code: 'review_workspace_changed',
+      });
+    } finally {
+      await worker?.stop();
+      environment.mockRestore();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(['review', 'verify_merge'] as const)(
+  'rejects %s when the published finding is edited under the same ID during the run',
+  async (kind) => {
+    const f = await fixture();
+    try {
+      await f.engine.review(f.task.id);
+      const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+        key: 'current',
+        body: 'First version',
+      })) as { id: string };
+      await f.run();
+      await f.engine.publish(f.task.id);
+      const task = f.store.getTask(f.task.id);
+      const old = task.review!;
+      const author = f.store.claim()!;
+      await f.engine.completeJob(author, f.result());
+      f.store.saveJob({ ...author, status: 'completed' });
+
+      if (kind === 'verify_merge') {
+        const candidate = f.store.getTask(task.id);
+        candidate.state = 'needs_input';
+        f.store.saveTask(candidate);
+        f.store.setSetting('demo-pr:1', {
+          ...task.pr,
+          state: 'merged',
+          mergeCommit: 'merge-sha',
+        });
+        await f.engine.action(task.id, 'verify-merge');
+      } else await f.engine.review(task.id);
+
+      const job = f.store.claim()!;
+      const current = f.store.getTask(task.id);
+      await f.engine.refreshFindingEvidence(current, job);
+      f.store.saveTask(current);
+      await f.provider.updateComment(prRef(task), old, finding.id, 'Revised acceptance criterion');
+      await f.engine.completeJob(job, f.result({ verifiedCommentIds: [finding.id] }));
+      expect(f.store.getTask(task.id)).toMatchObject({ state: 'needs_input' });
+      expect(f.store.getTask(task.id).verifiedMerge).toBeUndefined();
+      expect(f.store.getTask(task.id).feedback?.comments[0].body).toContain('Revised acceptance');
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it.each([true, false])(
+  'distinguishes a refused local save from an unknown outcome (%s)',
+  async (refused) => {
+    const f = await fixture({ state: 'fixing' });
+    try {
+      f.engine.readFixSave = async () => {
+        throw new Error('No ref for this run');
+      };
+      f.store.enqueue(f.task, 'author', 'fix', 'Apply feedback');
+      const job = f.store.claim()!;
+      const error = refused
+        ? new AppError('fix_before_commit', 'Could not stage changes')
+        : new Error('The writer disappeared');
+      await expect(
+        f.engine.completeJob(job, f.result(), async () => {
+          throw error;
+        }),
+      ).rejects.toBe(error);
+      f.engine.failJob(job, error);
+      f.store.saveJob({ ...job, status: 'failed' });
+      await f.engine.recoverFixSave(f.task.id);
+      const current = f.store.getTask(f.task.id);
+      expect(current.state).toBe('needs_input');
+      expect(current.pendingAuthorHead).toBeUndefined();
+      if (refused) {
+        expect(current.fixSave).toBeUndefined();
+        expect(current.reason).toContain('Could not stage changes');
+      } else {
+        expect(current.fixSave?.runId).toBe(job.id);
+        expect(current.reason).toContain('No ref for this run');
+        await expect(f.engine.review(f.task.id, true)).rejects.toMatchObject({
+          code: 'fix_pending',
+        });
+      }
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+it('routes a saved fix merged externally to read-only verification of that exact head', async () => {
+  const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+  try {
+    const t = f.store.getTask(f.task.id);
+    t.pendingFix = { revision: t.revision!, attempted: true };
+    f.store.saveTask(t);
+    const pr = { ...t.pr!, head: savedHead, state: 'merged' as const, mergeCommit: 'merged-h2' };
+    f.store.setSetting('demo-pr:1', { ...pr, targetBranch: 'other' });
+    await expect(f.engine.action(t.id, 'verify-merge')).rejects.toMatchObject({
+      code: 'merge_unconfirmed',
+    });
+    f.store.setSetting('demo-pr:1', pr);
+    await f.engine.review(t.id, true);
+    expect(f.store.getTask(t.id).revision?.head).toBe(savedHead);
+    expect(f.store.activeJobs(t.id)[0]).toMatchObject({ kind: 'verify_merge' });
+    await f.run({ status: 'incomplete', summary: 'Integration check unavailable' });
+    expect(f.store.getTask(t.id)).toMatchObject({
+      state: 'needs_input',
+      reason: 'Integration check unavailable',
+    });
+    expect(f.store.getTask(t.id).verifiedMerge).toBeUndefined();
   } finally {
     f.store.close();
   }

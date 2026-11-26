@@ -71,7 +71,7 @@ export class GitLabProvider implements ReviewProvider {
         web_url: string;
       } | null;
     }>('GET', path(ref));
-    if (!mr.diff_refs?.head_sha)
+    if (!mr.diff_refs?.head_sha || (mr.sha && mr.sha !== mr.diff_refs.head_sha))
       throw new AppError(
         'diff_unavailable',
         'GitLab has not prepared the merge request diff yet',

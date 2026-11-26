@@ -214,6 +214,15 @@ export interface ReviewSnapshot {
   url: string;
   revision: Revision;
 }
+export interface FixSave {
+  runId: string;
+  generation: number;
+  revision: Revision;
+  pr: PullRequest;
+  ref: PRRef;
+  summary: string;
+}
+
 export interface Task {
   replyTo?: TelegramReply;
   inputRequest?: { runId: string; role: Role; generation: number };
@@ -262,7 +271,11 @@ export interface Task {
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
-  verifiedMerge?: Revision & { mergeCommit?: string };
+  verifiedMerge?: Revision & {
+    mergeCommit?: string;
+    findingVersions?: Record<string, string>;
+    mergeFindingVersions?: Record<string, string>;
+  };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
@@ -287,6 +300,7 @@ export interface Task {
   fixingMergeConflict?: boolean;
   conflictCheckpoint?: string;
   deferredWorkerInstructions?: { id: string; text: string }[];
+  fixSave?: FixSave;
   pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
@@ -328,6 +342,7 @@ export interface Task {
   resumeState?: State;
   lastFeedbackHash?: string;
   feedback?: ReviewSnapshot;
+  feedbackReview?: ReviewHandle;
   createdAt: string;
   updatedAt: string;
 }
@@ -369,12 +384,16 @@ export interface Decision {
   id: string;
   taskId: string;
   commentId?: string;
+  commentVersion?: string;
   outcome: 'withdrawn' | 'deferred' | 'rejected' | 'accepted' | 'verified' | 'disputed';
   reason: string;
   head: string;
   at: string;
 }
 export interface Job {
+  publishedFindingReview?: ReviewHandle;
+  findingVersions?: Record<string, string>;
+  mergeFindingVersions?: Record<string, string>;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   taskId: string;
