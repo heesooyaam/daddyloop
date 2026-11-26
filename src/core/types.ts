@@ -166,6 +166,7 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  diffHead?: string;
   draft?: boolean;
   mergeable?: boolean | null;
   mergeConflict?: boolean;
@@ -274,6 +275,7 @@ export interface Task {
   reviewFinished?: boolean;
   verifiedMerge?: Revision & {
     mergeCommit?: string;
+    publishedFindingReviews?: ReviewHandle[];
     findingVersions?: Record<string, string>;
     mergeFindingVersions?: Record<string, string>;
   };
@@ -394,6 +396,7 @@ export interface Decision {
 }
 export interface Job {
   publishedFindingReview?: ReviewHandle;
+  publishedFindingReviews?: ReviewHandle[];
   findingVersions?: Record<string, string>;
   mergeFindingVersions?: Record<string, string>;
   instructions?: import('./instructions.js').AgentInstructions;

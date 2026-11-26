@@ -12,6 +12,7 @@ type Saved = ArcLease & {
   prepared?: boolean;
   targetBranch?: string;
 };
+type ArcFixIntent = { branch: string; parent: string; title: string };
 export class ArcWorkspaces {
   protectedSources: () => string[] = () => [];
   private allocation = Promise.resolve();
@@ -298,7 +299,36 @@ export class ArcWorkspaces {
     return join(this.dataDir, 'workspaces', task.id, 'arc-fixes', save.runId);
   }
   async recoverFix(task: Task, save: FixSave) {
-    return readFileSync(this.fixReceipt(task, save), 'utf8');
+    const path = this.fixReceipt(task, save);
+    try {
+      return readFileSync(path, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const intent = JSON.parse(readFileSync(path + '.intent', 'utf8')) as ArcFixIntent;
+    return this.confirmCommit(task, save, intent);
+  }
+  private async confirmCommit(
+    task: Task,
+    save: FixSave,
+    intent: ArcFixIntent,
+    signal?: AbortSignal,
+  ) {
+    const after = await this.checkedAuthor(task, signal);
+    if (
+      after.branch !== intent.branch ||
+      after.head === intent.parent ||
+      (await this.bridge.native(
+        ['log', '-n', '1', '--no-walk', '--format={title}', after.head],
+        after.saved.mount,
+        signal,
+      )) !== intent.title
+    )
+      throw new Error(
+        'Arc did not confirm that the current commit was created by this fix run. The author copy was preserved.',
+      );
+    privateWrite(this.fixReceipt(task, save), after.head);
+    return after.head;
   }
   async commit(task: Task, message: string, signal?: AbortSignal, save?: FixSave) {
     let attempted = false;
@@ -340,24 +370,13 @@ export class ArcWorkspaces {
         throw new Error('Ambiguous Arc status paths require manual review before committing');
       for (const path of files) await this.bridge.native(['add', path], saved.mount, signal);
       const title = save ? `${message.split('\n', 1)[0]} [daddyloop fix ${save.runId}]` : message;
+      const intent = { branch: before.branch, parent: before.head, title };
+      if (save) privateWrite(this.fixReceipt(task, save) + '.intent', JSON.stringify(intent));
       committing();
       await this.bridge.native(['commit', '-m', title], saved.mount, signal);
-      const after = await this.checkedAuthor(task, signal);
-      if (
-        save &&
-        (after.branch !== before.branch ||
-          after.head === before.head ||
-          (await this.bridge.native(
-            ['log', '-n', '1', '--no-walk', '--format={title}', after.head],
-            saved.mount,
-            signal,
-          )) !== title)
-      )
-        throw new Error(
-          'Arc did not confirm that the current commit was created by this fix run. The author copy was preserved.',
-        );
-      if (save) privateWrite(this.fixReceipt(task, save), after.head);
-      return after.head;
+      return save
+        ? this.confirmCommit(task, save, intent, signal)
+        : (await this.checkedAuthor(task, signal)).head;
     }
     const head = before.head;
     if (save) {

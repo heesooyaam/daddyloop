@@ -1403,14 +1403,25 @@ describe('opt-in GitHub merging', () => {
       await git(['add', '.'], repo);
       await commit(repo, 'H1');
       const head = await git(['rev-parse', 'HEAD'], repo);
-      const f = await setup(fixture, { head, base: head, start: head }, repo);
+      const remote = join(fixture.dir, 'remote.git');
+      await git(['clone', '--bare', repo, remote], fixture.dir);
+      await git(['push', remote, 'HEAD:refs/heads/feature'], repo);
+      writeFileSync(join(repo, 'file'), 'target\n');
+      await commit(repo, 'Target branch advanced');
+      const target = await git(['rev-parse', 'HEAD'], repo);
+      const cloneUrl = 'ssh://git@github.com/test/repo.git';
+      const f = await setup(
+        fixture,
+        { head, base: head, start: head, branch: 'feature', cloneUrl },
+        repo,
+      );
       await f.daddy.settings(f.group.id, { autoMerge: true });
       const task = f.store.getTask(f.task.id);
       task.state = 'fixing';
       const author = await f.checkouts.prepare(task, 'author');
       f.store.saveTask(task);
       saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
-      f.setRemote({ mergeable: false, mergeConflict: true });
+      f.setRemote({ base: target, start: target, mergeable: false, mergeConflict: true });
       f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
       const job = f.store.claim()!;
       writeFileSync(join(author, 'file'), 'H2\n');
@@ -1425,6 +1436,12 @@ describe('opt-in GitHub merging', () => {
           writeFileSync(join(author, 'file'), 'H3\n');
           await commit(author, 'H3');
           h3 = await git(['rev-parse', 'HEAD'], author);
+          writeFileSync(join(author, 'staged.txt'), 'keep in index');
+          await git(['add', 'staged.txt'], author);
+          writeFileSync(join(author, 'untracked.txt'), 'keep untracked');
+          await git(['config', 'protocol.allow', 'never'], author);
+          await git(['config', 'protocol.file.allow', 'always'], author);
+          await git(['config', 'url.' + remote + '.insteadOf', cloneUrl], author);
           return h2;
         },
       );
@@ -1436,6 +1453,36 @@ describe('opt-in GitHub merging', () => {
       });
       expect(await git(['rev-parse', 'HEAD'], author)).toBe(h3);
       expect(readFileSync(join(author, 'file'), 'utf8')).toBe('H3\n');
+      const preserved = author + '-before-conflict-' + h2;
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.role).toBe('author');
+        expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(h2);
+        expect(await git(['rev-parse', 'MERGE_HEAD'], input.cwd)).toBe(target);
+        expect(await git(['rev-parse', 'HEAD'], preserved)).toBe(h3);
+        expect(await git(['show', ':staged.txt'], preserved)).toBe('keep in index');
+        expect(readFileSync(join(preserved, 'untracked.txt'), 'utf8')).toBe('keep untracked');
+        writeFileSync(join(input.cwd, 'file'), 'combined\n');
+        return { status: 'completed', summary: 'Both branches preserved', checkedHead: head };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_push'));
+      const saved = f.store.getTask(task.id).pendingAuthorHead!;
+      await f.engine.submitSavedFix(task.id, async (current, sha) => {
+        await f.checkouts.pushSavedFix(current, sha);
+        expect(await git(['rev-parse', 'refs/heads/feature'], remote)).toBe(saved);
+        expect(await git(['show', '-s', '--format=%P', saved], remote)).toBe(h2 + ' ' + target);
+        f.setRemote({ head: saved, mergeable: true, mergeConflict: false });
+      });
+      await f.engine.review(task.id);
+      expect(f.store.getTask(task.id).review?.revision.head).toBe(saved);
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.role).toBe('reviewer');
+        expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(saved);
+        return { status: 'completed', summary: 'Checked the repaired merge', checkedHead: saved };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_publication'));
+      expect(await git(['rev-parse', 'HEAD'], preserved)).toBe(h3);
       expect(f.daddy.board(f.group.id).workers.slots[0].taskId).toBe(task.id);
     } finally {
       await fixture.close();

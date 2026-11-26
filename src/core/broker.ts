@@ -149,8 +149,22 @@ export class Broker {
         if (task.ref.provider === 'github' && task.draftStart)
           return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
+        if (
+          task.ref.provider === 'arcadia' &&
+          existing &&
+          (existing.nodeId !== revision.revisionId || existing.revision.head !== revision.head)
+        )
+          throw new AppError(
+            'diff_unavailable',
+            'Arcanum has not confirmed the pinned diff for this review',
+            503,
+          );
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
+      (error) =>
+        task.ref.provider === 'arcadia' &&
+        error instanceof AppError &&
+        error.code === 'diff_unavailable',
     );
     task.review = review;
     return review;

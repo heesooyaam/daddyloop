@@ -102,6 +102,15 @@ export function confirmedSupersededDraft(task: Task) {
   );
 }
 
+type FindingEvidence = Pick<
+  Job,
+  | 'kind'
+  | 'publishedFindingReview'
+  | 'publishedFindingReviews'
+  | 'findingVersions'
+  | 'mergeFindingVersions'
+>;
+
 export class Engine {
   readonly broker: Broker;
   private locks = new Map<string, Promise<unknown>>();
@@ -1878,7 +1887,7 @@ export class Engine {
     return (
       task.ref.provider !== 'arcadia' ||
       pr.head === original?.head ||
-      (!!pr.revisionId && pr.revisionId !== original?.revisionId)
+      (pr.diffHead === pr.head && !!pr.revisionId && pr.revisionId !== original?.revisionId)
     );
   }
 
@@ -2053,104 +2062,157 @@ export class Engine {
     task.feedbackReview = handle;
   }
 
-  private feedbackHandle(task: Task) {
-    if (task.feedbackReview) return task.feedbackReview;
-    if (!task.feedback) return;
-    // Old records often have a publication event even after the next draft replaced the handle.
-    const events = this.store.db
+  private publications(task: Task) {
+    return this.store.db
       .prepare(
         "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published') ORDER BY id DESC",
       )
-      .all(task.id);
-    for (const event of events) {
-      const data = JSON.parse(String(event.data)) as {
-        reviewId?: string;
-        handle?: ReviewHandle;
-        snapshot?: ReviewSnapshot;
-        revision?: Revision;
-      };
-      if (
-        !data?.reviewId ||
-        !sameRevision(data.snapshot?.revision ?? data.revision, task.feedback.revision)
-      )
-        continue;
-      if (data.handle) return data.handle;
-      const record = this.store.db
-        .prepare(
-          `SELECT result FROM operations WHERE task_id=? AND status='done'
-         AND id GLOB ? AND json_extract(result,'$.id')=? AND json_extract(result,'$.marker')=id
-         LIMIT 1`,
-        )
-        .get(task.id, `daddyloop:${task.id}:*`, data.reviewId);
-      if (typeof record?.result === 'string') {
-        const handle = JSON.parse(record.result) as ReviewHandle;
-        if (sameRevision(handle.revision, task.feedback.revision)) return handle;
-      }
-      // GitHub fetches directly by review ID. Other providers need the native marker.
-      if (task.ref.provider === 'github')
-        return { id: data.reviewId, marker: '', revision: task.feedback.revision };
-    }
-    if (
-      task.review &&
-      task.snapshot?.status === 'published' &&
-      sameRevision(task.review.revision, task.feedback.revision)
-    )
-      return task.review;
+      .all(task.id)
+      .map(
+        (event) =>
+          JSON.parse(String(event.data)) as {
+            reviewId?: string;
+            handle?: ReviewHandle;
+            snapshot?: ReviewSnapshot;
+            revision?: Revision;
+            comments?: number;
+          },
+      );
   }
 
-  async refreshFindingEvidence(
-    task: Task,
-    job: Pick<Job, 'kind' | 'publishedFindingReview' | 'findingVersions' | 'mergeFindingVersions'>,
-  ) {
-    if (job.kind !== 'review' && job.kind !== 'verify_merge') return;
-    job.findingVersions = {};
-    job.mergeFindingVersions = {};
-    const handle = job.publishedFindingReview ?? this.feedbackHandle(task);
-    job.publishedFindingReview = handle;
-    if (!handle && task.feedback?.comments.length)
+  private publicationHandle(task: Task, publication: ReturnType<Engine['publications']>[number]) {
+    const { reviewId, handle, snapshot } = publication;
+    const revision = snapshot?.revision ?? publication.revision;
+    if (!reviewId || !revision) return;
+    if (handle && handle.id === reviewId && sameRevision(handle.revision, revision)) return handle;
+    const record = this.store.db
+      .prepare(
+        `SELECT result FROM operations WHERE task_id=? AND status='done'
+        AND id GLOB ? AND json_extract(result,'$.id')=? AND json_extract(result,'$.marker')=id
+        LIMIT 1`,
+      )
+      .get(task.id, `daddyloop:${task.id}:*`, reviewId);
+    if (typeof record?.result === 'string') {
+      const saved = JSON.parse(record.result) as ReviewHandle;
+      if (sameRevision(saved.revision, revision)) return saved;
+    }
+    // GitHub fetches directly by review ID. Other providers need the native marker.
+    if (task.ref.provider === 'github') return { id: reviewId, marker: '', revision };
+  }
+
+  private async feedbackHandle(task: Task) {
+    if (task.feedbackReview) return task.feedbackReview;
+    if (!task.feedback?.comments.length) return;
+    const matches = (snapshot?: ReviewSnapshot) =>
+      snapshot?.status === 'published' &&
+      sameRevision(snapshot.revision, task.feedback?.revision) &&
+      task.feedback!.comments.every((finding) =>
+        snapshot.comments.some((c) => c.id === finding.id),
+      );
+    const handles = new Map<string, ReviewHandle | undefined>();
+    for (const publication of this.publications(task)) {
+      if (
+        !publication.reviewId ||
+        !sameRevision(
+          publication.snapshot?.revision ?? publication.revision,
+          task.feedback.revision,
+        )
+      )
+        continue;
+      const handle = this.publicationHandle(task, publication);
+      if (matches(publication.snapshot)) handles.set(publication.reviewId, handle);
+      else if (!publication.snapshot && publication.comments && handle) {
+        // Older partial-publication events retained a count without the native comment IDs.
+        const native = await this.provider(prRef(task)).getReview(prRef(task), handle);
+        if (matches(native)) handles.set(publication.reviewId, handle);
+      }
+    }
+    if (task.review && matches(task.snapshot)) handles.set(task.review.id, task.review);
+    if (handles.size === 1) return handles.values().next().value;
+  }
+
+  private earlierPublications(task: Task) {
+    return this.publications(task).filter(
+      (event) =>
+        event.reviewId !== task.review?.id && (event.snapshot?.comments.length || event.comments),
+    );
+  }
+
+  async refreshFindingEvidence(task: Task, job: FindingEvidence): Promise<ReviewSnapshot[]> {
+    if (job.kind !== 'review' && job.kind !== 'verify_merge') return [];
+    const latest = job.publishedFindingReviews
+      ? job.publishedFindingReview
+      : (job.publishedFindingReview ?? (await this.feedbackHandle(task)));
+    if (!latest && task.feedback?.comments.length && !job.publishedFindingReviews)
       throw new AppError(
         'feedback_unconfirmed',
         'The native publication of earlier findings could not be identified.',
       );
-    if (handle) {
-      const native = await this.provider(prRef(task)).getReview(prRef(task), handle);
+    const handles = new Map<string, ReviewHandle>();
+    if (latest) handles.set(latest.id, latest);
+    if (job.publishedFindingReviews) {
+      for (const handle of job.publishedFindingReviews) handles.set(handle.id, handle);
+    } else {
+      for (const publication of this.earlierPublications(task)) {
+        if (publication.reviewId && handles.has(publication.reviewId)) continue;
+        const handle = this.publicationHandle(task, publication);
+        if (!handle)
+          throw new AppError(
+            'feedback_unconfirmed',
+            'An earlier native publication could not be identified.',
+          );
+        handles.set(handle.id, handle);
+      }
+    }
+    const provider = this.provider(prRef(task));
+    const read = new Map<string, ReviewSnapshot>();
+    for (const handle of handles.values()) {
+      const native = await provider.getReview(prRef(task), handle);
       if (native.status !== 'published' || !sameRevision(native.revision, handle.revision))
         throw new AppError('feedback_unconfirmed', 'Could not confirm the published findings.');
-      this.setFeedback(task, native, handle);
+      read.set(handle.id, native);
     }
+    job.publishedFindingReview = latest;
+    job.publishedFindingReviews = [...handles.values()];
+    job.findingVersions = this.findingVersions([...read.values()]);
+    job.mergeFindingVersions = {};
+    if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
-      const current = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+      const current =
+        read.get(task.review.id) ?? (await provider.getReview(prRef(task), task.review));
       if (current.status === 'partial')
         throw new AppError('feedback_unconfirmed', 'The latest review is partially published.');
       task.snapshot = current;
+      job.mergeFindingVersions = this.findingVersions([current]);
+      if (current.status === 'published') read.set(task.review.id, current);
     }
-    if (job.kind === 'verify_merge' && task.snapshot?.status === 'published')
-      job.mergeFindingVersions = Object.fromEntries(
-        task.snapshot.comments.map((c) => [c.id, findingVersion(c)]),
-      );
-    if (task.feedback?.status === 'published')
-      job.findingVersions = Object.fromEntries(
-        task.feedback.comments.map((c) => [c.id, findingVersion(c)]),
-      );
+    return [...read.values()];
   }
 
-  private async findingsStillCurrent(
-    task: Task,
-    job: Pick<Job, 'kind' | 'publishedFindingReview' | 'findingVersions' | 'mergeFindingVersions'>,
-  ) {
-    const versions = (snapshot?: ReviewSnapshot) =>
-      snapshot?.status === 'published'
-        ? Object.fromEntries(snapshot.comments.map((c) => [c.id, findingVersion(c)]))
-        : {};
-    const before = job.findingVersions ?? versions(task.feedback);
-    const beforeMerge = job.mergeFindingVersions ?? versions(task.snapshot);
-    const current = { ...job };
-    await this.refreshFindingEvidence(task, current);
-    const matches = (before?: Record<string, string>, after?: Record<string, string>) =>
-      Object.entries(after ?? {}).every(([id, version]) => before?.[id] === version);
-    return (
-      matches(before, current.findingVersions) && matches(beforeMerge, current.mergeFindingVersions)
+  private findingVersions(snapshots: (ReviewSnapshot | undefined)[]) {
+    return Object.fromEntries(
+      snapshots.flatMap((snapshot) =>
+        snapshot?.status === 'published'
+          ? snapshot.comments.map((c) => [c.id, findingVersion(c)])
+          : [],
+      ),
     );
+  }
+
+  private async currentFindingEvidence(task: Task, job: FindingEvidence, capture = false) {
+    const before = job.findingVersions ?? this.findingVersions([task.feedback]);
+    const beforeMerge = job.mergeFindingVersions ?? this.findingVersions([task.snapshot]);
+    const current = { ...job };
+    const evidence = await this.refreshFindingEvidence(task, current);
+    const matches = (before: Record<string, string>, after?: Record<string, string>) =>
+      Object.entries(after ?? {}).every(([id, version]) => before[id] === version);
+    if (
+      matches(before, current.findingVersions) &&
+      matches(beforeMerge, current.mergeFindingVersions)
+    ) {
+      if (capture) Object.assign(job, current);
+      return evidence;
+    }
   }
 
   async completedReviewFindingsCurrent(task: Task) {
@@ -2167,11 +2229,16 @@ export class Engine {
           (job) =>
             job.kind === 'review' &&
             job.status === 'completed' &&
-            job.generation <= task.generation &&
-            !!job.publishedFindingReview,
+            job.generation <= task.generation,
         );
     if (receipt && !review) return false;
-    return !review?.publishedFindingReview || this.findingsStillCurrent({ ...task }, review);
+    const earlier = this.earlierPublications(task);
+    const known = new Set(review?.publishedFindingReviews?.map((handle) => handle.id));
+    if (review?.publishedFindingReview) known.add(review.publishedFindingReview.id);
+    if (earlier.some((publication) => !publication.reviewId || !known.has(publication.reviewId)))
+      return false;
+    if (!review?.findingVersions) return !task.feedback?.comments.length && known.size === 0;
+    return !!(await this.currentFindingEvidence({ ...task }, review));
   }
 
   private async confirmCompletedReview(task: Task) {
@@ -2181,10 +2248,11 @@ export class Engine {
     return false;
   }
 
-  private hasUnverifiedFindings(task: Task, verified: Set<string>, feedback = task.feedback) {
+  private hasUnverifiedFindings(task: Task, verified: Set<string>, evidence: ReviewSnapshot[]) {
     const decisions = this.store.decisions(task.id);
-    return (
-      feedback?.comments.some((comment) => {
+    return evidence
+      .flatMap((snapshot) => snapshot.comments)
+      .some((comment) => {
         if (verified.has(comment.id)) return false;
         return !decisions.some(
           (d) =>
@@ -2193,8 +2261,7 @@ export class Engine {
             (['withdrawn', 'deferred', 'rejected'].includes(d.outcome) ||
               (d.outcome === 'verified' && d.head === task.revision?.head)),
         );
-      }) ?? false
-    );
+      });
   }
   finishReviewedTask(
     task: Task,
@@ -2230,9 +2297,20 @@ export class Engine {
     }
   }
   private async checkMergedFindings(task: Task) {
+    const verified = task.verifiedMerge;
+    if (!verified) return true;
+    const known = new Set(verified.publishedFindingReviews?.map((handle) => handle.id));
+    const coversPublications = this.earlierPublications(task).every(
+      (publication) => publication.reviewId && known.has(publication.reviewId),
+    );
+    const hasEvidence = verified.findingVersions && verified.mergeFindingVersions;
+    const noFindings =
+      !task.feedback?.comments.length &&
+      !(task.snapshot?.status === 'published' && task.snapshot.comments.length);
     if (
-      !task.verifiedMerge ||
-      (await this.findingsStillCurrent(task, { ...task.verifiedMerge, kind: 'verify_merge' }))
+      coversPublications &&
+      (hasEvidence || noFindings) &&
+      (await this.currentFindingEvidence(task, { ...verified, kind: 'verify_merge' }))
     )
       return true;
     delete task.verifiedMerge;
@@ -2282,7 +2360,7 @@ export class Engine {
       );
       return true;
     }
-    if (!snapshot.comments.length && !(await this.confirmCompletedReview(task))) return true;
+    if (!(await this.confirmCompletedReview(task))) return true;
     task.snapshot = snapshot;
     this.setFeedback(task, snapshot);
     if (sameRevision(task.revision, pr)) task.pr = pr;
@@ -2307,6 +2385,7 @@ export class Engine {
             handle: task.review,
             revision: snapshot.revision,
             comments: snapshot.comments.length,
+            snapshot,
           }
         : { reviewId: task.review!.id, handle: task.review, snapshot },
     );
@@ -2514,8 +2593,7 @@ export class Engine {
       if (task.publicationRetry && task.publicationRetry.retryAt > Date.now()) return task;
       try {
         if (task.partialReview) return await this.releaseReviewFindings(task);
-        if (!task.snapshot?.comments.length && !(await this.confirmCompletedReview(task)))
-          return task;
+        if (!(await this.confirmCompletedReview(task))) return task;
         const publication = await this.broker.publish(task);
         return await this.reconcileLocked(id, publication);
       } catch (error) {
@@ -2531,14 +2609,15 @@ export class Engine {
           return this.reconcileLocked(id);
 
         if (
-          task.ref.provider !== 'github' ||
           current.generation !== task.generation ||
           current.state !== 'awaiting_publication' ||
           current.review?.id !== task.review?.id ||
           !(
             error instanceof AppError &&
-            (error instanceof GitHubRetryError ||
-              /^(provider_(408|500|502|503|504)|provider_unreachable)$/.test(error.code))
+            (error.code === 'diff_unavailable' ||
+              (task.ref.provider === 'github' &&
+                (error instanceof GitHubRetryError ||
+                  /^(provider_(408|500|502|503|504)|provider_unreachable)$/.test(error.code))))
           )
         )
           throw error;
@@ -2550,7 +2629,13 @@ export class Engine {
             error instanceof GitHubRetryError ? error.until : 0,
           ),
         };
-        this.state(current, 'awaiting_publication', 'Waiting to retry GitHub review publication');
+        this.state(
+          current,
+          'awaiting_publication',
+          error.code === 'diff_unavailable'
+            ? 'Waiting for the provider to confirm the diff before continuing publication'
+            : 'Waiting to retry GitHub review publication',
+        );
         return current;
       }
     });
@@ -2700,14 +2785,20 @@ export class Engine {
     const recorded = this.store.db
       .prepare("SELECT data FROM events WHERE task_id=? AND run_id=? AND type='author.fixes_saved'")
       .all(task.id, save.runId)
-      .map((event) => (JSON.parse(String(event.data)) as { head: string }).head);
+      .map((event) => JSON.parse(String(event.data)) as { head: string; revision?: Revision });
     const previous = task.pendingAuthorHead;
     if (
-      recorded.some((value) => value !== head) ||
+      recorded.some(
+        (value) =>
+          value.head !== head || (value.revision && !sameRevision(value.revision, save.revision)),
+      ) ||
+      (task.pendingFix && !sameRevision(task.pendingFix.revision, save.revision)) ||
       (previous && previous !== head && (task.pendingFix || previous !== save.revision.head))
     ) {
-      const conflicting = [...new Set([...recorded, ...(previous ? [previous] : [])])];
-      const reason = `Conflicting evidence for fix run ${save.runId}: saved ${head}, previously recorded ${conflicting.join(', ')}. The author copy and both records were preserved.`;
+      const conflicting = [
+        ...new Set([...recorded.map((value) => value.head), ...(previous ? [previous] : [])]),
+      ];
+      const reason = `Conflicting evidence for fix run ${save.runId}: saved ${head}, previously recorded ${conflicting.join(', ')}. The recorded commit or starting revision disagrees with the save intent. The author copy and both records were preserved.`;
       if (task.reason !== reason) this.state(task, 'needs_input', reason);
       return;
     }
@@ -2953,24 +3044,26 @@ export class Engine {
             result.question || result.summary,
             requestsHumanInput(result) ? job : undefined,
           );
-        } else if (
-          result.disputedCommentIds?.length ||
-          !(await this.findingsStillCurrent(task, job)) ||
-          this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds)) ||
-          (task.snapshot?.status === 'published' &&
-            this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds), task.snapshot))
-        ) {
-          this.state(
-            task,
-            'needs_input',
-            'Reviewer has not verified all previously published findings',
-          );
         } else {
+          const evidence = await this.currentFindingEvidence(task, job, true);
+          if (
+            result.disputedCommentIds?.length ||
+            !evidence ||
+            this.hasUnverifiedFindings(task, new Set(result.verifiedCommentIds), evidence)
+          ) {
+            this.state(
+              task,
+              'needs_input',
+              'Reviewer has not verified all previously published findings',
+            );
+            return;
+          }
           task.summary = result.summary;
           task.pr = pr;
           task.verifiedMerge = {
             ...revisionOf(pr),
             mergeCommit: pr.mergeCommit,
+            publishedFindingReviews: job.publishedFindingReviews,
             findingVersions: job.findingVersions,
             mergeFindingVersions: job.mergeFindingVersions,
           };
@@ -3047,10 +3140,10 @@ export class Engine {
         }
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review!);
         const verified = new Set(result.verifiedCommentIds ?? []);
+        const evidence = await this.currentFindingEvidence(task, job, true);
         if (
-          !snapshot.comments.length &&
-          (!(await this.findingsStillCurrent(task, job)) ||
-            this.hasUnverifiedFindings(task, verified))
+          !evidence ||
+          (!snapshot.comments.length && this.hasUnverifiedFindings(task, verified, evidence))
         ) {
           this.state(
             task,
@@ -3102,12 +3195,16 @@ export class Engine {
           revision: task.revision!,
         };
         delete task.openReviewQuestion;
-        for (const id of verified)
+        const checked = this.findingVersions(evidence);
+        for (const id of verified) {
+          if (!Object.hasOwn(checked, id)) continue;
           this.store.decision(task, {
             commentId: id,
+            commentVersion: checked[id],
             outcome: 'verified',
             reason: `Verified by the independent reviewer in round ${task.round}`,
           });
+        }
         this.state(
           task,
           'awaiting_publication',

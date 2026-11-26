@@ -22,7 +22,14 @@ export class ArcadiaProvider implements ReviewProvider {
   constructor(private bridge = new ArcBridge()) {}
   async getPR(ref: PRRef): Promise<PullRequest> {
     const { pr, base } = await this.bridge.metadata(ref.number),
-      diffId = await this.bridge.activeDiff(ref.number);
+      diff = await this.bridge.activeDiffDetails(ref.number);
+    if (diff.head !== pr.from_id)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed a diff for the current PR commit',
+        503,
+      );
+    const diffId = diff.id;
     const checks: {
       name: string;
       status: string;
@@ -73,6 +80,7 @@ export class ArcadiaProvider implements ReviewProvider {
       base,
       start: base,
       revisionId: diffId,
+      diffHead: diff.head,
       title: pr.summary,
       body: pr.description ?? '',
       branch: pr.from_branch,
@@ -122,8 +130,14 @@ export class ArcadiaProvider implements ReviewProvider {
     };
   }
   async findReview(ref: PRRef, marker: string) {
-    const { user } = await this.bridge.metadata(ref.number),
-      diffId = await this.bridge.activeDiff(ref.number);
+    const { pr, user } = await this.bridge.metadata(ref.number);
+    const { id: diffId, head } = await this.bridge.activeDiffDetails(ref.number);
+    if (head !== pr.from_id)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed a diff for the current PR commit',
+        503,
+      );
     const [notes] = await this.notes(ref, diffId),
       summary = notes.find(
         (n) => n.author?.name === user && n.content.includes(tag(marker)) && !n.deleted_at,
@@ -134,13 +148,19 @@ export class ArcadiaProvider implements ReviewProvider {
           marker,
           nodeId: diffId,
           authorId: user,
-          revision: { head: '', base: '', start: '', revisionId: diffId },
+          revision: { head: pr.from_id, base: '', start: '', revisionId: diffId },
         }
       : undefined;
   }
   async createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle> {
-    const { user } = await this.bridge.metadata(ref.number),
-      diffId = revision.revisionId ?? (await this.bridge.activeDiff(ref.number));
+    const { pr, user } = await this.bridge.metadata(ref.number);
+    const { id: diffId, head } = await this.bridge.activeDiffDetails(ref.number);
+    if (head !== pr.from_id || head !== revision.head || diffId !== revision.revisionId)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed the pinned diff for this review',
+        503,
+      );
     const [notes, inline] = await this.notes(ref, diffId);
     if ([...notes, ...inline].some((n) => n.author?.name === user && n.is_draft && !n.deleted_at))
       throw new AppError(

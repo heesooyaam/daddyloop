@@ -533,52 +533,71 @@ it('routes a saved fix merged externally to read-only verification of that exact
   }
 });
 
-it.each([savedHead, 'c'.repeat(40)])(
-  'reconciles a saved ref against prior submission evidence for %s',
-  async (recordedHead) => {
-    const f = await fixture({ state: 'needs_input' });
-    try {
-      const task = f.store.getTask(f.task.id);
-      const job = f.store.enqueue(task, 'author', 'fix', 'Fix');
-      f.store.saveJob({ ...job, status: 'failed' });
-      const prior = { revision: task.revision!, attempted: true, confirmUntil: '2999-01-01' };
-      task.pendingFix = prior;
-      task.pendingAuthorHead = recordedHead;
-      task.fixSave = {
-        runId: job.id,
-        generation: job.generation,
-        revision: task.revision!,
-        pr: task.pr!,
-        ref: prRef(task),
-        summary: 'Saved',
-      };
-      f.store.saveTask(task);
-      f.store.event(task.id, 'author.fixes_saved', { head: recordedHead }, job.id);
-      f.engine.readFixSave = async () => savedHead;
-      await f.engine.recoverFixSave(task.id);
-      const recovered = f.store.getTask(task.id);
-      expect(recovered.pendingFix).toEqual(prior);
-      expect(recovered.pendingAuthorHead).toBe(recordedHead);
-      expect(f.store.events(task.id).filter((e) => e.type === 'author.fixes_saved')).toHaveLength(
-        1,
-      );
-      if (recordedHead === savedHead) {
-        expect(recovered.fixSave).toBeUndefined();
-        expect(recovered.state).toBe('awaiting_push');
-      } else {
-        expect(recovered.fixSave?.runId).toBe(job.id);
-        expect(recovered.state).toBe('needs_input');
-        expect(recovered.reason).toContain(savedHead);
-        expect(recovered.reason).toContain(recordedHead);
-        const push = vi.fn();
-        await f.engine.submitSavedFix(task.id, push);
-        expect(push).not.toHaveBeenCalled();
-      }
-    } finally {
-      f.store.close();
+it.each([
+  'legacy receipt',
+  'conflicting head',
+  'conflicting event base',
+  'conflicting pending start',
+])('reconciles a saved ref against prior submission evidence for %s', async (scenario) => {
+  const recordedHead = scenario === 'conflicting head' ? 'c'.repeat(40) : savedHead;
+  const f = await fixture({ state: 'needs_input' });
+  try {
+    const task = f.store.getTask(f.task.id);
+    const job = f.store.enqueue(task, 'author', 'fix', 'Fix');
+    f.store.saveJob({ ...job, status: 'failed' });
+    const prior = {
+      revision: {
+        ...task.revision!,
+        ...(scenario === 'conflicting pending start' && { start: 'd'.repeat(40) }),
+      },
+      attempted: true,
+      confirmUntil: '2999-01-01',
+    };
+    task.pendingFix = prior;
+    task.pendingAuthorHead = recordedHead;
+    task.fixSave = {
+      runId: job.id,
+      generation: job.generation,
+      revision: task.revision!,
+      pr: task.pr!,
+      ref: prRef(task),
+      summary: 'Saved',
+    };
+    f.store.saveTask(task);
+    f.store.event(
+      task.id,
+      'author.fixes_saved',
+      {
+        head: recordedHead,
+        ...(scenario === 'conflicting event base' && {
+          revision: { ...task.revision, base: 'b'.repeat(39) + 'c' },
+        }),
+      },
+      job.id,
+    );
+    f.engine.readFixSave = async () => savedHead;
+    await f.engine.recoverFixSave(task.id);
+    const recovered = f.store.getTask(task.id);
+    expect(recovered.pendingFix).toEqual(prior);
+    expect(recovered.pendingAuthorHead).toBe(recordedHead);
+    expect(f.store.events(task.id).filter((e) => e.type === 'author.fixes_saved')).toHaveLength(1);
+    if (scenario === 'legacy receipt') {
+      expect(recovered.fixSave).toBeUndefined();
+      expect(recovered.state).toBe('awaiting_push');
+    } else {
+      expect(recovered.fixSave?.runId).toBe(job.id);
+      expect(recovered.state).toBe('needs_input');
+      expect(recovered.reason).toContain(savedHead);
+      expect(recovered.reason).toContain(recordedHead);
+      expect(recovered.reason).toContain('starting revision');
+      const push = vi.fn();
+      await f.engine.submitSavedFix(task.id, push);
+      expect(push).not.toHaveBeenCalled();
     }
-  },
-);
+  } finally {
+    f.store.close();
+  }
+});
 
 it.each([false, true])(
   'settles an unchanged save once after an interrupted provider read (retargeted=%s)',
@@ -655,7 +674,21 @@ it('waits on the original Arcanum diff ID even when the saved head is already vi
       pendingAuthorHead: savedHead,
     });
     expect(f.store.jobs(task.id)).toHaveLength(0);
-    provider.mockResolvedValue({ ...task.pr!, head: savedHead, revisionId: 'D2' });
+    provider.mockResolvedValue({
+      ...task.pr!,
+      head: savedHead,
+      revisionId: 'older D0',
+      diffHead: task.pr!.head,
+    });
+    await f.engine.submitSavedFix(task.id, push);
+    await expect(f.engine.review(task.id, true)).rejects.toMatchObject({ code: 'fix_pending' });
+    expect(f.store.jobs(task.id)).toHaveLength(0);
+    provider.mockResolvedValue({
+      ...task.pr!,
+      head: savedHead,
+      revisionId: 'D2',
+      diffHead: savedHead,
+    });
     await f.engine.submitSavedFix(task.id, push);
     await f.engine.review(task.id);
     expect(push).toHaveBeenCalledOnce();
@@ -769,6 +802,251 @@ it('preserves plan approval through a rerun of mandatory CI on an external merge
     f.store.setSetting('demo-pr:1', pr);
     expect((await f.engine.reconcile(f.task.id)).state).toBe('complete');
   } finally {
+    f.store.close();
+  }
+});
+
+it('identifies the legacy publication by native finding IDs among reviews on the same revision', async () => {
+  const f = await fixture();
+  try {
+    await f.engine.review(f.task.id);
+    const old = f.store.getTask(f.task.id).review!;
+    const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+      key: 'prior',
+      body: 'original',
+    })) as { id: string };
+    await f.run();
+    await f.engine.publish(f.task.id);
+    const other = await f.provider.createReview(prRef(f.task), old.revision, 'newer-published');
+    await f.provider.publish(prRef(f.task), other);
+    const snapshot = await f.provider.getReview(prRef(f.task), other);
+    f.store.event(f.task.id, 'review.published', { reviewId: other.id, handle: other, snapshot });
+    await f.run();
+    await f.engine.review(f.task.id);
+    const task = f.store.getTask(f.task.id);
+    delete task.feedbackReview;
+    await f.provider.updateComment(prRef(task), old, finding.id, 'Edited original');
+    const job = f.store.claim()!;
+    await f.engine.refreshFindingEvidence(task, job);
+    expect(job.publishedFindingReview?.id).toBe(old.id);
+    expect(task.feedback?.comments[0].body).toContain('Edited original');
+    task.feedback!.comments[0].id = 'unattributed';
+    delete task.feedbackReview;
+    await expect(f.engine.refreshFindingEvidence(task, f.job())).rejects.toMatchObject({
+      code: 'feedback_unconfirmed',
+    });
+  } finally {
+    f.store.close();
+  }
+});
+
+it('requires fresh verification of legacy completed review evidence before manual publication can finish', async () => {
+  const f = await fixture();
+  try {
+    await f.engine.review(f.task.id);
+    const old = f.store.getTask(f.task.id).review!;
+    const finding = (await f.engine.broker.call(f.job(), 'add_comment', {
+      key: 'prior',
+      body: 'original',
+    })) as { id: string };
+    await f.run();
+    await f.engine.publish(f.task.id);
+    await f.run();
+    await f.engine.review(f.task.id);
+    const completed = await f.run({ verifiedCommentIds: [finding.id] });
+    delete completed.publishedFindingReview;
+    delete completed.publishedFindingReviews;
+    delete completed.findingVersions;
+    f.store.saveJob(completed);
+    const task = f.store.getTask(f.task.id);
+    delete task.completedReview;
+    f.store.saveTask(task);
+    await f.provider.updateComment(prRef(task), old, finding.id, 'Edited after the legacy run');
+    await f.provider.publish(prRef(task), task.review!);
+    expect((await f.engine.reconcile(task.id)).state).toBe('needs_input');
+  } finally {
+    f.store.close();
+  }
+});
+
+it('carries an edited finding across a later published review with a different finding', async () => {
+  const f = await fixture();
+  try {
+    const id = f.task.id;
+    const add = (job: Parameters<typeof f.engine.broker.call>[0], key: string) =>
+      f.engine.broker.call(job, 'add_comment', { key, body: key }) as Promise<{ id: string }>;
+    await f.engine.review(id);
+    const old = f.store.getTask(id).review!;
+    const first = await add(f.job(), 'first');
+    await f.run();
+    await f.engine.publish(id);
+    await f.run();
+    const claimReview = async (retry = false) => {
+      await f.engine.review(id, retry);
+      const job = f.store.claim()!;
+      const current = f.store.getTask(id);
+      const earlier = await f.engine.refreshFindingEvidence(current, job);
+      f.store.saveTask(current);
+      return { job, earlier };
+    };
+    const complete = async (job: ReturnType<typeof f.job>, verifiedCommentIds: string[]) => {
+      await f.engine.completeJob(job, f.result({ verifiedCommentIds }));
+      f.store.saveJob({ ...job, status: 'completed' });
+    };
+    const secondRun = await claimReview();
+    const second = await add(secondRun.job, 'second');
+    await f.provider.updateComment(
+      prRef(f.task),
+      old,
+      first.id,
+      'Edited after the second run started',
+    );
+    await complete(secondRun.job, [first.id]);
+    expect(f.store.getTask(id).state).toBe('needs_input');
+    expect(f.store.decisions(id).filter((decision) => decision.commentId === first.id)).toEqual([]);
+    await complete((await claimReview(true)).job, []);
+    await f.engine.publish(id);
+    await f.run();
+    const thirdRun = await claimReview();
+    expect(
+      thirdRun.earlier.flatMap((review) => review.comments.map((finding) => finding.id)),
+    ).toEqual(expect.arrayContaining([first.id, second.id]));
+    await complete(thirdRun.job, [second.id]);
+    expect(f.store.getTask(id).state).toBe('needs_input');
+    await complete((await claimReview(true)).job, [first.id, second.id]);
+    await f.engine.publish(id);
+    expect(f.store.getTask(id).state).toBe('complete');
+  } finally {
+    f.store.close();
+  }
+});
+
+it.each([
+  'after author save',
+  'before reviewer',
+  'after reviewer report',
+  'after reviewer report on a changed head',
+  'before publication',
+  'after publication',
+])('resumes the exact GitLab step %s when the diff lags once', async (phase) => {
+  const f = await fixture({ state: 'fixing' });
+  const workspaces = new Workspaces('/tmp');
+  const id = f.task.id;
+  const task = f.store.getTask(id);
+  task.ref.provider = 'gitlab';
+  const originalReview = await f.provider.createReview(
+    prRef(task),
+    task.revision!,
+    'original-review',
+  );
+  await f.provider.publish(prRef(task), originalReview);
+  task.review = originalReview;
+  task.reviewFinished = true;
+  task.snapshot = await f.provider.getReview(prRef(task), originalReview);
+  f.store.saveTask(task);
+  f.store.enqueue(task, 'author', 'fix', 'Apply published feedback');
+  const save = vi.spyOn(workspaces, 'commitFix').mockResolvedValue(savedHead);
+  vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+  const headChanged = phase === 'after reviewer report on a changed head';
+  let reviewed = 0,
+    lagged = false,
+    sendingReview = false;
+  const runtime = {
+    run: vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+      if (input.job.role === 'reviewer') reviewed++;
+      return {
+        status: 'completed' as const,
+        summary: 'Checked the work',
+        checkedHead: input.task.revision!.head,
+      };
+    }),
+  };
+  const worker = new Worker(
+    f.engine,
+    workspaces,
+    runtime,
+    new DemoRuntime(),
+    () => ({
+      ok: true,
+      reasons: [],
+      diskAvailableGiB: 20,
+      diskUsedPercent: 50,
+      memoryAvailableGiB: 10,
+      memoryTotalGiB: 20,
+    }),
+    -1,
+  );
+  const publish = vi.spyOn(f.provider, 'publish');
+  const publishNative = f.engine.broker.publish.bind(f.engine.broker);
+  vi.spyOn(f.engine.broker, 'publish').mockImplementation(async (...args) => {
+    sendingReview = true;
+    try {
+      return await publishNative(...args);
+    } finally {
+      sendingReview = false;
+    }
+  });
+  const original = f.provider.getPR.bind(f.provider);
+  vi.spyOn(f.provider, 'getPR').mockImplementation(async (ref) => {
+    const current = f.store.getTask(id);
+    const running = f.store.activeJobs(id).some((job) => job.status === 'running');
+    const lag =
+      (phase === 'after author save' &&
+        running &&
+        save.mock.calls.length > 0 &&
+        current.state === 'awaiting_push') ||
+      (phase === 'before reviewer' && running && current.state === 'reviewing' && reviewed === 0) ||
+      ((phase === 'after reviewer report' || headChanged) &&
+        running &&
+        current.state === 'reviewing' &&
+        reviewed === 1) ||
+      (phase === 'before publication' && sendingReview && publish.mock.calls.length === 0) ||
+      (phase === 'after publication' &&
+        current.state === 'awaiting_publication' &&
+        publish.mock.calls.length === 1);
+    if (lag && !lagged) {
+      lagged = true;
+      if (headChanged) f.store.setSetting('demo-pr:1', { ...task.pr, head: 'd'.repeat(40) });
+      throw new AppError('diff_unavailable', 'GitLab has not prepared the current diff', 503);
+    }
+    return original(ref);
+  });
+  const push = vi.fn(async (_current: Task, head: string) => {
+    expect(head).toBe(savedHead);
+    f.store.setSetting('demo-pr:1', { ...task.pr, head });
+  });
+  worker.autoSubmit = () => f.engine.submitSavedFix(id, push);
+  try {
+    await vi.waitFor(
+      async () => {
+        for (const job of f.store.activeJobs(id)) {
+          if (job.status === 'queued' && job.notBefore)
+            f.store.saveJob({ ...job, notBefore: undefined });
+        }
+        const current = f.store.getTask(id);
+        if (current.publicationRetry) {
+          current.publicationRetry.retryAt = 0;
+          f.store.saveTask(current);
+        }
+        await worker.tick();
+        expect(f.store.getTask(id).state).toBe(headChanged ? 'needs_input' : 'complete');
+      },
+      { timeout: 5000 },
+    );
+    expect(lagged).toBe(true);
+    expect(save).toHaveBeenCalledOnce();
+    expect(push).toHaveBeenCalledOnce();
+    expect(runtime.run).toHaveBeenCalledTimes(2);
+    expect(reviewed).toBe(1);
+    if (headChanged) {
+      expect(publish).not.toHaveBeenCalled();
+      expect(f.store.getTask(id).reviewFinished).toBe(false);
+    } else {
+      expect(publish).toHaveBeenCalledOnce();
+      expect(f.store.getTask(id).revision?.head).toBe(savedHead);
+    }
+  } finally {
+    await worker.stop();
     f.store.close();
   }
 });

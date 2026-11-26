@@ -185,7 +185,7 @@ export class Workspaces {
           ? checkpoint
           : task.revision.head;
       await run(['--git-dir', bare, 'worktree', 'add', '--detach', target, start], root);
-    } else if (role === 'author') {
+    } else if (role === 'author' && !(task.fixingMergeConflict && task.conflictCheckpoint)) {
       const current = await run(['rev-parse', 'HEAD'], target);
       if (current !== task.revision.head) {
         if (task.authorBaseHead === task.revision.head) {
@@ -273,13 +273,16 @@ export class Workspaces {
     const merging = await run(['rev-parse', '--verify', '-q', 'MERGE_HEAD']).catch(() => undefined);
     if (!merging && current !== head && (await this.savedConflictMerge(cwd, head, base, signal)))
       return existsSync(preserved) ? preserved : undefined;
-    if (current !== head || (merging && merging !== base))
+    if (
+      (current !== head && (!task.conflictCheckpoint || merging)) ||
+      (merging && merging !== base)
+    )
       throw new AppError(
         'workspace_diverged',
         'The worker copy has a different commit or unfinished merge. Its changes were preserved.',
       );
     if (!merging) {
-      if (await run(['status', '--porcelain'])) {
+      if (current !== head || (await run(['status', '--porcelain']))) {
         if (task.scope || existsSync(preserved))
           throw new AppError(
             'workspace_dirty',

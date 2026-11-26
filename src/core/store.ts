@@ -473,7 +473,7 @@ export class Store {
       task.snapshot?.comments.find((comment) => comment.id === data.commentId);
     const item: Decision = {
       ...data,
-      commentVersion: finding && findingVersion(finding),
+      commentVersion: data.commentVersion ?? (finding && findingVersion(finding)),
       id: randomUUID(),
       taskId: task.id,
       head: task.revision?.head ?? '',

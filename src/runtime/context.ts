@@ -1,12 +1,13 @@
 import { reviewDecisionContext } from '../core/review-decisions.js';
 import { codexInputLimit } from './agent.js';
 import type { Store } from '../core/store.js';
-import { AppError, type Task, type Job } from '../core/types.js';
+import { AppError, type Task, type Job, type ReviewSnapshot } from '../core/types.js';
 export function buildContext(
   store: Store,
   task: Task,
   job: Job,
   additions: (string | false | undefined)[] = [],
+  earlierPublishedReviews?: ReviewSnapshot[],
 ): string {
   const group = task.groupId ? store.getGroup(task.groupId) : undefined;
   const ticket = task.ref.kind === 'ticket';
@@ -104,6 +105,9 @@ export function buildContext(
       ? {
           nativeReview: task.snapshot,
           previousPublishedFeedback: task.feedback,
+          earlierPublishedReviews: earlierPublishedReviews?.length
+            ? earlierPublishedReviews
+            : undefined,
         }
       : {
           publishedFeedback:

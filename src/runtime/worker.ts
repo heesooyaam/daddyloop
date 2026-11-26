@@ -10,7 +10,7 @@ import {
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
-import type { FixSave, Job, ResourceStatus, Task } from '../core/types.js';
+import type { FixSave, Job, ResourceStatus, ReviewSnapshot, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact, redactEvent } from '../core/security.js';
 import type { AgentRuntime } from './agent.js';
@@ -727,8 +727,12 @@ export class Worker {
         return;
       }
 
+      let earlierPublishedReviews: ReviewSnapshot[] | undefined;
       if (!isTicket(task) && (job.kind === 'review' || job.kind === 'verify_merge')) {
-        await this.engine.refreshFindingEvidence(task, job);
+        earlierPublishedReviews = (await this.engine.refreshFindingEvidence(task, job)).filter(
+          (review) =>
+            review.comments.length && review !== task.feedback && review !== task.snapshot,
+        );
         if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'The task changed while findings were being read.');
         store.saveTask(task);
@@ -784,13 +788,19 @@ export class Worker {
               ...(this.workspaces.readPaths?.(task) ?? []),
               ...(preservedCopy ? [preservedCopy] : []),
             ],
-        prompt: buildContext(store, task, job, [
-          preservedCopy &&
-            `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
-          job.kind === 'review' &&
-            task.draftRecheck &&
-            `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
-        ]),
+        prompt: buildContext(
+          store,
+          task,
+          job,
+          [
+            preservedCopy &&
+              `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
+            job.kind === 'review' &&
+              task.draftRecheck &&
+              `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
+          ],
+          earlierPublishedReviews,
+        ),
         signal: abort.signal,
         tools,
         onSession: (threadId, turnId) => {
@@ -915,7 +925,11 @@ export class Worker {
         try {
           await this.engine.completeJob(job, result, saveFix);
         } catch (error) {
-          if (error instanceof GitHubRetryError) job.deferredResult = result;
+          if (
+            error instanceof GitHubRetryError ||
+            (error instanceof AppError && error.code === 'diff_unavailable')
+          )
+            job.deferredResult = result;
           throw error;
         }
       }
@@ -928,7 +942,7 @@ export class Worker {
         error instanceof AppError &&
         error.code === 'diff_unavailable' &&
         !abort.signal.aborted &&
-        !!(job.kind === 'review' || job.kind === 'verify_merge');
+        (job.kind === 'review' || job.kind === 'verify_merge' || !!job.deferredResult);
       job.status =
         capacity || quota || diffPending ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));

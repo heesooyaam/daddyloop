@@ -156,9 +156,10 @@ it('recovers the saved Arc hash and refuses a push from a different checkout has
   }
 });
 
-it.each([false, true])(
-  'attributes an Arc commit only to the marked save (checkout changed=%s)',
-  async (moved) => {
+it.each(['normal', 'branch moved', 'interrupted read'])(
+  'attributes an Arc commit only to the marked save after %s',
+  async (scenario) => {
+    const moved = scenario === 'branch moved';
     const f = await fixture({ repoPath: '/fake/arc-source' });
     const dir = mkdtempSync(join(tmpdir(), 'daddy-arc-moved-save-'));
     const bridge = new MountFixture();
@@ -171,14 +172,23 @@ it.each([false, true])(
         h3 = 'd'.repeat(40);
       const native = bridge.native.bind(bridge);
       let title = '';
+      let commits = 0;
+      let failRead = scenario === 'interrupted read';
       bridge.native = async (args) => {
         if (args[0] === 'commit') {
+          commits++;
           title = args[2];
           bridge.hash = moved ? h3 : h2;
           if (moved) bridge.branch += '-different';
           return '';
         }
-        if (args[0] === 'log') return args.at(-1) === h2 ? title : 'Unrelated commit';
+        if (args[0] === 'log') {
+          if (failRead) {
+            failRead = false;
+            throw new Error('Interrupted commit read');
+          }
+          return args.at(-1) === h2 ? title : 'Unrelated commit';
+        }
         return native(args);
       };
       const save = {
@@ -195,8 +205,15 @@ it.each([false, true])(
         expect(bridge.hash).toBe(h3);
         await expect(workspaces.recoverFix(task, save)).rejects.toThrow();
       } else {
-        expect(await commit).toBe(h2);
-        expect(await workspaces.recoverFix(task, save)).toBe(h2);
+        if (scenario === 'interrupted read')
+          await expect(commit).rejects.toThrow('Interrupted commit read');
+        else expect(await commit).toBe(h2);
+        const restarted = new ArcWorkspaces(dir, bridge);
+        expect(await restarted.recoverFix(task, save)).toBe(h2);
+        task.pr!.branch = 'users/test/correction';
+        await restarted.pushSavedFix(task, h2);
+        expect(bridge.calls.filter((args) => args[0] === 'push')).toHaveLength(1);
+        expect(commits).toBe(1);
       }
     } finally {
       f.store.close();
