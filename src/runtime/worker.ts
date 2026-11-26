@@ -400,7 +400,11 @@ export class Worker {
               current.reason = redact(String(error));
               store.saveTask(current);
               store.event(task.id, 'publication.failed', { error: current.reason });
-              store.event(task.id, 'task.state', { state: current.state, reason: current.reason });
+              store.event(task.id, 'task.state', {
+                state: current.state,
+                reason: current.reason,
+                previousState: 'awaiting_publication',
+              });
             }
           }
         }
@@ -868,7 +872,7 @@ export class Worker {
       }
       job.finishedAt = now();
       store.saveJob(job);
-      store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
+      store.event(job.taskId, `job.${job.status}`, { kind: job.kind, error: job.error }, job.id);
       this.active.delete(job.taskId);
       this.runningJobs.delete(job.taskId);
       this.finalizing.delete(job.id);

@@ -235,11 +235,13 @@ export class Engine {
     task.inputRequest = request
       ? { runId: request.id, role: request.role, generation: task.generation }
       : undefined;
+    const previousState = task.state;
     task.state = state;
     task.reason = reason;
     this.store.saveTask(task);
     this.store.event(task.id, 'task.state', {
       state,
+      previousState,
       reason,
       generation: task.generation,
       head: task.revision?.head,
