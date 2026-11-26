@@ -41,6 +41,7 @@ const { Store } = await import(new URL('src/core/store.ts', root).href + suffix)
 const { Telegram, TelegramApi } = await import(
   new URL('src/integrations/telegram.ts', root).href + suffix
 );
+const { Engine } = await import(new URL('src/core/engine.ts', root).href + suffix);
 const group = '1b951e45-19d6-4890-93f7-7e5d90962624';
 const at = 1_750_000_000_000;
 const NativeDate = Date;
@@ -108,8 +109,45 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       return Response.json({ ok: true, result: { message_id: 101 } });
     });
     const bot = new Telegram({ store }, api, 'offline_fixture');
-    // The workspace only reads this session; no workers or real provider run.
-    bot.configure({ daddy: { engine: { store }, group: () => store.getGroup(group) } });
+    // The task path writes through the released Engine without starting workers
+    // or asking a repository provider to describe a working copy.
+    const engine =
+      scenario === 'task'
+        ? new Engine(store, () => {
+            throw new Error('Offline fixture');
+          })
+        : { store };
+    if (scenario === 'task')
+      store.saveGroup({
+        ...store.getGroup(group),
+        generation: 1,
+        daddyState: 'active',
+        daddy: engine.defaultAgents().daddy,
+      });
+    const createTask = (_groupId, input) =>
+      engine.createTicket({
+        id: '9f8677ba-776e-4a81-ba88-364099269ea4',
+        groupId: group,
+        groupGeneration: 1,
+        createdByAction: input.requestId,
+        repoPath: directory,
+        repository: { baseHead: 'a'.repeat(40) },
+        startImplementation: true,
+        ref: {
+          kind: 'ticket',
+          provider: 'github',
+          host: 'github.com',
+          repo: 'fixture/offline',
+          number: 0,
+        },
+        source: {
+          kind: 'local',
+          title: input.requirements,
+          body: input.requirements,
+          url: 'https://github.com/fixture/offline',
+        },
+      });
+    bot.configure({ daddy: { engine, group: () => store.getGroup(group), createTask } });
     const reply = async (id, text, phase) => {
       store.db.prepare('INSERT INTO messages VALUES(?,?,?)').run(
         id,
@@ -128,21 +166,29 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       bot.workspace.onEvent(event);
       await bot.workspace.pending;
     };
+    let nextUpdate = 17;
     const menu = async () => {
       const chat = { id: topic.chatId, type: 'supergroup' };
       const from = { id: 7, first_name: 'Owner' };
-      const message = { message_id: 15, chat, message_thread_id: topic.threadId };
+      const update_id = nextUpdate++;
+      const message = { message_id: update_id - 2, chat, message_thread_id: topic.threadId };
+      const command =
+        scenario === 'text language'
+          ? '/language ru'
+          : scenario === 'task'
+            ? '/task Legacy task'
+            : '/status';
       await bot.handle(
-        scenario === 'language'
+        scenario === 'language' || scenario === 'two languages'
           ? {
-              update_id: 17,
-              callback_query: { id: 'language-dialog', data: 'language:ru', from, message },
+              update_id,
+              callback_query: { id: 'language-' + update_id, data: 'language:ru', from, message },
             }
-          : { update_id: 17, message: { ...message, from, text: '/status' } },
+          : { update_id, message: { ...message, from, text: command } },
       );
       // Same persisted cursor write as the released getUpdates loop.
       store.transaction(() => {
-        store.setSetting('telegram.offset', 18);
+        store.setSetting('telegram.offset', nextUpdate);
         store.setSetting('telegram.offsetAt', Date.now());
       });
     };
@@ -166,7 +212,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
         clock += gap;
       }
       await reply('B', 'Reply B', 'final');
-      if (!menuFirst) {
+      if (!menuFirst || scenario === 'two languages') {
         clock += gap;
         await menu();
       }
@@ -194,11 +240,15 @@ async function replay(path, acknowledgedReply) {
         if (body.chat_id === -10042 && method === 'sendMessage')
           actions.push(
             /Reply ([ABC])$/.exec(body.text)?.[1] ??
-              (body.reply_markup?.inline_keyboard?.[0]?.some(({ callback_data }) =>
-                callback_data?.startsWith('language:'),
-              )
-                ? 'language:ru'
-                : '/status'),
+              (body.text.includes('Legacy task')
+                ? '/task'
+                : body.text === 'Язык изменён.'
+                  ? '/language'
+                  : body.reply_markup?.inline_keyboard?.[0]?.some(({ callback_data }) =>
+                        callback_data?.startsWith('language:'),
+                      )
+                    ? 'language:ru'
+                    : '/status'),
           );
         return { message_id: 102 + actions.length };
       },
@@ -278,6 +328,24 @@ try {
   assert.deepEqual(await replay(languageFirst), ['language:ru', 'B']);
   clock = at + 1;
   assert.deepEqual(await replay(bFirst), ['B', 'language:ru']);
+  const twoMenus = join(directory, 'two-languages.sqlite');
+  await run(twoMenus, true, 0, 'two languages');
+  assert.deepEqual(await replay(twoMenus), ['language:ru', 'B', 'language:ru']);
+  for (const [scenario, label] of [
+    ['text language', '/language'],
+    ['task', '/task'],
+  ]) {
+    for (const menuFirst of [true, false]) {
+      const path = join(directory, scenario + '-' + menuFirst + '.sqlite');
+      const legacy = await run(path, menuFirst, 0, scenario);
+      const event = scenario === 'task' ? 'ticket.imported' : 'preferences.changed';
+      const eventSlot = legacy.events.findIndex(({ type }) => type === event);
+      const replySlot = legacy.events.findLastIndex(({ type }) => type === 'daddy.message');
+      assert.ok(eventSlot >= 0 && replySlot >= 0);
+      assert.equal(eventSlot < replySlot, menuFirst);
+      assert.deepEqual(await replay(path), menuFirst ? [label, 'B'] : ['B', label]);
+    }
+  }
   const third = join(directory, 'c-then-menu.sqlite');
   await run(third, false, 0, 'third');
   assert.deepEqual(await replay(third), ['C', '/status']);
@@ -320,6 +388,15 @@ try {
           ['B', 'language:ru'],
         ],
         attemptedThirdReplay: ['C', '/status'],
+        repeatedLanguageReplay: ['language:ru', 'B', 'language:ru'],
+        textLanguageReplay: [
+          ['/language', 'B'],
+          ['B', '/language'],
+        ],
+        taskReplay: [
+          ['/task', 'B'],
+          ['B', '/task'],
+        ],
         duplicateReplay: [
           ['A', 'C'],
           ['A', 'A', 'C'],

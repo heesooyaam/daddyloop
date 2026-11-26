@@ -120,6 +120,8 @@ function queueStatus(item: TaskActivity) {
   const label = activityStatus(item);
   if (label === 'Task discussion in progress') return { label };
   const detail = queueDetail(task);
+  if (label === 'Waiting for daddy’s decision' || label === 'Waiting for your answer')
+    return { label, detail };
   if (mergeStatus) {
     if (label.startsWith(mergeabilityStatus + ' · ')) return { label, detail };
     if (label.startsWith('Waiting for GitHub API quota until '))
@@ -133,7 +135,6 @@ function queueStatus(item: TaskActivity) {
   }
   if (task.state === 'needs_input') {
     if (label === 'Checking the GitHub draft') return { label };
-    if (label === 'Waiting for your answer') return { label, detail };
     return { label: 'Action needed', detail: label === 'Action needed' ? detail : label };
   }
   if (task.state === 'paused') return { label: 'Paused' };

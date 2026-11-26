@@ -31,7 +31,7 @@ import {
 } from './daddy-cards.js';
 import { TelegramProgress } from './telegram-progress.js';
 import { translator, type Locale } from '../i18n/index.js';
-import { notificationPreferences } from './notifications.js';
+import { notificationPreferences, setNotificationMode } from './notifications.js';
 import type { Workspace } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
 import type { UsageBackend, ResetPlan } from '../core/usage.js';
@@ -67,6 +67,14 @@ import {
 type Pair = { chatId: number; userId: number; ownerLabel?: string };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
+type GroupSelection = {
+  requestId: number;
+  chatId: number;
+  ownerId: number;
+  ownerChatId: number;
+  result?: { room: Room } | { error: string };
+};
+const selectionKey = 'telegram.pendingGroupSelection';
 type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
@@ -159,14 +167,17 @@ export class TelegramWorkspace {
       resources,
     );
   }
+  private groupSelection?: { controller: AbortController; running: Promise<void> };
   start() {
     this.voice?.start();
+    void this.resumeGroupSelection();
     this.replay();
     this.remindOwners();
     this.reminderTimer = setInterval(() => this.remindOwners(), 60000);
     this.reminderTimer.unref();
     this.progress.start();
     this.retryTimer = setInterval(() => {
+      void this.resumeGroupSelection();
       for (const row of this.store.db
         .prepare("SELECT key,value FROM settings WHERE key LIKE 'telegram.eventRetry:%'")
         .all()) {
@@ -432,32 +443,85 @@ export class TelegramWorkspace {
       },
     });
   }
+  private currentSelection(selection: GroupSelection) {
+    const current = this.store.setting<GroupSelection | null>(selectionKey);
+    const pair = this.pair();
+    return (
+      current?.requestId === selection.requestId &&
+      current.chatId === selection.chatId &&
+      pair?.userId === selection.ownerId &&
+      pair.chatId === selection.ownerChatId
+    );
+  }
+  private selectionRequest(selection: GroupSelection) {
+    const request = this.store.setting<{ id: number; userId: number; expiresAt: string }>(
+      'telegram.workspaceRequest',
+    );
+    if (request?.id === selection.requestId && request.userId === selection.ownerId) return request;
+  }
   private async bind(shared: NonNullable<NonNullable<Update['message']>['chat_shared']>) {
-    const pair = this.pair()!,
-      request = this.store.setting<{ id: number; userId: number; expiresAt: string }>(
-        'telegram.workspaceRequest',
-      );
-    if (
-      !request ||
-      request.id !== shared.request_id ||
-      request.userId !== pair.userId ||
-      request.expiresAt <= now()
-    )
-      throw new Error(this.t('Group selection expired. Send /group again.'));
+    const pair = this.pair()!;
+    const selection: GroupSelection = {
+      requestId: shared.request_id,
+      chatId: shared.chat_id,
+      ownerId: pair.userId,
+      ownerChatId: pair.chatId,
+    };
+    const accept = () => {
+      const request = this.selectionRequest(selection);
+      if (!request || request.expiresAt <= now())
+        throw new Error(this.t('Group selection expired. Send /group again.'));
+      this.store.setSetting(selectionKey, selection);
+      return true;
+    };
+    this.api.applyUpdateEffect?.(this.store, 'group-selection', accept) ?? accept();
+    const running = this.resumeGroupSelection();
+    if (!this.api.delivery?.drainingInBackground) await running;
+  }
+  private resumeGroupSelection() {
+    if (this.stopped || this.groupSelection) return this.groupSelection?.running;
+    const selection = this.store.setting<GroupSelection | null>(selectionKey);
+    if (!selection) return;
+    const controller = new AbortController();
+    const running = this.finishGroupSelection(selection, controller.signal)
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          this.store.setSetting('telegram.error', redact(String(error)));
+      })
+      .finally(() => {
+        this.groupSelection = undefined;
+      });
+    this.groupSelection = { controller, running };
+    return running;
+  }
+  private async validateGroupSelection(
+    selection: GroupSelection,
+    signal: AbortSignal,
+  ): Promise<Room> {
     const botId = this.store.setting<number>('telegram.botId');
     if (!botId) throw new Error('Bot identity is unavailable');
     const [chat, user, bot] = await Promise.all([
-      this.api.call<{ type: string; is_forum?: boolean; title: string }>('getChat', {
-        chat_id: shared.chat_id,
-      }),
-      this.api.call<{ status: string; can_manage_topics?: boolean }>('getChatMember', {
-        chat_id: shared.chat_id,
-        user_id: pair.userId,
-      }),
-      this.api.call<{ status: string; can_manage_topics?: boolean }>('getChatMember', {
-        chat_id: shared.chat_id,
-        user_id: botId,
-      }),
+      this.api.call<{ type: string; is_forum?: boolean; title: string }>(
+        'getChat',
+        { chat_id: selection.chatId },
+        signal,
+      ),
+      this.api.call<{ status: string; can_manage_topics?: boolean }>(
+        'getChatMember',
+        {
+          chat_id: selection.chatId,
+          user_id: selection.ownerId,
+        },
+        signal,
+      ),
+      this.api.call<{ status: string; can_manage_topics?: boolean }>(
+        'getChatMember',
+        {
+          chat_id: selection.chatId,
+          user_id: botId,
+        },
+        signal,
+      ),
     ]);
     if (
       chat.type !== 'supergroup' ||
@@ -471,23 +535,71 @@ export class TelegramWorkspace {
           'Enable Topics and make the bot an administrator with Manage Topics permission, then select the group again.',
         ),
       );
-    if (
-      this.pair()?.userId !== pair.userId ||
-      this.store.setting<{ id: number }>('telegram.workspaceRequest')?.id !== request.id
-    )
-      throw new Error(this.t('Group selection expired. Send /group again.'));
-    const room: Room = { chatId: shared.chat_id, title: chat.title, ownerId: pair.userId };
-    this.store.transaction(() => {
-      this.store.setSetting('telegram.group', room);
-      this.store.setSetting('telegram.workspaceRequest', null);
-    });
-    await this.api.call('sendMessage', {
-      chat_id: pair.chatId,
-      text: this.t('Workspace connected: {name}', { name: room.title }),
-      reply_markup: { remove_keyboard: true },
-    });
-    await this.api.send(pair.chatId, daddyHome(this.locale(), this.daddy.sessions()));
-    this.replay();
+    return { chatId: selection.chatId, title: chat.title, ownerId: selection.ownerId };
+  }
+  private async finishGroupSelection(selection: GroupSelection, signal: AbortSignal) {
+    if (!this.currentSelection(selection)) {
+      this.store.setSetting(selectionKey, null);
+      return;
+    }
+    let result = selection.result;
+    if (!result) {
+      try {
+        // Acceptance already checked the deadline. A restart or a slow
+        // permission check can outlive it, but a replacement still wins.
+        if (!this.selectionRequest(selection))
+          throw new Error(this.t('Group selection expired. Send /group again.'));
+        const room = await this.validateGroupSelection(selection, signal);
+        if (signal.aborted || !this.currentSelection(selection)) return;
+        if (!this.selectionRequest(selection))
+          throw new Error(this.t('Group selection expired. Send /group again.'));
+        result = { room };
+      } catch (error) {
+        if (signal.aborted || !this.currentSelection(selection)) return;
+        result = { error: redact((error as Error).message) };
+      }
+      const validated = result;
+      this.store.transaction(() => {
+        if ('room' in validated) {
+          this.store.setSetting('telegram.group', validated.room);
+          this.store.setSetting('telegram.workspaceRequest', null);
+        }
+        this.store.setSetting(selectionKey, { ...selection, result: validated });
+      });
+    }
+    const key = `group-selection:${selection.ownerId}:${selection.requestId}`;
+    if ('room' in result) {
+      if (this.room()?.chatId === result.room.chatId) {
+        await this.api.send(
+          selection.ownerChatId,
+          {
+            ...new TelegramText().add(
+              this.t('Workspace connected: {name}', { name: result.room.title }),
+            ),
+            removeKeyboard: true,
+          },
+          undefined,
+          { key: key + ':connected' },
+        );
+        await this.api.send(
+          selection.ownerChatId,
+          daddyHome(this.locale(), this.daddy.sessions()),
+          undefined,
+          { key: key + ':home' },
+        );
+        this.replay();
+      }
+    } else {
+      await this.api.send(
+        selection.ownerChatId,
+        new TelegramText()
+          .add('⚠️ ' + this.t('Could not complete the action'), 'bold')
+          .add('\n\n' + result.error),
+        undefined,
+        { key: key + ':error' },
+      );
+    }
+    if (this.currentSelection(selection)) this.store.setSetting(selectionKey, null);
   }
   private authorize(destination: Destination, groupId: string) {
     const pair = this.pair();
@@ -1176,15 +1288,11 @@ export class TelegramWorkspace {
     }
     const notification = data.match(/^notifications:(show|on|off|all)$/);
     if (notification) {
-      const before = notificationPreferences(this.store);
+      const apply = () => setNotificationMode(this.store, notification[1] as 'on' | 'off' | 'all');
       const value =
         notification[1] === 'show'
-          ? before
-          : {
-              enabled: notification[1] !== 'off',
-              mode: notification[1] === 'all' ? ('all' as const) : ('attention' as const),
-            };
-      if (notification[1] !== 'show') this.store.setSetting('notifications.telegram', value);
+          ? notificationPreferences(this.store)
+          : (this.api.applyUpdateEffect?.(this.store, 'notifications', apply) ?? apply());
       await this.api.send(destination, notificationsCard(value, this.locale()));
       return true;
     }
@@ -1776,8 +1884,10 @@ export class TelegramWorkspace {
         await this.api.send(destination, translator(locale)('Language updated.'));
         return true;
       }
-      if (text === '/notifications') {
-        await respond(() => this.callback('notifications:show', destination));
+      const notification = /^\/notifications(?:\s+(on|off|all))?$/.exec(text);
+      if (notification) {
+        if (notification[1]) await this.callback(`notifications:${notification[1]}`, destination);
+        else await respond(() => this.callback('notifications:show', destination));
         return true;
       }
       if (/^\/cleanup(?:\s|$)/.test(text) && !privateChat) {
@@ -2455,7 +2565,8 @@ export class TelegramWorkspace {
         const dialog = !reminder && message?.sender === 'agent' ? message : undefined;
         if (!dialog && mention) text.append(mention);
         if (task) {
-          const worker = task.inputRequest?.role === 'author';
+          const worker =
+            task.inputRequest?.role === 'author' && task.inputRequest.reviewDispute !== 'owner';
           text
             .add(worker ? this.t('Worker') : 'daddy', 'bold')
             .add(' · ')
@@ -2562,6 +2673,8 @@ export class TelegramWorkspace {
   }
   async stop() {
     this.stopped = true;
+    this.groupSelection?.controller.abort();
+    await this.groupSelection?.running;
     clearInterval(this.retryTimer);
     clearInterval(this.reminderTimer);
     await this.progress.stop();

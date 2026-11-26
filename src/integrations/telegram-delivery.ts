@@ -8,6 +8,7 @@ import type { Message, ReviewGroup } from '../core/types.js';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
 import { clipTitle } from '../core/session-title.js';
+import { translator } from '../i18n/index.js';
 import { languageCard } from './telegram-meta.js';
 import {
   TelegramText,
@@ -89,7 +90,10 @@ const partBody = (
   link_preview_options: { is_disabled: true },
   reply_markup:
     index === chunks.length - 1
-      ? (content.replyKeyboard ?? { inline_keyboard: content.buttons ?? [] })
+      ? (content.replyKeyboard ??
+        (content.removeKeyboard
+          ? { remove_keyboard: true }
+          : { inline_keyboard: content.buttons ?? [] }))
       : { inline_keyboard: [] },
 });
 
@@ -404,7 +408,8 @@ export class TelegramDelivery {
     let later = Infinity;
     for (const row of tied) {
       const menu = JSON.parse(String(row.value)) as Delivery;
-      const event = replyEvent?.id != null ? this.legacyLanguageEvent(menu) : undefined;
+      const event =
+        replyEvent?.id != null ? this.legacyMenuEvent(menu, Number(row.position)) : undefined;
       const precedes =
         event !== undefined ? event < Number(replyEvent!.id) : !attempted || menu.attempts > 0;
       if (precedes) earlier = Math.max(earlier, Number(row.position));
@@ -413,32 +418,45 @@ export class TelegramDelivery {
     earlier = Math.min(earlier, later - 1);
     return { createdAt, queuePosition: earlier + index / (index + 1) };
   }
-  private legacyLanguageEvent(menu: Delivery): number | undefined {
-    if (menu.options.key || !menu.options.deletePrevious) return;
-    const locale = (['ru', 'en'] as const).find(
-      (locale) => digest(menu.content) === digest(languageCard(locale)),
-    );
+  private legacyMenuEvent(menu: Delivery, position: number): number | undefined {
+    if (menu.options.key?.startsWith('telegram:task:')) {
+      const event = this.store.db
+        .prepare(
+          `SELECT MIN(e.id) AS id FROM tasks t JOIN events e ON e.task_id=t.id
+         WHERE json_extract(t.data,'$.createdByAction')=? AND e.type='ticket.imported'`,
+        )
+        .get(menu.options.key);
+      if (event?.id != null) return Number(event.id);
+      return;
+    }
+    const localeOf = ({ content, options }: Delivery) =>
+      (['ru', 'en'] as const).find(
+        (locale) =>
+          !options.key &&
+          ((options.deletePrevious && digest(content) === digest(languageCard(locale))) ||
+            (!options.deletePrevious && content.text === translator(locale)('Language updated.'))),
+      );
+    const locale = localeOf(menu);
     if (!locale) return;
-    // Match only a unique card and a unique compatible event. If the old
-    // records cannot establish the pairing, keep the recorded menu slot.
+    // The old poll processed selections sequentially. Within each locale
+    // and millisecond, only pair cards with events if the counts match.
     const cards = this.store.db
       .prepare(
-        `SELECT count(*) AS n FROM settings WHERE key GLOB 'telegram.delivery:*'
-       AND json_extract(value,'$.bot')=?
-       AND json_extract(value,'$.createdAt')=?
-       AND json_extract(value,'$.options.key') IS NULL
-       AND json_extract(value,'$.options.deletePrevious') IS NOT NULL
-       AND json_extract(value,'$.content')=?`,
+        `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+       AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
+       AND json_extract(value,'$.createdAt')=? ORDER BY rowid`,
       )
-      .get(this.bot, menu.createdAt, JSON.stringify(menu.content));
-    if (Number(cards?.n) !== 1) return;
+      .all(this.bot, menu.ownerId ?? null, menu.createdAt)
+      .filter((row) => localeOf(JSON.parse(String(row.value))) === locale);
     const events = this.store.db
       .prepare(
         `SELECT id FROM events WHERE type='preferences.changed' AND task_id='_system'
-       AND at=? AND json_extract(data,'$.locale')=?`,
+       AND at=? AND json_extract(data,'$.locale')=? ORDER BY id`,
       )
       .all(new Date(menu.createdAt).toISOString(), locale);
-    if (events.length === 1) return Number(events[0].id);
+    if (cards.length !== events.length) return;
+    const index = cards.findIndex((card) => Number(card.position) === position);
+    if (index >= 0) return Number(events[index].id);
   }
   private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
     const { chatId, threadId } = value.destination;
@@ -610,8 +628,33 @@ export class TelegramDelivery {
     if (['queued', 'sending'].includes(value.status)) this.pending.set(key, value);
     else this.pending.delete(key);
   }
+  private pickerRequest(value: Delivery) {
+    const keyboard = (value.content as TelegramCard).replyKeyboard;
+    if (!keyboard) return;
+    const requestId = keyboard.keyboard[0]?.[0]?.request_chat.request_id;
+    const current = this.store.setting<{ id: number; userId: number; expiresAt: string }>(
+      'telegram.workspaceRequest',
+    );
+    if (current?.id === requestId && current?.userId === value.ownerId) return current;
+  }
   private valid(value: Delivery) {
+    if ((value.content as TelegramCard).replyKeyboard && !this.pickerRequest(value)) return false;
     if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
+    // Older queued first mentions have only their notification key. Check it again on delivery or replay.
+    const taskQuestion = value.options.key?.match(
+      /^telegram:question:(\d+):([^:]+):(.+?)(?::reminder:\d+)?$/,
+    );
+    if (taskQuestion && !value.options.reminder) {
+      const [, ownerId, taskId, request] = taskQuestion;
+      const groupId =
+        value.options.groupId ?? this.store.tasks().find((task) => task.id === taskId)?.groupId;
+      if (
+        Number(ownerId) !== value.ownerId ||
+        !groupId ||
+        !reminderOpen(this.store, { groupId, taskId, request })
+      )
+        return false;
+    }
     const pair = this.store.setting<Pairing>('telegram.pairing');
     const room = this.store.setting<Room>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
@@ -877,6 +920,14 @@ export class TelegramDelivery {
     const revision = value.revision,
       original = this.currentChildCard(value),
       options = { ...value.options };
+    const picker = this.pickerRequest(value);
+    if (picker) {
+      // A queued picker receives a full validity window at delivery time.
+      const expiresAt = new Date(
+        Math.max(Date.parse(picker.expiresAt), this.clock() + 10 * 60000),
+      ).toISOString();
+      this.store.setSetting('telegram.workspaceRequest', { ...picker, expiresAt });
+    }
     value.status = 'sending';
     this.save(key, value);
     this.controller = new AbortController();

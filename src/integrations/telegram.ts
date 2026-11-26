@@ -9,7 +9,7 @@ import type { Store } from '../core/store.js';
 import type { Engine } from '../core/engine.js';
 import { AppError, now, type Event } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
-import { notificationPreferences } from './notifications.js';
+import { notificationPreferences, setNotificationMode } from './notifications.js';
 import {
   splitTelegramText,
   TelegramText,
@@ -417,8 +417,12 @@ export class TelegramApi {
         text: chunk.text,
         ...(chunk.entities.length ? { entities: chunk.entities } : {}),
         link_preview_options: { is_disabled: true },
-        ...(i === chunks.length - 1 && (card.replyKeyboard || keyboard)
-          ? { reply_markup: card.replyKeyboard ?? { inline_keyboard: keyboard } }
+        ...(i === chunks.length - 1 && (card.replyKeyboard || card.removeKeyboard || keyboard)
+          ? {
+              reply_markup:
+                card.replyKeyboard ??
+                (card.removeKeyboard ? { remove_keyboard: true } : { inline_keyboard: keyboard }),
+            }
           : {}),
       });
     }
@@ -644,16 +648,13 @@ export class Telegram {
         return;
       }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
-        const mode = text.split(/\s+/)[1];
-        if (mode)
-          store.setSetting('notifications.telegram', {
-            enabled: mode !== 'off',
-            mode: mode === 'all' ? 'all' : 'attention',
-          });
-        await this.api.send(
-          chat.id,
-          notificationsCard(notificationPreferences(store), this.locale()),
-        );
+        const mode = text.split(/\s+/)[1] as 'on' | 'off' | 'all' | undefined;
+        const value = mode
+          ? this.api.applyUpdateEffect(store, 'notifications', () =>
+              setNotificationMode(store, mode),
+            )
+          : notificationPreferences(store);
+        await this.api.send(chat.id, notificationsCard(value, this.locale()));
         return;
       }
       if (text === '/web') {
@@ -744,15 +745,14 @@ export class Telegram {
 
     const prefs = data.match(/^notifications:(show|on|off|all)$/);
     if (prefs) {
-      if (prefs[1] !== 'show')
-        this.engine.store.setSetting('notifications.telegram', {
-          enabled: prefs[1] !== 'off',
-          mode: prefs[1] === 'all' ? 'all' : 'attention',
-        });
-      await this.api.send(
-        chatId,
-        notificationsCard(notificationPreferences(this.engine.store), this.locale()),
-      );
+      const store = this.engine.store;
+      const value =
+        prefs[1] === 'show'
+          ? notificationPreferences(store)
+          : this.api.applyUpdateEffect(store, 'notifications', () =>
+              setNotificationMode(store, prefs[1] as 'on' | 'off' | 'all'),
+            );
+      await this.api.send(chatId, notificationsCard(value, this.locale()));
       return true;
     }
     return false;

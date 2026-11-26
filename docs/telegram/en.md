@@ -34,7 +34,7 @@ The bot posts the status card at the start of a new topic and pins it without re
 
 ## A topic per daddy session
 
-Create a Telegram **supergroup with Topics enabled**, add the bot as administrator, and grant **Manage Topics**. Grant **Pin Messages** to let the bot pin the status card. In the private bot chat send `/group` and select the group using Telegram's picker. The service verifies your membership and the bot's rights. Telegram requires you to create or join the group yourself.
+Create a Telegram **supergroup with Topics enabled**, add the bot as administrator, and grant **Manage Topics**. Grant **Pin Messages** to let the bot pin the status card. In the private bot chat send `/group` and select the group using Telegram's picker. The service verifies your membership and the bot's rights. The latest picker is valid for ten minutes from sending. Messages can still be accepted while the permissions check runs. Telegram requires you to create or join the group yourself.
 
 Each daddy session gets a topic. Send goals and tickets there. Workers report to daddy. `/new Another job` inside a topic starts a separate session and topic. If topic creation had an uncertain result, follow the bot's `/attach` instructions.
 

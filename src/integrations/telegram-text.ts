@@ -29,6 +29,7 @@ export interface TelegramReplyKeyboard {
 export interface TelegramCard extends FormattedText {
   buttons?: TelegramButton[][];
   replyKeyboard?: TelegramReplyKeyboard;
+  removeKeyboard?: boolean;
 }
 
 export function safeLink(value: string) {
