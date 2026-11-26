@@ -197,7 +197,7 @@ export class ArcadiaProvider implements ReviewProvider {
     const owned = (note: Note) => !note.deleted_at && note.author?.name === review.authorId;
     const summary = general.find((n) => owned(n) && n.content.includes(tag(review.marker)));
     const publishedEvidence = options?.publishedEvidence && summary && !summary.is_draft;
-    const known = publishedEvidence ? new Set(options.knownCommentIds) : undefined;
+    const known = summary && !summary.is_draft ? new Set(options?.knownCommentIds) : undefined;
     const findings = (items: Note[], kind: 'pr' | 'diff') =>
       items.filter(
         (n) =>

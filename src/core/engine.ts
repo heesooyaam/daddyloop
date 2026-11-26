@@ -369,7 +369,8 @@ export class Engine {
       }
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
-        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+        const snapshot = await this.readReviewForReconciliation(task);
+        if (!snapshot) return task;
         if (snapshot.status === 'published') this.setFeedback(task, snapshot);
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
@@ -1845,7 +1846,8 @@ export class Engine {
       this.store.saveTask(task);
       return task;
     }
-    const snapshot = await provider.getReview(prRef(task), task.review);
+    const snapshot = await this.readReviewForReconciliation(task);
+    if (!snapshot) return task;
     if (task.snapshot && JSON.stringify(task.snapshot) !== JSON.stringify(snapshot))
       this.store.event(id, 'review.changed', {
         previous: task.snapshot,
@@ -2386,6 +2388,14 @@ export class Engine {
       );
     else this.queuePublishedFix(task, 'Author is addressing the published review');
   }
+  private async readReviewForReconciliation(task: Task) {
+    try {
+      return await this.broker.readCurrentReview(task);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'feedback_unconfirmed') throw error;
+      this.state(task, 'needs_input', error.message);
+    }
+  }
   private async advancePublishedReview(task: Task, pr: PullRequest, publication?: ReviewSnapshot) {
     if (
       task.state !== 'awaiting_publication' ||
@@ -2395,8 +2405,8 @@ export class Engine {
       this.store.busy(task.id)
     )
       return false;
-    const snapshot =
-      publication ?? (await this.provider(prRef(task)).getReview(prRef(task), task.review));
+    const snapshot = publication ?? (await this.readReviewForReconciliation(task));
+    if (!snapshot) return true;
     if (snapshot.status !== 'published') return false;
     if (!task.reviewFinished) {
       this.state(
@@ -2644,6 +2654,16 @@ export class Engine {
         return await this.reconcileLocked(id, publication);
       } catch (error) {
         const current = this.store.getTask(id);
+        if (
+          error instanceof AppError &&
+          error.code === 'feedback_unconfirmed' &&
+          current.generation === task.generation &&
+          current.state === 'awaiting_publication' &&
+          current.review?.id === task.review?.id
+        ) {
+          this.state(current, 'needs_input', error.message);
+          return current;
+        }
         if (
           error instanceof AppError &&
           error.code === 'stale_revision' &&
@@ -3302,7 +3322,12 @@ export class Engine {
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
-          task.snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          const snapshot =
+            task.state === 'awaiting_publication'
+              ? await this.readReviewForReconciliation(task)
+              : await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          if (!snapshot) return;
+          task.snapshot = snapshot;
           task.summary = result.summary;
         }
         this.store.saveTask(task);

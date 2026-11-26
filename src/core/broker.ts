@@ -8,6 +8,7 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type ReviewComment,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
@@ -279,7 +280,10 @@ export class Broker {
     const provider = this.provider(prRef(task));
     if (!task.review)
       throw new AppError('review_missing', 'No native review is attached to this task');
-    const snapshot = await provider.getReview(prRef(task), task.review);
+    const snapshot =
+      job.role === 'author' && tool === 'read_review'
+        ? await this.readCurrentReview(task)
+        : await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
       if (job.role === 'author' && snapshot.status !== 'published')
@@ -478,6 +482,91 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
+  async readCurrentReview(task: Task): Promise<ReviewSnapshot> {
+    const handle = task.review;
+    if (!handle) throw new AppError('review_missing', 'No native review to read');
+    const ref = prRef(task);
+    const provider = this.provider(ref);
+    if (ref.provider !== 'gitlab' && ref.provider !== 'arcadia')
+      return provider.getReview(ref, handle);
+
+    // A snapshot is evidence only for its own review and revision.
+    const snapshots = [
+      task.snapshot,
+      task.feedbackReview?.id === handle.id ? task.feedback : undefined,
+    ].filter(
+      (snapshot): snapshot is ReviewSnapshot =>
+        !!snapshot &&
+        sameRevision(snapshot.revision, handle.revision) &&
+        (snapshot.status === 'draft' || snapshot.status === 'published'),
+    );
+    const hasPublishedSnapshot = snapshots.some((snapshot) => snapshot.status === 'published');
+    const nativeIds = new Set<string>();
+    const draftNotes = new Map<string, ReviewComment>();
+    for (const snapshot of snapshots) {
+      for (const comment of snapshot.comments) {
+        // A confirmed publication supersedes its draft, whose IDs can differ.
+        if (snapshot.status === 'published') nativeIds.add(comment.id);
+        else if (!hasPublishedSnapshot) draftNotes.set(comment.id, comment);
+      }
+    }
+    const requestedIds =
+      ref.provider === 'arcadia' ? [...nativeIds, ...draftNotes.keys()] : [...nativeIds];
+    const native = await provider.getReview(ref, handle, { knownCommentIds: requestedIds });
+    const hold = () => {
+      throw new AppError(
+        'feedback_unconfirmed',
+        'Could not account for the recorded findings in the native review. Inspect the preserved snapshot before continuing.',
+      );
+    };
+    if (native.status === 'partial' || native.status === 'missing') {
+      if (nativeIds.size || draftNotes.size) hold();
+      return native;
+    }
+    if (draftNotes.size) {
+      // A confirmed deletion through the review tool is durable even if the
+      // application stops before it refreshes the saved draft.
+      const removed = this.store.db
+        .prepare(
+          `SELECT json_extract(result,'$.id') AS comment_id FROM operations
+          WHERE task_id=? AND id GLOB ? AND status='done'`,
+        )
+        .all(task.id, handle.marker + ':*:remove_comment:*');
+      for (const row of removed)
+        if (typeof row.comment_id === 'string') draftNotes.delete(row.comment_id);
+    }
+    const ids = new Set(native.comments.map((comment) => comment.id));
+    if (native.status === 'draft') {
+      if (hasPublishedSnapshot || [...draftNotes.keys()].some((id) => !ids.has(id))) hold();
+      return native;
+    }
+    if (
+      !sameRevision(native.revision, handle.revision) ||
+      (!snapshots.length && (task.state === 'awaiting_publication' || task.state === 'fixing')) ||
+      [...nativeIds].some((id) => !ids.has(id))
+    )
+      hold();
+
+    // GitLab allocates a new ID on publication. Arcanum can also return a
+    // different ID for a draft; an intact marker proves that correspondence.
+    const marker = (comment: ReviewComment) =>
+      comment.body
+        .match(/<!-- ([^\s]+:comment:[a-zA-Z0-9_-]+) -->/g)
+        ?.find((tag) => tag.startsWith(`<!-- ${handle.marker}:comment:`));
+    const matched = new Set<string>();
+    for (const draft of draftNotes.values()) {
+      const key = marker(draft);
+      const candidates = native.comments.filter(
+        (note) =>
+          (ref.provider === 'arcadia' && note.id === draft.id) ||
+          (key !== undefined && marker(note) === key),
+      );
+      if (candidates.length !== 1 || matched.has(candidates[0].id)) hold();
+      matched.add(candidates[0].id);
+    }
+    return native;
+  }
+
   async publish(
     task: Task,
     verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
@@ -498,7 +587,7 @@ export class Broker {
           'stale_revision',
           'PR revision changed. This review cannot release feedback for the new revision.',
         );
-      const draft = await provider.getReview(ref, handle);
+      const draft = await this.readCurrentReview(task);
       if (verifyFindings) await verifyFindings(pr, draft);
       return draft;
     };
@@ -570,6 +659,6 @@ export class Broker {
         return { found: true, value: await send() };
       },
     );
-    return provider.getReview(prRef(task), task.review);
+    return this.readCurrentReview(task);
   }
 }

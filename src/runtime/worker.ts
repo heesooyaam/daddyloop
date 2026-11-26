@@ -743,7 +743,7 @@ export class Worker {
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
       } else if (job.kind === 'fix') {
-        const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
+        const actual = await this.engine.broker.readCurrentReview(task);
         if (actual.status !== 'published')
           throw new Error(
             'The published review changed before the author started; feedback was not released.',

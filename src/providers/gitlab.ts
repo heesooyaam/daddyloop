@@ -196,7 +196,7 @@ export class GitLabProvider implements ReviewProvider {
     const draft = drafts.find(isSummary);
     const summary = draft ?? notes.find((n) => isSummary(n) && ownAuthor(n));
     const publishedEvidence = options?.publishedEvidence && summary && !draft;
-    const known = publishedEvidence ? new Set(options.knownCommentIds) : undefined;
+    const known = summary && !draft ? new Set(options?.knownCommentIds) : undefined;
     const draftComments = drafts.filter(isComment);
     // GitLab allocates draft and published IDs separately.
     const published = notes.filter(
@@ -212,7 +212,8 @@ export class GitLabProvider implements ReviewProvider {
             !n.system &&
             n.id > (review.baselineNoteId ?? Infinity) &&
             !isSummary(n) &&
-            !isComment(n),
+            !isComment(n) &&
+            !known?.has(String(n.id)),
         ));
     return {
       status:

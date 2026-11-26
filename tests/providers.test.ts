@@ -732,3 +732,156 @@ it.each(
     }
   },
 );
+
+it.each(
+  ['arcadia', 'gitlab'].flatMap((provider) =>
+    ['manual', 'manual via service', 'automatic', 'queued', 'incomplete read after queue'].map(
+      (phase) => ({
+        provider,
+        phase,
+      }),
+    ),
+  ),
+)(
+  'keeps native $provider findings through $phase publication reconciliation',
+  async ({ provider, phase }) => {
+    const f = await fixture({ state: 'awaiting_publication' });
+    const workspaces = new Workspaces('/tmp');
+    const task = f.store.getTask(f.task.id);
+    task.ref.provider = provider;
+    const arc = provider === 'arcadia';
+    const ref = prRef(task);
+    const handle: ReviewHandle = {
+      id: '10',
+      nodeId: '7',
+      authorId: arc ? 'worker' : '7',
+      marker: 'daddyloop:current',
+      baselineNoteId: 9,
+      revision: task.revision!,
+    };
+    task.review = handle;
+    task.reviewFinished = true;
+    let published = false;
+    let edited = false;
+    let incomplete = false;
+    let sends = 0;
+    const beforeConfirmation =
+      phase === 'manual' || phase === 'manual via service' || phase === 'automatic';
+    const markPublished = () => {
+      published = true;
+      if (beforeConfirmation) edited = true;
+    };
+    const markdown = ['Updated general Markdown', 'Updated inline\n\n```ts\ncheckAgain();\n```'];
+    const note = (index: number) => {
+      const id = (arc || published ? 10 : 50) + index;
+      const body =
+        index === 0
+          ? tag(handle.marker)
+          : edited
+            ? markdown[index - 1]
+            : 'Initial wording ' + tag(handle.marker + ':comment:' + index);
+      return {
+        id,
+        body,
+        content: body,
+        author: { id: 7, name: 'worker' },
+        is_draft: !published,
+        ...(index === 2 && {
+          position: { new_path: 'a.ts', new_line: 4 },
+          anchor: { path: 'a.ts', line: 4 },
+        }),
+      };
+    };
+    const http = transport((path, method) => {
+      if (method === 'PUT' && /draft_notes\/5[0-2]\/publish$/.test(path)) {
+        sends++;
+        if (path.endsWith('50/publish')) markPublished();
+        return {};
+      }
+      expect(method).toBe('GET');
+      if (path.includes('draft_notes') === published) return [];
+      return (incomplete ? [0, 1] : [0, 1, 2]).map(note);
+    });
+    const bridge = new ArcBridge();
+    vi.spyOn(bridge, 'api').mockImplementation(async <T>(args: string[]) => {
+      if (args[0] === 'draft-comment' && args[1] === 'publish') {
+        sends++;
+        expect(args).toContain('--comment-for-review-ids=10,11');
+        expect(args).toContain('--comment-for-diff-ids=12');
+        markPublished();
+        return {} as T;
+      }
+      expect(args[1]).toBe('comments');
+      return (args[0] === 'pr' ? [note(0), note(1)] : incomplete ? [] : [note(2)]) as T;
+    });
+    const native = arc
+      ? new ArcadiaProvider(bridge)
+      : new GitLabProvider('gitlab.example.com', 'fake', http);
+    task.snapshot = await native.getReview(ref, handle);
+    expect(task.snapshot.status).toBe('draft');
+    expect(task.snapshot.comments).toHaveLength(2);
+    f.store.saveTask(task);
+    vi.spyOn(f.provider, 'getReview').mockImplementation(native.getReview.bind(native));
+    vi.spyOn(f.provider, 'publish').mockImplementation(native.publish.bind(native));
+    vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const expected = markdown.map((body, i) => ({
+      body,
+      id: arc ? (i === 0 ? 'pr:11' : 'diff:12') : String(11 + i),
+    }));
+    const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+      expect(input.job.role).toBe('author');
+      expect(input.task.feedback?.comments).toMatchObject(expected);
+      expect(input.task.feedback?.comments[1].location).toMatchObject({ path: 'a.ts', line: 4 });
+      const tool = await input.onTool('read_review', {});
+      expect(tool).toMatchObject({ status: 'published', comments: expected });
+      return {
+        status: 'needs_input' as const,
+        summary: 'Author received the findings',
+        checkedHead: task.revision!.head,
+      };
+    });
+    const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
+      ok: true,
+      reasons: [],
+      diskAvailableGiB: 20,
+      diskUsedPercent: 20,
+      memoryAvailableGiB: 10,
+      memoryTotalGiB: 20,
+    }));
+    try {
+      if (phase === 'manual') {
+        markPublished();
+        await f.engine.reconcile(task.id);
+      } else if (phase === 'manual via service') {
+        await f.engine.publish(task.id, { generation: task.generation, head: task.revision!.head });
+        expect(sends).toBe(arc ? 1 : 3);
+      } else if (!beforeConfirmation) {
+        await f.engine.publish(task.id);
+        expect(f.store.getTask(task.id).state).toBe('fixing');
+        expect(f.store.getTask(task.id).feedback?.comments.map((c) => c.id)).toEqual(
+          expected.map((c) => c.id),
+        );
+        edited = true;
+        incomplete = phase === 'incomplete read after queue';
+      }
+      await worker.tick();
+      if ((!arc && beforeConfirmation) || incomplete) {
+        await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('needs_input'));
+        const stopped = f.store.getTask(task.id);
+        expect(stopped.reason).toContain('recorded findings');
+        expect(stopped.snapshot?.comments).toHaveLength(2);
+        expect(run).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() =>
+          expect(f.store.getTask(task.id).reason).toBe('Author received the findings'),
+        );
+        expect(run).toHaveBeenCalledOnce();
+        expect(f.store.getTask(task.id).feedback?.comments).toMatchObject(expected);
+      }
+      expect(sends).toBe(phase === 'manual' ? 0 : arc ? 1 : 3);
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
