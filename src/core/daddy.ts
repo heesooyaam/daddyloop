@@ -52,6 +52,7 @@ import {
   activityReason,
   activityStatus,
   outstandingActivity,
+  waitingForDaddy,
   taskActivity,
 } from './task-activity.js';
 import type { SessionWorkspaces } from '../runtime/session-workspaces.js';
@@ -514,6 +515,37 @@ export class Daddy {
     this.store.event(id, 'daddy.renamed', { title });
     return this.board(id);
   }
+  private queueDispute(group: ReviewGroup, task: Task) {
+    if (!waitingForDaddy(task)) return;
+    const runId = task.inputRequest!.runId;
+    const input = `Task ${task.id}: read the worker’s report and the disputed published findings. Use the accepted requirements to resolve the objection with message_worker and preserve independent review. If only the owner can decide, return needs_input with the concrete choice in question.`;
+    const existing = this.store
+      .daddyJobs(group.id)
+      .find(
+        (job) =>
+          job.generation === group.generation &&
+          job.waitingTaskId === task.id &&
+          ((job.disputeRunId === runId && ['queued', 'running'].includes(job.status)) ||
+            (!job.disputeRunId && job.trigger === 'worker' && job.status === 'queued')),
+      );
+    if (existing) {
+      if (!existing.disputeRunId) {
+        existing.disputeRunId = runId;
+        existing.input = input;
+        this.store.saveDaddyJob(existing);
+      }
+      return;
+    }
+    this.enqueue(
+      group,
+      'worker',
+      input,
+      task.workspaceId ? this.availableWorkspaces(group).get(task.workspaceId) : undefined,
+      task.id,
+      undefined,
+      runId,
+    );
+  }
   private enqueue(
     group: ReviewGroup,
     trigger: DaddyJob['trigger'],
@@ -521,6 +553,7 @@ export class Daddy {
     workspace?: Workspace,
     waitingTaskId?: string,
     replyTo?: TelegramReply,
+    disputeRunId?: string,
   ) {
     if (group.daddyState !== 'active') return;
     const queued = this.store
@@ -534,6 +567,8 @@ export class Daddy {
       .at(-1);
     const pending =
       queued &&
+      !disputeRunId &&
+      !queued.disputeRunId &&
       !(trigger === 'user' && (replyTo || queued.replyTo)) &&
       JSON.stringify(queued.workspace) === JSON.stringify(workspace) &&
       JSON.stringify(queued.instructions) ===
@@ -555,6 +590,7 @@ export class Daddy {
       generation: group.generation,
       trigger,
       waitingTaskId,
+      disputeRunId,
       replyTo,
       input,
       profile: group.daddy,
@@ -907,6 +943,7 @@ export class Daddy {
         );
         this.store.event(id, 'daddy.resumed');
       });
+      for (const task of this.store.tasks(id)) this.queueDispute(group, task);
     });
     return this.board(id);
   }
@@ -1033,6 +1070,10 @@ export class Daddy {
     if (!task?.groupId) return;
     const group = this.store.getGroup(task.groupId);
     if (!group.orchestrated || group.daddyState !== 'active') return;
+    if (waitingForDaddy(task)) {
+      this.queueDispute(group, task);
+      return;
+    }
     const transition = (event.data ?? {}) as {
       state?: string;
       previousState?: string;
@@ -1107,6 +1148,7 @@ export class Daddy {
           this.store.setSetting('resources.nextRecovery', 0);
           continue;
         }
+        if (job.disputeRunId) continue; // The task below restores the current dispute.
         this.enqueue(
           this.group(job.groupId),
           'recovery',
@@ -1116,6 +1158,7 @@ export class Daddy {
       }
     for (const group of this.sessions().filter((group) => group.daddyState === 'active')) {
       this.store.transaction(() => restoreSessionWork(this.store, group, true));
+      for (const task of this.store.tasks(group.id)) this.queueDispute(group, task);
       const last =
         this.store
           .daddyJobs(group.id)
@@ -1257,6 +1300,14 @@ export class Daddy {
           group.workspacePreparation.state !== 'ready')
       )
         continue;
+      if (job.disputeRunId) {
+        const task = this.store.tasks(group.id).find((item) => item.id === job.waitingTaskId);
+        if (!task || !waitingForDaddy(task) || task.inputRequest?.runId !== job.disputeRunId) {
+          job.status = 'cancelled';
+          this.store.saveDaddyJob(job);
+          continue;
+        }
+      }
       if (!this.worker.reserveGroup(group.id)) continue;
       const controller = new AbortController();
       job.status = 'running';
@@ -1390,31 +1441,50 @@ export class Daddy {
         },
       });
       const current = this.active(job, controller.signal);
-      current.summary = result.summary;
-      // A question about an already blocked task stays visible in the session.
-      // Other workers can still notify daddy while its owner considers that question.
-      const taskQuestion =
-        job.trigger === 'worker' && !!job.waitingTaskId && result.status === 'needs_input';
-      if (result.status !== 'completed' && !taskQuestion) current.daddyState = 'needs_input';
-      this.store.saveGroup(current);
-      const answer =
-        result.summary +
-        (result.question && !result.summary.includes(result.question)
-          ? '\n\n' + result.question
-          : '');
       const blocked =
         job.waitingTaskId && this.store.tasks(group.id).find((t) => t.id === job.waitingTaskId);
+      const question = result.question?.trim();
+      const taskQuestion =
+        job.trigger === 'worker' &&
+        !!job.waitingTaskId &&
+        (result.status === 'needs_input' || !!job.disputeRunId);
       const alreadyAsked =
         blocked &&
         blocked.state === 'needs_input' &&
         blocked.inputRequest &&
-        blocked.reason.trim() === (result.question || result.summary).trim();
-      this.store.finishDaddyReply(
-        group.id,
-        redact(answer),
-        job.id,
-        requestsHumanInput(result) && !alreadyAsked,
-      );
+        blocked.reason.trim() === (question || result.summary).trim();
+      const answer =
+        result.summary + (question && !result.summary.includes(question) ? '\n\n' + question : '');
+      this.store.transaction(() => {
+        current.summary = result.summary;
+        if (result.status !== 'completed' && !taskQuestion) current.daddyState = 'needs_input';
+        this.store.saveGroup(current);
+        if (
+          question &&
+          requestsHumanInput(result) &&
+          job.disputeRunId &&
+          blocked &&
+          waitingForDaddy(blocked) &&
+          blocked.inputRequest?.runId === job.disputeRunId
+        ) {
+          blocked.inputRequest.reviewDispute = 'owner';
+          blocked.reason = redact(question);
+          this.store.saveTask(blocked);
+          this.store.event(blocked.id, 'task.state', {
+            state: blocked.state,
+            previousState: blocked.state,
+            reason: blocked.reason,
+            generation: blocked.generation,
+            head: blocked.revision?.head,
+          });
+        }
+        this.store.finishDaddyReply(
+          group.id,
+          redact(answer),
+          job.id,
+          requestsHumanInput(result) && !alreadyAsked && !job.disputeRunId,
+        );
+      });
       job.status = result.status === 'incomplete' ? 'failed' : 'completed';
     } catch (error) {
       const capacity =
@@ -1462,7 +1532,7 @@ export class Daddy {
         { status: job.status, trigger: job.trigger },
         job.id,
       );
-      if (this.stopped && job.status === 'cancelled')
+      if (this.stopped && job.status === 'cancelled' && !job.disputeRunId)
         this.enqueue(
           this.group(job.groupId),
           'recovery',

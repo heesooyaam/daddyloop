@@ -1,5 +1,7 @@
-import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
-import { reminderOpen } from '../src/integrations/telegram-reminders.js';
+import { join } from 'node:path';
+import { Store } from '../src/core/store.js';
+import { taskCard } from '../src/integrations/telegram-tasks.js';
+import { reminderOpen, taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { Telegram, TelegramApi, type Update } from '../src/integrations/telegram.js';
@@ -907,6 +909,138 @@ it.each(['private', 'topic'])(
     }
   },
 );
+
+it('routes a disputed review to daddy and mentions the owner only for the concrete escalated question', async () => {
+  const f = daddyFixture(true);
+  const send = vi.fn(async (_to: unknown, _card: any, _unused: unknown, _options: any) => ({
+    message_id: 30,
+  }));
+  const api = { send, call: vi.fn() } as unknown as TelegramApi;
+  const newBot = () => new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  let bot = newBot();
+  const mentions = () =>
+    send.mock.calls.filter(([, card]) =>
+      card.entities?.some((e: { url?: string }) => e.url === 'tg://user?id=7'),
+    );
+  try {
+    f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7, ownerLabel: 'Owner' });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 163,
+        url: 'https://demo.local/pull/163',
+      },
+      repoPath: f.dir,
+      groupId: group.id,
+      requirements: 'Preserve the order of replies',
+    });
+    f.store.saveTask({
+      ...task,
+      state: 'fixing',
+      reviewFinished: true,
+      review: { id: 'published', marker: 'order', revision: task.revision! },
+      snapshot: {
+        status: 'published',
+        revision: task.revision!,
+        body: 'Check ordering',
+        url: task.ref.url,
+        comments: [{ id: 'ordering', body: 'Restore the original order', url: task.ref.url }],
+      },
+    });
+    const job = f.store.enqueue(task, 'author', 'fix', 'Recheck order');
+    await f.engine.completeJob(job, {
+      status: 'completed',
+      summary: 'Two legacy histories have the same stored timestamps.',
+      checkedHead: task.revision!.head,
+      disputedCommentIds: ['ordering'],
+    });
+    f.store.saveJob({ ...job, status: 'completed' });
+    const blocked = f.store.getTask(task.id);
+    expect(blocked.inputRequest?.reviewDispute).toBe('daddy');
+    expect(f.daddy.board(group.id).tasks[0].statusLabel).toBe('Waiting for daddy’s decision');
+    expect(taskCard('ru', { task: blocked }).text).toContain('Ждёт решения daddy');
+    // A database from the released version only stored the author run and the reason.
+    f.store.saveTask({
+      ...blocked,
+      inputRequest: { runId: job.id, role: 'author', generation: task.generation },
+    });
+    const disk = new Store(join(f.dir, 'state.sqlite'));
+    try {
+      expect(disk.getTask(task.id).inputRequest?.reviewDispute).toBe('daddy');
+    } finally {
+      disk.close();
+    }
+    const oldPing = `telegram:question:7:${task.id}:${job.id}`;
+    f.store.db
+      .prepare('INSERT INTO notifications VALUES(?,?,?)')
+      .run(oldPing, 'sent', new Date(0).toISOString());
+    bot.replay();
+    bot.remindOwners();
+    await bot.stop();
+    expect(mentions()).toHaveLength(0);
+
+    f.daddy.start();
+    f.store.event(task.id, 'job.completed', { kind: 'fix' });
+    const question = 'Which item should appear first when the original order was lost?';
+    f.runtime.runSession.mockResolvedValueOnce({
+      status: 'needs_input',
+      question,
+      summary: 'Both items can be restored.',
+      checkedHead: '',
+    });
+    await vi.waitFor(() =>
+      expect(f.store.daddyJobs(group.id).filter((j) => j.disputeRunId === job.id)).toHaveLength(1),
+    );
+    await f.daddy.tick();
+    await vi.waitFor(() =>
+      expect(f.store.getTask(task.id).inputRequest?.reviewDispute).toBe('owner'),
+    );
+    expect(f.store.getGroup(group.id).daddyState).toBe('active');
+    expect(f.store.messages(group.id).at(-1)?.needsReply).toBeFalsy();
+    expect(f.daddy.board(group.id).tasks[0]).toMatchObject({
+      reason: question,
+      statusLabel: 'Waiting for your answer',
+    });
+    bot = newBot();
+    bot.replay();
+    bot.remindOwners();
+    await vi.waitFor(() => expect(mentions()).toHaveLength(1));
+    const [, card, , options] = mentions()[0];
+    expect(card.text).toContain(question);
+    expect(card.text).toContain('daddy · DADDY-');
+    expect(options.notificationId).not.toBe(oldPing);
+    const escalated = f.store.getTask(task.id);
+    const request = taskRequestKey(f.store, escalated)!;
+    expect(request).toMatch(/^dispute:/);
+    expect(options.notificationId).toBe(`telegram:question:7:${task.id}:${request}`);
+    const ownerQuestion = { groupId: group.id, taskId: task.id, request };
+    expect(reminderOpen(f.store, ownerQuestion)).toBe(true);
+    f.store.saveTask({
+      ...escalated,
+      revision: { ...escalated.revision!, head: 'f'.repeat(40) },
+    });
+    expect(reminderOpen(f.store, ownerQuestion)).toBe(false);
+    f.store.saveTask(escalated);
+
+    f.store.db
+      .prepare('UPDATE notifications SET at=? WHERE id=?')
+      .run(new Date(0).toISOString(), options.notificationId);
+    bot.remindOwners();
+    await vi.waitFor(() => expect(mentions()).toHaveLength(2));
+    await f.engine.chat(task.id, 'author', 'Deliver the saved menu first.');
+    expect(f.store.getTask(task.id).state).toBe('fixing');
+    bot.replay();
+    bot.remindOwners();
+    await bot.stop();
+    expect(mentions()).toHaveLength(2);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});
 
 it('repeats only an open owner question after 30 minutes, once across replays and restarts', async () => {
   const f = daddyFixture();

@@ -22,8 +22,15 @@ export function taskRequestKey(store: Store, task: Task) {
     !store.pendingReviewWrites(task.id, task.review.marker).length
   )
     return 'inspect-draft:' + task.review.id + ':' + version;
-  if (task.state === 'needs_input' && task.inputRequest?.generation === task.generation)
-    return task.inputRequest.runId + ':' + version;
+  const request = task.inputRequest;
+  if (
+    task.state === 'needs_input' &&
+    request?.generation === task.generation &&
+    request.reviewDispute !== 'daddy'
+  ) {
+    const kind = request.reviewDispute === 'owner' ? 'dispute:' : '';
+    return kind + request.runId + ':' + version;
+  }
 }
 
 export function reminderOpen(store: Store, question: OwnerQuestion, requireNotifications = true) {

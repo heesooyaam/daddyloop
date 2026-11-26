@@ -149,6 +149,7 @@ export interface DaddyJob {
   generation: number;
   trigger: 'user' | 'worker' | 'recovery' | 'resources';
   waitingTaskId?: string;
+  disputeRunId?: string;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
@@ -216,7 +217,12 @@ export interface ReviewSnapshot {
 }
 export interface Task {
   replyTo?: TelegramReply;
-  inputRequest?: { runId: string; role: Role; generation: number };
+  inputRequest?: {
+    runId: string;
+    role: Role;
+    generation: number;
+    reviewDispute?: 'daddy' | 'owner';
+  };
   resourcePause?: { generation: number; at: string };
   id: string;
   title: string;

@@ -13,6 +13,7 @@ import { TelegramText } from './telegram-text.js';
 import {
   activityStatus,
   draftSyncPending,
+  waitingForDaddy,
   outstandingActivity,
   taskActivity,
   taskReference,
@@ -68,7 +69,8 @@ function snapshot(store: Store, group: ReviewGroup, jobs: Job[], coordination: D
     group.workspacePreparation?.state !== 'error' &&
     (preparing || !!activeTask || turns.length > 0 || workers.length > 0);
   const attention = tasks.find(
-    (task) => task.state === 'needs_input' && task.reason !== draftSyncPending,
+    (task) =>
+      task.state === 'needs_input' && task.reason !== draftSyncPending && !waitingForDaddy(task),
   );
   const outstanding = taskActivity(
     [...tasks].reverse(),

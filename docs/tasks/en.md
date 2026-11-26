@@ -14,6 +14,8 @@ New messages in an existing session go to the same daddy. He imports requirement
 
 An answer to a blocked author fix resumes that worker. The task retains the clarification for subsequent author turns and independent reviews.
 
+When a worker disputes a published finding, the task shows **Waiting for daddy’s decision**. daddy checks the worker’s evidence against the requirements. If the owner needs to choose, the task shows the specific question and Telegram mentions the owner. An unanswered question is repeated after 30 minutes.
+
 ## Architecture before implementation
 
 **Queue task** and Telegram `/task DESCRIPTION` start with a read-only planning turn. Send an issue URL to include its description and comments. The planner inspects the repository, validates an existing design or writes a concise one, identifies the acceptance checks, and hands the saved plan to implementation. A material open question waits for an answer. The implementation and independent reviewer receive the same plan.

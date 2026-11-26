@@ -667,6 +667,9 @@ export const daddyRu: Record<string, string> = {
     'Черновик ревью GitHub · повтор в {time} UTC · PR #{number}',
   'A different pending GitHub review belongs to this account. Its contents have been preserved.':
     'У этой учётной записи есть другой черновик ревью. Его содержимое сохранено.',
+  'Waiting for daddy’s decision': 'Ждёт решения daddy',
+  'daddy is checking the worker’s objection to the published review.':
+    'Воркер оспорил замечание ревью. daddy проверяет его аргументы.',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',

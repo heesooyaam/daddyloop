@@ -87,6 +87,21 @@ export class TelegramDelivery {
   }
   private valid(value: Delivery) {
     if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
+    // Older queued first mentions have only their notification key. Check it again on delivery or replay.
+    const taskQuestion = value.options.key?.match(
+      /^telegram:question:(\d+):([^:]+):(.+?)(?::reminder:\d+)?$/,
+    );
+    if (taskQuestion && !value.options.reminder) {
+      const [, ownerId, taskId, request] = taskQuestion;
+      const groupId =
+        value.options.groupId ?? this.store.tasks().find((task) => task.id === taskId)?.groupId;
+      if (
+        Number(ownerId) !== value.ownerId ||
+        !groupId ||
+        !reminderOpen(this.store, { groupId, taskId, request })
+      )
+        return false;
+    }
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
