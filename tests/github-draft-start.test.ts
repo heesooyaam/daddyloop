@@ -186,22 +186,16 @@ function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>, engine = f.engin
       disputedCommentIds: [],
     })),
   };
-  const worker = new Worker(
-    engine,
-    workspaces,
-    runtime,
-    runtime,
-    () => ({
-      memoryAvailableGiB: 30,
-      memoryTotalGiB: 90,
-      diskAvailableGiB: 180,
-      diskUsedPercent: 77,
-      ok: true,
-      reasons: [],
-    }),
-    0,
-  );
-  return { worker, prepare, prepareConflict, run: runtime.run };
+  const resources = {
+    memoryAvailableGiB: 30,
+    memoryTotalGiB: 90,
+    diskAvailableGiB: 180,
+    diskUsedPercent: 77,
+    ok: true,
+    reasons: [] as string[],
+  };
+  const worker = new Worker(engine, workspaces, runtime, runtime, () => resources, 0);
+  return { worker, prepare, prepareConflict, resources, run: runtime.run };
 }
 
 it('recovers the original paginated draft after restart and starts exactly one reviewer', async () => {
@@ -977,6 +971,175 @@ it.each(['CI edit', 'plan edit', 'CI restarted', 'CI unchanged', 'CI waiver edit
       expect(final.mergedReviewId).toBe(scenario.endsWith('edit') ? '123' : undefined);
       if (scenario.endsWith('edit')) expect(final.verifiedMerge).toBeUndefined();
       expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['pending', 'verify-merge'],
+  ['done', 'verify-merge'],
+  ['pending', 'retry'],
+] as const)(
+  'requires the original draft intent before merge verification (%s, %s)',
+  async (receipt, entry) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      if (receipt === 'done') {
+        f.options.hidden = false;
+        f.options.directReadFailure = true;
+        f.due();
+        await f.engine.review(f.task.id);
+        f.options.directReadFailure = false;
+      }
+      f.options.owner = 99;
+      f.due();
+      await expect(f.engine.review(f.task.id)).rejects.toMatchObject({
+        code: 'draft_owner_changed',
+      });
+      const original = f.store.getTask(f.task.id);
+      expect(original).toMatchObject({ state: 'needs_input', draftStart: { owner: '12' } });
+      expect(original.review).toBeUndefined();
+      expect(
+        f.store.db
+          .prepare('SELECT status FROM operations WHERE id=?')
+          .get(original.draftStart!.marker),
+      ).toMatchObject({ status: receipt });
+
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({
+        id: 456,
+        body: '**Published after account switch**',
+        html_url: f.task.ref.url,
+      });
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      f.restart();
+      const verify = () => f.engine.action(f.task.id, 'verify-merge');
+      await expect(verify()).rejects.toMatchObject({ code: 'draft_owner_changed' });
+      f.options.owner = 12;
+      if (receipt === 'pending')
+        await expect(verify()).rejects.toMatchObject({ code: 'draft_lookup_pending' });
+      f.remote.targetBranch = 'release';
+      await expect(verify()).rejects.toMatchObject({ code: 'draft_changed' });
+      expect(f.store.getTask(f.task.id)).toEqual(original);
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+
+      f.remote.targetBranch = original.pr!.targetBranch;
+      // The known ID still works when the listing temporarily hides it.
+      f.options.hidden = receipt === 'done';
+      const retried = await (entry === 'retry' ? f.engine.review(f.task.id, true) : verify());
+      expect(retried).toMatchObject({
+        state: 'reviewing',
+        mergedReviewId: '123',
+        review: { id: '123' },
+      });
+      expect(retried.draftStart).toBeUndefined();
+      expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
+      const { worker, run } = reviewer(f);
+      run.mockResolvedValue({
+        checkedHead: f.remote.head,
+        status: 'completed',
+        summary: 'Checked merge',
+        verifiedCommentIds: [],
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0].task.snapshot?.comments).toMatchObject([
+          { id: '456', body: f.comments[0].body },
+        ]);
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          reason: expect.stringContaining('verified all previously published findings'),
+        });
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['review', 'resource'],
+  ['verify_merge', 'resource'],
+  ['review', 'manual'],
+  ['verify_merge', 'manual'],
+] as const)(
+  'resumes the original %s after a %s pause in workspace preparation',
+  async (kind, pause) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      if (kind === 'verify_merge') {
+        f.reviews[0].state = 'COMMENTED';
+        f.comments.push({ id: 456, body: '**Original Markdown**', html_url: f.task.ref.url });
+      }
+      f.due();
+      await f.engine.review(f.task.id);
+      if (kind === 'verify_merge') {
+        f.remote.state = 'merged';
+        f.remote.mergeCommit = 'f'.repeat(40);
+        await f.engine.action(f.task.id, 'verify-merge');
+      }
+      const [first] = f.store.activeJobs(f.task.id);
+      const { worker, run, prepare, resources } = reviewer(f);
+      prepare.mockImplementationOnce(async (_task, _role, signal) => {
+        await new Promise<void>((resolve) =>
+          signal!.addEventListener('abort', () => resolve(), { once: true }),
+        );
+        return '/tmp';
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+        if (pause === 'resource') {
+          resources.ok = false;
+          resources.reasons = ['Disk threshold'];
+          await worker.tick();
+        } else {
+          await f.engine.action(f.task.id, 'pause');
+        }
+        await vi.waitFor(() => {
+          expect(f.store.jobs(f.task.id).find((job) => job.id === first.id)).toMatchObject({
+            status: 'cancelled',
+            finishedAt: expect.any(String),
+          });
+        });
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: pause === 'resource' ? 'needs_input' : 'paused',
+          generation: first.generation + 1,
+          review: { id: '123' },
+        });
+        if (pause === 'resource')
+          expect(f.store.getTask(f.task.id).resourcePause?.generation).toBe(first.generation + 1);
+        expect(run).not.toHaveBeenCalled();
+        resources.ok = true;
+        resources.reasons = [];
+        await f.engine.action(f.task.id, 'resume');
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+        await worker.tick();
+        expect(run).toHaveBeenCalledTimes(1);
+        const [input] = run.mock.calls[0];
+        expect(input.job.kind).toBe(kind);
+        expect(input.task.review?.id).toBe('123');
+        if (kind === 'verify_merge')
+          expect(input.task.snapshot?.comments).toMatchObject([
+            { id: '456', body: f.comments[0].body },
+          ]);
+        expect(f.store.getTask(f.task.id).resourcePause).toBeUndefined();
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await worker.stop();
+      }
     } finally {
       f.close();
     }

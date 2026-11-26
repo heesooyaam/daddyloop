@@ -297,7 +297,7 @@ export class Engine {
       if (task.draftStart) {
         if (retry) task.draftStart.retry = true;
         if (clarification !== undefined) task.draftStart.clarification = clarification;
-        return this.startGitHubDraft(task, provider);
+        return this.startGitHubDraft(task, provider, retry);
       }
       if (task.reviewAdmission && !retry && !this.heldMergeReviewId(task)) {
         if (task.state !== 'queued')
@@ -471,7 +471,20 @@ export class Engine {
     return task;
   }
 
-  private async startGitHubDraft(task: Task, provider: ReviewProvider) {
+  private checkDraftStartRef(task: Task) {
+    const original = task.draftStart?.ref;
+    const ref = prRef(task);
+    if (
+      original &&
+      (original.host !== ref.host ||
+        original.repo !== ref.repo ||
+        original.number !== ref.number ||
+        original.provider !== ref.provider)
+    )
+      throw new AppError('draft_changed', 'The pull request changed during draft recovery.');
+  }
+
+  private async startGitHubDraft(task: Task, provider: ReviewProvider, retry = false) {
     const intent = task.draftStart!;
     const ref = prRef(task);
     const target = intent.target ?? task.pr;
@@ -484,40 +497,38 @@ export class Engine {
     const ready = (pr: PullRequest) =>
       openTarget(pr) && !confirmedAutoMergeConflict(pr, autoMergeEnabled(this.store, task));
     try {
-      if (
-        intent.ref &&
-        (intent.ref.host !== ref.host ||
-          intent.ref.repo !== ref.repo ||
-          intent.ref.number !== ref.number ||
-          intent.ref.provider !== ref.provider)
-      )
-        throw new AppError('draft_changed', 'The pull request changed during draft recovery.');
+      this.checkDraftStartRef(task);
       const observed = await provider.getPR(ref);
       if (!current()) return this.store.getTask(task.id);
+      if (retry && observed.state === 'merged') return this.queueMergeVerification(task, observed);
       const handle = await this.broker.resolveGitHubDraft(
         task,
         provider,
-        async (owner) => {
-          const fresh = await provider.getPR(ref);
-          if ((await this.provider(ref).reviewAccount?.()) !== owner)
-            throw new AppError(
-              'draft_owner_changed',
-              'The GitHub account changed before draft creation.',
-            );
-          if (!ready(fresh) || !sameRevision(intent.revision, fresh))
-            throw new AppError('draft_revision_changed', 'The PR changed before draft creation.');
-          if (!current())
-            throw new AppError('stale_task', 'The task changed before draft creation.');
-          const latest = this.store.getTask(task.id);
-          if (latest.draftStart!.owner && latest.draftStart!.owner !== owner)
-            throw new AppError(
-              'draft_owner_changed',
-              'The GitHub account changed before draft creation.',
-            );
-          latest.draftStart!.owner = intent.owner = owner;
-          this.store.saveTask(latest);
-        },
-        ready(observed) && sameRevision(intent.revision, observed),
+        ready(observed) && sameRevision(intent.revision, observed)
+          ? async (owner) => {
+              const fresh = await provider.getPR(ref);
+              if ((await this.provider(ref).reviewAccount?.()) !== owner)
+                throw new AppError(
+                  'draft_owner_changed',
+                  'The GitHub account changed before draft creation.',
+                );
+              if (!ready(fresh) || !sameRevision(intent.revision, fresh))
+                throw new AppError(
+                  'draft_revision_changed',
+                  'The PR changed before draft creation.',
+                );
+              if (!current())
+                throw new AppError('stale_task', 'The task changed before draft creation.');
+              const latest = this.store.getTask(task.id);
+              if (latest.draftStart!.owner && latest.draftStart!.owner !== owner)
+                throw new AppError(
+                  'draft_owner_changed',
+                  'The GitHub account changed before draft creation.',
+                );
+              latest.draftStart!.owner = intent.owner = owner;
+              this.store.saveTask(latest);
+            }
+          : undefined,
       );
       const account = handle && (await this.provider(ref).reviewAccount?.());
       const pr = await provider.getPR(ref);
@@ -1650,10 +1661,36 @@ export class Engine {
       );
   }
 
+  private async recoverDraftForMerge(task: Task, pr: PullRequest) {
+    const intent = task.draftStart!;
+    this.checkDraftStartRef(task);
+    if (!sameReviewTarget(intent.target ?? task.pr, pr))
+      throw new AppError('draft_changed', draftInspectionRequired);
+    if (!intent.owner)
+      throw new AppError('draft_owner_unknown', 'The original GitHub account was not recorded.');
+    const candidate = { ...task };
+    const handle = await this.broker.resolveGitHubDraft(candidate, this.provider(prRef(task)));
+    if (!handle)
+      throw new AppError(
+        'draft_lookup_pending',
+        'The original GitHub review has not been identified.',
+      );
+    if (
+      handle.marker !== intent.marker ||
+      handle.authorId !== intent.owner ||
+      !sameRevision(handle.revision, intent.revision)
+    )
+      throw new AppError('draft_changed', draftInspectionRequired);
+    candidate.review = handle;
+    candidate.reviewAdmission = handle.id;
+    return { handle, ...(await this.readHeldPublication(candidate, pr, candidate.snapshot)) };
+  }
+
   private async queueMergeVerification(task: Task, pr: PullRequest, resume = false) {
     if (
       (task.state !== 'needs_input' &&
-        !(resume && (task.state === 'paused' || task.state === 'queued'))) ||
+        !(resume && task.state === 'paused') &&
+        !((resume || task.draftStart) && task.state === 'queued')) ||
       this.store.busy(task.id)
     )
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
@@ -1668,15 +1705,18 @@ export class Engine {
         'Inspect the saved worker changes before verifying this merge',
       );
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-    const originalId = this.heldMergeReviewId(task) ?? task.reviewAdmission;
+    const recovered = task.draftStart ? await this.recoverDraftForMerge(task, pr) : undefined;
+    const originalId = recovered?.handle.id ?? this.heldMergeReviewId(task) ?? task.reviewAdmission;
     let retryAt: number | undefined;
-    const original = originalId
-      ? await this.readHeldPublication(task, pr).catch((error: unknown) => {
-          if (!(error instanceof GitHubRetryError)) throw error;
-          retryAt = error.until;
-          return undefined;
-        })
-      : undefined;
+    const original =
+      recovered ??
+      (originalId
+        ? await this.readHeldPublication(task, pr).catch((error: unknown) => {
+            if (!(error instanceof GitHubRetryError)) throw error;
+            retryAt = error.until;
+            return undefined;
+          })
+        : undefined);
     if (originalId) {
       const current = this.store.getTask(task.id);
       const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
@@ -1695,6 +1735,11 @@ export class Engine {
       pr = original?.pr ?? pr;
     }
     this.store.transaction(() => {
+      if (recovered) {
+        task.review = recovered.handle;
+        delete task.draftStart;
+      }
+      delete task.resourcePause;
       if (!sameRevision(task.revision, pr)) {
         task.approvedAt = undefined;
         task.checksWaivedAt = undefined;
@@ -3208,7 +3253,9 @@ export class Engine {
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
-        if (this.heldMergeReviewId(task) && task.state === 'paused') {
+        const resourcePaused = this.reviewWaitingForResources(task);
+        const resumingReview = task.state === 'paused' || resourcePaused;
+        if (this.heldMergeReviewId(task) && resumingReview) {
           const pr = await this.provider(prRef(task)).getPR(prRef(task));
           if (
             task.verifiedMerge &&
@@ -3223,8 +3270,12 @@ export class Engine {
             throw new AppError('merge_unconfirmed', 'The merged revision changed while paused');
           return this.queueMergeVerification(task, pr, true);
         }
-        if (task.reviewAdmission && task.state === 'paused') {
-          this.state(task, 'queued', 'Checking the original GitHub review draft');
+        if (task.reviewAdmission && resumingReview) {
+          this.store.transaction(() => {
+            delete task.resourcePause;
+            this.state(task, 'queued', 'Checking the original GitHub review draft');
+            this.store.event(id, 'human.resume', { reason });
+          });
           return task;
         }
         if (task.draftStart && !task.review) {
@@ -3306,7 +3357,7 @@ export class Engine {
               ? 'awaiting_push'
               : 'awaiting_publication'
           : 'queued';
-        if (this.reviewWaitingForResources(task)) {
+        if (resourcePaused) {
           this.store.transaction(() => {
             delete task.resourcePause;
             this.state(task, target, resumedProviderState);

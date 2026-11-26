@@ -114,14 +114,13 @@ export class Broker {
   async resolveGitHubDraft(
     task: Task,
     provider: ReviewProvider,
-    beforeWrite: (owner: string) => Promise<void>,
-    allowCreate: boolean,
+    beforeWrite?: (owner: string) => Promise<void>,
   ) {
     const intent = task.draftStart!;
     const { marker, revision } = intent;
     const ref = intent.ref ?? prRef(task);
     if (!provider.reviewAccount || !provider.inspectReviewStart || !provider.postReview) {
-      if (!allowCreate) return;
+      if (!beforeWrite) return;
       return this.ensureReview(task);
     }
 
@@ -152,7 +151,7 @@ export class Broker {
           'draft_lookup_pending',
           'Waiting for the original GitHub review to become visible.',
         );
-      if (!allowCreate) return;
+      if (!beforeWrite) return;
       if (observed?.occupied)
         throw new AppError(
           'draft_occupied',

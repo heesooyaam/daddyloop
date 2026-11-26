@@ -22,7 +22,10 @@ export function sameOpenTarget(expected: BranchTarget | undefined, current: Pull
   return current.state === 'open' && sameBranchTarget(expected, current);
 }
 
-export function sameReviewTarget(expected: PullRequest | undefined, current: PullRequest) {
+export function sameReviewTarget(
+  expected: (BranchTarget & Pick<PullRequest, 'targetCloneUrl'>) | undefined,
+  current: PullRequest,
+) {
   return sameBranchTarget(expected, current) && expected?.targetCloneUrl === current.targetCloneUrl;
 }
 
