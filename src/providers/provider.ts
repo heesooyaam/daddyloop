@@ -40,7 +40,6 @@ export interface ReviewProvider {
     ref: PRRef,
     review: ReviewHandle,
     snapshot: ReviewSnapshot,
-    checkPR?: () => Promise<void>,
   ): Promise<() => Promise<void>>;
   createComment(
     ref: PRRef,

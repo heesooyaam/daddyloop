@@ -7,6 +7,7 @@ import {
   type Task,
   type Job,
   type PRRef,
+  type ReviewHandle,
   type ReviewSnapshot,
   type PullRequest,
 } from './types.js';
@@ -128,12 +129,13 @@ export class Broker {
         checkTask();
       };
       await checkRevision();
-      if (!intent.owner && !prepared.existing && this.draftStartOperation(task))
+      const operation = this.draftStartOperation(task);
+      if (!intent.owner && !prepared.existing && operation)
         throw new AppError(
           'draft_create_unconfirmed',
           'The previous draft creation has no recorded GitHub account.',
         );
-      if (prepared.occupied)
+      if (prepared.occupied && !operation)
         throw new AppError(
           'draft_occupied',
           'A different pending GitHub review belongs to this account. Its contents have been preserved.',
@@ -142,41 +144,33 @@ export class Broker {
         intent.owner = prepared.authorId;
         this.store.saveTask(task);
       }
-      let wrote = false;
-      const write = async () => {
-        if (prepared.existing) return prepared.existing;
-        // Persist this before dispatch so a restart cannot reuse evidence from the previous POST.
-        if (intent.emptyScanAfterAttempt) {
-          delete intent.emptyScanAfterAttempt;
-          this.store.saveTask(task);
-        }
-        const handle = await prepared.create();
-        wrote = true;
-        return handle;
-      };
-      const review = await this.outbox.perform(task.id, marker, revision, write, async () => {
-        if (prepared.existing) return { found: true, value: prepared.existing };
-        if (!intent.emptyScanAfterAttempt) {
-          intent.emptyScanAfterAttempt = true;
-          this.store.saveTask(task);
-          throw new AppError(
-            'draft_create_unconfirmed',
-            'Waiting for a second complete scan of the GitHub review list.',
-          );
-        }
-        // A second full read still found the same slot empty on the same PR head.
-        // GitHub rejects a second pending draft for this author, even during delayed visibility.
-        const handle = await write();
-        return { found: true, value: handle };
-      });
-      if (wrote) await checkRevision();
-      else if (!prepared.existing || prepared.existing.id !== review.id)
-        throw new AppError(
-          'draft_create_unconfirmed',
-          'GitHub has not confirmed the recorded draft.',
-        );
+      const recovered = !!operation || !!prepared.existing;
+      const receipt = await this.outbox.perform(
+        task.id,
+        marker,
+        revision,
+        () => (prepared.existing ? Promise.resolve(prepared.existing) : prepared.create()),
+        async () => {
+          if (prepared.existing) return { found: true, value: prepared.existing };
+          // The first review may already have been published and freed the
+          // pending slot while still absent from the list.
+          throw new AppError('draft_create_unconfirmed', 'Waiting for the original GitHub review.');
+        },
+        (error) => error instanceof AppError && error.code === 'draft_creation_race',
+      );
+      if (prepared.existing && prepared.existing.id !== receipt.id)
+        throw new AppError('draft_changed', 'The listed review differs from the recorded review.');
+      const review = prepared.existing ?? receipt;
       if (prepared.requiresInspection)
         throw new AppError('draft_changed', 'The recovered review needs inspection.');
+      if (!recovered) await checkRevision();
+      else {
+        if (this.draftStartOperation(task, marker + ':retire:' + review.id))
+          throw new AppError('draft_changed', 'An earlier deletion attempt needs inspection.');
+        await this.checkRecoveredDraft(ref, review);
+        checkTask();
+        task.draftHandoff = review.id;
+      }
       task.review = review;
       return review;
     }
@@ -192,6 +186,28 @@ export class Broker {
     );
     task.review = review;
     return review;
+  }
+  async checkRecoveredDraft(ref: PRRef, review: ReviewHandle) {
+    if (!review.nodeId?.trim())
+      throw new AppError('provider_shape', 'The recovered GitHub draft has no node ID.', 502);
+    const snapshot = await this.provider(ref).getReview(ref, review);
+    if (snapshot.status === 'missing' && !snapshot.dismissed)
+      throw new AppError(
+        'draft_missing',
+        'The recovered GitHub review is no longer readable by ID.',
+      );
+    if (
+      snapshot.status !== 'draft' ||
+      snapshot.authorId !== review.authorId ||
+      snapshot.revision.head !== review.revision.head ||
+      snapshot.body !==
+        `Review in progress.
+
+${tag(review.marker)}` ||
+      snapshot.comments.length
+    )
+      throw new AppError('draft_changed', 'The recovered review needs inspection.');
+    return snapshot;
   }
   reconcileDraftEdits(task: Task, draft: ReviewSnapshot) {
     const review = task.review!;

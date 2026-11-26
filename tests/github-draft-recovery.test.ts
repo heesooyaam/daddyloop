@@ -39,7 +39,7 @@ async function fixture(realPRReads = false) {
     createStatus: 502,
     account: 7,
     paginate: false,
-    rejectOccupiedSlot: false,
+    nextId: 6060947228,
     advanced: false,
     createBody: undefined as string | undefined,
     listBody: undefined as string | undefined,
@@ -91,13 +91,8 @@ async function fixture(realPRReads = false) {
     }
     expect(init?.method).toBe('POST');
     const body = JSON.parse(String(init?.body));
-    if (gitHub.rejectOccupiedSlot && gitHub.draft)
-      return Response.json(
-        { message: 'User can only have one pending review per pull request' },
-        { status: 422 },
-      );
     gitHub.draft = {
-      id: 6060947228,
+      id: gitHub.nextId,
       node_id: 'draft',
       body: body.body,
       state: 'PENDING',
@@ -274,36 +269,6 @@ it.each(['revision', 'account', 'draft state', 'draft commit'])(
   },
 );
 
-it('reconciles the same draft if GitHub rejects a guarded retry before the original becomes visible', async () => {
-  const f = await fixture();
-  try {
-    const id = f.task.id,
-      first = await f.engine.review(id);
-    f.gitHub.rejectOccupiedSlot = true;
-    f.ready();
-    await f.engine.review(id);
-    expect(f.posts()).toBe(1);
-    f.ready();
-    await f.engine.review(id);
-    expect(f.posts()).toBe(2);
-    expect(f.store.getTask(id).state).toBe('queued');
-    expect(f.store.activeJobs(id)).toHaveLength(0);
-    f.gitHub.reviews = [f.gitHub.draft];
-    f.gitHub.paginate = true;
-    f.ready();
-    const recovered = await f.engine.review(id);
-    expect(recovered.review).toMatchObject({
-      marker: first.draftStart!.marker,
-      id: '6060947228',
-      revision,
-    });
-    expect(f.posts()).toBe(2);
-    expect(f.store.activeJobs(id)).toHaveLength(1);
-  } finally {
-    f.close();
-  }
-});
-
 it('migrates a pending create from the base version without binding it to the new account', async () => {
   const f = await fixture();
   const id = f.task.id;
@@ -360,34 +325,34 @@ it('keeps the original owner and marker when the account and PR head change toge
   }
 });
 
-it('requires two fresh empty scans after a second 502, including after restart', async () => {
-  const f = await fixture();
-  const id = f.task.id;
-  try {
-    const first = await f.engine.review(id);
-    // Earlier builds persisted an empty scan without binding it to the last POST.
-    const saved = f.store.getTask(id);
-    Object.assign(saved.draftStart!, { emptyScanSeen: true });
-    f.store.saveTask(saved);
-    f.ready();
-    await f.engine.review(id);
-    expect(f.posts()).toBe(1);
-    f.ready();
-    await f.engine.review(id);
-    expect(f.posts()).toBe(2);
-    f.restart();
-    f.ready();
-    await f.engine.review(id);
-    expect(f.posts()).toBe(2);
-    f.ready();
-    f.gitHub.reviews = [f.gitHub.draft];
-    expect((await f.engine.review(id)).review).toMatchObject({ marker: first.draftStart!.marker });
-    expect(f.posts()).toBe(2);
-    expect(f.store.activeJobs(id)).toHaveLength(1);
-  } finally {
-    f.close();
-  }
-});
+it.each(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'])(
+  'does not recreate a hidden review that was already %s',
+  async (state) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      const first = await f.engine.review(id);
+      const marker = first.draftStart!.marker;
+      Object.assign(f.gitHub.draft as object, { state });
+      f.restart();
+      for (let i = 0; i < 3; i++) {
+        f.ready();
+        expect((await f.engine.review(id)).draftStart?.marker).toBe(marker);
+      }
+      expect(f.posts()).toBe(1);
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'draft_changed' });
+      expect(f.store.activeJobs(id)).toHaveLength(0);
+      expect(f.posts()).toBe(1);
+      expect((await f.engine.review(id, true)).carriedReviewFeedback?.reviews[0]?.id).toBe(
+        '6060947228',
+      );
+    } finally {
+      f.close();
+    }
+  },
+);
 
 const changes = {
   head: (pr: PullRequest) => {
@@ -430,14 +395,12 @@ it.each(Object.entries(changes))(
         Object.assign(f.pr, prBefore);
         f.ready();
       }
-      const settled = await f.engine.review(id);
       if (change === 'head') {
-        expect(settled.state).toBe('queued');
-        expect(settled.draftStart).toBeUndefined();
-        expect(settled.revision?.head).toBe(f.pr.head);
-        expect(f.deletes()).toBe(1);
-        expect(f.store.setting(`review.archive:${id}:6060947228`)).toMatchObject({ revision });
+        await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'draft_changed' });
+        expect(f.store.getTask(id).draftStart?.marker).toBe(marker);
+        expect(f.deletes()).toBe(0);
       } else {
+        const settled = await f.engine.review(id);
         expect(settled.review).toMatchObject({
           marker,
           id: '6060947228',
@@ -469,32 +432,6 @@ it('drops an unused intent after the base is rewritten and starts a review of th
     expect(started.review?.marker).not.toBe(first.draftStart!.marker);
     expect(started.review?.revision.base).toBe(f.pr.base);
     expect(f.posts()).toBe(1);
-  } finally {
-    f.close();
-  }
-});
-
-it('preserves the old draft if the PR closes during the final retirement read', async () => {
-  const f = await fixture();
-  const id = f.task.id;
-  try {
-    const initial = await f.engine.review(id);
-    changes.head(f.pr);
-    f.gitHub.reviews = [f.gitHub.draft];
-    let reads = 0;
-    f.gitHub.readComments = () => {
-      // Close during the retirement endpoint's verification, after the first PR recheck.
-      if (++reads === 3) changes.closed(f.pr);
-      return Response.json([]);
-    };
-    f.ready();
-    expect((await f.engine.review(id)).draftStart?.marker).toBe(initial.draftStart!.marker);
-    expect(f.deletes()).toBe(0);
-    expect(f.store.activeJobs(id)).toHaveLength(0);
-    f.pr.state = 'open';
-    f.ready();
-    expect((await f.engine.review(id)).draftStart).toBeUndefined();
-    expect(f.deletes()).toBe(1);
   } finally {
     f.close();
   }
@@ -601,7 +538,6 @@ it.each(['PENDING', 'COMMENTED'])(
       f.ready();
       const waiting = await f.engine.review(f.task.id);
       expect(waiting.state).toBe('queued');
-      expect(waiting.draftStart?.emptyScanAfterAttempt).toBeUndefined();
       expect(f.posts()).toBe(1);
     } finally {
       f.close();
@@ -649,7 +585,6 @@ it.each(['broken list JSON', 'non-array list', 'non-array comments', 'moved draf
       f.ready();
       const waiting = await f.engine.review(f.task.id);
       expect(waiting.state).toBe('queued');
-      expect(waiting.draftStart?.emptyScanAfterAttempt).toBeUndefined();
       f.ready();
       f.gitHub.listBody = undefined;
       f.gitHub.reviews = [f.gitHub.draft];
@@ -663,145 +598,81 @@ it.each(['broken list JSON', 'non-array list', 'non-array comments', 'moved draf
   },
 );
 
-it.each(['summary', 'comment'])(
-  'keeps a draft when its %s changes during the last PR read',
-  async (edit) => {
+it.each(['summary', 'comment', 'closed', 'retargeted'])(
+  'preserves the recovered draft on an obsolete head during the final reads: %s',
+  async (change) => {
     const f = await fixture();
     try {
       const initial = await f.engine.review(f.task.id);
       changes.head(f.pr);
       f.gitHub.reviews = [f.gitHub.draft];
-      let commentReads = 0;
-      f.gitHub.readComments = () => {
-        commentReads++;
-        return Response.json([]);
-      };
-      f.gitHub.readPR = () => {
-        if (commentReads !== 3) return;
-        if (edit === 'summary')
-          Object.assign(f.gitHub.draft as object, { body: 'Owner edited this review' });
-        else f.gitHub.readComments = () => Response.json([{ id: 42, body: 'Owner comment' }]);
+      f.gitHub.override = (path) => {
+        if (!path.endsWith('/reviews/6060947228')) return;
+        if (change === 'summary')
+          Object.assign(f.gitHub.draft as object, { body: 'Owner edited the review' });
+        if (change === 'comment')
+          f.gitHub.readComments = () => Response.json([{ id: 42, body: 'Owner comment' }]);
+        if (change === 'closed' || change === 'retargeted') changes[change](f.pr);
       };
       f.ready();
-      await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'draft_changed' });
+      await Promise.allSettled([f.engine.review(f.task.id)]);
       expect(f.deletes()).toBe(0);
+      expect(f.gitHub.draft).toMatchObject({ id: 6060947228 });
       expect(f.store.getTask(f.task.id).draftStart?.marker).toBe(initial.draftStart!.marker);
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
     } finally {
       f.close();
     }
   },
 );
 
-it('requires a review 404 to confirm deletion after a lost DELETE response', async () => {
+it('confirms a legacy pending DELETE only through the review endpoint', async () => {
   const f = await fixture();
   const id = f.task.id;
   try {
-    const first = await f.engine.review(id);
-    const marker = first.draftStart!.marker;
+    const initial = await f.engine.review(id);
+    const marker = initial.draftStart!.marker;
+    const body = (f.gitHub.draft as { body: string }).body;
     const deletion = marker + ':retire:6060947228';
+    // Main archived the placeholder and completed the create receipt before dispatching DELETE.
+    const review = { id: '6060947228', nodeId: 'draft', marker, revision, authorId: '7' };
+    f.store.db
+      .prepare("UPDATE operations SET status='done', result=? WHERE id=?")
+      .run(JSON.stringify(review), marker);
+    f.store.setSetting('review.archive:' + id + ':' + review.id, {
+      status: 'draft',
+      authorId: review.authorId,
+      body,
+      comments: [],
+      revision,
+      url: ref.url,
+    });
+    f.store.db.prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)').run(
+      deletion,
+      id,
+      'pending',
+      createHash('sha256')
+        .update(JSON.stringify({ review: '6060947228', head: revision.head, body }))
+        .digest('hex'),
+    );
     changes.head(f.pr);
     f.gitHub.reviews = [f.gitHub.draft];
-    f.gitHub.override = (_path, method) =>
-      method === 'DELETE' ? new Response(null, { status: 502 }) : undefined;
-    f.ready();
-    await f.engine.review(id);
-    expect(f.deletes()).toBe(1);
-    expect(
-      f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(deletion)?.status,
-    ).toBe('pending');
     f.restart();
     f.ready();
     f.gitHub.readComments = () => new Response(null, { status: 404 });
     expect((await f.engine.review(id)).draftStart?.marker).toBe(marker);
-    expect(
-      f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(deletion)?.status,
-    ).toBe('pending');
+    const receipt = f.store.db.prepare('SELECT status FROM operations WHERE id=?');
+    expect(receipt.get(deletion)?.status).toBe('pending');
     f.ready();
     f.gitHub.draft = undefined;
     f.gitHub.reviews = [];
     expect((await f.engine.review(id)).draftStart).toBeUndefined();
-    expect(
-      f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(deletion)?.status,
-    ).toBe('done');
-    expect(f.deletes()).toBe(1);
+    expect(receipt.get(deletion)?.status).toBe('done');
+    expect(f.deletes()).toBe(0);
   } finally {
     f.close();
   }
 });
-
-it.each(['/user', '/reviews/6060947228', '/reviews/6060947228/comments'])(
-  'retries deletion preflight after restart when %s failed before DELETE',
-  async (endpoint) => {
-    const f = await fixture();
-    const id = f.task.id;
-    try {
-      const first = await f.engine.review(id);
-      const deletion = first.draftStart!.marker + ':retire:6060947228';
-      changes.head(f.pr);
-      f.gitHub.reviews = [f.gitHub.draft];
-      let reads = 0;
-      f.gitHub.override = (path) =>
-        path.endsWith(endpoint) && ++reads === (endpoint === '/user' ? 2 : 3)
-          ? new Response(null, { status: 502 })
-          : undefined;
-      f.ready();
-      expect((await f.engine.review(id)).state).toBe('queued');
-      expect(f.deletes()).toBe(0);
-      expect(
-        f.store.db.prepare('SELECT status FROM operations WHERE id=?').get(deletion),
-      ).toBeUndefined();
-      f.restart();
-      f.ready();
-      f.gitHub.override = () => undefined;
-      expect((await f.engine.review(id, true)).draftStart).toBeUndefined();
-      expect(f.deletes()).toBe(1);
-    } finally {
-      f.close();
-    }
-  },
-);
-
-it.each([false, true])(
-  'migrates a legacy deletion preflight receipt only for the last attempt (new intent: %s)',
-  async (newAttempt) => {
-    const f = await fixture();
-    const id = f.task.id;
-    try {
-      const first = await f.engine.review(id);
-      const key = first.draftStart!.marker + ':retire:6060947228';
-      const draft = f.gitHub.draft as { body: string };
-      changes.head(f.pr);
-      f.gitHub.reviews = [draft];
-      f.store.db.prepare('INSERT INTO operations VALUES(?,?,?,?,NULL)').run(
-        key,
-        id,
-        'pending',
-        createHash('sha256')
-          .update(
-            JSON.stringify({
-              review: '6060947228',
-              head: revision.head,
-              body: draft.body,
-            }),
-          )
-          .digest('hex'),
-      );
-      f.store.event(id, 'operation.uncertain', {
-        operationId: key,
-        error:
-          'AppError: GET /repos/acme/service/pulls/38/reviews/6060947228/comments: HTTP 502 bad gateway',
-      });
-      if (newAttempt) f.store.event(id, 'operation.started', { operationId: key });
-      f.restart();
-      f.ready();
-      const recovered = await f.engine.review(id);
-      expect(f.deletes()).toBe(newAttempt ? 0 : 1);
-      expect(recovered.draftStart?.marker).toBe(newAttempt ? first.draftStart!.marker : undefined);
-    } finally {
-      f.close();
-    }
-  },
-);
 
 it.each(Object.entries(changes))(
   'rechecks a recovered PR after workspace preparation: %s',
@@ -880,7 +751,6 @@ it.each([
     const waiting = await f.engine.review(id);
     expect(waiting.state).toBe('queued');
     expect(waiting.draftStart?.marker).toBe(initial.draftStart!.marker);
-    expect(waiting.draftStart?.emptyScanAfterAttempt).toBeUndefined();
     f.ready();
     f.gitHub.override = () => undefined;
     f.gitHub.reviews = [f.gitHub.draft];
@@ -924,7 +794,7 @@ it.each(['preflight', 'quota', 'known draft'])(
   },
 );
 
-it.each(['published', 'removed'])(
+it.each(['published', 'dismissed', 'removed'])(
   'starts the current review when the owner has %s an inspected draft',
   async (outcome) => {
     const f = await fixture();
@@ -937,11 +807,14 @@ it.each(['published', 'removed'])(
       Object.assign(f.gitHub.draft as object, { body: 'Edited review\n\n<!-- ' + marker + ' -->' });
       f.ready();
       await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'draft_changed' });
+      changes.retargeted(f.pr);
       if (outcome === 'removed') {
         f.gitHub.draft = undefined;
         f.gitHub.reviews = [];
       } else {
-        Object.assign(f.gitHub.draft as object, { state: 'COMMENTED' });
+        Object.assign(f.gitHub.draft as object, {
+          state: outcome === 'dismissed' ? 'DISMISSED' : 'COMMENTED',
+        });
         f.gitHub.readComments = () => Response.json([{ id: 42, body: 'Published finding' }]);
       }
       f.restart();
@@ -951,7 +824,7 @@ it.each(['published', 'removed'])(
       const next = await f.engine.review(id);
       expect(next.review?.revision.head).toBe(f.pr.head);
       expect(next.review?.marker).not.toBe(marker);
-      if (outcome === 'published')
+      if (outcome !== 'removed')
         expect(next.feedback?.comments).toMatchObject([{ id: '42', body: 'Published finding' }]);
       expect(f.deletes()).toBe(0);
       expect(f.posts()).toBe(2);
@@ -981,7 +854,8 @@ it('does not trust an earlier completed deletion receipt while the review still 
         'null',
       );
     f.ready();
-    expect((await f.engine.review(id)).draftStart?.marker).toBe(marker);
+    await expect(f.engine.review(id)).rejects.toMatchObject({ code: 'draft_changed' });
+    expect(f.store.getTask(id).draftStart?.marker).toBe(marker);
     expect(f.deletes()).toBe(0);
   } finally {
     f.close();
@@ -1006,6 +880,276 @@ it('remembers an edited draft on the same revision for a later explicit retry', 
     f.gitHub.createStatus = 201;
     expect((await f.engine.review(id)).review?.marker).not.toBe(initial.draftStart!.marker);
     expect(f.deletes()).toBe(0);
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['short head', 'empty head', 'target sha', 'merge base sha', 'review sha', 'draft node'])(
+  'waits for complete GitHub identity before reusing the draft: %s',
+  async (change) => {
+    const f = await fixture(true);
+    const id = f.task.id;
+    try {
+      const initial = await f.engine.review(id);
+      f.gitHub.reviews = [f.gitHub.draft];
+      if (change === 'merge base sha') changes.base(f.pr);
+      if (change === 'draft node') {
+        f.gitHub.reviews = [{ ...(f.gitHub.draft as object), node_id: undefined }];
+      } else {
+        f.gitHub.override = (path) => {
+          if ((change === 'short head' || change === 'empty head') && path.endsWith('/pulls/38'))
+            return Response.json({
+              head: { sha: change === 'short head' ? f.pr.head.slice(0, 9) : '', ref: f.pr.branch },
+              base: { sha: f.pr.base, ref: f.pr.targetBranch },
+              state: 'open',
+              draft: false,
+              merged: false,
+            });
+          if (change === 'target sha' && path.includes('/git/ref/heads/'))
+            return Response.json({ ref: 'refs/heads/main', object: { type: 'commit', sha: '' } });
+          if (change === 'merge base sha' && path.includes('/compare/'))
+            return Response.json({ status: 'ahead', merge_base_commit: { sha: '' } });
+          if (change === 'review sha' && path.endsWith('/reviews/6060947228'))
+            return Response.json({ ...(f.gitHub.draft as object), commit_id: '' });
+        };
+      }
+      f.ready();
+      const waiting = await f.engine.review(id);
+      expect(waiting.state).toBe('queued');
+      expect(waiting.draftStart?.marker).toBe(initial.draftStart!.marker);
+      expect(f.store.activeJobs(id)).toHaveLength(0);
+      f.gitHub.override = () => undefined;
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      expect((await f.engine.review(id)).review?.id).toBe('6060947228');
+      expect(f.posts()).toBe(1);
+      expect(f.deletes()).toBe(0);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+function startWorker(
+  f: Awaited<ReturnType<typeof fixture>>,
+  prepareWorkspace = async () => '/tmp',
+) {
+  const workspaces = new Workspaces('/tmp');
+  const prepare = vi.spyOn(workspaces, 'prepare').mockImplementation(prepareWorkspace);
+  const runtime = new DemoRuntime();
+  const run = vi.spyOn(runtime, 'run').mockResolvedValue({
+    status: 'incomplete',
+    checkedHead: f.pr.head,
+    summary: 'Runtime test double',
+  });
+  const worker = new Worker(
+    f.engine,
+    workspaces,
+    runtime,
+    runtime,
+    () => ({
+      memoryAvailableGiB: 30,
+      memoryTotalGiB: 90,
+      diskAvailableGiB: 180,
+      diskUsedPercent: 77,
+      ok: true,
+      reasons: [],
+    }),
+    0,
+  );
+  return { worker, run, prepare };
+}
+
+it.each([
+  ['before', '{}'],
+  ['before', '{'],
+  ['after', '{}'],
+  ['after', '{'],
+])('requeues a malformed PR read %s workspace preparation: %s', async (phase, body) => {
+  const f = await fixture(true);
+  const id = f.task.id;
+  try {
+    await f.engine.review(id);
+    f.gitHub.reviews = [f.gitHub.draft];
+    f.ready();
+    await f.engine.review(id);
+    f.restart();
+    let broken = true;
+    let reads = 0;
+    f.gitHub.override = (path) =>
+      path.endsWith('/pulls/38') && broken && ++reads === (phase === 'before' ? 1 : 2)
+        ? new Response(body)
+        : undefined;
+    const { worker, run } = startWorker(f);
+    try {
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.jobs(id).at(-1)).toMatchObject({
+          status: 'queued',
+          errorCode: 'provider_shape',
+        }),
+      );
+      expect(run).not.toHaveBeenCalled();
+      expect(f.store.getTask(id).state).toBe('reviewing');
+      expect(f.store.getTask(id).draftHandoff).toBe('6060947228');
+      broken = false;
+      const job = f.store.jobs(id).at(-1)!;
+      f.store.saveJob({ ...job, notBefore: undefined });
+      await worker.tick();
+      await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+      expect(run.mock.calls[0][0].task.review?.id).toBe('6060947228');
+      expect(f.posts()).toBe(1);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+const draftChanges = ['published', 'deleted', 'summary', 'comment'] as const;
+function changeDraft(
+  f: Awaited<ReturnType<typeof fixture>>,
+  change: (typeof draftChanges)[number],
+) {
+  if (change === 'published') Object.assign(f.gitHub.draft as object, { state: 'COMMENTED' });
+  if (change === 'deleted') f.gitHub.draft = undefined;
+  if (change === 'summary')
+    Object.assign(f.gitHub.draft as object, { body: 'Owner edited the draft' });
+  if (change === 'comment')
+    f.gitHub.readComments = () => Response.json([{ id: 42, body: 'Owner comment' }]);
+}
+
+it.each(draftChanges)(
+  'rechecks the matched draft by ID after reading the PR: %s',
+  async (change) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      const initial = await f.engine.review(id);
+      f.gitHub.reviews = [f.gitHub.draft];
+      let reads = 0;
+      f.gitHub.readPR = () => {
+        if (++reads === 2) changeDraft(f, change);
+      };
+      f.ready();
+      const [result] = await Promise.allSettled([f.engine.review(id)]);
+      if (change === 'deleted') expect(result.status).toBe('fulfilled');
+      else expect(result).toMatchObject({ status: 'rejected', reason: { code: 'draft_changed' } });
+      expect(f.store.getTask(id).draftStart?.marker).toBe(initial.draftStart!.marker);
+      expect(f.store.activeJobs(id)).toHaveLength(0);
+      expect(f.deletes()).toBe(0);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(draftChanges)(
+  'validates the recovered draft by ID after preparing the workspace: %s',
+  async (change) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      await f.engine.review(id);
+      f.gitHub.reviews = [f.gitHub.draft];
+      f.ready();
+      expect((await f.engine.review(id)).draftHandoff).toBe('6060947228');
+      const { worker, run } = startWorker(f, async () => {
+        changeDraft(f, change);
+        return '/tmp';
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.jobs(id).at(-1)?.status).toBe('failed'));
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.getTask(id)).toMatchObject({
+          state: 'needs_input',
+          draftHandoff: '6060947228',
+        });
+        expect(f.deletes()).toBe(0);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['removed', 'edited', 'unchanged', 'summary only'])(
+  'refreshes published feedback by review ID before building the new context: %s',
+  async (edit) => {
+    const f = await fixture();
+    const id = f.task.id;
+    try {
+      const initial = await f.engine.review(id);
+      const original = f.gitHub.draft as { state: string; body: string };
+      changes.retargeted(f.pr);
+      f.gitHub.reviews = [original];
+      original.state = 'COMMENTED';
+      original.body = 'Original published summary\n\n<!-- ' + initial.draftStart!.marker + ' -->';
+      let comments = edit === 'summary only' ? [] : [{ id: 45, body: 'Original finding' }];
+      f.gitHub.readComments = () => Response.json(comments);
+      f.ready();
+      expect((await f.engine.review(id, true)).carriedReviewFeedback?.reviews[0]?.id).toBe(
+        '6060947228',
+      );
+      f.gitHub.nextId = 6060947229;
+      f.gitHub.createStatus = 201;
+      expect((await f.engine.review(id)).review?.id).toBe('6060947229');
+      f.restart();
+      f.gitHub.override = (path) =>
+        path.endsWith('/reviews/6060947228') ? Response.json(original) : undefined;
+      const { worker, run } = startWorker(f, async () => {
+        if (edit === 'removed') comments = [];
+        if (edit === 'edited') {
+          original.body = 'Updated published summary';
+          comments = [{ id: 45, body: 'Updated finding' }];
+        }
+        return '/tmp';
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+        const { task, prompt } = run.mock.calls[0][0];
+        expect(task.feedback?.comments).toMatchObject(
+          comments.map(({ id, body }) => ({ id: String(id), body })),
+        );
+        expect(task.feedback?.comments).toHaveLength(comments.length);
+        expect(prompt).toContain(
+          edit === 'edited' ? 'Updated published summary' : 'Original published summary',
+        );
+        if (edit !== 'unchanged') expect(prompt).not.toContain('Original finding');
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it('retries the same marker after GitHub explicitly refuses to create a second pending draft', async () => {
+  const f = await fixture();
+  const id = f.task.id;
+  try {
+    f.gitHub.override = (_path, method) =>
+      method === 'POST'
+        ? Response.json(
+            { message: 'User can only have one pending review per pull request' },
+            { status: 422 },
+          )
+        : undefined;
+    const first = await f.engine.review(id);
+    expect(first.state).toBe('queued');
+    f.ready();
+    f.gitHub.override = () => undefined;
+    f.gitHub.createStatus = 201;
+    expect((await f.engine.review(id)).review?.marker).toBe(first.draftStart!.marker);
+    expect(f.posts()).toBe(2);
+    expect(f.store.activeJobs(id)).toHaveLength(1);
   } finally {
     f.close();
   }

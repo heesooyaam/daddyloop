@@ -22,6 +22,25 @@ import {
   workerSlots,
 } from '../core/worker-pool.js';
 
+async function readReviewAdmission<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (
+      error instanceof SyntaxError ||
+      (error instanceof AppError && error.code === 'provider_shape')
+    )
+      throw new GitHubRetryError(
+        'provider_shape',
+        'GitHub returned incomplete review admission data. Retrying the queued job.',
+        Date.now() + 15000,
+        false,
+        502,
+      );
+    throw error;
+  }
+}
+
 export class Worker {
   private active = new Map<string, AbortController>();
   private runningJobs = new Map<string, Job>();
@@ -554,9 +573,13 @@ export class Worker {
         job.status = 'completed';
         return;
       }
+      const githubReview = job.kind === 'review' && task.ref.provider === 'github';
+      const readPR = () => this.engine.provider(prRef(task)).getPR(prRef(task));
       const startingPR = isTicket(task)
         ? undefined
-        : await this.engine.provider(prRef(task)).getPR(prRef(task));
+        : githubReview
+          ? await readReviewAdmission(readPR)
+          : await readPR();
       if (
         job.kind === 'review' &&
         task.ref.provider === 'github' &&
@@ -696,7 +719,8 @@ export class Worker {
           throw new Error('The starting directory escaped its managed workspace');
       }
       if (job.kind === 'review' && !isTicket(task) && task.ref.provider === 'github') {
-        const latest = await this.engine.provider(prRef(task)).getPR(prRef(task));
+        const feedback = await readReviewAdmission(() => this.engine.currentCarriedFeedback(task));
+        const latest = await readReviewAdmission(readPR);
         if (
           !sameOpenTarget(task.pr, latest) ||
           latest.draft ||
@@ -706,8 +730,18 @@ export class Worker {
             'stale_revision',
             'The PR changed while the review workspace was being prepared.',
           );
+        const review = task.review;
+        if (review && task.draftHandoff === review.id)
+          await readReviewAdmission(() =>
+            this.engine.broker.checkRecoveredDraft(prRef(task), review),
+          );
         if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed before the reviewer started.');
+        if (task.carriedReviewFeedback || task.draftHandoff) {
+          task.feedback = feedback;
+          delete task.draftHandoff;
+          store.saveTask(task);
+        }
       }
       const tools =
         job.kind === 'verify_merge'

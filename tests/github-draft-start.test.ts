@@ -22,6 +22,7 @@ async function reviewFixture() {
   f.store.saveTask(task);
   type Native = {
     id: number;
+    node_id: string;
     user: { id: number };
     commit_id: string;
     state: string;
@@ -41,6 +42,7 @@ async function reviewFixture() {
       posts.push(body.body);
       const r = {
         id: 123,
+        node_id: 'draft-123',
         user: { id: 12 },
         commit_id: body.commit_id,
         state: 'PENDING',
@@ -102,13 +104,18 @@ it.each([true, false])(
       }
       await Promise.allSettled([restarted.review(f.task.id), restarted.review(f.task.id)]);
       const t = f.store.getTask(f.task.id);
+      expect(f.posts).toHaveLength(1);
+      if (!accepted) {
+        expect(t.draftStart?.marker).toBe(pending.draftStart?.marker);
+        expect(f.store.activeJobs(t.id)).toHaveLength(0);
+        return;
+      }
       expect(t).toMatchObject({
         state: 'reviewing',
         round: pending.round,
         review: { id: '123', marker: pending.draftStart!.marker, revision: t.revision },
       });
       expect(t.draftStart).toBeUndefined();
-      expect(f.posts).toHaveLength(accepted ? 1 : 2);
       expect(new Set(f.posts).size).toBe(1);
       expect(f.reviews).toHaveLength(1);
       expect(f.store.activeJobs(t.id)).toMatchObject([{ role: 'reviewer', kind: 'review' }]);
@@ -150,6 +157,7 @@ it('restores a pre-upgrade 502 only for the recorded request, and preserves anot
     });
     const other = {
       id: 99,
+      node_id: 'draft-99',
       user: { id: 12 },
       state: 'PENDING',
       commit_id: f.remote.head,

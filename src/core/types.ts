@@ -204,6 +204,7 @@ export interface ReviewHandle {
 export interface ReviewSnapshot {
   authorId?: string;
   status: 'draft' | 'published' | 'missing' | 'partial';
+  dismissed?: true;
   body: string;
   comments: ReviewComment[];
   url: string;
@@ -261,8 +262,9 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
+  draftHandoff?: string;
+  carriedReviewFeedback?: { previous?: ReviewSnapshot; reviews: ReviewHandle[] };
   draftStart?: {
-    emptyScanAfterAttempt?: boolean;
     marker: string;
     owner?: string;
     revision: Revision;

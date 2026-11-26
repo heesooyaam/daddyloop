@@ -45,6 +45,7 @@ describe('GitHub draft review contract', () => {
   it('requires numeric account and draft identities before binding a review after an ambiguous create', async () => {
     let validAccount = false;
     const writes = vi.fn(() => ({
+      node_id: 'draft',
       commit_id: revision.head,
       user: { id: 7 },
       state: 'PENDING',

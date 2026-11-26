@@ -366,7 +366,11 @@ export class Engine {
       if (changed) this.invalidate(task, pr);
       if (retry && task.review) {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
-        if (snapshot.status === 'published') task.feedback = snapshot;
+        if (task.draftHandoff === task.review.id) {
+          if (snapshot.status === 'published' || snapshot.dismissed)
+            this.rememberCarriedReview(task, task.review, snapshot);
+          delete task.draftHandoff;
+        } else if (snapshot.status === 'published') task.feedback = snapshot;
         if (snapshot.status === 'published' || snapshot.status === 'missing')
           this.invalidate(task, pr);
       }
@@ -434,7 +438,7 @@ export class Engine {
       error instanceof SyntaxError ||
       error instanceof GitHubRetryError ||
       (error instanceof AppError &&
-        /^(?:provider_(?:408|500|502|503|504|shape|unreachable)|draft_creation_race|draft_create_unconfirmed|draft_revision_changed)$/.test(
+        /^(?:provider_(?:408|500|502|503|504|shape|unreachable)|draft_creation_race|draft_create_unconfirmed|draft_missing|draft_revision_changed)$/.test(
           error.code,
         ))
     ) {
@@ -492,13 +496,13 @@ export class Engine {
             .existing
         : await provider.findReview(ref, intent.marker);
       if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
-      const handle = receipt ?? existing;
+      const handle = existing ?? receipt;
       if (!handle)
         throw new AppError('draft_create_unconfirmed', 'Waiting for the original GitHub draft.');
       if (
         handle.revision.head !== intent.revision.head ||
         (owner && handle.authorId !== owner) ||
-        (existing && handle.id !== existing.id)
+        (receipt && handle.id !== receipt.id)
       )
         throw new AppError('draft_changed', 'The marked review differs from the original attempt.');
       const pinned = { ...handle, revision: intent.revision };
@@ -519,37 +523,37 @@ export class Engine {
         intent.marker + ':retire:' + pinned.id,
       );
       if (
-        draft.status !== 'missing' &&
+        (draft.status !== 'missing' || draft.dismissed) &&
         (draft.authorId !== pinned.authorId || draft.revision.head !== intent.revision.head)
       )
         throw new AppError('draft_changed', draftInspectionRequired);
       if (draft.status === 'published' || draft.status === 'missing') {
-        if (draft.status === 'missing' && !retirement && existing)
+        const absent = draft.status === 'missing' && !draft.dismissed;
+        if (absent && !retirement && existing)
           throw new AppError(
             'draft_create_unconfirmed',
             'The listed draft could not be read by ID.',
           );
-        if (!explicitRetry && !(retirement && draft.status === 'missing'))
+        if (!explicitRetry && !(retirement && absent))
           throw new AppError('draft_changed', draftInspectionRequired);
         await checkPR();
-        if (
-          retirement &&
-          draft.status === 'missing' &&
-          !(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR))
-        )
-          return this.store.getTask(task.id);
-        if (draft.status === 'published' && draft.comments.length)
-          task.feedback = {
-            ...draft,
-            comments: [
-              ...new Map(
-                [...(task.feedback?.comments ?? []), ...draft.comments].map((comment) => [
-                  comment.id,
-                  comment,
-                ]),
-              ).values(),
-            ],
-          };
+        if (retirement?.status === 'pending' && absent) {
+          const key = intent.marker + ':retire:' + pinned.id;
+          const archived = this.store.setting<ReviewSnapshot>(
+            'review.archive:' + task.id + ':' + pinned.id,
+          );
+          if (archived)
+            await this.broker.outbox.perform(
+              task.id,
+              key,
+              { review: pinned.id, head: pinned.revision.head, body: archived.body },
+              async () => {
+                throw new AppError('draft_create_unconfirmed', 'No deletion is needed.');
+              },
+              async () => ({ found: true, value: null }),
+            );
+        }
+        if (!absent) this.rememberCarriedReview(task, pinned, draft);
       } else {
         if (draft.status !== 'draft' || this.draftHasWork(pinned, draft))
           throw new AppError('draft_changed', draftInspectionRequired);
@@ -572,6 +576,8 @@ export class Engine {
           intent.revision.head === pr.head &&
           this.prAction(task, pr).kind !== 'repair'
         ) {
+          const confirmed = await this.broker.checkRecoveredDraft(ref, pinned);
+          if (!this.currentReviewStart(task)) return this.store.getTask(task.id);
           this.store.transaction(() => {
             task.review = pinned;
             delete task.draftStart;
@@ -579,14 +585,17 @@ export class Engine {
             this.restartNativeReview(
               task,
               pr,
-              draft,
+              confirmed,
               'The PR is ready. Reviewing the current revision.',
             );
+            task.draftHandoff = pinned.id;
+            this.store.saveTask(task);
           });
           return task;
         }
-        if (!(await this.retireSupersededDraft({ ...task, review: pinned }, provider, checkPR)))
-          return this.store.getTask(task.id);
+        // GitHub offers no conditional DELETE that protects edits arriving
+        // between the last read and the write.
+        throw new AppError('draft_changed', draftInspectionRequired);
       }
     } else {
       await checkPR();
@@ -597,6 +606,57 @@ export class Engine {
     if (intent.clarification) this.rememberClarification(task, intent.clarification);
     this.state(task, 'queued', 'New revision is ready for review');
     return task;
+  }
+  private rememberCarriedReview(task: Task, handle: ReviewHandle, snapshot: ReviewSnapshot) {
+    if (snapshot.authorId !== handle.authorId || snapshot.revision.head !== handle.revision.head)
+      throw new AppError(
+        'draft_changed',
+        'The published review differs from the recorded identity.',
+      );
+    const carried = (task.carriedReviewFeedback ??= { previous: task.feedback, reviews: [] });
+    if (carried.reviews.some((review) => review.id === handle.id)) return;
+    carried.reviews.push(handle);
+    task.feedback = this.mergeCarriedFeedback(task.feedback, [snapshot]);
+  }
+  private mergeCarriedFeedback(previous: ReviewSnapshot | undefined, snapshots: ReviewSnapshot[]) {
+    const latest = snapshots.at(-1);
+    if (!latest) return previous;
+    const all = previous ? [previous, ...snapshots] : snapshots;
+    return {
+      ...latest,
+      status: 'published' as const,
+      body: all
+        .map((snapshot) => snapshot.body)
+        .filter(Boolean)
+        .join('\n\n'),
+      comments: [
+        ...new Map(
+          all.flatMap((snapshot) => snapshot.comments).map((comment) => [comment.id, comment]),
+        ).values(),
+      ],
+    };
+  }
+  async currentCarriedFeedback(task: Task) {
+    const carried = task.carriedReviewFeedback;
+    if (!carried) return task.feedback;
+    const ref = prRef(task);
+    const provider = this.provider(ref);
+    const snapshots = await Promise.all(
+      carried.reviews.map(async (review) => {
+        const snapshot = await provider.getReview(ref, review);
+        if (
+          (snapshot.status !== 'published' && !snapshot.dismissed) ||
+          snapshot.authorId !== review.authorId ||
+          snapshot.revision.head !== review.revision.head
+        )
+          throw new AppError(
+            'draft_changed',
+            'The earlier published review could not be confirmed.',
+          );
+        return snapshot;
+      }),
+    );
+    return this.mergeCarriedFeedback(carried.previous, snapshots);
   }
   private currentReviewStart(task: Task) {
     const current = this.store.getTask(task.id);
@@ -879,11 +939,7 @@ export class Engine {
     };
   }
 
-  private async retireSupersededDraft(
-    task: Task,
-    provider: ReviewProvider,
-    checkPR?: () => Promise<void>,
-  ) {
+  private async retireSupersededDraft(task: Task, provider: ReviewProvider) {
     const handle = task.review!,
       ref = prRef(task);
     const snapshot = await provider.getReview(ref, handle);
@@ -943,9 +999,7 @@ export class Engine {
           archiveKey,
         });
       });
-    const remove = pending
-      ? undefined
-      : await provider.prepareDraftDeletion(ref, handle, source, checkPR);
+    const remove = pending ? undefined : await provider.prepareDraftDeletion(ref, handle, source);
     await this.broker.outbox.perform(
       task.id,
       key,
@@ -960,18 +1014,9 @@ export class Engine {
         const deleted = provider.reviewDeleted
           ? await provider.reviewDeleted(ref, handle)
           : (await provider.getReview(ref, handle)).status === 'missing';
-        if (!deleted && checkPR)
-          throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
         return deleted ? { found: true, value: null } : { found: false };
       },
     );
-    if (
-      checkPR &&
-      pending?.status !== 'pending' &&
-      provider.reviewDeleted &&
-      !(await provider.reviewDeleted(ref, handle))
-    )
-      throw new AppError('draft_create_unconfirmed', 'Waiting to confirm draft deletion.');
     return true;
   }
   private invalidate(task: Task, pr: Task['pr'], cancelRunning = true) {
@@ -979,6 +1024,7 @@ export class Engine {
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
+    delete task.draftHandoff;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
@@ -2179,6 +2225,7 @@ export class Engine {
       this.store.saveTask(task);
       return;
     }
+    delete task.carriedReviewFeedback;
     const partial = task.partialReview;
     this.store.event(
       task.id,
