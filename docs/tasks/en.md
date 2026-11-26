@@ -16,6 +16,12 @@ An answer to a blocked author fix resumes that worker. The task retains the clar
 
 When a worker disputes a published finding, the task shows **Waiting for daddy’s decision**. daddy checks the worker’s evidence against the requirements. If the owner needs to choose, the task shows the specific question and Telegram mentions the owner. An unanswered question is repeated after 30 minutes.
 
+## Regression tests and independent review
+
+The worker adds or extends a repository test for each behavior-changing issue and each behavioral finding fixed in review. For example, if a setting can be cleared in the web panel, its Telegram equivalent must clear the same stored value. The worker reports the test path, case, command, and the observed results before and after the fix. One parameterized test can protect several related cases.
+
+On the first review, the reviewer checks all promised outcomes and affected entry points and reports confirmed blockers together. On later reviews, the reviewer independently runs the relevant tests on the pinned revision and checks that they detect the pre-fix behavior. A missing or ineffective regression test is a blocking review finding for the worker. Plans, research reports and documentation use their own acceptance checks.
+
 ## Architecture before implementation
 
 **Queue task** and Telegram `/task DESCRIPTION` start with a read-only planning turn. Send an issue URL to include its description and comments. The planner inspects the repository, validates an existing design or writes a concise one, identifies the acceptance checks, and hands the saved plan to implementation. A material open question waits for an answer. The implementation and independent reviewer receive the same plan.
