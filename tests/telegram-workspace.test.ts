@@ -1457,14 +1457,14 @@ it('keeps explicit replies bound to the delivered registration prompt', async ()
   const f = daddyFixture(),
     sent: any[] = [],
     replyRegistration = vi.fn((_chatId: number, messageId: number) =>
-      messageId === 101
-        ? { id: 'registration-A', step: 'source' as const }
-        : { id: 'registration-A', step: 'name' as const },
+      messageId === 102
+        ? { id: 'registration-A', step: 'name' as const }
+        : { id: 'registration-A', step: 'source' as const },
     );
   const api = {
     replaceCard: async (_callback: unknown, action: () => Promise<unknown>) => action(),
-    send: vi.fn(async (destination, card) => {
-      sent.push({ destination, card });
+    send: vi.fn(async (destination, card, _buttons, options) => {
+      sent.push({ destination, card, options });
       return { message_id: sent.length };
     }),
     call: vi.fn(async () => ({})),
@@ -1490,6 +1490,40 @@ it('keeps explicit replies bound to the delivered registration prompt', async ()
       },
     },
   });
+  const input = (text: string): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      text,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+    },
+  });
+  const mediaReply = (kind: 'voice' | 'document', messageId: number): Update => ({
+    update_id: id++,
+    message: {
+      message_id: id,
+      from: { id: 7 },
+      chat: { id: 7, type: 'private' },
+      ...(kind === 'voice'
+        ? { voice: { file_id: 'voice-a', file_unique_id: 'voice-a-unique', duration: 1 } }
+        : {
+            document: {
+              file_id: 'document-a',
+              file_unique_id: 'document-a-unique',
+              file_name: 'instructions.json',
+              mime_type: 'application/json',
+              file_size: 20,
+            },
+          }),
+      reply_to_message: {
+        message_id: messageId,
+        text: 'Repository source',
+        from: { id: 99, is_bot: true },
+        chat: { id: 7, type: 'private' },
+      },
+    },
+  });
   const active = (step: 'source' | 'name') =>
     f.store.setSetting('telegram.addWorkspace:7:7:0', {
       id: 'registration-B',
@@ -1500,8 +1534,21 @@ it('keeps explicit replies bound to the delivered registration prompt', async ()
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
   try {
+    f.store.setSetting('telegram.addWorkspace:7:7:0', {
+      id: 'registration-A',
+      step: 'source',
+      provider: 'github',
+      creationBound: false,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await bot.handle(input('relative/path'));
+    expect(sent.at(-1)!.options.registration).toEqual({
+      id: 'registration-A',
+      step: 'source',
+    });
+
     active('source');
-    await bot.handle(reply('https://example.test/repository-a', 101));
+    await bot.handle(reply('https://example.test/repository-a', 103));
     expect(f.store.setting<any>('telegram.addWorkspace:7:7:0')).toMatchObject({
       id: 'registration-B',
       step: 'source',
@@ -1518,6 +1565,27 @@ it('keeps explicit replies bound to the delivered registration prompt', async ()
       path: 'https://example.test/repository-b',
     });
     expect(f.workspaces.list().some((workspace) => workspace.name === 'Repository A')).toBe(false);
+
+    const jobs = Number(f.store.db.prepare('SELECT count(*) AS n FROM voice_jobs').get()?.n);
+    await bot.handle(mediaReply('voice', 101));
+    await bot.handle(mediaReply('document', 101));
+    expect(Number(f.store.db.prepare('SELECT count(*) AS n FROM voice_jobs').get()?.n)).toBe(jobs);
+    expect(f.daddy.group(group.id).instructions).toBeUndefined();
+
+    active('name');
+    await bot.handle({
+      update_id: id++,
+      callback_query: {
+        id: String(id),
+        data: 'dad:workspaces',
+        from: { id: 7 },
+        message: { message_id: 101, chat: { id: 7, type: 'private' } },
+      },
+    });
+    expect(f.store.setting<any>('telegram.addWorkspace:7:7:0')).toMatchObject({
+      id: 'registration-B',
+      step: 'name',
+    });
 
     f.store.setSetting('telegram.addWorkspace:7:7:0', null);
     await bot.handle(reply('Do not route this', 101));

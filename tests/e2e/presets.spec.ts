@@ -222,7 +222,7 @@ test('merges a stale preset addition without undoing the order saved in another 
       instructions: {
         daddy: {},
         worker: {},
-        presets: presets.slice(0, 3).map((preset) => ({ preset, enabled: true, omit: [] })),
+        presets: presets.slice(0, 5).map((preset) => ({ preset, enabled: true, omit: [] })),
       },
     },
   });
@@ -239,13 +239,10 @@ test('merges a stale preset addition without undoing the order saved in another 
   await firstConflict.getByRole('button', { name: 'Add presets', exact: true }).click();
   await firstConflict
     .getByRole('button', {
-      name: `Remove preset Concurrent B ${suffix} from this session`,
+      name: `Remove preset Concurrent A ${suffix} from this session`,
       exact: true,
     })
     .click();
-  await firstConflict
-    .getByRole('checkbox', { name: `Use preset Concurrent B ${suffix}`, exact: true })
-    .check();
 
   await other.getByRole('button', { name: 'Session settings', exact: true }).click();
   const secondConflict = other.getByRole('dialog', { name: 'Session settings' });
@@ -253,17 +250,15 @@ test('merges a stale preset addition without undoing the order saved in another 
   const prompt = secondConflict.getByLabel('Your instructions for daddy');
   await prompt.fill('Keep this conflicting draft');
   await secondConflict.getByRole('button', { name: 'Add presets', exact: true }).click();
-  for (const name of ['A', 'C'])
-    await secondConflict
-      .getByRole('button', {
-        name: `Remove preset Concurrent ${name} ${suffix} from this session`,
-        exact: true,
-      })
-      .click();
-  for (const name of ['A', 'C'])
-    await secondConflict
-      .getByRole('checkbox', { name: `Use preset Concurrent ${name} ${suffix}`, exact: true })
-      .check();
+  await secondConflict
+    .getByRole('button', {
+      name: `Remove preset Concurrent A ${suffix} from this session`,
+      exact: true,
+    })
+    .click();
+  await secondConflict
+    .getByRole('checkbox', { name: `Use preset Concurrent A ${suffix}`, exact: true })
+    .check();
 
   await firstConflict.getByRole('button', { name: 'Save settings', exact: true }).click();
   await expect(firstConflict).toHaveCount(0);
@@ -274,9 +269,10 @@ test('merges a stale preset addition without undoing the order saved in another 
   const conflictBoard = await (await page.request.get(`/api/daddy/sessions/${conflict.id}`)).json();
   expect(conflictBoard.group.instructions.daddy.prompt).toBeUndefined();
   expect(conflictBoard.group.instructions.presets.map((entry: any) => entry.preset.name)).toEqual([
-    `Concurrent A ${suffix}`,
-    `Concurrent C ${suffix}`,
     `Concurrent B ${suffix}`,
+    `Concurrent C ${suffix}`,
+    `Concurrent D ${suffix}`,
+    `Concurrent E ${suffix}`,
   ]);
   await other.close();
 });

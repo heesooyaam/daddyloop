@@ -60,6 +60,15 @@ it('binds a delivered registration prompt to its registration and step', async (
     await f.close();
   }
 });
+it('recognizes a registration prompt saved before prompt bindings existed', async () => {
+  const f = fixture();
+  try {
+    await f.queue.send({ chatId: 7 }, new TelegramText().add('Workspace name'));
+    expect(f.queue.replyRegistration(7, 1, 7)).toEqual({ id: '', step: 'unknown' });
+  } finally {
+    await f.close();
+  }
+});
 const text = (value: string) => new TelegramText().add(value);
 
 it('keeps status edits delivering while a durable pin retries', async () => {

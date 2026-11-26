@@ -811,6 +811,96 @@ it('merges independent instruction elements and rejects an overlapping patch ato
       ).toEqual([presetB.id, presetC.id, presetA.id, presetE.id, presetD.id]);
     }
 
+    for (const reverse of [false, true]) {
+      const samePreset = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: { prompt: 'Keep deletion conflict atomic' },
+            presets: [
+              selected(presetA),
+              selected(presetB),
+              selected(presetC),
+              selected(presetD),
+              selected(presetE),
+            ],
+          },
+        }),
+        remove = [
+          { target: 'preset', id: presetA.id, before: state(presetA), after: null },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+            after: [presetB.id, presetC.id, presetD.id, presetE.id],
+          },
+        ],
+        move = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+            after: [presetB.id, presetC.id, presetD.id, presetE.id, presetA.id],
+          },
+        ],
+        first = reverse ? move : remove,
+        second = [
+          {
+            target: 'worker.prompt',
+            before: 'Keep deletion conflict atomic',
+            after: 'Do not save',
+          },
+          ...(reverse ? remove : move),
+        ];
+      expect((await patchInstructions(samePreset.id, first)).statusCode).toBe(200);
+      expect((await patchInstructions(samePreset.id, second)).statusCode).toBe(409);
+      expect(f.daddy.group(samePreset.id).instructions?.worker.prompt).toBe(
+        'Keep deletion conflict atomic',
+      );
+      expect(
+        f.daddy.group(samePreset.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual(
+        reverse
+          ? [presetB.id, presetC.id, presetD.id, presetE.id, presetA.id]
+          : [presetB.id, presetC.id, presetD.id, presetE.id],
+      );
+    }
+
+    for (const reverse of [false, true]) {
+      const independent = f.daddy.create({
+          workspaceId: f.workspace.id,
+          instructions: {
+            daddy: {},
+            worker: {},
+            presets: [
+              selected(presetA),
+              selected(presetB),
+              selected(presetC),
+              selected(presetD),
+              selected(presetE),
+            ],
+          },
+        }),
+        removeC = [
+          { target: 'preset', id: presetC.id, before: state(presetC), after: null },
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+            after: [presetA.id, presetB.id, presetD.id, presetE.id],
+          },
+        ],
+        moveA = [
+          {
+            target: 'preset-order',
+            before: [presetA.id, presetB.id, presetC.id, presetD.id, presetE.id],
+            after: [presetB.id, presetC.id, presetD.id, presetE.id, presetA.id],
+          },
+        ];
+      for (const changes of reverse ? [moveA, removeC] : [removeC, moveA])
+        expect((await patchInstructions(independent.id, changes)).statusCode).toBe(200);
+      expect(
+        f.daddy.group(independent.id).instructions?.presets?.map((entry) => entry.preset.id),
+      ).toEqual([presetB.id, presetD.id, presetE.id, presetA.id]);
+    }
+
     for (const { base, firstOrder, secondOrder, addition } of [
       {
         base: [presetA, presetB, presetC],

@@ -323,8 +323,19 @@ export function applyInstructionChanges(
   if (order) {
     orderActual = value(order) as string[];
     const presetChanges = new Map(
-      changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
-    );
+        changes.filter((change) => change.target === 'preset').map((change) => [change.id, change]),
+      ),
+      shared = order.before.filter((id) => order.after.includes(id)),
+      orderAnchors = commonSubsequence(
+        order.before.filter((candidate) => shared.includes(candidate)),
+        order.after.filter((candidate) => shared.includes(candidate)),
+      ),
+      moved = shared.filter((id) => !orderAnchors.includes(id)),
+      actualPresent = order.before.filter((id) => orderActual.includes(id)),
+      actualAnchors = commonSubsequence(
+        actualPresent,
+        orderActual.filter((id) => order.before.includes(id)),
+      );
     if (
       new Set(order.before).size !== order.before.length ||
       new Set(order.after).size !== order.after.length
@@ -333,11 +344,12 @@ export function applyInstructionChanges(
     for (const id of order.after)
       if (!order.before.includes(id) && !orderActual.includes(id) && !presetChanges.get(id)?.after)
         throw new Error('instruction_conflict');
+    for (const id of moved) if (!orderActual.includes(id)) throw new Error('instruction_conflict');
     for (const id of order.before)
       if (
         !order.after.includes(id) &&
         orderActual.includes(id) &&
-        presetChanges.get(id)?.after !== null
+        (presetChanges.get(id)?.after !== null || !actualAnchors.includes(id))
       )
         throw new Error('instruction_conflict');
   }

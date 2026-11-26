@@ -3593,16 +3593,48 @@ export class TelegramWorkspace {
     const privateChat = chat.type === 'private' && chat.id === pair.chatId;
     if (!privateChat && (chat.type !== 'supergroup' || this.room()?.chatId !== chat.id))
       return false;
-    const replyTo = telegramReply(message);
+    const replyTo = telegramReply(message),
+      registrationMessageId = replyTo?.messageId ?? callback?.message?.message_id;
     const registrationPrompt =
-        privateChat && replyTo?.messageId
-          ? this.api.delivery?.replyRegistration(chat.id, replyTo.messageId, pair.userId)
+        privateChat && registrationMessageId
+          ? this.api.delivery?.replyRegistration(chat.id, registrationMessageId, pair.userId)
           : undefined,
       replyGroup =
         privateChat && replyTo?.messageId && !message?.text?.trimStart().startsWith('/')
           ? this.api.delivery?.replySession(chat.id, replyTo.messageId, pair.userId)
           : undefined;
     try {
+      if (registrationPrompt) {
+        const active = this.store.setting<{ id?: string; step?: 'source' | 'name'; path?: string }>(
+            this.registrationKey(destination),
+          ),
+          step = active?.step ?? (active?.path ? 'name' : 'source'),
+          matches =
+            registrationPrompt.step !== 'unknown' &&
+            !!active?.id &&
+            active.id === registrationPrompt.id &&
+            step === registrationPrompt.step;
+        if (!matches) {
+          if (callback)
+            await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          await this.api.send(
+            destination,
+            this.t('This selection expired. Open repository registration again.'),
+          );
+          return true;
+        }
+        if (message?.voice || message?.document) {
+          const content =
+            step === 'name'
+              ? this.t('Send a short name, for example Work or My app.')
+              : this.t('Send a repository URL or an absolute server path.');
+          await this.api.send(destination, content, undefined, {
+            key: `registration-validation:${active.id}:${step}:${update.update_id}`,
+            registration: { id: active.id!, step },
+          });
+          return true;
+        }
+      }
       if (callback) {
         if (
           !callback.data?.startsWith('dad:') &&
@@ -3692,24 +3724,6 @@ export class TelegramWorkspace {
           if (messages.length) this.saveRegistrationReply(privateInput, messages);
         }
       };
-      if (registrationPrompt) {
-        const active = this.store.setting<{ id?: string; step?: 'source' | 'name'; path?: string }>(
-            this.registrationKey(destination),
-          ),
-          step = active?.step ?? (active?.path ? 'name' : 'source');
-        if (
-          registrationPrompt.step === 'unknown' ||
-          !active?.id ||
-          active.id !== registrationPrompt.id ||
-          step !== registrationPrompt.step
-        ) {
-          const content = this.t('This selection expired. Open repository registration again.');
-          this.store.transaction(() => recordPrivateInput([{ destination, content }]));
-          if (privateInput !== undefined) await this.sendRegistrationReply(privateInput);
-          else await this.api.send(destination, content);
-          return true;
-        }
-      }
       if (text === '/cancel') {
         const document = this.store.setting(this.documentKey(destination)),
           repository = privateChat ? this.store.setting(this.repoInputKey(destination)) : undefined;
@@ -3834,7 +3848,13 @@ export class TelegramWorkspace {
             (registration.origin && registration.creationId && registration.creationExpiresAt
               ? true
               : undefined),
-          registrationId = registration.id ?? randomBytes(12).toString('base64url');
+          registrationId = registration.id ?? randomBytes(12).toString('base64url'),
+          registrationStep = registration.step ?? (registration.path ? 'name' : 'source');
+        if (!registration.id || !registration.step) {
+          registration.id = registrationId;
+          registration.step = registrationStep;
+          this.store.setSetting(registrationKey, registration);
+        }
         if (creationBound === undefined) {
           const content = this.t('This selection expired. Open repository registration again.');
           this.store.transaction(() => {
@@ -4560,11 +4580,29 @@ export class TelegramWorkspace {
               'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.',
             )
           : this.t(redact((error as Error).message));
+      const registration = privateChat
+          ? this.store.setting<{ id?: string; step?: 'source' | 'name'; path?: string }>(
+              this.registrationKey(destination),
+            )
+          : undefined,
+        binding = registration?.id
+          ? {
+              id: registration.id,
+              step: registration.step ?? (registration.path ? 'name' : 'source'),
+            }
+          : undefined;
       await this.api.send(
         destination,
         new TelegramText()
           .add('⚠️ ' + this.t('Could not complete the action'), 'bold')
           .add('\n\n' + message),
+        undefined,
+        binding
+          ? {
+              key: `registration-validation:${binding.id}:${binding.step}:${update.update_id}`,
+              registration: binding,
+            }
+          : undefined,
       );
       return true;
     }
