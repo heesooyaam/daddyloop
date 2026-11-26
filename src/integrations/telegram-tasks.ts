@@ -331,15 +331,6 @@ export function taskCard(
       })),
     );
   }
-  if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
-    buttons.unshift([
-      {
-        text: t('Verify merge'),
-        callback_data: queuePage
-          ? `dad:vm:${task.id}:${task.generation.toString(36)}:${queuePage.toString(36)}`
-          : `dad:merge:${task.id}:${task.generation}`,
-      },
-    ]);
   return { ...text, buttons };
 }
 

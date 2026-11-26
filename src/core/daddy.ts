@@ -1,3 +1,4 @@
+import { assertSetting, mergeSetting } from './settings-edit.js';
 import { pauseSessionWork, restoreSessionWork } from './session-pause.js';
 import { githubBackoff } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
@@ -14,6 +15,8 @@ import { translator } from '../i18n/index.js';
 import { preferences } from './preferences.js';
 import {
   AppError,
+  assertTaskVersion,
+  type ExpectedTask,
   now,
   prRef,
   isTicket,
@@ -505,6 +508,11 @@ export class Daddy {
     taskId: string,
     profile: AgentProfile | null,
     actionId?: string,
+    expected?: {
+      task: ExpectedTask;
+      groupGeneration: number;
+      architectProfile: AgentProfile | null;
+    },
   ) {
     if (profile) await this.catalogue.validate(profile);
     return this.engine.lock(taskId, async () => {
@@ -512,6 +520,17 @@ export class Daddy {
       const task = this.task(groupId, taskId);
       if (group.deletion || group.deletedAt)
         throw new AppError('session_deleting', 'This session is being deleted');
+      if (expected) {
+        assertTaskVersion(task, expected.task);
+        if (expected.groupGeneration !== group.generation)
+          throw new AppError('stale_session', 'This session changed. Open its settings again.');
+        assertSetting(
+          'architectProfile',
+          expected.architectProfile,
+          profile,
+          task.architectProfile ?? null,
+        );
+      }
       if (!isTicket(task) || task.state === 'complete')
         throw new AppError('planning_finished', 'Choose a task that can still enter planning', 409);
       this.store.transaction(() => {
@@ -527,6 +546,14 @@ export class Daddy {
   async settings(
     id: string,
     input: {
+      expectedGeneration?: number;
+      baseline?: {
+        profiles?: Partial<AgentProfiles>;
+        workerLimit?: number;
+        instructions?: SessionInstructions | null;
+        architectProfile?: AgentProfile | null;
+        autoMerge?: boolean;
+      };
       workerLimit?: number;
       profiles?: Partial<AgentProfiles>;
       architectProfile?: AgentProfile | null;
@@ -545,8 +572,57 @@ export class Daddy {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (input.autoMerge !== undefined && group.workspace?.provider !== 'github')
         throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
+      if (input.expectedGeneration !== undefined && input.expectedGeneration !== group.generation)
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
+      const base = input.baseline;
+      if (base) {
+        for (const role of ['daddy', 'worker'] as const) {
+          const edit = input.profiles?.[role];
+          if (edit && base.profiles?.[role]) {
+            assertSetting(
+              role,
+              base.profiles[role],
+              edit,
+              group[role] ?? this.engine.defaultAgents()[role],
+            );
+          }
+        }
+        if (input.instructions && base.instructions !== undefined) {
+          const empty = { daddy: {}, worker: {} };
+          input.instructions = sessionInstructionsSchema.parse(
+            mergeSetting(
+              'instructions',
+              base.instructions ?? empty,
+              input.instructions,
+              group.instructions ?? empty,
+            ),
+          );
+        }
+        if (input.architectProfile !== undefined && base.architectProfile !== undefined) {
+          assertSetting(
+            'architectProfile',
+            base.architectProfile,
+            input.architectProfile,
+            group.architectProfile ?? null,
+          );
+        }
+        if (input.autoMerge !== undefined && base.autoMerge !== undefined)
+          input.autoMerge = mergeSetting(
+            'autoMerge',
+            base.autoMerge,
+            input.autoMerge,
+            sessionAutoMerge(this.store, id),
+          );
+      }
       const limit = input.workerLimit;
       if (limit !== undefined) {
+        if (base?.workerLimit !== undefined)
+          assertSetting(
+            'workerLimit',
+            base.workerLimit,
+            limit,
+            workerPool(this.store, group).target,
+          );
         if (!Number.isInteger(limit) || limit < 1 || limit > 8)
           throw new AppError('invalid_pool', 'Choose between 1 and 8 workers', 400);
         if (
@@ -686,8 +762,10 @@ export class Daddy {
       return lock(0);
     });
   }
-  async pause(id: string) {
+  async pause(id: string, expectedGeneration?: number) {
     await this.withSessionTasks(id, (group, tasks) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== group.generation)
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (group.daddyState === 'paused') return;
       const stopped = this.store.transaction(() => {
@@ -707,8 +785,10 @@ export class Daddy {
     });
     return this.board(id);
   }
-  async resume(id: string) {
+  async resume(id: string, expectedGeneration?: number) {
     await this.withSessionTasks(id, (group) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== group.generation)
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
       if (group.deletion)
         throw new AppError('session_deleting', 'Retry deletion before changing this session');
       if (this.running.has(id) && group.daddyState !== 'active' && group.daddyState !== 'paused')

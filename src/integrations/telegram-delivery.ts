@@ -95,17 +95,20 @@ export class TelegramDelivery {
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
   }
-  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+  replyReceipt(chatId: number, messageId: number, ownerId: number) {
     // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
-    const row = this.store.db
+    return this.store.db
       .prepare(
         `SELECT json_extract(value,'$.options.groupId') AS groupId,
-      json_extract(value,'$.options.key') AS deliveryKey FROM settings
+      json_extract(value,'$.options.key') AS deliveryKey, json_extract(value,'$.destination.threadId') AS threadId FROM settings
       WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
         AND json_extract(value,'$.destination.chatId')=?
         AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
       )
       .get(this.bot, ownerId, chatId, messageId);
+  }
+  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+    const row = this.replyReceipt(chatId, messageId, ownerId);
     if (typeof row?.groupId === 'string') return row.groupId;
     // Receipts from older installs identify the task or turn in the delivery key.
     const key = String(row?.deliveryKey ?? '');

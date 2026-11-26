@@ -103,12 +103,21 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
   });
   app.post<{ Params: { id: string } }>(
     '/api/daddy/sessions/:id/settings',
-    { bodyLimit: 1048576 },
+    { bodyLimit: 2097152 },
     async (request) =>
       daddy.settings(
         id.parse(request.params.id),
         z
           .object({
+            baseline: z
+              .object({
+                profiles: profilesSchema.partial().optional(),
+                architectProfile: profileSchema.nullable().optional(),
+                instructions: sessionInstructionsSchema.nullable().optional(),
+                autoMerge: z.boolean().optional(),
+              })
+              .strict()
+              .optional(),
             workerLimit: workerNumber.optional(),
             profiles: profilesSchema.partial().optional(),
             architectProfile: profileSchema.nullable().optional(),
@@ -214,6 +223,15 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
         taskId: id,
         action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
         expectedHead: z.string().max(128),
+        expectedRevision: z
+          .object({
+            head: z.string(),
+            base: z.string(),
+            start: z.string(),
+            revisionId: z.string().optional(),
+          })
+          .strict(),
+        reason: z.string().trim().max(2000).optional(),
         expectedGeneration: z.number().int().positive(),
       })
       .strict()
@@ -226,9 +244,10 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       );
     const expected = {
       head: input.expectedHead,
+      revision: input.expectedRevision,
       generation: input.expectedGeneration,
       groupId: request.params.id,
     };
-    return daddy.engine.action(task.id, input.action, '', expected);
+    return daddy.engine.action(task.id, input.action, input.reason, expected);
   });
 }

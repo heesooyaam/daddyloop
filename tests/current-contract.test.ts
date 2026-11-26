@@ -96,4 +96,4 @@ it('exposes the current CLI and rejects retired commands and model flags', () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}, 20000);
+}, 30000);

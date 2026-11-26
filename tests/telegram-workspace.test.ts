@@ -184,9 +184,20 @@ it('binds a forum selected by the paired owner, creates one topic per session an
         ),
       ).toBe(true),
     );
-    await bot.handle(click(`dad:pool:${group.id}:3`, -10042, 7, 17));
+    await bot.handle(click(`dad:pool:${group.id}`, -10042, 7, 17));
+    const poolButtons = () =>
+      (
+        sent.filter((item) => item.method === 'sendMessage').at(-1)!.body.reply_markup as {
+          inline_keyboard: { text: string; callback_data: string }[][];
+        }
+      ).inline_keyboard.flat();
+    await bot.handle(
+      click(poolButtons().find((button) => button.text === '3')!.callback_data, -10042, 7, 17),
+    );
     expect(f.daddy.group(group.id).requestedWorkerLimit).toBe(3);
-    await bot.handle(click(`dad:pool:${group.id}:8`, -10042, 99, 17));
+    await bot.handle(
+      click(poolButtons().find((button) => button.text === '8')!.callback_data, -10042, 99, 17),
+    );
     expect(f.daddy.group(group.id).requestedWorkerLimit).toBe(3);
     expect(sent.filter((item) => item.method === 'createForumTopic')).toHaveLength(1);
     const task = await f.tickets.local({

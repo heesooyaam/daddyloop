@@ -11,19 +11,49 @@ import { draftSyncPending, taskReference } from '../src/core/task-activity.js';
 import { githubActivityStatus } from '../src/core/auto-merge.js';
 import { queueCard } from '../src/integrations/telegram-tasks.js';
 import { translate } from '../src/i18n/index.js';
-import type { Job, Task } from '../src/core/types.js';
+import { prRef as taskPrRef, type Job, type Task } from '../src/core/types.js';
+import { DemoProvider } from '../src/providers/demo.js';
 
 it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
-  const f = daddyFixture();
+  const f = daddyFixture(true);
   const app = Fastify();
   registerDaddy(app, f.daddy);
   const sent: { method: string; body: Record<string, unknown> }[] = [];
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, request) => {
-    sent.push({ method: String(url).split('/').at(-1)!, body: JSON.parse(String(request?.body)) });
-    return Response.json({ ok: true, result: { message_id: sent.length } });
-  });
-  const bot = new Telegram(f.engine, api, 'fixture_bot');
-  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
+  const localBotApi = Fastify();
+  const imported = { daddy: { prompt: 'From Telegram' }, worker: {} };
+  const documents: string[] = [];
+  localBotApi.addContentTypeParser(
+    /^multipart\/form-data/,
+    { parseAs: 'string' },
+    (_request, body, done) => {
+      documents.push(String(body));
+      done(null, {});
+    },
+  );
+  localBotApi.get('/instructions.json', async () => imported);
+  localBotApi.post<{ Params: { method: string }; Body: Record<string, unknown> }>(
+    '/:method',
+    async (request) => {
+      sent.push({ method: request.params.method, body: request.body });
+      if (request.params.method === 'getFile')
+        return { ok: true, result: { file_path: 'instructions.json' } };
+      return { ok: true, result: { message_id: sent.length } };
+    },
+  );
+  const origin = await localBotApi.listen({ host: '127.0.0.1', port: 0 });
+  const createBot = () => {
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', (url, request) =>
+      fetch(origin + '/' + String(url).split('/').at(-1), request),
+    );
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
+    return { api, bot };
+  };
+  let { api, bot } = createBot();
   setLocale(f.store, 'en');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
@@ -89,6 +119,68 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await bot.handle(message('/workers'));
     expect(lastText()).toContain('Worker 1 · codex · gpt-6-astra · max\nFree');
 
+    const settings = session + '/settings';
+    const instructions = { daddy: {}, worker: {} };
+    const edit = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: settings, payload });
+    expect(
+      (await edit({ instructions: { daddy: { prompt: 'Web draft' }, worker: {} } })).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await edit({
+          baseline: { instructions },
+          instructions: { daddy: {}, worker: { prompt: 'Bot draft' } },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await edit({
+          baseline: { instructions },
+          instructions: { daddy: { prompt: 'Stale draft' }, worker: {} },
+          workerLimit: 3,
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(f.daddy.group(group.id).instructions).toMatchObject({
+      daddy: { prompt: 'Web draft' },
+      worker: { prompt: 'Bot draft' },
+    });
+    expect(f.daddy.board(group.id).workers.target).toBe(2);
+
+    const privateMessage = (text?: string): Update => {
+      const update = message(text ?? '');
+      return {
+        ...update,
+        message: {
+          ...update.message!,
+          chat: { id: 7, type: 'private' },
+          message_thread_id: undefined,
+        },
+      };
+    };
+    const other = f.daddy.create({ workspaceId: f.workspace.id, requirements: 'Other session' });
+    await bot.handle(privateMessage('/session@fixture_bot ' + group.id.slice(0, 8)));
+    expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
+    const upload = privateMessage();
+    await bot.handle({
+      ...upload,
+      message: {
+        ...upload.message!,
+        text: undefined,
+        caption: '/import ' + other.id,
+        document: { file_id: 'instruction-test' },
+      },
+    });
+    expect((await app.inject('/api/daddy/sessions/' + other.id)).json().group.instructions).toEqual(
+      imported,
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web draft');
+    await bot.handle(privateMessage('/export@fixture_bot ' + other.id));
+    expect(documents).toHaveLength(1);
+    expect(documents[0]).toContain(JSON.stringify(imported, null, 2));
+
     const web = (await app.inject(session)).json();
     expect(web.taskQueue).toEqual([task!.id]);
     expect(web.tasks[0]).toMatchObject({ id: task!.id, statusLabel: 'Waiting for a worker' });
@@ -108,6 +200,14 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         },
       },
     });
+    const keyboard = () =>
+      (
+        sent.filter((x) => x.method === 'sendMessage').at(-1)?.body.reply_markup as {
+          inline_keyboard: { text: string; callback_data: string; url?: string }[][];
+        }
+      ).inline_keyboard.flat();
+    const buttonFor = (label: string) =>
+      keyboard().find((button) => button.text.replace(/^✓ /, '') === label)!.callback_data;
     const queuedPlan = () => f.store.activeJobs(task!.id).find((job) => job.kind === 'plan')!;
     expect(queuedPlan().profile).toMatchObject({ model: 'gpt-6-astra', effort: 'max' });
     const architectUrl = session + '/tasks/' + task!.id + '/architect';
@@ -117,18 +217,14 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       payload: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
     });
     expect(updated.statusCode).toBe(200);
-    await bot.handle(click(`dad:arch-reset:t:${task!.id}`, 7, 18));
+    await bot.handle(click(`dad:arch-task:${task!.id}`));
+    const resetTaskArchitect = buttonFor('Use the session architect profile');
+    await bot.handle(click(resetTaskArchitect, 7, 18));
     expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
-    await bot.handle(click(`dad:arch-reset:t:${task!.id}`));
+    await bot.handle(click(resetTaskArchitect));
     expect((await app.inject(session)).json().tasks[0].architectProfile).toBeUndefined();
     expect(queuedPlan().profile).toEqual(group.daddy);
     await bot.handle(click(`dad:arch-task:${task!.id}`));
-    const keyboard = () =>
-      (
-        sent.filter((x) => x.method === 'sendMessage').at(-1)?.body.reply_markup as {
-          inline_keyboard: { text: string; callback_data: string }[][];
-        }
-      ).inline_keyboard.flat();
     await bot.handle(click(keyboard().find((b) => b.text.includes('gpt-5.6-sol'))!.callback_data));
     await bot.handle(click(keyboard().find((b) => b.text === 'max')!.callback_data));
     expect((await app.inject(session)).json().tasks[0].architectProfile).toMatchObject({
@@ -159,21 +255,26 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         model: 'architect-30',
       });
       expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
-      await bot.handle(click(`dad:arch-reset:g:${group.id}`));
+      await bot.handle(click(`dad:models:${group.id}:architect`));
+      await bot.handle(click(buttonFor('Use the shared reviewer profile')));
       expect(f.store.getGroup(group.id).architectProfile).toBeUndefined();
     } finally {
       list.mockRestore();
     }
-    await bot.handle(click(`dad:sm:${group.id}:on`, 99));
+    await bot.handle(click(`dad:settings:${group.id}`));
+    const enableMerge = buttonFor('Enable auto-merge for session');
+    await bot.handle(click(enableMerge, 99));
     expect((await app.inject(session)).json().group.autoMerge).toBe(false);
-    await bot.handle(click(`dad:sm:${group.id}:on`));
+    await bot.handle(click(enableMerge));
     expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
       mode: 'inherit',
       enabled: true,
     });
-    await bot.handle(click(`dad:tm:${task!.id}:off`, 7, 18));
+    await bot.handle(click(`dad:task:${task!.id}`));
+    const disableMerge = buttonFor('Off');
+    await bot.handle(click(disableMerge, 7, 18));
     expect((await app.inject(session)).json().tasks[0].autoMerge.mode).toBe('inherit');
-    await bot.handle(click(`dad:tm:${task!.id}:off`));
+    await bot.handle(click(disableMerge));
     expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
       mode: 'off',
       enabled: false,
@@ -248,21 +349,81 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         .flat()
         .map(({ callback_data }) => callback_data);
     };
-    for (const mode of ['on', 'off', 'inherit']) {
-      const button = callbacks().find((data) => data.startsWith(`dad:tm:${tenth.id}:${mode}`))!;
-      await bot.handle(click(button));
+    for (const mode of ['On', 'Off', 'Session default']) {
+      await bot.handle(click(buttonFor(mode)));
       expect(callbacks()).toContain(backToQueue);
     }
     const verifyButton = callbacks().find((data) => data.startsWith('dad:vm:'))!;
     expect(Buffer.byteLength(verifyButton)).toBeLessThanOrEqual(64);
+    await bot.handle(click(verifyButton, 99));
+    await bot.handle(click(verifyButton, 7, 18));
+    expect(action).not.toHaveBeenCalled();
     await bot.handle(click(verifyButton));
     expect(action).toHaveBeenCalledWith(withPr.id, 'verify-merge', '', {
       groupId: group.id,
       head: withPr.revision!.head,
+      revision: withPr.revision,
       generation: withPr.generation,
     });
     expect(callbacks()).toContain(backToQueue);
+    await bot.handle(click(verifyButton));
+    expect(action).toHaveBeenCalledTimes(1);
     action.mockRestore();
+    await bot.handle(click(openTenth));
+    const stale = buttonFor('Verify merge');
+    f.store.saveTask({ ...withPr, revision: { ...withPr.revision!, head: 'c'.repeat(40) } });
+    await bot.handle(click(stale));
+    expect(lastText()).toContain('The task changed');
+    const pr = {
+      ...(await new DemoProvider(f.store).getPR(taskPrRef(withPr))),
+      ...withPr.revision!,
+      checks: 'missing' as const,
+    };
+    f.store.setSetting('demo-pr:10', pr);
+    f.store.saveTask({ ...withPr, pr, state: 'awaiting_checks' });
+    const currentWaiver = {
+      action: 'waive-checks',
+      taskId: tenth.id,
+      expectedGeneration: withPr.generation,
+      expectedHead: withPr.revision!.head,
+      expectedRevision: withPr.revision,
+    };
+    const noReason = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: currentWaiver,
+    });
+    expect(noReason.statusCode).toBe(400);
+    const wrongBase = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: {
+        ...currentWaiver,
+        reason: 'Reviewed locally',
+        expectedRevision: { ...withPr.revision!, base: 'd'.repeat(40) },
+      },
+    });
+    expect(wrongBase.statusCode).toBe(409);
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+
+    await bot.handle(click(openTenth));
+    const handoff = keyboard().find((button) => button.text.startsWith('Waive CI checks'));
+    const start = new URL(handoff!.url!).searchParams.get('start')!;
+    const key = start.slice('waive_'.length);
+    await bot.handle(message('/waive ' + key + ' Reviewed locally'));
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+    await bot.handle(privateMessage('/start@fixture_bot ' + start));
+    expect(lastText()).toContain('Reason for waiving CI checks');
+    const confirmWaiver = privateMessage('/waive ' + key + ' Reviewed locally');
+    await bot.handle(confirmWaiver);
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(confirmWaiver);
+    await bot.handle(privateMessage('/waive ' + key + ' Reviewed locally again'));
+    expect(f.store.events(tenth.id).filter(({ type }) => type === 'checks.waived')).toMatchObject([
+      { data: { reason: 'Reviewed locally', head: withPr.revision!.head } },
+    ]);
+
     f.store.saveTask({ ...tenth, state: 'complete' });
     await bot.handle(click(backToQueue));
     expect(lastText()).toContain('Task queue\n\nFix search');
@@ -589,7 +750,52 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       expect(lastText()).toContain('\n\n' + publicQuestion);
       f.store.setSetting('github.quota:' + task!.ref.host, null);
     }
+
+    const requestTask = {
+      ...withPr,
+      state: 'needs_input' as const,
+      inputRequest: {
+        runId: 'task-question',
+        role: 'author' as const,
+        generation: withPr.generation,
+      },
+    };
+    f.store.saveTask(requestTask);
+    const question = 'Choose the next step for task ten.';
+    const destination = { chatId: -10042, threadId: 17 };
+    await api.send(destination, question, undefined, {
+      key: `telegram:question:7:${withPr.id}:task-question`,
+      groupId: group.id,
+    });
+    await api.delivery!.flush();
+    const messageId = sent.findIndex((item) => item.body.text === question) + 1;
+    expect(messageId).toBeGreaterThan(0);
+    const reply = message('Continue the task', 7, 18);
+    const external = { chat: reply.message!.chat, message_id: messageId };
+    await bot.handle(message('/attach ' + other.id, 7, 18));
+    await bot.handle({ ...reply, message: { ...reply.message!, external_reply: external } });
+    expect(f.store.messages(other.id).every((item) => item.text !== 'Continue the task')).toBe(
+      true,
+    );
+
+    const parent = { ...external, message_thread_id: 17 };
+    const answered = message('Continue task ten');
+    await bot.handle({ ...answered, message: { ...answered.message!, reply_to_message: parent } });
+    expect(
+      f.store.messages(group.id).find((item) => item.text === 'Continue task ten')?.origin?.replyTo
+        ?.taskId,
+    ).toBe(withPr.id);
+    f.store.saveTask({ ...requestTask, generation: requestTask.generation + 1 });
+    const staleReply = message('Answer to an old question');
+    await bot.handle({
+      ...staleReply,
+      message: { ...staleReply.message!, reply_to_message: parent },
+    });
+    expect(
+      f.store.messages(group.id).every((item) => item.text !== 'Answer to an old question'),
+    ).toBe(true);
   } finally {
+    await localBotApi.close();
     await app.close();
     await bot.stop();
     await f.close();

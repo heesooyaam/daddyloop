@@ -1,4 +1,4 @@
-import { commandHelp, telegramCommands } from './telegram-commands.js';
+import { commandHelp, telegramCommands, normalizeTelegramText } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
 import { randomBytes, createHash } from 'node:crypto';
@@ -44,6 +44,8 @@ export interface Update {
   update_id: number;
   message?: {
     text?: string;
+    caption?: string;
+    document?: { file_id: string; file_size?: number; file_name?: string };
     chat: Chat;
     from?: User;
     message_thread_id?: number;
@@ -58,7 +60,7 @@ export interface Update {
       forum_topic_created?: unknown;
     };
     quote?: { text: string; position: number; is_manual?: boolean };
-    external_reply?: unknown;
+    external_reply?: { chat?: Chat; message_id?: number };
     voice?: {
       file_id: string;
       file_unique_id: string;
@@ -154,8 +156,12 @@ export class TelegramApi {
       try {
         const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          ...(body instanceof FormData
+            ? { body }
+            : {
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              }),
           redirect: 'manual',
           signal: requestSignal,
         });
@@ -278,8 +284,34 @@ export class TelegramApi {
     }
     return result;
   }
-  async downloadVoice(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
-    const limit = 10 * 1024 * 1024;
+  async sendInstructions(chatId: number, value: unknown) {
+    const form = new FormData();
+    form.set('chat_id', String(chatId));
+    form.set(
+      'document',
+      new Blob([JSON.stringify(value, null, 2) + '\n'], {
+        type: 'application/json',
+      }),
+      'daddy-instructions.json',
+    );
+    await this.call('sendDocument', form);
+  }
+
+  downloadVoice(fileId: string, signal?: AbortSignal) {
+    return this.downloadFile(
+      fileId,
+      10 * 1024 * 1024,
+      'Voice messages can be at most 10 MB',
+      signal,
+    );
+  }
+
+  async downloadFile(
+    fileId: string,
+    limit: number,
+    sizeError: string,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     const file = await this.call<{ file_path?: string; file_size?: number }>(
       'getFile',
       { file_id: fileId },
@@ -291,9 +323,13 @@ export class TelegramApi {
       file.file_path.split('/').some((part) => part === '..' || part === '.') ||
       file.file_path.startsWith('/')
     )
-      throw new AppError('voice_file_invalid', 'Telegram returned an invalid voice file path');
-    if (file.file_size && file.file_size > limit)
-      throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+      throw new AppError(
+        'voice_file_invalid',
+        limit === 10 * 1024 * 1024
+          ? 'Telegram returned an invalid voice file path'
+          : 'Telegram returned an invalid file path',
+      );
+    if (file.file_size && file.file_size > limit) throw new AppError('voice_too_large', sizeError);
     try {
       const response = await this.fetcher(
         `https://api.telegram.org/file/bot${this.token}/${file.file_path}`,
@@ -306,18 +342,17 @@ export class TelegramApi {
       );
       if (!response.ok || !response.body) {
         await response.body?.cancel();
-        throw new AppError('voice_download_failed', 'Could not download the voice message');
+        throw new AppError('voice_download_failed', 'Could not download the Telegram file');
       }
       if (Number(response.headers.get('content-length')) > limit) {
         await response.body.cancel();
-        throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+        throw new AppError('voice_too_large', sizeError);
       }
       const chunks: Uint8Array[] = [];
       let size = 0;
       for await (const chunk of response.body) {
         size += chunk.length;
-        if (size > limit)
-          throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+        if (size > limit) throw new AppError('voice_too_large', sizeError);
         chunks.push(chunk);
       }
       return Buffer.concat(chunks);
@@ -455,6 +490,7 @@ export class Telegram {
   unpair() {
     this.engine.store.transaction(() => {
       this.engine.store.setSetting('telegram.pairing', null);
+      this.engine.store.setSetting('telegram.currentDaddy', null);
       this.engine.store.setSetting('telegram.pairCode', null);
       this.engine.store.db.prepare('DELETE FROM bot_actions').run();
     });
@@ -491,6 +527,11 @@ export class Telegram {
   };
   async handle(update: Update) {
     const store = this.engine.store;
+    if (update.message?.text) {
+      const text = normalizeTelegramText(update.message.text, this.username);
+      if (text === undefined) return;
+      update = { ...update, message: { ...update.message, text } };
+    }
     const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
     const sender = update.callback_query?.from ?? message?.from;
@@ -513,7 +554,12 @@ export class Telegram {
         .run(update.update_id, now());
       return;
     }
-    store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    await this.handleUpdate(update);
+    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+  }
+  private async handleUpdate(update: Update) {
+    const store = this.engine.store;
+    const message = update.message;
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
@@ -526,8 +572,14 @@ export class Telegram {
     const code = message?.text?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
     const expected = store.setting<{ hash: string; expiresAt: string }>('telegram.pairCode');
     if (code && expected && expected.expiresAt > now() && hash(code) === expected.hash) {
-      pair = { chatId: chat.id, userId: from.id, username: this.username, ownerLabel };
+      pair = {
+        chatId: chat.id,
+        userId: from.id,
+        username: this.username,
+        ownerLabel: from.username ? '@' + from.username : from.first_name,
+      };
       store.transaction(() => {
+        if (this.paired()?.userId !== pair!.userId) store.setSetting('telegram.currentDaddy', null);
         store.setSetting('telegram.pairing', pair);
         store.setSetting('telegram.pairCode', null);
         store.db.prepare('DELETE FROM bot_actions').run();
@@ -543,7 +595,10 @@ export class Telegram {
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
-    const cleanup = message?.text?.trim().match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
+    const cleanup = message?.text
+      ?.replace(/^\/start cleanup$/, '/cleanup')
+      .trim()
+      .match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
     if (cleanup && (!cleanup[1] || cleanup[1].toLowerCase() === this.username.toLowerCase())) {
       try {
         await this.showCleanup(chat.id, cleanupCommand(cleanup[2]));
@@ -579,7 +634,7 @@ export class Telegram {
         await this.showModels(chat.id, false);
         return;
       }
-      if (text === '/updates') {
+      if (text === '/updates' || text === '/start updates') {
         await this.showUpdates(chat.id, false);
         return;
       }
@@ -596,7 +651,7 @@ export class Telegram {
         );
         return;
       }
-      if (text === '/web') {
+      if (text === '/web' || text === '/start web') {
         if (!this.publicOrigin)
           throw new Error('Configure a permanent HTTPS address with daddy web first.');
         const { Access } = await import('../server/access.js');

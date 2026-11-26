@@ -65,6 +65,53 @@ const commands: Command[] = [
     ru: 'Выбрать сессию или открыть её тему',
   },
   {
+    name: 'session',
+    args: '[SESSION_ID]',
+    en: 'Choose a session explicitly',
+    ru: 'Выбрать сессию явно',
+  },
+  {
+    name: 'agents',
+    args: '[daddy|worker ENGINE MODEL EFFORT]',
+    scope: 'private',
+    en: 'Inspect or change the default agent profiles',
+    ru: 'Посмотреть или сменить общие профили агентов',
+  },
+  {
+    name: 'concurrency',
+    args: '1..8',
+    scope: 'private',
+    en: 'Set the total number of concurrent agents',
+    ru: 'Задать общий предел параллельных агентов',
+  },
+  {
+    name: 'export',
+    args: 'SESSION_ID',
+    scope: 'private',
+    en: 'Download session instructions as JSON',
+    ru: 'Скачать инструкции сессии в JSON',
+  },
+  {
+    name: 'preset_parts',
+    args: 'ID [1,2,...|all|off]',
+    en: 'Choose components of an applied preset',
+    ru: 'Выбрать компоненты подключённого пресета',
+  },
+  {
+    name: 'preset_export',
+    args: 'ID',
+    scope: 'private',
+    en: 'Download a preset as JSON',
+    ru: 'Скачать пресет в JSON',
+  },
+  {
+    name: 'preset_remove',
+    args: 'ID REVISION',
+    scope: 'private',
+    en: 'Delete a specific preset revision',
+    ru: 'Удалить указанную версию пресета',
+  },
+  {
     name: 'new',
     args: '[goal]',
     en: 'Start a separate session and choose a workspace',
@@ -82,8 +129,15 @@ const commands: Command[] = [
     ru: 'Выбрать или подключить репозиторий',
   },
   {
+    name: 'workspace_defaults',
+    args: '[ID UPDATED_AT JSON]',
+    scope: 'private',
+    en: 'Read or edit the defaults of a saved repository',
+    ru: 'Посмотреть или изменить настройки сохранённого репозитория',
+  },
+  {
     name: 'repo',
-    args: '[default | path]',
+    args: '[default | path | JSON]',
     en: 'Choose the repository for one request',
     ru: 'Выбрать репозиторий для одного запроса',
     detail: {
@@ -114,9 +168,24 @@ const commands: Command[] = [
     ru: 'Подключить скилл с GitHub к выбранной роли',
   },
   {
+    name: 'skill_source',
+    args: 'SESSION_ID daddy|worker JSON',
+    scope: 'private',
+    en: 'Import a skill using the same sources as the web',
+    ru: 'Импортировать навык из источников веб-интерфейса',
+    detail: {
+      en: 'For a Markdown attachment use the caption /skill_file SESSION_ID ROLE [RELATIVE_PATH]. Use /skill_source with a JSON source, for example {"kind":"text","name":"Style","text":"Use short paragraphs."}.',
+      ru: 'Приложи Markdown с подписью /skill_file ID_СЕССИИ РОЛЬ [ПУТЬ]. Для /skill_source укажи источник в JSON, например {"kind":"text","name":"Style","text":"Пиши короткими абзацами."}.',
+    },
+  },
+  {
     name: 'presets',
     en: 'List saved instruction presets',
     ru: 'Посмотреть готовые наборы инструкций',
+    detail: {
+      en: 'In private chat attach a JSON document with caption /preset_create NAME or /preset_edit ID REVISION NAME. /preset_export ID downloads it. /export SESSION_ID downloads session instructions and a document captioned /import SESSION_ID loads them.',
+      ru: 'В личке приложи JSON с подписью /preset_create НАЗВАНИЕ или /preset_edit ID ВЕРСИЯ НАЗВАНИЕ. /preset_export ID скачивает пресет. /export ID_СЕССИИ скачивает инструкции, а документ с подписью /import ID_СЕССИИ загружает их обратно.',
+    },
   },
   {
     name: 'preset',
@@ -189,7 +258,6 @@ const commands: Command[] = [
   },
   {
     name: 'cancel',
-    scope: 'private',
     en: 'Cancel a pending workspace registration step',
     ru: 'Отменить текущий шаг регистрации репозитория',
   },
@@ -253,4 +321,12 @@ export function commandHelp(locale: Locale, scope: Scope, argument = '') {
       .add('/' + cmd.name, 'bot_command')
       .add((cmd.args ? ' ' + cmd.args : '') + ' — ' + cmd[locale]);
   return out;
+}
+
+export function normalizeTelegramText(value: string | undefined, username: string) {
+  const text = value?.trim();
+  const command = text && /^\/([a-z0-9_]+)(?:@([a-z0-9_]+))?(?=\s|$)/i.exec(text);
+  if (!command) return text;
+  if (command[2] && command[2].toLowerCase() !== username.toLowerCase()) return;
+  return '/' + command[1].toLowerCase() + text.slice(command[0].length);
 }

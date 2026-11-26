@@ -325,6 +325,12 @@ export class WorkspaceRegistry {
           .find(
             (saved) => saved.repoPath === workspace.repoPath && saved.scope === workspace.scope,
           );
+    if (previous && existing?.updatedAt !== previous.updatedAt)
+      throw new AppError(
+        'workspace_changed',
+        'This workspace changed. Reload it before saving.',
+        409,
+      );
     if (existing) {
       workspace.id = existing.id;
       workspace.createdAt = existing.createdAt;

@@ -1123,6 +1123,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               forceDaddy,
               applyWorkers,
               architectProfile,
+              baseline,
             ) => {
               await model.action(
                 'settings',
@@ -1133,10 +1134,14 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   forceDaddy,
                   applyWorkers,
                   architectProfile,
+                  baseline,
                 },
                 board.group.id,
               );
-              if (isCurrentForm() && !model.snapshot().error) setModal(null);
+              if (!isCurrentForm()) return;
+              const error = model.snapshot().error;
+              if (error) throw new Error(error);
+              setModal(null);
             }}
           />
         </Dialog>
@@ -1754,6 +1759,12 @@ function SessionSettings({
     forceDaddy?: boolean,
     applyWorkers?: boolean,
     architectProfile?: AgentProfile | null,
+    baseline?: {
+      profiles?: Partial<AgentProfiles>;
+      instructions?: SessionInstructions | null;
+      autoMerge?: boolean;
+      architectProfile?: AgentProfile | null;
+    },
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1770,6 +1781,7 @@ function SessionSettings({
     [busy, setBusy] = useState(false);
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const [architect, setArchitect] = useState(board.group.architectProfile);
+  const originalInstructions = useRef(instructions);
   const originalArchitect = useRef(architect);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
@@ -1798,15 +1810,27 @@ function SessionSettings({
           JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
         )
           changed.worker = profiles.worker;
+        const changedInstructions =
+          JSON.stringify(instructions) !== JSON.stringify(originalInstructions.current);
+        const changedAutoMerge = autoMerge !== originalAutoMerge.current;
+        const changedArchitect =
+          JSON.stringify(architect) !== JSON.stringify(originalArchitect.current);
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          instructions,
-          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          changedInstructions ? instructions : undefined,
+          changedAutoMerge ? autoMerge : undefined,
           forceDaddy || undefined,
           applyWorkers || undefined,
-          JSON.stringify(architect) === JSON.stringify(originalArchitect.current)
-            ? undefined
-            : (architect ?? null),
+          changedArchitect ? (architect ?? null) : undefined,
+          {
+            profiles: {
+              ...(changed.daddy ? { daddy: originalProfiles.current.daddy } : {}),
+              ...(changed.worker ? { worker: originalProfiles.current.worker } : {}),
+            },
+            instructions: changedInstructions ? (originalInstructions.current ?? null) : undefined,
+            autoMerge: changedAutoMerge ? originalAutoMerge.current : undefined,
+            architectProfile: changedArchitect ? (originalArchitect.current ?? null) : undefined,
+          },
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1957,6 +1981,7 @@ function TaskReport({
       active = false;
     };
   }, [id]);
+  const [waiverReason, setWaiverReason] = useState('');
   const action = async (action: string) => {
     if (!board || !value) return;
     setBusy(true);
@@ -1966,6 +1991,8 @@ function TaskReport({
         action,
         expectedHead: value.task.revision?.head ?? '',
         expectedGeneration: value.task.generation,
+        expectedRevision: value.task.revision,
+        reason: action === 'waive-checks' ? waiverReason : undefined,
       });
       onChange();
       const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
@@ -2059,6 +2086,27 @@ function TaskReport({
             >
               {t('Verify merge')}
             </button>
+          )}
+          {value.task.state === 'awaiting_checks' && value.task.revision && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void action('waive-checks');
+              }}
+            >
+              <label>
+                {t('Reason for waiving CI checks')}
+                <input
+                  value={waiverReason}
+                  maxLength={2000}
+                  onChange={(event) => setWaiverReason(event.target.value)}
+                  required
+                />
+              </label>
+              <button className="daddy-button outline" disabled={busy || !waiverReason.trim()}>
+                {t('Waive CI checks')}
+              </button>
+            </form>
           )}
           {value.task.state === 'awaiting_plan_approval' && (
             <button

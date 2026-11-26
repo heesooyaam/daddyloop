@@ -1,5 +1,18 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
+  'Continue in the private bot chat.': 'Продолжи в личке бота.',
+  'Reason for waiving CI checks': 'Причина исключения для проверок CI',
+  'Waive CI checks': 'Разрешить исключение для проверок CI',
+  'This action expired. Open a fresh card.': 'Действие устарело. Открой новую карточку.',
+  'This question has expired or belongs to a different topic.':
+    'Вопрос устарел или относится к другой теме.',
+  'Use /help export and /help presets in the private bot chat.':
+    'В личке отправь /help export или /help presets.',
+  'The instruction set file is too large': 'Файл инструкций слишком большой',
+  'Instructions saved.': 'Инструкции сохранены.',
+  'Preset deleted.': 'Пресет удалён.',
+  'Session deletion requested.': 'Удаление сессии запрошено.',
+
   'Resources are available again. Saved work can continue; no manual process cleanup is needed.':
     'Ресурсов снова хватает. Сохранённую работу можно продолжать; вручную останавливать процессы не нужно.',
   'Choose an agent and model with /models inside a session. Use Add workspace to connect a repository.':

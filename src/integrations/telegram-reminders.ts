@@ -7,7 +7,7 @@ export type OwnerQuestion =
   { groupId: string; taskId: string; request: string } | { groupId: string; messageId: string };
 export function taskRequestKey(store: Store, task: Task) {
   if (task.state === 'awaiting_plan_approval')
-    return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
+    return `plan:${task.generation}:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.revision?.start}:${task.revision?.revisionId ?? ''}:${task.review?.id ?? ''}`;
   if (
     task.state === 'needs_input' &&
     task.reason === draftInspectionRequired &&
@@ -45,6 +45,7 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
       AND EXISTS (SELECT 1 FROM settings s WHERE s.key GLOB 'telegram.delivery:*'
         AND (json_extract(s.value,'$.options.key')=? OR json_extract(s.value,'$.options.key') GLOB ?)
         AND json_extract(s.value,'$.destination.chatId')=json_extract(m.data,'$.origin.chatId')
+        AND json_extract(s.value,'$.destination.threadId') IS json_extract(m.data,'$.origin.threadId')
         AND EXISTS(SELECT 1 FROM json_each(s.value,'$.messages') delivered
           WHERE json_extract(delivered.value,'$.id')=json_extract(m.data,'$.origin.replyTo.messageId'))) LIMIT 1`,
       )
