@@ -1331,6 +1331,7 @@ export class Daddy {
           title: task.title,
           requirements: task.requirements,
           clarification: task.latestClarification,
+          architecturePlan: task.planning?.result,
           source: task.source,
           ref: task.ref,
           state: task.state,
@@ -1408,6 +1409,34 @@ export class Daddy {
           .join('\n\n');
         let source = options.source;
         if (workspace.provider === 'github' && options.architecturePlan) {
+          const issue = githubTaskIssue(source ?? options.requirements, workspace);
+          const attached =
+            issue &&
+            this.store.tasks().find((t) => t.source?.url === issue && t.state !== 'complete');
+          if (
+            attached &&
+            (attached.groupId !== group.id ||
+              attached.repoPath !== workspace.repoPath ||
+              attached.scope !== workspace.scope)
+          )
+            throw new AppError(
+              'ticket_workspace_conflict',
+              'The issue already belongs to another session or workspace',
+              422,
+            );
+          if (attached && attached.state !== 'discussing') {
+            if (attached.requirements === requirements)
+              return {
+                taskId: attached.id,
+                title: attached.title,
+                state: attached.state,
+                source: attached.source?.url,
+              };
+            throw new AppError(
+              'task_busy',
+              'The issue already has an active task. Send the change to its worker instead.',
+            );
+          }
           source = await this.tickets.recordArchitectureIssue(
             group.id,
             workspace,

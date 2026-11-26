@@ -185,3 +185,29 @@ it.each([false, true])(
     }
   },
 );
+
+it('revalidates the plan if preparing the implementation reveals a different checkout revision', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const t = await f.daddy.createTask(group.id, {
+      requirements: 'Keep the index consistent.',
+      requestId: 'changed-head',
+    });
+    await f.worker.tick();
+    await vi.waitFor(() => expect(f.store.activeJobs(t.id)).toMatchObject([{ kind: 'implement' }]));
+    const changed = 'e'.repeat(40);
+    vi.mocked(f.checkouts.prepareTicket).mockImplementationOnce(async (task) => {
+      task.revision = { ...task.revision!, head: changed };
+      return f.dir;
+    });
+    await f.worker.tick();
+    await vi.waitFor(() =>
+      expect(f.store.activeJobs(t.id)).toMatchObject([{ kind: 'plan', status: 'queued' }]),
+    );
+    expect(f.agentRuntime.run.mock.calls.map(([input]) => input.job.kind)).toEqual(['plan']);
+    expect(f.checkouts.commitTicket).not.toHaveBeenCalled();
+  } finally {
+    await f.close();
+  }
+});
