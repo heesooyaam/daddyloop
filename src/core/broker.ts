@@ -490,7 +490,7 @@ export class Broker {
     if (!handle) throw new AppError('review_missing', 'No native review to read');
     const ref = prRef(task);
     const provider = this.provider(ref);
-    if (ref.provider !== 'gitlab' && ref.provider !== 'arcadia')
+    if (!['gitlab', 'arcadia', 'github'].includes(ref.provider))
       return provider.getReview(ref, handle);
 
     // A snapshot is evidence only for its own review and revision.
@@ -563,8 +563,8 @@ export class Broker {
       const key = marker(draft);
       const candidates = native.comments.filter(
         (note) =>
-          (ref.provider === 'arcadia' && note.id === draft.id) ||
-          (key !== undefined && marker(note) === key),
+          (ref.provider !== 'gitlab' && note.id === draft.id) ||
+          (ref.provider !== 'github' && key !== undefined && marker(note) === key),
       );
       if (candidates.length !== 1 || matched.has(candidates[0].id)) hold();
       matched.add(candidates[0].id);

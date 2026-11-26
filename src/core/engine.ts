@@ -2179,53 +2179,49 @@ export class Engine {
       };
       for (const publication of publications)
         if (publication.reviewId === handle.id) remember(publication.snapshot);
-      if (latest?.id === handle.id) remember(task.feedback);
+      if (
+        task.feedbackReview?.id === handle.id ||
+        (!task.feedbackReview && !job.publishedFindingReviews && latest?.id === handle.id)
+      )
+        remember(task.feedback);
       if (task.review?.id === handle.id) remember(task.snapshot);
       return [...known];
     };
-    const readPublished = (handle: ReviewHandle, knownCommentIds: string[]) =>
-      provider.getReview(prRef(task), handle, {
-        publishedEvidence: true,
-        knownCommentIds,
-      });
-    const readMergeEvidence = async (handle: ReviewHandle) => {
+    const readFindingReview = async (handle: ReviewHandle) => {
       const known = knownFindingIds(handle);
-      const current = task.review?.id === handle.id;
+      const checkingMerge = job.kind === 'verify_merge';
+      const current = checkingMerge && task.review?.id === handle.id;
       const native = current
         ? await this.broker.readCurrentReview(task, known)
-        : await readPublished(handle, known);
+        : await provider.getReview(prRef(task), handle, {
+            publishedEvidence: true,
+            knownCommentIds: known,
+          });
       const ids = new Set(native.comments.map((comment) => comment.id));
+      const expectsPublished =
+        !current || known.length > 0 || task.snapshot?.status === 'published';
       if (
         !sameRevision(native.revision, handle.revision) ||
         native.status === 'missing' ||
         native.status === 'partial' ||
-        (native.status !== 'published' &&
-          (known.length > 0 || (current && task.snapshot?.status === 'published'))) ||
+        (expectsPublished && native.status !== 'published') ||
         known.some((id) => !ids.has(id))
       )
         throw new AppError(
-          'published_review_unavailable',
+          checkingMerge ? 'published_review_unavailable' : 'feedback_unconfirmed',
           `Could not confirm the recorded findings in review ${handle.id}. Its last snapshot was preserved.`,
         );
       return native;
     };
     const read = new Map<string, ReviewSnapshot>();
-    for (const handle of handles.values()) {
-      const native =
-        job.kind === 'verify_merge'
-          ? await readMergeEvidence(handle)
-          : await readPublished(handle, knownFindingIds(handle));
-      if (native.status !== 'published' || !sameRevision(native.revision, handle.revision))
-        throw new AppError('feedback_unconfirmed', 'Could not confirm the published findings.');
-      read.set(handle.id, native);
-    }
+    for (const handle of handles.values()) read.set(handle.id, await readFindingReview(handle));
     job.publishedFindingReview = latest;
     job.publishedFindingReviews = [...handles.values()];
     job.findingVersions = this.findingVersions([...read.values()]);
     job.mergeFindingVersions = {};
     if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
-      const current = read.get(task.review.id) ?? (await readMergeEvidence(task.review));
+      const current = read.get(task.review.id) ?? (await readFindingReview(task.review));
       task.snapshot = current;
       job.mergeFindingVersions = this.findingVersions([current]);
       if (current.status === 'published') read.set(task.review.id, current);
@@ -2254,7 +2250,7 @@ export class Engine {
     const evidence = await this.refreshFindingEvidence(task, current);
     const matches = (before: Record<string, string>, after: Record<string, string> = {}) =>
       Object.entries(after).every(([id, version]) => before[id] === version) &&
-      (job.kind !== 'verify_merge' || Object.keys(before).length === Object.keys(after).length);
+      Object.keys(before).length === Object.keys(after).length;
     if (
       matches(before, current.findingVersions) &&
       matches(beforeMerge, current.mergeFindingVersions)

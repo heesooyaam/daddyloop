@@ -568,8 +568,15 @@ it('prepares a merged GitLab fork on its source head and fetches the result from
 });
 
 it.each(
-  ['gitlab', 'arcadia'].flatMap((vcs) =>
-    ['unchanged', 'edited before review', 'edited during review'].map((phase) => ({ vcs, phase })),
+  ['gitlab', 'arcadia', 'github'].flatMap((vcs) =>
+    [
+      'unchanged',
+      'edited before review',
+      'edited during review',
+      'omitted before review',
+      'omitted during review',
+      'omitted before publication',
+    ].map((phase) => ({ vcs, phase })),
   ),
 )(
   'checks the previous $vcs publication beside a new draft with the finding $phase',
@@ -595,6 +602,8 @@ it.each(
     const exact = 'Current wording\n\n```ts\ncheck();\n```\n' + tag(old.marker + ':comment:old');
     const edited = 'Replaced Markdown without the marker.\n\n```ts\ncheckAgain();\n```';
     let wording = exact;
+    let omitted = false;
+    let recovered = false;
     let oldFindingDraft = false;
     let otherDraft = false;
     let next: ReviewHandle | undefined;
@@ -608,11 +617,29 @@ it.each(
     });
     const notes = () => [
       note(10, tag(old.marker), false),
-      note(11, wording, oldFindingDraft),
+      ...(omitted ? [] : [note(11, wording, oldFindingDraft)]),
       ...(next ? [note(-20, tag(next.marker), !nextPublished)] : []),
       ...(otherDraft ? [note(vcs === 'gitlab' ? 11 : -21, 'Foreign draft', true)] : []),
     ];
     const http = transport((path, method) => {
+      if (vcs === 'github') {
+        if (method === 'POST' && path.endsWith('/reviews/20/events')) {
+          nextPublished = true;
+          return {};
+        }
+        expect(method).toBe('GET');
+        if (path.includes('/reviews/10/comments'))
+          return omitted ? [] : [{ ...note(11, wording, false), html_url: task.ref.url }];
+        if (path.includes('/reviews/20/comments')) return [];
+        const handle = path.endsWith('/reviews/10') ? old : next!;
+        return {
+          id: Number(handle.id),
+          user: { id: 7 },
+          commit_id: handle.revision.head,
+          state: handle === old || nextPublished ? 'COMMENTED' : 'PENDING',
+          body: tag(handle.marker),
+        };
+      }
       if (method === 'PUT' && path.endsWith('/draft_notes/-20/publish')) {
         nextPublished = true;
         return {};
@@ -633,7 +660,9 @@ it.each(
     const native =
       vcs === 'arcadia'
         ? new ArcadiaProvider(bridge)
-        : new GitLabProvider('gitlab.example.com', 'fake', http);
+        : vcs === 'github'
+          ? new GitHubProvider('github.com', 'fake', http)
+          : new GitLabProvider('gitlab.example.com', 'fake', http);
     const snapshot = await native.getReview(prRef(task), old);
     expect(snapshot.status).toBe('published');
     f.engine.setFeedback(task, snapshot, old);
@@ -644,28 +673,37 @@ it.each(
     f.store.event(task.id, 'review.published', { reviewId: old.id, handle: old, snapshot });
     vi.spyOn(f.provider as ReviewProvider, 'createReview').mockImplementation(
       async (_ref, revision, marker) => {
-        next = { id: '-20', marker, revision, authorId, nodeId: '2', baselineNoteId: 11 };
+        next = {
+          id: vcs === 'github' ? '20' : '-20',
+          marker,
+          revision,
+          authorId,
+          nodeId: '2',
+          baselineNoteId: 11,
+        };
         return next;
       },
     );
     vi.spyOn(f.provider, 'getReview').mockImplementation(native.getReview.bind(native));
     vi.spyOn(f.provider, 'publish').mockImplementation(native.publish.bind(native));
     vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
-    let runs = 0;
+    if (phase === 'omitted before review') omitted = true;
     if (phase === 'edited before review') wording = edited;
     const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
       expect(input.task.revision?.head).toBe(target.head);
-      runs++;
       expect(input.task.feedback?.comments).toEqual(
         snapshot.comments.map((comment) => ({ ...comment, body: wording })),
       );
       if (phase === 'edited during review') wording = edited;
+      if (phase === 'omitted during review' && !recovered) omitted = true;
       return {
         status: 'completed' as const,
         summary: 'Verified',
         checkedHead: target.head,
         verifiedCommentIds:
-          phase === 'unchanged' || runs > 1 ? snapshot.comments.map((c) => c.id) : [],
+          phase === 'unchanged' || phase === 'omitted before publication' || recovered
+            ? snapshot.comments.map((c) => c.id)
+            : [],
       };
     });
     const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
@@ -679,21 +717,36 @@ it.each(
     try {
       await worker.tick();
       const changed = phase !== 'unchanged';
+      const omissionBeforePublish = phase === 'omitted before publication';
       await vi.waitFor(() =>
         expect(f.store.getTask(task.id).state).toBe(
-          changed ? 'needs_input' : 'awaiting_publication',
+          changed && !omissionBeforePublish ? 'needs_input' : 'awaiting_publication',
         ),
       );
-      expect(run).toHaveBeenCalledOnce();
+      const firstRuns = phase === 'omitted before review' ? 0 : 1;
+      expect(run).toHaveBeenCalledTimes(firstRuns);
       if (changed) {
-        expect(f.store.getTask(task.id).reviewFinished).toBeFalsy();
-        await expect(f.engine.publish(task.id)).rejects.toMatchObject({
-          code: 'publication_unavailable',
-        });
+        if (omissionBeforePublish) {
+          omitted = true;
+          await f.engine.publish(task.id);
+          expect(f.store.getTask(task.id).state).toBe('needs_input');
+          expect(nextPublished).toBe(false);
+        } else {
+          expect(f.store.getTask(task.id).reviewFinished).toBeFalsy();
+          await expect(f.engine.publish(task.id)).rejects.toMatchObject({
+            code: 'publication_unavailable',
+          });
+        }
+        if (phase.startsWith('omitted')) {
+          expect(f.store.getTask(task.id).feedback?.comments).toEqual(snapshot.comments);
+          omitted = false;
+          wording = edited;
+        }
+        recovered = true;
         await f.engine.review(task.id, true);
         await worker.tick();
         await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_publication'));
-        expect(run).toHaveBeenCalledTimes(2);
+        expect(run).toHaveBeenCalledTimes(firstRuns + 1);
         expect(
           f.store
             .decisions(task.id)
@@ -705,6 +758,11 @@ it.each(
         ).toBe(true);
         await f.engine.publish(task.id);
         expect(nextPublished).toBe(true);
+        expect(f.store.getTask(task.id).state).toBe('complete');
+        return;
+      }
+      if (vcs === 'github') {
+        await f.engine.publish(task.id);
         expect(f.store.getTask(task.id).state).toBe('complete');
         return;
       }
@@ -739,6 +797,7 @@ async function publicationFixture(provider: string) {
   const task = f.store.getTask(f.task.id);
   task.ref.provider = provider;
   const arc = provider === 'arcadia';
+  const github = provider === 'github';
   if (arc) {
     task.revision = { ...task.revision!, revisionId: '7' };
     task.pr = { ...task.pr!, ...task.revision, diffHead: task.revision.head };
@@ -774,7 +833,7 @@ async function publicationFixture(provider: string) {
       ? nativeState.published && nativeState.remapArc
         ? 20
         : 10
-      : nativeState.published
+      : github || nativeState.published
         ? 10
         : 50;
     const body =
@@ -789,7 +848,11 @@ async function publicationFixture(provider: string) {
       content: body,
       author: { id: 7, name: 'worker' },
       is_draft: !nativeState.published,
+      html_url: ref.url,
       ...(index === 2 && {
+        path: 'a.ts',
+        line: 4,
+        side: 'RIGHT',
         position: { new_path: 'a.ts', new_line: 4 },
         anchor: { path: 'a.ts', line: 4 },
       }),
@@ -801,6 +864,23 @@ async function publicationFixture(provider: string) {
     return result;
   };
   const http = transport((path, method) => {
+    if (github) {
+      if (method === 'POST' && path.endsWith('/reviews/10/events')) {
+        nativeState.sends++;
+        afterPublish();
+        return {};
+      }
+      expect(method).toBe('GET');
+      if (path.includes('/reviews/10/comments')) return readNotes([1, 2]);
+      expect(path).toMatch(/\/reviews\/10$/);
+      return {
+        id: 10,
+        user: { id: 7 },
+        commit_id: handle.revision.head,
+        state: nativeState.published ? 'COMMENTED' : 'PENDING',
+        body: tag(handle.marker),
+      };
+    }
     if (method === 'PUT' && /draft_notes\/5[0-2]\/publish$/.test(path)) {
       nativeState.sends++;
       if (path.endsWith('50/publish')) afterPublish();
@@ -824,7 +904,9 @@ async function publicationFixture(provider: string) {
   });
   const native = arc
     ? new ArcadiaProvider(bridge)
-    : new GitLabProvider('gitlab.example.com', 'fake', http);
+    : github
+      ? new GitHubProvider('github.com', 'fake', http)
+      : new GitLabProvider('gitlab.example.com', 'fake', http);
   task.snapshot = await native.getReview(ref, handle);
   expect(task.snapshot.status).toBe('draft');
   expect(task.snapshot.comments).toHaveLength(2);
@@ -848,7 +930,22 @@ async function publicationFixture(provider: string) {
   const editDuringPublication = () => {
     afterPublish = () => markPublished(true);
   };
-  return { ...f, task, nativeState, expected, worker, markPublished, editDuringPublication };
+  const omitDuringPublication = () => {
+    afterPublish = () => {
+      markPublished(true);
+      nativeState.omitted = 2;
+    };
+  };
+  return {
+    ...f,
+    task,
+    nativeState,
+    expected,
+    worker,
+    markPublished,
+    editDuringPublication,
+    omitDuringPublication,
+  };
 }
 
 it.each(
@@ -918,9 +1015,10 @@ it.each(
 );
 
 it.each(
-  ['arcadia', 'gitlab'].flatMap((provider) =>
+  ['arcadia', 'gitlab', 'github'].flatMap((provider) =>
     [
       'edited before confirmation',
+      'omitted before confirmation',
       'intact before confirmation',
       'held publication',
       'missing general at completion',
@@ -937,7 +1035,15 @@ it.each(
       nativeState.edited = true;
     } else {
       nativeState.remapArc = phase === 'held publication';
-      f.markPublished(phase !== 'intact before confirmation');
+      f.markPublished(
+        phase !== 'intact before confirmation' &&
+          (provider !== 'gitlab' || phase !== 'omitted before confirmation'),
+      );
+      if (
+        phase === 'omitted before confirmation' ||
+        (phase === 'held publication' && provider === 'github')
+      )
+        nativeState.omitted = 2;
       if (phase === 'held publication') {
         await engine.reconcile(task.id);
         expect(store.getTask(task.id).state).toBe('needs_input');
@@ -988,6 +1094,7 @@ it.each(
     await worker.tick();
     const held =
       phase === 'held publication' ||
+      phase === 'omitted before confirmation' ||
       (provider === 'gitlab' && phase === 'edited before confirmation');
     if (held || interruptRead) {
       await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
@@ -996,6 +1103,13 @@ it.each(
       if (held) {
         expect(run).not.toHaveBeenCalled();
         expect(stopped.snapshot).toEqual(start.snapshot);
+        if (phase === 'omitted before confirmation') {
+          nativeState.omitted = -1;
+          await engine.action(task.id, 'verify-merge');
+          await worker.tick();
+          await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('complete'));
+          expect(run).toHaveBeenCalledOnce();
+        }
       } else {
         expect(run).toHaveBeenCalledOnce();
         expect(stopped.snapshot?.comments).toMatchObject(expected);
@@ -1055,6 +1169,54 @@ it.each(
       const after = store.getTask(task.id);
       expect(after).toMatchObject({ state: 'needs_input', snapshot: held.snapshot });
       expect(after.reason).toContain('recorded findings');
+    } finally {
+      await worker.stop();
+      store.close();
+    }
+  },
+);
+
+it.each(['manual publication', 'automatic publication', 'queued author'])(
+  'holds a GitHub PR when the native list omits a known comment after %s',
+  async (phase) => {
+    const f = await publicationFixture('github');
+    const { task, nativeState, expected, engine, store } = f;
+    const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+      expect(input.job.kind).toBe('fix');
+      expect(input.task.feedback?.comments).toMatchObject(expected);
+      expect(await input.onTool('read_review', {})).toMatchObject({ comments: expected });
+      return {
+        status: 'needs_input' as const,
+        summary: 'Author received restored findings',
+        checkedHead: task.revision!.head,
+      };
+    });
+    const worker = f.worker(run);
+    try {
+      if (phase === 'queued author') {
+        await engine.publish(task.id);
+        expect(store.getTask(task.id).state).toBe('fixing');
+        nativeState.edited = true;
+        nativeState.omitted = 2;
+      } else if (phase === 'manual publication') {
+        f.markPublished(true);
+        nativeState.omitted = 2;
+      } else f.omitDuringPublication();
+
+      const before = store.getTask(task.id);
+      if (phase === 'manual publication') await engine.reconcile(task.id);
+      await worker.tick();
+      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
+      expect(run).not.toHaveBeenCalled();
+      expect(store.getTask(task.id).snapshot).toEqual(before.snapshot);
+      nativeState.omitted = -1;
+      await engine.action(task.id, 'resume');
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(store.getTask(task.id).reason).toBe('Author received restored findings'),
+      );
+      expect(run).toHaveBeenCalledOnce();
+      expect(nativeState.sends).toBe(phase === 'manual publication' ? 0 : 1);
     } finally {
       await worker.stop();
       store.close();
