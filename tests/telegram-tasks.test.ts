@@ -135,6 +135,35 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       model: 'gpt-5.6-sol',
       effort: 'max',
     });
+    const many = Array.from({ length: 31 }, (_, i) => ({
+      id: `architect-${i}`,
+      engine: 'codex',
+      name: `Architect model ${i}`,
+      efforts: [],
+      defaultEffort: '',
+      isDefault: false,
+    }));
+    const list = vi
+      .spyOn(f.daddy.catalogue, 'list')
+      .mockResolvedValueOnce(many)
+      .mockResolvedValueOnce(many);
+    try {
+      await bot.handle(click(`dad:models:${group.id}:architect`));
+      await bot.handle(click(keyboard().find((b) => b.text === 'Next page')!.callback_data));
+      await bot.handle(
+        click(keyboard().find((b) => b.text.includes('Architect model 30'))!.callback_data),
+      );
+      await bot.handle(click(keyboard().find((b) => b.text === 'Default')!.callback_data));
+      expect(f.store.getGroup(group.id).architectProfile).toEqual({
+        engine: 'codex',
+        model: 'architect-30',
+      });
+      expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
+      await bot.handle(click(`dad:arch-reset:g:${group.id}`));
+      expect(f.store.getGroup(group.id).architectProfile).toBeUndefined();
+    } finally {
+      list.mockRestore();
+    }
     await bot.handle(click(`dad:sm:${group.id}:on`, 99));
     expect((await app.inject(session)).json().group.autoMerge).toBe(false);
     await bot.handle(click(`dad:sm:${group.id}:on`));

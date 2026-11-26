@@ -199,8 +199,8 @@ export class Store {
       status: 'queued',
       createdAt: now(),
       profile:
-        kind === 'plan' && group
-          ? architectProfileFor(task, group)
+        kind === 'plan'
+          ? (architectProfileFor(task, group) ?? defaults?.daddy)
           : role === 'reviewer' && group
             ? group.daddy
             : (task.agents?.[role === 'author' ? 'worker' : 'daddy'] ??
@@ -256,7 +256,7 @@ export class Store {
   }
   refreshQueuedPlans(task: Task, group: ReviewGroup) {
     for (const job of this.activeJobs(task.id))
-      if (job.kind === 'plan' && job.status === 'queued')
+      if (job.kind === 'plan' && job.status === 'queued' && job.generation === task.generation)
         this.saveJob({ ...job, profile: architectProfileFor(task, group) });
   }
   claim(
@@ -290,8 +290,10 @@ export class Store {
           )
         )
           continue;
-        if (job.kind === 'plan' && job.groupId)
-          job.profile = architectProfileFor(task, this.getGroup(job.groupId));
+        if (job.kind === 'plan')
+          job.profile =
+            architectProfileFor(task, job.groupId ? this.getGroup(job.groupId) : undefined) ??
+            this.setting<AgentProfiles>('agents.defaults')?.daddy;
         job.status = 'running';
         onClaim?.(job);
         const startedAt = now();

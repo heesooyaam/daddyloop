@@ -50,8 +50,8 @@ export function sameAgentProfile(a: AgentProfile | undefined, b: AgentProfile) {
   return a?.engine === b.engine && a.model === b.model && a.effort === b.effort;
 }
 /** Only planning follows the session reviewer by default. */
-export function architectProfileFor(task: Task, group: ReviewGroup) {
-  return task.architectProfile ?? group.architectProfile ?? group.daddy;
+export function architectProfileFor(task: Task, group?: ReviewGroup) {
+  return task.architectProfile ?? group?.architectProfile ?? group?.daddy ?? task.agents?.daddy;
 }
 export interface AgentProfiles {
   worker: AgentProfile;
