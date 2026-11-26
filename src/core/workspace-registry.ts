@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { mergeSetting } from './settings-edit.js';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -345,31 +346,31 @@ export class WorkspaceRegistry {
         provider: edited.provider ?? (sameSource ? previous.provider : undefined),
         copyMode: edited.copyMode ?? (sameSource ? previous.copyMode : undefined),
       });
-      const existing = id
-        ? this.get(id)
-        : this.store
-            .workspaces()
-            .find(
-              (saved) => saved.repoPath === workspace.repoPath && saved.scope === workspace.scope,
-            );
-      if (previous && existing?.updatedAt !== previous.updatedAt) {
-        if (baseline) continue;
+      const saved = this.store.transaction(() => {
+        const existing = id
+          ? this.get(id)
+          : this.store
+              .workspaces()
+              .find(
+                (entry) => entry.repoPath === workspace.repoPath && entry.scope === workspace.scope,
+              );
+        if (previous && !isDeepStrictEqual(existing, previous)) return false;
+        if (existing) {
+          workspace.id = existing.id;
+          workspace.createdAt = existing.createdAt;
+        }
+        this.store.saveWorkspace(workspace);
+        this.store.event('_system', 'workspace.saved', { id: workspace.id, name: workspace.name });
+        onCommit?.();
+        return true;
+      });
+      if (saved) return workspace;
+      if (!baseline)
         throw new AppError(
           'workspace_changed',
           'This workspace changed. Reload it before saving.',
           409,
         );
-      }
-      if (existing) {
-        workspace.id = existing.id;
-        workspace.createdAt = existing.createdAt;
-      }
-      this.store.transaction(() => {
-        this.store.saveWorkspace(workspace);
-        this.store.event('_system', 'workspace.saved', { id: workspace.id, name: workspace.name });
-        onCommit?.();
-      });
-      return workspace;
     }
   }
   private normalizeDefaults(input: z.infer<typeof workspaceSchema>) {

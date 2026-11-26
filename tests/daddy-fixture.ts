@@ -14,7 +14,7 @@ import { DemoProvider } from '../src/providers/demo.js';
 import type { AgentInput, SessionInput } from '../src/runtime/agent.js';
 import type { AgentResult, Workspace, Task } from '../src/core/types.js';
 import { healthy, catalogue, profiles } from './planning-fixture.js';
-export function daddyFixture(persist = false) {
+export function daddyFixture(persist = false, maxAgents = 1) {
   const dir = mkdtempSync(join(tmpdir(), 'daddyloop-test-')),
     store = new Store(persist ? join(dir, 'state.sqlite') : ':memory:');
   const engine = new Engine(store, () => new DemoProvider(store), profiles),
@@ -62,7 +62,15 @@ export function daddyFixture(persist = false) {
       return { status: 'completed', summary: 'Ready.', checkedHead: '' };
     }),
   };
-  const worker = new Worker(engine, checkouts, agentRuntime, agentRuntime, healthy, 30000, 1);
+  const worker = new Worker(
+    engine,
+    checkouts,
+    agentRuntime,
+    agentRuntime,
+    healthy,
+    30000,
+    maxAgents,
+  );
   const context = {
     prepare: vi.fn(async () => ({ cwd: dir, context: {} as Task })),
     release: vi.fn(async () => {}),

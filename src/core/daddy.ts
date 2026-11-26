@@ -208,7 +208,7 @@ export class Daddy {
   }
   private sessionActivity(group: ReviewGroup, jobs: Job[]) {
     return {
-      workers: workerPool(this.store, group, jobs),
+      workers: workerPool(this.store, group, jobs, this.maxConcurrentAgents()),
       daddyBusy:
         this.store.hasRunningDaddyJob(group.id) ||
         jobs.some(
@@ -302,6 +302,7 @@ export class Daddy {
     input: {
       requirements: string;
       validatePlan?: boolean;
+      expectedGeneration?: number;
       architectProfile?: AgentProfile;
       replyTo?: TelegramReply;
       requestId: string;
@@ -314,6 +315,7 @@ export class Daddy {
       const tasks = this.store.tasks(id);
       const existing = tasks.find((task) => task.createdByAction === input.requestId);
       if (existing) return existing;
+      this.checkSessionGeneration(group, input.expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (group.daddyState === 'paused' || group.daddyState === 'archived')
         throw new AppError('daddy_paused', 'Resume daddy before sending another message');
@@ -348,8 +350,15 @@ export class Daddy {
       force = false,
       expectedTaskId,
       check,
+      expected,
       onCommit,
-    }: { force?: boolean; expectedTaskId?: string; check?: () => void; onCommit?: () => void } = {},
+    }: {
+      force?: boolean;
+      expectedTaskId?: string;
+      expected?: { groupGeneration: number; task: ExpectedTask };
+      check?: () => void;
+      onCommit?: () => void;
+    } = {},
   ) {
     await this.catalogue.validate(profile);
     const readSlot = () => {
@@ -369,6 +378,10 @@ export class Daddy {
     const update = (lockedTaskId?: string) => {
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
+      if (expected && lockedTaskId) {
+        this.checkSessionGeneration(group, expected.groupGeneration);
+        assertTaskVersion(this.task(id, lockedTaskId), expected.task);
+      }
       check?.();
       const restarted = this.store.transaction(() => {
         slot.profile = profile;

@@ -2743,6 +2743,7 @@ export class Engine {
     action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
     reason = '',
     expected?: ExpectedTask,
+    check?: () => void,
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -2752,8 +2753,10 @@ export class Engine {
           throw new AppError('session_deleting', 'This session is being deleted');
       }
       assertTaskVersion(task, expected);
+      check?.();
       if (action === 'verify-merge') {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        check?.();
         return this.queueMergeVerification(task, pr);
       }
       if (action === 'pause') {
@@ -2865,6 +2868,7 @@ export class Engine {
             (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
+        check?.();
         task.approvedAt = now();
         task.pr = current;
         this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
@@ -2881,6 +2885,7 @@ export class Engine {
             'stale_revision',
             'The PR changed; a waiver cannot apply to a new revision',
           );
+        check?.();
         task.checksWaivedAt = now();
         this.store.event(id, 'checks.waived', {
           reason,

@@ -32,15 +32,8 @@ export function mergeSetting<T>(field: string, base: T, edit: T, current: T): T 
     const merged = mergeSetting(field, index(base), index(edit), index(current));
     if (field !== 'instructions.presets') return Object.values(merged) as T;
     const ids = (value: T) => ((value ?? []) as unknown[]).map(key);
-    const initial = ids(base),
-      edited = ids(edit),
-      latest = ids(current);
-    const shared = new Set(initial.filter((id) => edited.includes(id) && latest.includes(id)));
-    const common = (order: string[]) => order.filter((id) => shared.has(id));
-    const reordered = !isDeepStrictEqual(common(initial), common(edited));
-    if (reordered) assertSetting(field + '.order', common(initial), common(edited), common(latest));
-    const order = new Set(reordered ? [...edited, ...latest] : [...latest, ...edited]);
-    return [...order].filter((id) => Object.hasOwn(merged, id)).map((id) => merged[id]) as T;
+    const order = mergePresetOrder(Object.keys(merged), ids(base), ids(edit), ids(current));
+    return order.map((id) => merged[id]) as T;
   }
   if (record(base) && record(edit) && record(current)) {
     const keys = new Set([...Object.keys(current), ...Object.keys(edit), ...Object.keys(base)]);
@@ -52,4 +45,48 @@ export function mergeSetting<T>(field: string, base: T, edit: T, current: T): T 
   }
   assertSetting(field, base, edit, current);
   return edit;
+}
+
+// Each editor contributes changed precedence, including the neighbours of inserted presets.
+function mergePresetOrder(ids: string[], base: string[], edit: string[], current: string[]) {
+  const compare = (order: string[], a: string, b: string) => {
+    const left = order.indexOf(a),
+      right = order.indexOf(b);
+    return left < 0 || right < 0 ? undefined : left < right;
+  };
+  const shared = new Set(base.filter((id) => edit.includes(id) && current.includes(id)));
+  const common = (order: string[]) => order.filter((id) => shared.has(id));
+  const original = common(base),
+    proposed = common(edit),
+    latest = common(current);
+  if (!isDeepStrictEqual(original, proposed))
+    assertSetting('instructions.presets.order', original, proposed, latest);
+  const before = new Map(ids.map((id) => [id, new Set<string>()]));
+  const conflict = () =>
+    new AppError(
+      'settings_conflict',
+      'Settings changed. Reload before editing instructions.presets.order',
+      409,
+    );
+  for (const [index, a] of ids.entries()) {
+    for (const b of ids.slice(index + 1)) {
+      const prior = compare(base, a, b),
+        proposed = compare(edit, a, b),
+        latest = compare(current, a, b);
+      const changed = proposed !== undefined && proposed !== prior;
+      if (changed && latest !== undefined && latest !== prior && latest !== proposed)
+        throw conflict();
+      const order = changed ? proposed : (latest ?? proposed);
+      if (order !== undefined) before.get(order ? b : a)!.add(order ? a : b);
+    }
+  }
+  const result = [];
+  while (before.size) {
+    const next = [...before].find(([, dependencies]) => !dependencies.size)?.[0];
+    if (next === undefined) throw conflict();
+    result.push(next);
+    before.delete(next);
+    for (const dependencies of before.values()) dependencies.delete(next);
+  }
+  return result;
 }

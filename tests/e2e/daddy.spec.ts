@@ -1771,10 +1771,24 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
           },
         }),
   );
+  let detailUnavailable = true;
+  await page.route('**/api/tasks/' + id, (route) =>
+    detailUnavailable
+      ? route.fulfill({ status: 503, json: { error: { message: 'Task details unavailable' } } })
+      : route.continue(),
+  );
+  await page.route('**' + session + '/task-action', (route) =>
+    route.fulfill({ status: 409, json: { error: { message: 'Confirmation became stale' } } }),
+  );
   await page.goto('/#session/' + group.id);
   await page.locator('.daddy-work-item').first().click();
   const report = page.getByRole('dialog');
+  await expect(report.getByRole('alert')).toContainText('Task details unavailable');
+  expect(await report.getByRole('button', { name: 'Waive CI checks' }).count()).toBe(0);
+  detailUnavailable = false;
+  await report.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(report.getByText('Read-only worker reports')).toBeVisible();
+  let triedWaiver = false;
   const actions = ['Verify merge', 'Waive CI checks', 'Approve plan'];
   for (const [next, action] of [
     ['needs_input', actions[0]],
@@ -1791,6 +1805,13 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(
         label === action ? 1 : 0,
       );
+    if (action === 'Waive CI checks' && !triedWaiver) {
+      triedWaiver = true;
+      await report.getByLabel('Reason for waiving CI checks').fill('Reviewed separately');
+      await report.getByRole('button', { name: action, exact: true }).click();
+      await expect(report.getByRole('alert')).toContainText('Confirmation became stale');
+      await expect(report.getByRole('button', { name: action, exact: true })).toHaveCount(0);
+    }
   }
   unavailable = true;
   await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(0);

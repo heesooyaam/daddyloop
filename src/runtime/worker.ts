@@ -416,7 +416,7 @@ export class Worker {
         if (task.deferredWorkerInstructions?.length && !store.busy(task.id))
           await this.engine.deliverWorkerInstruction(task.id);
       // Authors may be independent; each shared reviewer thread has one worker.
-      reconcileWorkerPools(store);
+      reconcileWorkerPools(store, this.maxAgents);
       const limit = Math.max(
         1,
         Math.min(8, store.setting<number>('worker.maxAgents') ?? this.maxAgents),

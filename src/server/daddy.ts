@@ -194,14 +194,25 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     '/api/daddy/sessions/:id/workers/:number',
     async (request) => {
       const input = z
-        .object({ profile: profileSchema, forceTaskId: id.optional() })
+        .object({
+          profile: profileSchema,
+          forceTaskId: id.optional(),
+          expected: z
+            .object({ groupGeneration: generation, task: expectedTask })
+            .strict()
+            .optional(),
+        })
         .strict()
+        .refine(
+          (input) => !input.forceTaskId || !!input.expected,
+          'Open the current worker settings before confirming a restart',
+        )
         .parse(request.body);
       return daddy.configureWorker(
         id.parse(request.params.id),
         workerNumber.parse(Number(request.params.number)),
         input.profile,
-        { force: !!input.forceTaskId, expectedTaskId: input.forceTaskId },
+        { force: !!input.forceTaskId, expectedTaskId: input.forceTaskId, expected: input.expected },
       );
     },
   );

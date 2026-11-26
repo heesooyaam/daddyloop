@@ -361,12 +361,18 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await bot.handle(click(verifyButton, 7, 18));
     expect(action).not.toHaveBeenCalled();
     await bot.handle(click(verifyButton));
-    expect(action).toHaveBeenCalledWith(withPr.id, 'verify-merge', '', {
-      groupId: group.id,
-      head: withPr.revision!.head,
-      revision: withPr.revision,
-      generation: withPr.generation,
-    });
+    expect(action).toHaveBeenCalledWith(
+      withPr.id,
+      'verify-merge',
+      '',
+      {
+        groupId: group.id,
+        head: withPr.revision!.head,
+        revision: withPr.revision,
+        generation: withPr.generation,
+      },
+      expect.any(Function),
+    );
     expect(callbacks()).toContain(backToQueue);
     await bot.handle(click(verifyButton));
     expect(action).toHaveBeenCalledTimes(1);
@@ -416,6 +422,24 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
     await bot.handle(privateMessage('/start@fixture_bot ' + start));
     expect(lastText()).toContain('Reason for waiving CI checks');
+    const originalRoom = f.store.setting('telegram.group');
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const blocker = f.engine.lock(tenth.id, () => waiting);
+    const actionCall = vi.spyOn(f.engine, 'action');
+    const staleWaiver = bot.handle(privateMessage('/waive ' + key + ' Interrupted route'));
+    try {
+      await vi.waitFor(() => expect(actionCall).toHaveBeenCalledOnce());
+      f.store.setSetting('telegram.group', null);
+    } finally {
+      release();
+      await Promise.all([blocker, staleWaiver]);
+      actionCall.mockRestore();
+      f.store.setSetting('telegram.group', originalRoom);
+    }
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
     const confirmWaiver = privateMessage('/waive ' + key + ' Reviewed locally');
     await bot.handle(confirmWaiver);
     await bot.stop();
@@ -787,7 +811,27 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         .statusCode,
     ).toBe(200);
     await bot.handle(oldInstructions);
+    expect(lastText()).toMatch(/already completed|уже выполнено/);
     expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('newer from web');
+
+    const stopBeforeReply = privateMessage('/notifications off');
+    const failedReply = vi
+      .spyOn(api, 'send')
+      .mockRejectedValueOnce(new Error('Stopped before sending confirmation'));
+    try {
+      await expect(bot.handle(stopBeforeReply)).rejects.toThrow(
+        'Stopped before sending confirmation',
+      );
+    } finally {
+      failedReply.mockRestore();
+    }
+    expect(f.store.setting('notifications.telegram')).toMatchObject({ enabled: false });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(stopBeforeReply);
+    expect(lastText()).toMatch(/already completed|уже выполнено/);
+    expect(f.store.setting('notifications.telegram')).toMatchObject({ enabled: true, mode: 'all' });
 
     const crew = f.daddy.group(group.id);
     crew.workerSlots = [{ number: 1, taskId: task!.id }];
@@ -833,6 +877,28 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         .filter(({ requirements }) => requirements === 'Keep this queued request'),
     ).toHaveLength(1);
 
+    await bot.handle(message('/attach ' + other.id, 7, 18));
+    for (const viaButton of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      await bot.handle(privateMessage('/pause'));
+      const choice = () =>
+        keyboard().find((button) => button.text === f.daddy.group(other.id).title)!.callback_data;
+      const pick = async () => {
+        if (viaButton) {
+          const update = click(choice());
+          update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+          await bot.handle(update);
+        } else await bot.handle(privateMessage('/session ' + other.id));
+      };
+      await f.daddy.pause(other.id);
+      await f.daddy.resume(other.id);
+      await pick();
+      expect(f.daddy.group(other.id).daddyState).toBe('active');
+      await pick();
+      expect(f.daddy.group(other.id).daddyState).toBe('paused');
+      await f.daddy.resume(other.id);
+    }
+
     await bot.handle(privateMessage('/session ' + group.id));
     await bot.handle(message('/export ' + other.id));
     const exportLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
@@ -853,7 +919,23 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       keyboard().find((button) => button.callback_data?.startsWith('dad:private:'))!.callback_data,
     );
     privateClick.callback_query!.message = { chat: { id: 7, type: 'private' } };
+    f.store.setSetting('worker.maxAgents', 5);
     await bot.handle(privateClick);
+    expect(f.daddy.maxConcurrentAgents()).toBe(5);
+    await bot.handle(message('/concurrency 3'));
+    const freshLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    await bot.handle(
+      privateMessage('/start ' + new URL(freshLink!.url!).searchParams.get('start')),
+    );
+    const confirm = () => {
+      const update = click(
+        keyboard().find((button) => button.callback_data?.startsWith('dad:private:'))!
+          .callback_data,
+      );
+      update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+      return bot.handle(update);
+    };
+    await confirm();
     expect(f.daddy.maxConcurrentAgents()).toBe(3);
 
     const attachDocument = async (caption: string, update = privateMessage()) => {
@@ -870,6 +952,15 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const downloadsBefore = sent.filter(({ method }) => method === 'getFile').length;
     await attachDocument('/import@another_bot ' + other.id, message(''));
     expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore);
+    await attachDocument('/import@fixture_bot ' + other.id, message(''));
+    const attachment = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore);
+    await bot.handle(
+      privateMessage('/start ' + new URL(attachment!.url!).searchParams.get('start')),
+    );
+    await confirm();
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore + 1);
+    expect(f.daddy.group(other.id).instructions?.daddy.prompt).toBe(imported.daddy.prompt);
     await attachDocument('/skill_file@fixture_bot ' + other.id + ' worker');
     expect(f.daddy.group(other.id).instructions?.worker.skills).toHaveLength(1);
     await attachDocument('/preset_create@fixture_bot From attachment');
@@ -908,6 +999,22 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     ).toEqual([]);
 
     const beforePause = f.daddy.group(group.id).generation;
+    const shownLimit = f.daddy.board(group.id).workers.target;
+    const shownWorker = f.daddy.board(group.id).workers.slots.find(({ number }) => number === 1)!;
+    const shownTask = f.store.getTask(shownWorker.taskId!);
+    const workerUrl = session + '/workers/1';
+    const workerChange = {
+      profile: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+      forceTaskId: shownTask.id,
+      expected: {
+        groupGeneration: beforePause,
+        task: {
+          generation: shownTask.generation,
+          head: shownTask.revision?.head ?? '',
+          revision: shownTask.revision,
+        },
+      },
+    };
     const lifecycle = (action: string, expectedGeneration: number) =>
       app.inject({
         method: 'POST',
@@ -919,6 +1026,43 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect((await lifecycle('resume', resumed)).statusCode).toBe(200);
     expect((await lifecycle('pause', beforePause)).statusCode).toBe(409);
     expect(f.daddy.group(group.id).daddyState).toBe('active');
+    expect(
+      (
+        await edit({
+          workerLimit: 6,
+          expectedGeneration: beforePause,
+          baseline: { workerLimit: shownLimit },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const workerBefore = f.daddy.board(group.id).workers.slots[0];
+    expect(
+      (await app.inject({ method: 'POST', url: workerUrl, payload: workerChange })).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[0]).toEqual(workerBefore);
+    const currentTask = f.store.getTask(shownTask.id);
+    const staleRevision = { ...currentTask.revision!, head: 'd'.repeat(40) };
+    f.store.saveTask({ ...currentTask, revision: staleRevision });
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: workerUrl,
+          payload: {
+            ...workerChange,
+            expected: {
+              groupGeneration: resumed,
+              task: {
+                generation: currentTask.generation,
+                head: currentTask.revision!.head,
+                revision: currentTask.revision,
+              },
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[0]).toEqual(workerBefore);
     const target = f.daddy.board(group.id).workers.target;
     expect((await edit({ workerLimit: 6, baseline: { workerLimit: target } })).statusCode).toBe(
       200,
@@ -962,6 +1106,14 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       f.store.messages(group.id).find((item) => item.text === 'Continue task ten')?.origin?.replyTo
         ?.taskId,
     ).toBe(withPr.id);
+    const duplicate = message('Second answer for the same question');
+    await bot.handle({
+      ...duplicate,
+      message: { ...duplicate.message!, reply_to_message: parent },
+    });
+    expect(f.store.messages(group.id).some((item) => item.text === duplicate.message!.text)).toBe(
+      false,
+    );
     f.store.saveTask({ ...requestTask, revision: { ...withPr.revision!, head: 'c'.repeat(40) } });
     const staleReply = message('Answer to an old question');
     await bot.handle({
@@ -983,9 +1135,8 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       { phase: 'final', needsReply: true },
     );
     await api.send(destination, followUp.text, undefined, {
-      key: 'coordinator-question-test',
+      key: `telegram:dialog:-10042:17:${followUp.id}:final`,
       groupId: group.id,
-      question: { groupId: group.id, messageId: followUp.id },
     });
     await api.delivery!.flush();
     const followUpId = sent.findIndex((item) => item.body.text === followUp.text) + 1;

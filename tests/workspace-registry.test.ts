@@ -89,12 +89,16 @@ it('registers a named Git workspace with a relative working directory without ch
     expect(store.getGroup(groupId).workspace).toEqual(saved);
     expect(workspaces.get(saved.id)).toMatchObject({ repoPath: repo, scope: '', base: 'release' });
     const baseline = workspaces.defaults(workspaces.get(saved.id));
-    await workspaces.register({ ...baseline, base: 'stable' }, saved.id, baseline);
-    await workspaces.register(
-      { ...baseline, name: 'Renamed from stale editor' },
-      saved.id,
-      baseline,
-    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(workspaces.get(saved.id).updatedAt));
+    try {
+      await Promise.all([
+        workspaces.register({ ...baseline, base: 'stable' }, saved.id, baseline),
+        workspaces.register({ ...baseline, name: 'Renamed from stale editor' }, saved.id, baseline),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(workspaces.get(saved.id)).toMatchObject({
       name: 'Renamed from stale editor',
       base: 'stable',

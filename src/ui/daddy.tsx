@@ -1188,6 +1188,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             onLimitChange={(workerLimit) =>
               void model.action('settings', {
                 workerLimit,
+                expectedGeneration: board.group.generation,
                 baseline: { workerLimit: board.workers.target },
               })
             }
@@ -1994,6 +1995,7 @@ function TaskReport({
   const { t } = useLocale(),
     [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
     [error, setError] = useState(''),
+    [retry, setRetry] = useState(0),
     [busy, setBusy] = useState(false);
   const live = board?.tasks.find((task) => task.id === id);
   const canAct =
@@ -2004,11 +2006,21 @@ function TaskReport({
   const profile = slot ? live?.worker : request?.profile;
   const ref = live?.ref ?? value?.task.ref;
   const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
+  const detailVersion = JSON.stringify([
+    live?.generation,
+    live?.state,
+    live?.revision,
+    live?.architectProfile,
+    live?.autoMerge.mode,
+  ]);
   useEffect(() => {
     let active = true;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
       .then((result) => {
-        if (active) setValue(result);
+        if (active) {
+          setValue(result);
+          setError('');
+        }
       })
       .catch((error) => {
         if (active) setError(error.message);
@@ -2016,7 +2028,7 @@ function TaskReport({
     return () => {
       active = false;
     };
-  }, [id]);
+  }, [id, detailVersion, retry, connected]);
   const waiverKey = JSON.stringify([id, live?.state, live?.generation, live?.revision]);
   const [waiver, setWaiver] = useState<{ key: string; reason: string }>();
   const waiverReason = waiver?.key === waiverKey ? waiver.reason : '';
@@ -2045,7 +2057,14 @@ function TaskReport({
     <div className="daddy-task-report">
       {error && (
         <p role="alert" className="daddy-field-error">
-          {t(error)}
+          {t(error)}{' '}
+          <button
+            type="button"
+            className="daddy-button outline"
+            onClick={() => setRetry((value) => value + 1)}
+          >
+            {t('Retry')}
+          </button>
         </p>
       )}
       {value ? (

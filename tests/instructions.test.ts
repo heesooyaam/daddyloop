@@ -181,6 +181,20 @@ it('preserves a preset reorder and an independent component edit', () => {
     edited,
     c,
   ]);
+  const x = { ...a, preset: { id: 'x' } };
+  expect(mergeSetting('instructions.presets', [a, b], [a, x, b], [edited, b])).toEqual([
+    edited,
+    x,
+    b,
+  ]);
+  expect(mergeSetting('instructions.presets', [a, b], [edited, b], [x, a, b])).toEqual([
+    x,
+    edited,
+    b,
+  ]);
+  expect(() => mergeSetting('instructions.presets', [a, b], [a, x, b], [x, a, b])).toThrow(
+    'instructions.presets.order',
+  );
   expect(() => mergeSetting('instructions.presets', base, [b, a, c], [c, a, b])).toThrow(
     'instructions.presets.order',
   );

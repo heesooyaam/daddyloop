@@ -275,7 +275,11 @@ function WorkerProfileForm({
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const task = board.tasks.find(({ id }) => id === slot.taskId);
+  const [shown] = useState(() => ({
+    task: board.tasks.find(({ id }) => id === slot.taskId),
+    groupGeneration: board.group.generation,
+  }));
+  const task = shown.task;
   const submit = async () => {
     if (busy || !profile.model) return;
     setBusy(true);
@@ -283,7 +287,18 @@ function WorkerProfileForm({
     try {
       await api(`/daddy/sessions/${board.group.id}/workers/${slot.number}`, {
         profile,
-        forceTaskId: force ? slot.taskId : undefined,
+        forceTaskId: force ? task?.id : undefined,
+        expected:
+          force && task
+            ? {
+                groupGeneration: shown.groupGeneration,
+                task: {
+                  head: task.revision?.head ?? '',
+                  revision: task.revision,
+                  generation: task.generation,
+                },
+              }
+            : undefined,
       });
       await onSaved();
     } catch (error) {

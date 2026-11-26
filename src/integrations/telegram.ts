@@ -1,3 +1,9 @@
+import {
+  commitTelegramOperation,
+  operationDestination,
+  resultKey,
+  type TelegramOperationResult,
+} from './telegram-receipts.js';
 import { commandHelp, telegramCommands, normalizeTelegramText } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
@@ -536,7 +542,30 @@ export class Telegram {
       update = { ...update, message: { ...message, text, caption } };
     }
     const message = update.message;
-    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    const pending = resultKey(update.update_id);
+    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) {
+      const result = store.setting<TelegramOperationResult>(pending);
+      const source = operationDestination(update);
+      const pair = this.paired();
+      if (
+        result &&
+        pair &&
+        source?.ownerId === pair.userId &&
+        result.ownerId === pair.userId &&
+        source.chatId === result.chatId &&
+        source.threadId === result.threadId &&
+        (source.chatId === pair.chatId || this.workspace?.room()?.chatId === source.chatId)
+      ) {
+        await this.api.send(
+          result,
+          this.locale() === 'ru' ? 'Действие уже выполнено.' : 'This action has already completed.',
+          undefined,
+          { key: pending },
+        );
+        this.clearOperationResult(pending);
+      }
+      return;
+    }
     const sender = update.callback_query?.from ?? message?.from;
     const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
     const paired = this.paired();
@@ -555,10 +584,15 @@ export class Telegram {
       store.db
         .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
         .run(update.update_id, now());
+      this.clearOperationResult(pending);
       return;
     }
     await this.handleUpdate(update);
     store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    this.clearOperationResult(pending);
+  }
+  private clearOperationResult(key: string) {
+    this.engine.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
   }
   private async handleUpdate(update: Update) {
     const store = this.engine.store;
@@ -606,6 +640,7 @@ export class Telegram {
       try {
         await this.showCleanup(chat.id, cleanupCommand(cleanup[2]));
       } catch (error) {
+        if (store.setting(resultKey(update.update_id))) throw error;
         await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
       }
       return;
@@ -644,9 +679,12 @@ export class Telegram {
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
         const mode = text.split(/\s+/)[1];
         if (mode)
-          store.setSetting('notifications.telegram', {
-            enabled: mode !== 'off',
-            mode: mode === 'all' ? 'all' : 'attention',
+          store.transaction(() => {
+            store.setSetting('notifications.telegram', {
+              enabled: mode !== 'off',
+              mode: mode === 'all' ? 'all' : 'attention',
+            });
+            commitTelegramOperation(store, update.update_id, operationDestination(update));
           });
         await this.api.send(
           chat.id,
@@ -679,6 +717,7 @@ export class Telegram {
         ),
       );
     } catch (error) {
+      if (store.setting(resultKey(update.update_id))) throw error;
       await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
   }
@@ -977,6 +1016,9 @@ export class Telegram {
         engine.store.setSetting('telegram.pairing', null);
         engine.store.setSetting('telegram.pairCode', null);
         engine.store.db.prepare('DELETE FROM bot_receipts').run();
+        engine.store.db
+          .prepare("DELETE FROM settings WHERE key GLOB 'telegram.operationResult:*'")
+          .run();
         engine.store.db.prepare('DELETE FROM bot_actions').run();
       });
     }
