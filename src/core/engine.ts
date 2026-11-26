@@ -4666,6 +4666,22 @@ export class Engine {
           this.savedFixEvent(task)?.run_id !== job.id
         )
           job.fixSaveRevision ??= task.revision;
+        const rejection =
+          !head && receiptsReadable && job.role === 'author' && job.kind === 'fix'
+            ? this.store.rejectedFix(job)
+            : undefined;
+        if (rejection && task.generation === job.generation && task.state === 'fixing') {
+          this.store.transaction(() => {
+            job.status = 'failed';
+            job.errorCode = rejection.code;
+            job.error = 'The worker stopped before committing. The working copy was preserved.';
+            job.finishedAt = now();
+            this.failJob(job, new AppError(rejection.code, job.error));
+            this.store.saveJob(job);
+          });
+          this.store.clearFixEvidence(rejection.path);
+          continue;
+        }
         const restartReason =
           'Server restarted during this run. Its external effects must be reconciled before retry.';
         const reason = head ? `${restartReason} Saved fix ${head} is preserved.` : restartReason;

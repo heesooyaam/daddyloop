@@ -3525,7 +3525,7 @@ it.each([true, false])(
   },
 );
 
-it.each(['poll', 'shutdown and restart'] as const)(
+it.each(['poll', 'shutdown and restart', 'locked through shutdown'] as const)(
   'persists a blocked pre-commit rejection after SQLite recovers (%s)',
   async (recovery) => {
     const dir = mkdtempSync(join(tmpdir(), 'daddy-locked-outcome-')),
@@ -3551,10 +3551,11 @@ it.each(['poll', 'shutdown and restart'] as const)(
       });
       const job = f.store.claim()!;
       await worker['run'](job);
+      if (recovery === 'locked through shutdown') await worker.stop();
       lock.exec('ROLLBACK');
       locked = false;
-      if (recovery === 'shutdown and restart') {
-        await worker.stop();
+      if (recovery !== 'poll') {
+        if (recovery === 'shutdown and restart') await worker.stop();
         store.close();
         store = new Store(path);
         engine = new Engine(store, () => new DemoProvider(store));
@@ -3569,7 +3570,7 @@ it.each(['poll', 'shutdown and restart'] as const)(
       expect(store.activeJobs(t.id)).toHaveLength(1);
     } finally {
       if (locked) lock.exec('ROLLBACK');
-      await worker.stop();
+      if (store === f.store) await worker.stop();
       lock.close();
       store.close();
       rmSync(dir, { recursive: true, force: true });

@@ -37,7 +37,10 @@ export class Worker {
   private runningJobs = new Map<string, Job>();
   private finalizing = new Set<string>();
   private pendingRuns = new Set<Promise<void>>();
-  private pendingJobOutcomes = new Map<string, { job: Job; failure?: unknown }>();
+  private pendingJobOutcomes = new Map<
+    string,
+    { job: Job; failure?: unknown; rejectionPath?: string }
+  >();
   private submitting = new Set<string>();
   private taskRuns = new Map<Promise<void>, string>();
   private timer?: NodeJS.Timeout;
@@ -547,6 +550,7 @@ export class Worker {
   }
   private writeJobOutcome(job: Job, failure?: unknown) {
     const store = this.engine.store;
+    const pending = this.pendingJobOutcomes.get(job.id);
     try {
       store.transaction(() => {
         if (failure !== undefined) this.engine.failJob(job, failure);
@@ -554,9 +558,22 @@ export class Worker {
         store.event(job.taskId, `job.${job.status}`, { error: job.error }, job.id);
       });
       this.pendingJobOutcomes.delete(job.id);
+      if (pending?.rejectionPath) store.clearFixEvidence(pending.rejectionPath);
     } catch (error) {
       if (!isSqliteBusy(error)) throw error;
-      this.pendingJobOutcomes.set(job.id, { job, failure });
+      const outcome = pending ?? { job, failure, rejectionPath: undefined };
+      this.pendingJobOutcomes.set(job.id, outcome);
+      try {
+        outcome.rejectionPath ??= store.stageRejectedFix(job);
+      } catch (journalError) {
+        // The in-memory finalization can still commit when SQLite becomes writable again.
+        if (
+          !['ENOSPC', 'EDQUOT', 'EROFS', 'EACCES', 'EPERM'].includes(
+            (journalError as NodeJS.ErrnoException).code ?? '',
+          )
+        )
+          throw journalError;
+      }
     }
   }
 
