@@ -299,13 +299,19 @@ export class Engine {
         if (clarification !== undefined) task.draftStart.clarification = clarification;
         return this.startGitHubDraft(task, provider);
       }
-      if (task.reviewAdmission && !retry) {
+      if (task.reviewAdmission && !retry && !this.heldMergeReviewId(task)) {
         if (task.state !== 'queued')
           throw new AppError('review_exists', 'Retry the original GitHub review.');
         return this.enqueueReview(task, retry, clarification);
       }
       let pr = await provider.getPR(prRef(task));
-      if (retry && pr.state === 'merged') return this.queueMergeVerification(task, pr);
+      const heldMerge = this.heldMergeReviewId(task);
+      if (pr.state === 'merged' && (retry || heldMerge))
+        return this.queueMergeVerification(task, pr, !!heldMerge && task.state === 'queued');
+      if (task.reviewAdmission && pr.state === 'closed')
+        throw new AppError('pr_closed', 'The PR is closed');
+      if (this.heldMergeReviewId(task) && pr.state !== 'merged')
+        throw new AppError('merge_unconfirmed', 'The original merged PR is no longer confirmed');
       if (task.reviewAdmission) {
         const handle = task.review!;
         const ref = prRef(task);
@@ -1044,6 +1050,7 @@ export class Engine {
     if (cancelRunning) this.onCancel(task.id);
     task.review = undefined;
     delete task.reviewAdmission;
+    delete task.mergedReviewId;
     delete task.conflictFeedbackReview;
     delete task.publicationRetry;
     task.partialReview = undefined;
@@ -1531,21 +1538,39 @@ export class Engine {
     );
   }
 
+  heldMergeReviewId(task: Task) {
+    // Older queued verifications used the draft admission field on an already merged PR.
+    return task.mergedReviewId ?? (task.pr?.state === 'merged' ? task.reviewAdmission : undefined);
+  }
+
   async readHeldPublication(task: Task, observed: PullRequest, snapshot?: ReviewSnapshot) {
     const ref = prRef(task);
     const provider = this.provider(ref);
     const handle = task.review;
     if (
       !handle?.authorId ||
-      handle.id !== task.reviewAdmission ||
+      handle.id !==
+        (observed.state === 'merged'
+          ? (this.heldMergeReviewId(task) ?? task.reviewAdmission)
+          : task.reviewAdmission) ||
       !sameReviewTarget(task.pr, observed) ||
       observed.draft
     )
       throw new AppError('draft_changed', draftInspectionRequired);
     const native = snapshot ?? (await provider.getReview(ref, handle));
+    if (native.status === 'missing' && !native.authorId)
+      throw new GitHubRetryError(
+        'github_read_unavailable',
+        'Waiting for the original GitHub review to become visible.',
+        Date.now() + 15000,
+        false,
+        503,
+      );
     const owner = await provider.reviewAccount?.();
+    const unchangedDraft =
+      observed.state === 'merged' && this.initialDraftMatches(task, native, owner);
     if (
-      native.status !== 'published' ||
+      (native.status !== 'published' && !unchangedDraft) ||
       owner !== handle.authorId ||
       native.authorId !== handle.authorId ||
       !sameRevision(native.revision, handle.revision) ||
@@ -1557,6 +1582,7 @@ export class Engine {
       !sameReviewTarget(observed, pr) ||
       !sameRevision(observed, pr) ||
       pr.state !== observed.state ||
+      pr.state === 'closed' ||
       pr.draft ||
       pr.mergeCommit !== observed.mergeCommit
     )
@@ -1568,28 +1594,53 @@ export class Engine {
     if (task.conflictFeedbackReview) return task.conflictFeedbackReview;
     const feedback = task.feedback;
     if (feedback?.status !== 'published' || feedback.revision.head !== task.revision?.head) return;
+    let linkedId: string | undefined;
+    try {
+      const url = new URL(feedback.url);
+      const prUrl = new URL(prRef(task).url);
+      if (url.origin === prUrl.origin && url.pathname === prUrl.pathname)
+        linkedId = /^#pullrequestreview-(\d+)$/.exec(url.hash)?.[1];
+    } catch {
+      // Older snapshots can lack a native review link.
+    }
     const rows = this.store.db
       .prepare(
         "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published')",
       )
       .all(task.id);
+    const feedbackIds = feedback.comments.map((comment) => comment.id).sort();
     const ids = new Set<string>();
+    let linkedPublication = false;
     for (const row of rows) {
       const event = JSON.parse(String(row.data)) as {
         reviewId?: string;
         snapshot?: ReviewSnapshot;
         revision?: Revision;
-        comments?: number;
       };
-      if (typeof event.reviewId !== 'string' || !/^\d+$/.test(event.reviewId)) continue;
-      const matches = event.snapshot
-        ? isDeepStrictEqual(event.snapshot, feedback)
-        : sameRevision(event.revision, feedback.revision) &&
-          event.comments === feedback.comments.length;
-      if (matches) ids.add(event.reviewId);
+      const id = event.reviewId;
+      if (typeof id !== 'string' || !/^\d+$/.test(id)) continue;
+      if (!sameRevision(event.snapshot?.revision ?? event.revision, feedback.revision)) continue;
+      if (
+        event.snapshot &&
+        (event.snapshot.status !== 'published' || event.snapshot.authorId !== feedback.authorId)
+      )
+        continue;
+      if (id === linkedId) linkedPublication = true;
+      if (
+        event.snapshot &&
+        feedbackIds.length &&
+        isDeepStrictEqual(event.snapshot.comments.map((comment) => comment.id).sort(), feedbackIds)
+      )
+        ids.add(id);
     }
-    const [id] = ids;
-    if (ids.size === 1 && feedback.authorId)
+    const id = linkedId
+      ? linkedPublication && (!ids.size || ids.has(linkedId))
+        ? linkedId
+        : undefined
+      : ids.size === 1
+        ? [...ids][0]
+        : undefined;
+    if (id && feedback.authorId)
       return { id, revision: feedback.revision, authorId: feedback.authorId, marker: '' };
     if (feedback.comments.length)
       throw new AppError(
@@ -1599,8 +1650,12 @@ export class Engine {
       );
   }
 
-  private async queueMergeVerification(task: Task, pr: PullRequest) {
-    if (task.state !== 'needs_input' || this.store.busy(task.id))
+  private async queueMergeVerification(task: Task, pr: PullRequest, resume = false) {
+    if (
+      (task.state !== 'needs_input' &&
+        !(resume && (task.state === 'paused' || task.state === 'queued'))) ||
+      this.store.busy(task.id)
+    )
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
     if (pr.state !== 'merged' || pr.head !== task.revision?.head)
       throw new AppError(
@@ -1613,12 +1668,31 @@ export class Engine {
         'Inspect the saved worker changes before verifying this merge',
       );
     const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-    const original = task.reviewAdmission ? await this.readHeldPublication(task, pr) : undefined;
-    if (original) {
+    const originalId = this.heldMergeReviewId(task) ?? task.reviewAdmission;
+    let retryAt: number | undefined;
+    const original = originalId
+      ? await this.readHeldPublication(task, pr).catch((error: unknown) => {
+          if (!(error instanceof GitHubRetryError)) throw error;
+          retryAt = error.until;
+          return undefined;
+        })
+      : undefined;
+    if (originalId) {
+      const current = this.store.getTask(task.id);
       const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
-      if (!this.currentReviewStart(task) || currentGroup?.generation !== group?.generation)
-        return this.store.getTask(task.id);
-      pr = original.pr;
+      if (
+        current.generation !== task.generation ||
+        current.state !== task.state ||
+        currentGroup?.generation !== group?.generation ||
+        currentGroup?.deletedAt ||
+        currentGroup?.deletion ||
+        currentGroup?.daddyState === 'paused' ||
+        currentGroup?.daddyState === 'archived'
+      )
+        return current;
+      task.mergedReviewId = originalId;
+      delete task.reviewAdmission;
+      pr = original?.pr ?? pr;
     }
     this.store.transaction(() => {
       if (!sameRevision(task.revision, pr)) {
@@ -1633,12 +1707,13 @@ export class Engine {
       if (original) task.snapshot = original.snapshot;
       task.reviewerThreadId = undefined;
       this.state(task, 'reviewing', 'Checking the merged result');
-      this.store.enqueue(
+      const job = this.store.enqueue(
         task,
         'reviewer',
         'verify_merge',
         'Verify the delivered PR diff and the original task outcome, including requested deployment checks. Use read-only evidence. Check prior published findings and return their verified IDs. Report incomplete if any required result cannot be verified.',
       );
+      if (retryAt) this.store.saveJob({ ...job, notBefore: new Date(retryAt).toISOString() });
     });
     return task;
   }
@@ -1973,9 +2048,16 @@ export class Engine {
   }
   private async reconcileLocked(id: string, publication?: ReviewSnapshot): Promise<Task> {
     let task = this.store.getTask(id);
-    if (task.draftStart || task.reviewAdmission) return task;
     if (task.state === 'paused' || isTicket(task) || this.reviewWaitingForResources(task))
       return task;
+    if (this.heldMergeReviewId(task)) {
+      if (task.state === 'awaiting_checks' || task.state === 'awaiting_plan_approval') {
+        const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        if (await this.confirmHeldMerge(task, pr)) await this.finish(task);
+      }
+      return task;
+    }
+    if (task.draftStart || task.reviewAdmission) return task;
     if (task.state === 'awaiting_publication' && task.partialReview) return task;
     const provider = this.provider(prRef(task)),
       pr = await provider.getPR(prRef(task));
@@ -2278,11 +2360,52 @@ export class Engine {
         this.finishReviewedTask(task);
   }
 
+  private async confirmHeldMerge(task: Task, observed: PullRequest) {
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const checked = task.verifiedMerge;
+    let current: Awaited<ReturnType<Engine['readHeldPublication']>> | undefined;
+    try {
+      if (
+        observed.state === 'merged' &&
+        sameRevision(checked, observed) &&
+        checked?.mergeCommit === observed.mergeCommit
+      )
+        current = await this.readHeldPublication(task, observed);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'draft_changed') throw error;
+    }
+    if (
+      !this.currentReviewStart(task) ||
+      (task.groupId && this.store.getGroup(task.groupId).generation !== group?.generation)
+    )
+      return false;
+    if (
+      !current ||
+      !isDeepStrictEqual(task.snapshot, JSON.parse(JSON.stringify(current.snapshot)))
+    ) {
+      task.verifiedMerge = undefined;
+      task.approvedAt = undefined;
+      task.checksWaivedAt = undefined;
+      this.state(
+        task,
+        'needs_input',
+        'The merged PR or original review changed. Retry verification.',
+      );
+      return false;
+    }
+    task.pr = current.pr;
+    return true;
+  }
+
   private async finish(task: Task) {
     const gate = completionGate(task);
     if (gate) this.state(task, gate.state, gate.reason);
     else {
       if (task.kind === 'plan') task.approvedAt = now();
+      if (this.heldMergeReviewId(task)) {
+        delete task.reviewAdmission;
+        delete task.mergedReviewId;
+      }
       this.finishReviewedTask(
         task,
         task.verifiedMerge ? 'daddy verified the merged result' : undefined,
@@ -2845,7 +2968,7 @@ export class Engine {
           pr.mergeCommit === task.pr?.mergeCommit &&
           result.checkedHead === pr.head;
         const publication =
-          sameMerge && task.reviewAdmission && result.status === 'completed'
+          sameMerge && this.heldMergeReviewId(task) && result.status === 'completed'
             ? await this.readHeldPublication(task, pr)
             : undefined;
         if (publication) {
@@ -2884,9 +3007,9 @@ export class Engine {
           );
         } else {
           task.summary = result.summary;
-          task.pr = pr;
-          task.verifiedMerge = { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
-          delete task.reviewAdmission;
+          const verifiedPR = publication?.pr ?? pr;
+          task.pr = verifiedPR;
+          task.verifiedMerge = { ...revisionOf(verifiedPR), mergeCommit: verifiedPR.mergeCommit };
           await this.finish(task);
         }
         return;
@@ -3085,6 +3208,21 @@ export class Engine {
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
         if (this.store.busy(id))
           throw new AppError('task_busy', 'Wait for the active session to finish');
+        if (this.heldMergeReviewId(task) && task.state === 'paused') {
+          const pr = await this.provider(prRef(task)).getPR(prRef(task));
+          if (
+            task.verifiedMerge &&
+            (task.resumeState === 'awaiting_checks' ||
+              task.resumeState === 'awaiting_plan_approval')
+          ) {
+            this.state(task, task.resumeState, 'Resuming merge verification');
+            if (await this.confirmHeldMerge(task, pr)) await this.finish(task);
+            return task;
+          }
+          if (!sameRevision(task.revision, pr) || task.pr?.mergeCommit !== pr.mergeCommit)
+            throw new AppError('merge_unconfirmed', 'The merged revision changed while paused');
+          return this.queueMergeVerification(task, pr, true);
+        }
         if (task.reviewAdmission && task.state === 'paused') {
           this.state(task, 'queued', 'Checking the original GitHub review draft');
           return task;
@@ -3187,9 +3325,15 @@ export class Engine {
             (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
-        task.approvedAt = now();
-        task.pr = current;
-        this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
+        if (this.heldMergeReviewId(task)) {
+          if (!(await this.confirmHeldMerge(task, current))) return task;
+          task.approvedAt = now();
+          await this.finish(task);
+        } else {
+          task.approvedAt = now();
+          task.pr = current;
+          this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
+        }
       } else if (action === 'waive-checks') {
         if (task.state !== 'awaiting_checks' || !reason.trim())
           throw new AppError(
@@ -3203,6 +3347,8 @@ export class Engine {
             'stale_revision',
             'The PR changed; a waiver cannot apply to a new revision',
           );
+        if (this.heldMergeReviewId(task) && !(await this.confirmHeldMerge(task, current)))
+          return task;
         task.checksWaivedAt = now();
         this.store.event(id, 'checks.waived', {
           reason,

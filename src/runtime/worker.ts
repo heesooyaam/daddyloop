@@ -746,7 +746,7 @@ export class Worker {
           task.feedback = undefined;
         }
       }
-      if (job.kind === 'verify_merge' && task.reviewAdmission && startingPR) {
+      if (job.kind === 'verify_merge' && this.engine.heldMergeReviewId(task) && startingPR) {
         const publication = await this.engine.readHeldPublication(task, startingPR);
         const current = store.getTask(job.taskId);
         const currentGroup = current.groupId ? store.getGroup(current.groupId) : undefined;

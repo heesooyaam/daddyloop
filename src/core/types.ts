@@ -267,8 +267,10 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
-  /** Native review ID held until reviewer admission or verification of an early publication. */
+  /** Native review ID held until the initial draft is admitted. */
   reviewAdmission?: string;
+  /** Original GitHub review bound to a read-only merge verification until completion. */
+  mergedReviewId?: string;
   draftStart?: {
     marker: string;
     ref?: PRRef;

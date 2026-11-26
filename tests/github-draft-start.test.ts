@@ -37,6 +37,7 @@ async function reviewFixture() {
     id: number;
     user: { id: number };
     commit_id: string;
+    html_url?: string;
     state: string;
     body: string;
   };
@@ -69,7 +70,11 @@ async function reviewFixture() {
     if (pathname.endsWith('/comments'))
       return options.missing === 'comments'
         ? new Response(null, { status: 404 })
-        : Response.json(comments);
+        : Response.json(
+            pathname.endsWith('/100/comments')
+              ? [{ id: 700, body: 'Unrelated publication', html_url: task.ref.url }]
+              : comments,
+          );
     if (init?.method === 'GET' && pathname.endsWith('/reviews')) {
       if (options.readFailure) return new Response(null, { status: 503 });
       if (options.hidden) return Response.json([]);
@@ -481,6 +486,7 @@ it.each([
   ['conflict', 'advanced'],
   ['conflict', 'rewritten'],
   ['conflict', 'legacy'],
+  ['conflict', 'legacy edited'],
   ['conflict', 'ambiguous publication'],
   ['conflict', 'redirected during preparation'],
 ] as const)('checks published feedback before an %s fix (%s)', async (kind, scenario) => {
@@ -496,6 +502,8 @@ it.each([
     delete task.reviewAdmission;
     task.reviewFinished = true;
     f.reviews[0].state = 'COMMENTED';
+    if (scenario === 'legacy edited')
+      f.reviews[0].html_url = f.task.ref.url + '#pullrequestreview-123';
     f.comments.push({ id: 456, body: 'Old comment', html_url: f.task.ref.url });
     task.snapshot = task.feedback = await f.github.getReview(prRef(task), task.review!);
     const originalId = task.review!.id;
@@ -510,9 +518,27 @@ it.each([
       }
       await f.engine.reconcile(task.id);
       expect(f.store.getTask(task.id).conflictFeedbackReview?.id).toBe(originalId);
-      if (scenario === 'legacy' || scenario === 'ambiguous publication') {
+      if (
+        scenario === 'legacy' ||
+        scenario === 'legacy edited' ||
+        scenario === 'ambiguous publication'
+      ) {
         const current = f.store.getTask(task.id);
         delete current.conflictFeedbackReview;
+        if (scenario === 'legacy edited') {
+          f.comments[0].body = 'Edited before the upgrade';
+          current.feedback = await f.github.getReview(prRef(task), task.review!);
+          f.reviews.push({
+            ...f.reviews[0],
+            id: 100,
+            html_url: f.task.ref.url + '#pullrequestreview-100',
+          });
+          f.store.event(task.id, 'review.findings_published', {
+            reviewId: '100',
+            revision: originalRevision,
+            comments: 1,
+          });
+        }
         f.store.saveTask(current);
         f.store.event(task.id, 'review.published', {
           reviewId: originalId,
@@ -553,7 +579,12 @@ it.each([
           originalRevision.base,
           f.remote.base,
         );
-      if (scenario === 'current' || scenario === 'advanced' || scenario === 'legacy') {
+      if (
+        scenario === 'current' ||
+        scenario === 'advanced' ||
+        scenario === 'legacy' ||
+        scenario === 'legacy edited'
+      ) {
         expect(run).toHaveBeenCalledTimes(1);
         expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
           { id: '456', body: f.comments[0].body },
@@ -782,11 +813,11 @@ it.each([
           state: 'complete',
           verifiedMerge: { head: f.remote.head },
         });
-        expect(completed.reviewAdmission).toBeUndefined();
+        expect(completed.mergedReviewId).toBeUndefined();
       } else if (f.remote.state === 'merged')
         expect(f.store.getTask(f.task.id)).toMatchObject({
           state: 'needs_input',
-          reviewAdmission: '123',
+          mergedReviewId: '123',
           reason: expect.stringContaining(
             scenario === 'merged'
               ? 'verified all previously published findings'
@@ -801,6 +832,156 @@ it.each([
     f.close();
   }
 });
+
+it.each([
+  'pause',
+  'missing review',
+  'missing comments',
+  'draft',
+  'closed and same target',
+  'closed and retargeted',
+] as const)('preserves the merge job and original review across %s', async (scenario) => {
+  const f = await reviewFixture();
+  try {
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    if (scenario === 'draft') {
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+    } else {
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Current comment**', html_url: f.task.ref.url });
+    }
+    f.due();
+    await f.engine.review(f.task.id);
+    const held = f.store.getTask(f.task.id);
+    expect(held).toMatchObject({ state: 'needs_input', reviewAdmission: '123' });
+    if (scenario.startsWith('closed')) {
+      f.remote.state = 'closed';
+      await expect(f.engine.review(f.task.id, true)).rejects.toMatchObject({ code: 'pr_closed' });
+      expect(f.store.getTask(f.task.id)).toEqual(held);
+    }
+    f.remote.state = 'merged';
+    f.remote.mergeCommit = 'f'.repeat(40);
+    if (scenario === 'closed and retargeted') {
+      f.remote.targetBranch = 'release';
+      await expect(f.engine.review(f.task.id, true)).rejects.toMatchObject({
+        code: 'draft_changed',
+      });
+      expect(f.store.getTask(f.task.id)).toEqual(held);
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      expect(f.writeAttempts).toEqual(['POST']);
+      return;
+    }
+    await f.engine.action(f.task.id, 'verify-merge');
+    if (scenario === 'pause') {
+      await f.engine.action(f.task.id, 'pause');
+      f.restart();
+      await f.engine.action(f.task.id, 'resume');
+    }
+    const [job] = f.store.activeJobs(f.task.id);
+    expect(job.kind).toBe('verify_merge');
+    const { worker, run } = reviewer(f);
+    run.mockResolvedValue({
+      status: 'completed',
+      summary: 'Verified merged result',
+      checkedHead: f.remote.head,
+      verifiedCommentIds: scenario === 'draft' ? [] : ['456'],
+    });
+    try {
+      if (scenario === 'missing review' || scenario === 'missing comments') {
+        f.options.missing = scenario === 'missing review' ? 'review' : 'comments';
+        await worker.tick();
+        const deferred = await vi.waitFor(() => {
+          const [retry] = f.store.activeJobs(f.task.id);
+          expect(retry).toMatchObject({
+            id: job.id,
+            kind: 'verify_merge',
+            status: 'queued',
+            notBefore: expect.any(String),
+          });
+          return retry;
+        });
+        expect(run).not.toHaveBeenCalled();
+        f.options.missing = undefined;
+        f.store.saveJob({ ...deferred, notBefore: undefined });
+      }
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('complete'));
+      expect(run).toHaveBeenCalledTimes(1);
+      const observed = run.mock.calls[0][0].task;
+      expect(observed.review?.id).toBe('123');
+      expect(observed.snapshot?.status).toBe(scenario === 'draft' ? 'draft' : 'published');
+      expect(f.reviews[0].state).toBe(scenario === 'draft' ? 'PENDING' : 'COMMENTED');
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['CI edit', 'plan edit', 'CI restarted', 'CI unchanged', 'CI waiver edit'] as const)(
+  'keeps merge verification tied to the original evidence at completion (%s)',
+  async (scenario) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Verified text**', html_url: f.task.ref.url });
+      f.due();
+      await f.engine.review(f.task.id);
+      const held = f.store.getTask(f.task.id);
+      held.policy.requireChecks = true;
+      if (scenario === 'plan edit') {
+        held.kind = 'plan';
+        held.policy.planApproval = 'human';
+      }
+      f.store.saveTask(held);
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      f.remote.checks =
+        scenario === 'CI restarted' || scenario === 'plan edit' ? 'passing' : 'pending';
+      // The plan kind only needs to be set for the result gate. The job fixture has no Git diff.
+      await f.engine.review(f.task.id, true);
+      const job = f.store.claim()!;
+      if (scenario === 'CI restarted') {
+        vi.mocked(f.github.getPR)
+          .mockResolvedValueOnce({ ...f.remote, checks: 'passing' })
+          .mockResolvedValueOnce({ ...f.remote, checks: 'pending' });
+        f.remote.checks = 'pending';
+      }
+      await f.engine.completeJob(job, {
+        status: 'completed',
+        checkedHead: f.remote.head,
+        summary: 'Verified',
+        verifiedCommentIds: ['456'],
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      const waiting = f.store.getTask(f.task.id);
+      expect(waiting).toMatchObject({
+        state: scenario === 'plan edit' ? 'awaiting_plan_approval' : 'awaiting_checks',
+        mergedReviewId: '123',
+      });
+      if (scenario === 'CI restarted') expect(waiting.pr?.checks).toBe('pending');
+      if (scenario.endsWith('edit')) f.comments[0].body = '**Edited after review**';
+      f.remote.checks = 'passing';
+      if (scenario === 'plan edit') await f.engine.action(f.task.id, 'approve-plan');
+      else if (scenario === 'CI waiver edit')
+        await f.engine.action(f.task.id, 'waive-checks', 'CI deferred');
+      else await f.engine.reconcile(f.task.id);
+      const final = f.store.getTask(f.task.id);
+      expect(final.state).toBe(scenario.endsWith('edit') ? 'needs_input' : 'complete');
+      expect(final.mergedReviewId).toBe(scenario.endsWith('edit') ? '123' : undefined);
+      if (scenario.endsWith('edit')) expect(final.verifiedMerge).toBeUndefined();
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      f.close();
+    }
+  },
+);
 
 it.each(['refused', 'visible', 'admission'] as const)(
   'respects newly confirmed auto-merge conflict (%s)',
