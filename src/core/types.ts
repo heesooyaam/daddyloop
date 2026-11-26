@@ -273,6 +273,8 @@ export interface Task {
   mergedReviewId?: string;
   /** A queued or verified merge awaiting its final outcome, even when no review was created. */
   mergeVerificationActive?: true;
+  /** An explicit request waiting for PR metadata after a review has already been bound. */
+  mergeVerificationRequest?: { kind: 'verify' | 'retry'; retryAt: number; delay: number };
   draftStart?: {
     marker: string;
     ref?: PRRef;

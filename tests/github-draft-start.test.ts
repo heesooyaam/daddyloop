@@ -977,6 +977,154 @@ it.each(['CI edit', 'plan edit', 'CI restarted', 'CI unchanged', 'CI waiver edit
   },
 );
 
+it('does not create a second draft when only the uncertain journal event survives', async () => {
+  const f = await reviewFixture();
+  try {
+    await f.engine.review(f.task.id);
+    const intent = f.store.getTask(f.task.id).draftStart!;
+    expect(f.store.events(f.task.id)).toContainEqual(
+      expect.objectContaining({
+        type: 'operation.uncertain',
+        data: expect.objectContaining({ operationId: intent.marker }),
+      }),
+    );
+    f.store.db.prepare('DELETE FROM operations WHERE id=?').run(intent.marker);
+    f.reviews[0].state = 'COMMENTED';
+    f.comments.push({ id: 456, body: '**Original finding**', html_url: f.task.ref.url });
+    f.restart();
+    const { worker, run } = reviewer(f);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        f.due();
+        await worker.tick();
+        expect(f.store.getTask(f.task.id).draftStart?.marker).toBe(intent.marker);
+        expect(f.writeAttempts).toEqual(['POST']);
+      }
+      f.options.hidden = false;
+      f.due();
+      await worker.tick();
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: 'needs_input',
+        review: { id: '123', marker: intent.marker },
+        snapshot: { status: 'published', comments: [{ id: '456', body: f.comments[0].body }] },
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['verify-merge', 'retry'] as const)(
+  'retains %s on the bound review after the first PR read fails',
+  async (entry) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: 'Earlier Markdown', html_url: f.task.ref.url });
+      f.due();
+      await f.engine.review(f.task.id);
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: 'needs_input',
+        reviewAdmission: '123',
+        review: { id: '123' },
+      });
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      vi.mocked(f.github.getPR).mockRejectedValueOnce(
+        new AppError('provider_503', 'PR read failed'),
+      );
+      const deferred = await (entry === 'retry'
+        ? f.engine.review(f.task.id, true)
+        : f.engine.action(f.task.id, 'verify-merge'));
+      expect(deferred).toMatchObject({
+        state: 'queued',
+        mergeVerificationRequest: { retryAt: expect.any(Number) },
+      });
+      expect(deferred.draftStart).toBeUndefined();
+      f.restart();
+      f.comments[0].body = '**Updated after the restart**';
+      const { worker, run } = reviewer(f);
+      run.mockResolvedValue({
+        status: 'completed',
+        summary: 'Verified merge',
+        checkedHead: f.remote.head,
+        verifiedCommentIds: ['456'],
+      });
+      try {
+        await worker.tick();
+        expect(run).not.toHaveBeenCalled();
+        const saved = f.store.getTask(f.task.id);
+        saved.mergeVerificationRequest!.retryAt = 0;
+        f.store.saveTask(saved);
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('complete'));
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0]).toMatchObject({
+          job: { kind: 'verify_merge' },
+          task: {
+            review: { id: '123' },
+            snapshot: { comments: [{ id: '456', body: f.comments[0].body }] },
+          },
+        });
+        expect(f.store.getTask(f.task.id).mergeVerificationRequest).toBeUndefined();
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['ambiguous', 'refused'] as const)(
+  'allows open-PR retry after a deferred merge request (%s)',
+  async (outcome) => {
+    const f = await reviewFixture();
+    try {
+      if (outcome === 'refused') {
+        f.options.firstPostStatus = 422;
+        f.options.firstPostAccepted = false;
+        await expect(f.engine.review(f.task.id)).rejects.toMatchObject({ code: 'provider_422' });
+      } else await f.engine.review(f.task.id);
+      const intent = f.store.getTask(f.task.id).draftStart!;
+      vi.mocked(f.github.getPR).mockRejectedValueOnce(
+        new AppError('provider_503', 'PR read failed'),
+      );
+      await f.engine.action(f.task.id, 'verify-merge');
+      f.restart();
+      f.options.hidden = false;
+      f.due();
+      const { worker, run } = reviewer(f);
+      try {
+        await worker.tick();
+        const held = f.store.getTask(f.task.id);
+        expect(held).toMatchObject({ state: 'needs_input', draftStart: { marker: intent.marker } });
+        expect(held.draftStart?.mergeVerificationRequested).toBeUndefined();
+        expect(run).not.toHaveBeenCalled();
+        await f.engine.review(f.task.id, true);
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        expect(run.mock.calls[0][0]).toMatchObject({
+          job: { kind: 'review' },
+          task: { review: { id: '123', marker: intent.marker } },
+        });
+        expect(f.writeAttempts).toEqual(outcome === 'refused' ? ['POST', 'POST'] : ['POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
 it.each([
   ['pending', 'verify-merge'],
   ['done', 'verify-merge'],
@@ -1205,6 +1353,8 @@ it.each([
 it.each([
   ['verify-merge', 'unsent'],
   ['retry', 'unsent'],
+  ['verify-merge', 'account saved'],
+  ['retry', 'account saved'],
   ['verify-merge', 'legacy'],
   ['retry', 'contradictory'],
 ] as const)(
@@ -1212,10 +1362,14 @@ it.each([
   async (entry, evidence) => {
     const f = await reviewFixture();
     try {
-      f.options.readFailure = true;
+      if (evidence === 'account saved')
+        vi.spyOn(f.engine.broker.outbox, 'perform').mockRejectedValueOnce(
+          new AppError('provider_503', 'Interrupted before recording the write'),
+        );
+      else f.options.readFailure = true;
       await f.engine.review(f.task.id);
       const task = f.store.getTask(f.task.id);
-      expect(task.draftStart?.owner).toBeUndefined();
+      expect(task.draftStart?.owner).toBe(evidence === 'account saved' ? '12' : undefined);
       const intent = task.draftStart!;
       expect(
         f.store.db.prepare('SELECT 1 FROM operations WHERE id=?').get(intent.marker),
@@ -1235,7 +1389,7 @@ it.each([
           ? f.engine.review(task.id, true)
           : f.engine.action(task.id, 'verify-merge');
       const scan = vi.spyOn(f.github, 'inspectReviewStart');
-      if (evidence === 'unsent') {
+      if (evidence === 'unsent' || evidence === 'account saved') {
         const queued = await verify();
         expect(queued).toMatchObject({ state: 'reviewing', mergeVerificationActive: true });
         expect(queued.review).toBeUndefined();
@@ -1279,33 +1433,40 @@ it.each([
   ['manual', 'current'],
   ['disk', 'current'],
   ['disk', 'legacy'],
+  ['shutdown', 'current'],
+  ['restart after claim', 'current'],
 ] as const)(
-  'resumes a merge verifier without a review after a %s pause and restart (%s record)',
+  'resumes a merge verifier without a review after %s (%s record)',
   async (pause, record) => {
     const f = await reviewFixture();
     try {
       await verifyAfterRefusedDraft(f);
-      const before = reviewer(f);
-      before.prepare.mockImplementationOnce(async (_task, _role, signal) => {
-        await new Promise<void>((resolve) =>
-          signal!.addEventListener('abort', () => resolve(), { once: true }),
-        );
-        return '/tmp';
-      });
-      try {
-        await before.worker.tick();
-        await vi.waitFor(() => expect(before.prepare).toHaveBeenCalledTimes(1));
-        if (pause === 'disk') {
-          before.resources.ok = false;
-          before.resources.reasons = ['Disk threshold'];
-          await before.worker.tick();
-        } else await f.engine.action(f.task.id, 'pause');
-        expect(f.store.getTask(f.task.id)).toMatchObject({
-          state: pause === 'disk' ? 'needs_input' : 'paused',
+      if (pause === 'restart after claim') {
+        expect(f.store.claim()).toMatchObject({ kind: 'verify_merge', status: 'running' });
+      } else {
+        const before = reviewer(f);
+        before.prepare.mockImplementationOnce(async (_task, _role, signal) => {
+          await new Promise<void>((resolve) =>
+            signal!.addEventListener('abort', () => resolve(), { once: true }),
+          );
+          return '/tmp';
         });
-        expect(before.run).not.toHaveBeenCalled();
-      } finally {
-        await before.worker.stop();
+        try {
+          await before.worker.tick();
+          await vi.waitFor(() => expect(before.prepare).toHaveBeenCalledTimes(1));
+          if (pause === 'disk') {
+            before.resources.ok = false;
+            before.resources.reasons = ['Disk threshold'];
+            await before.worker.tick();
+          } else if (pause === 'shutdown') await before.worker.stop();
+          else await f.engine.action(f.task.id, 'pause');
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: pause === 'manual' ? 'paused' : 'needs_input',
+          });
+          expect(before.run).not.toHaveBeenCalled();
+        } finally {
+          await before.worker.stop();
+        }
       }
       if (record === 'legacy') {
         const saved = f.store.getTask(f.task.id);

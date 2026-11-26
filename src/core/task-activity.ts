@@ -125,6 +125,10 @@ export function localRetryStatus(task: Task, job?: Job) {
       return { until, label: `${phase} · retry at ${retryTime(until)} UTC${pr}` };
     }
   }
+  if (task.state === 'queued' && task.mergeVerificationRequest) {
+    const until = task.mergeVerificationRequest.retryAt;
+    return { until, label: `GitHub PR · retry at ${retryTime(until)} UTC${pr}` };
+  }
   if (task.state === 'queued' && task.draftStart?.retryAt) {
     const until = task.draftStart.retryAt;
     return { until, label: `GitHub review draft · retry at ${retryTime(until)} UTC${pr}` };

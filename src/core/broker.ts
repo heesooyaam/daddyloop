@@ -138,7 +138,8 @@ export class Broker {
       operation?.status === 'done'
         ? (JSON.parse(String(operation.result)) as ReviewHandle)
         : undefined;
-    if (operation && !intent.owner)
+    const uncertain = this.outbox.writeEvidence(task.id, marker) === 'unknown';
+    if (uncertain && !intent.owner)
       throw new AppError(
         'draft_owner_unknown',
         'The original GitHub account was not recorded. Inspect the existing review before continuing.',
@@ -146,7 +147,7 @@ export class Broker {
     const observed = confirmed ? undefined : await provider.inspectReviewStart(ref, marker, owner);
     const match = confirmed ?? observed?.match;
     if (!match) {
-      if (operation)
+      if (uncertain)
         throw new AppError(
           'draft_lookup_pending',
           'Waiting for the original GitHub review to become visible.',

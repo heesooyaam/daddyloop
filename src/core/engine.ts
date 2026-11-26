@@ -293,21 +293,51 @@ export class Engine {
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
         );
       const provider = this.provider(prRef(task));
-      if (!retry && task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
+      const pendingVerification = task.mergeVerificationRequest;
+      if (
+        !retry &&
+        Math.max(task.draftStart?.retryAt ?? 0, pendingVerification?.retryAt ?? 0) > Date.now()
+      )
+        return task;
       if (task.draftStart) {
         if (retry) task.draftStart.retry = true;
         if (clarification !== undefined) task.draftStart.clarification = clarification;
         return this.startGitHubDraft(task, provider, retry);
       }
-      if (task.reviewAdmission && !retry && !this.heldMergeReviewId(task)) {
+      if (task.reviewAdmission && !retry && !pendingVerification && !this.heldMergeReviewId(task)) {
         if (task.state !== 'queued')
           throw new AppError('review_exists', 'Retry the original GitHub review.');
         return this.enqueueReview(task, retry, clarification);
       }
-      let pr = await provider.getPR(prRef(task));
       const heldMerge = this.heldMergeReviewId(task);
-      if (pr.state === 'merged' && (retry || heldMerge))
+      const request =
+        pendingVerification?.kind ??
+        (retry && (task.reviewAdmission || heldMerge || task.mergeVerificationActive)
+          ? 'retry'
+          : undefined);
+      const observed = await this.readReviewRoutingPR(task, provider, request);
+      if (
+        !observed ||
+        (request &&
+          (!this.currentReviewStart(task) ||
+            (task.groupId &&
+              this.store.getGroup(task.groupId).generation !== entryGroupGeneration)))
+      )
+        return this.store.getTask(task.id);
+      let pr = observed;
+      if (pr.state === 'merged' && (retry || heldMerge || pendingVerification))
         return this.queueMergeVerification(task, pr, !!heldMerge && task.state === 'queued');
+      if (pendingVerification && pr.state === 'open' && sameReviewTarget(task.pr, pr)) {
+        delete task.mergeVerificationRequest;
+        if (pendingVerification.kind === 'verify' && !retry) {
+          this.state(task, 'needs_input', 'The PR is open. Retry the original review to continue.');
+          return task;
+        }
+        this.store.saveTask(task);
+        retry = true;
+      } else if (pendingVerification) {
+        throw new AppError('merge_unconfirmed', 'The original merged PR is no longer confirmed');
+      }
       if (task.reviewAdmission && pr.state === 'closed')
         throw new AppError('pr_closed', 'The PR is closed');
       if (this.resumingMergeVerification(task) && pr.state !== 'merged')
@@ -484,7 +514,7 @@ export class Engine {
       throw new AppError('draft_changed', 'The pull request changed during draft recovery.');
   }
 
-  private async readDraftStartPR(
+  private async readReviewRoutingPR(
     task: Task,
     provider: ReviewProvider,
     request?: 'verify' | 'retry',
@@ -498,10 +528,24 @@ export class Engine {
         this.currentReviewStart(task) &&
         (!task.groupId || this.store.getGroup(task.groupId).generation === group?.generation)
       ) {
-        const intent = task.draftStart!;
-        if (request === 'verify' || !intent.mergeVerificationRequested)
-          intent.mergeVerificationRequested = request;
-        this.deferDraftStart(task, error);
+        if (task.draftStart) {
+          const intent = task.draftStart;
+          if (request === 'verify' || !intent.mergeVerificationRequested)
+            intent.mergeVerificationRequested = request;
+          this.deferDraftStart(task, error);
+        } else {
+          const saved = task.mergeVerificationRequest;
+          const delay = Math.min(300000, (saved?.delay ?? 7500) * 2);
+          task.mergeVerificationRequest = {
+            kind: request === 'verify' ? request : (saved?.kind ?? request),
+            delay,
+            retryAt: Math.max(
+              Date.now() + delay,
+              error instanceof GitHubRetryError ? error.until : 0,
+            ),
+          };
+          this.state(task, 'queued', 'Waiting for GitHub PR metadata before checking the merge');
+        }
       }
     }
   }
@@ -521,9 +565,21 @@ export class Engine {
     try {
       this.checkDraftStartRef(task);
       const request = intent.mergeVerificationRequested ?? (retry ? 'retry' : undefined);
-      const observed = await this.readDraftStartPR(task, provider, request);
+      const observed = await this.readReviewRoutingPR(task, provider, request);
       if (!observed || !current()) return this.store.getTask(task.id);
       if (
+        request === 'verify' &&
+        !intent.mergeVerification &&
+        observed.state === 'open' &&
+        sameReviewTarget(target, observed)
+      ) {
+        delete intent.mergeVerificationRequested;
+        if (!retry) {
+          this.state(task, 'needs_input', 'The PR is open. Retry the original review to continue.');
+          return task;
+        }
+        this.store.saveTask(task);
+      } else if (
         intent.mergeVerification ||
         request === 'verify' ||
         (request && observed.state === 'merged')
@@ -1116,6 +1172,7 @@ export class Engine {
     delete task.reviewAdmission;
     delete task.mergedReviewId;
     delete task.mergeVerificationActive;
+    delete task.mergeVerificationRequest;
     delete task.conflictFeedbackReview;
     delete task.publicationRetry;
     task.partialReview = undefined;
@@ -1738,7 +1795,7 @@ export class Engine {
     if (!sameReviewTarget(intent.target ?? task.pr, pr))
       throw new AppError('draft_changed', draftInspectionRequired);
     const evidence = this.broker.outbox.writeEvidence(task.id, intent.marker);
-    const unsent = evidence === 'not_started' && !!intent.ref && !!intent.target && !intent.owner;
+    const unsent = evidence === 'not_started' && !!intent.ref && !!intent.target;
     if (evidence === 'refused' || unsent) {
       if (!(await this.publicationRevisionApplies(task, intent.revision, pr)))
         throw new AppError('draft_changed', draftInspectionRequired);
@@ -1776,7 +1833,10 @@ export class Engine {
     if (
       (task.state !== 'needs_input' &&
         !(resume && task.state === 'paused') &&
-        !((resume || task.draftStart) && task.state === 'queued')) ||
+        !(
+          (resume || task.draftStart || task.mergeVerificationRequest) &&
+          task.state === 'queued'
+        )) ||
       this.store.busy(task.id)
     )
       throw new AppError('task_busy', 'Choose an idle task that needs attention');
@@ -1863,6 +1923,7 @@ export class Engine {
       task.pr = pr;
       task.verifiedMerge = undefined;
       task.mergeVerificationActive = true;
+      delete task.mergeVerificationRequest;
       task.pendingFix = undefined;
       if (original) task.snapshot = original.snapshot;
       task.reviewerThreadId = undefined;
@@ -3359,9 +3420,13 @@ export class Engine {
       if (action === 'verify-merge') {
         this.assertMergeVerificationIdle(task);
         const provider = this.provider(prRef(task));
-        const pr = task.draftStart
-          ? await this.readDraftStartPR(task, provider, 'verify')
-          : await provider.getPR(prRef(task));
+        const retainRequest =
+          task.draftStart || task.reviewAdmission || this.resumingMergeVerification(task);
+        const pr = await this.readReviewRoutingPR(
+          task,
+          provider,
+          retainRequest ? 'verify' : undefined,
+        );
         return pr ? this.queueMergeVerification(task, pr) : this.store.getTask(task.id);
       }
       if (action === 'pause') {
@@ -3377,7 +3442,9 @@ export class Engine {
           throw new AppError('task_busy', 'Wait for the active session to finish');
         const resourcePaused = this.reviewWaitingForResources(task);
         const resumingReview = task.state === 'paused' || resourcePaused;
-        if (this.resumingMergeVerification(task) && resumingReview) {
+        const interruptedMerge =
+          task.state === 'needs_input' && task.resumeState === 'reviewing' && !task.inputRequest;
+        if (this.resumingMergeVerification(task) && (resumingReview || interruptedMerge)) {
           const pr = await this.provider(prRef(task)).getPR(prRef(task));
           if (
             pr.state !== 'merged' ||
@@ -3407,6 +3474,10 @@ export class Engine {
             return task;
           }
           return this.queueMergeVerification(task, pr, true);
+        }
+        if (task.mergeVerificationRequest && task.state === 'paused') {
+          this.state(task, 'queued', 'Waiting for GitHub PR metadata before checking the merge');
+          return task;
         }
         if (task.reviewAdmission && resumingReview) {
           this.store.transaction(() => {
