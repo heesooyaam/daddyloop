@@ -388,7 +388,7 @@ export class Engine {
           const action = this.prAction({ ...task, state: 'queued', snapshot: native }, latestPR);
           if (action.kind === 'repair') {
             this.store.setSetting('review.archive:' + task.id + ':' + handle.id, native);
-            await this.applyRepair(task, latestPR, action, { snapshot: native });
+            await this.applyRepair(task, latestPR, action, { snapshot: native, clarification });
           }
           return task;
         }
@@ -432,7 +432,7 @@ export class Engine {
           'The PR branches changed. Inspect the task before restarting review.',
         );
       if (action.kind === 'repair') {
-        await this.applyRepair(task, pr, action);
+        await this.applyRepair(task, pr, action, { clarification });
         return task;
       }
       if (
@@ -2024,6 +2024,7 @@ export class Engine {
       snapshot?: ReviewSnapshot;
       checkpoint?: (task: Task) => Promise<string>;
       finishingRun?: boolean;
+      clarification?: string;
     } = {},
   ) {
     if (action.preparation === 'retire-draft') {
@@ -2051,6 +2052,7 @@ export class Engine {
       sameOpenTarget(task.pr, pr) &&
       task.pr?.targetCloneUrl === pr.targetCloneUrl;
     this.store.transaction(() => {
+      if (options.clarification?.trim()) this.rememberClarification(task, options.clarification);
       if (action.preparation !== 'resume') {
         this.invalidate(task, pr, !options.finishingRun);
         task.pendingFix = undefined;

@@ -198,7 +198,7 @@ function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>, engine = f.engin
     reasons: [] as string[],
   };
   const worker = new Worker(engine, workspaces, runtime, runtime, () => resources, 0);
-  return { worker, prepare, prepareConflict, resources, run: runtime.run };
+  return { worker, workspaces, prepare, prepareConflict, resources, run: runtime.run };
 }
 
 it('recovers the original paginated draft after restart and starts exactly one reviewer', async () => {
@@ -1306,6 +1306,100 @@ it.each([
     }
   },
 );
+
+it.each([
+  ['clear', 'immediate'],
+  ['conflict', 'immediate'],
+  ['clear', 'deferred'],
+  ['conflict', 'deferred'],
+] as const)('carries retry clarification through %s PR routing (%s)', async (route, timing) => {
+  const f = await reviewFixture();
+  try {
+    f.enableAutoMerge();
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    f.reviews[0].state = 'COMMENTED';
+    f.comments.push({ id: 456, body: '**Original finding**', html_url: f.task.ref.url });
+    f.due();
+    const held = await f.engine.review(f.task.id);
+    expect(held).toMatchObject({ state: 'needs_input', reviewAdmission: '123' });
+
+    const needsRepair = route === 'conflict';
+    f.remote.mergeConflict = needsRepair;
+    f.remote.mergeable = !needsRepair;
+    const clarification = 'Inspect the original rollout checklist for the owner';
+    if (timing === 'deferred')
+      vi.mocked(f.github.getPR).mockRejectedValueOnce(
+        new AppError('provider_503', 'First read failed'),
+      );
+    await f.engine.review(f.task.id, true, clarification);
+    f.restart();
+    if (timing === 'deferred') f.due();
+
+    if (needsRepair) {
+      const repair = reviewer(f);
+      const savedHead = 'e'.repeat(40);
+      vi.spyOn(repair.workspaces, 'commitFix').mockResolvedValue(savedHead);
+      repair.run.mockImplementationOnce(async (input) => {
+        expect(input.job.kind).toBe('fix');
+        expect(input.task).toMatchObject({
+          fixingMergeConflict: true,
+          conflictFeedbackReview: { id: '123' },
+        });
+        expect.soft(input.task.latestClarification).toMatchObject({ text: clarification });
+        return {
+          status: 'completed',
+          summary: 'Resolved the conflict',
+          checkedHead: input.task.revision!.head,
+        };
+      });
+      try {
+        await repair.worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'awaiting_push',
+            pendingAuthorHead: savedHead,
+          }),
+        );
+        expect(repair.run).toHaveBeenCalledTimes(1);
+        await f.engine.submitSavedFix(f.task.id, async (_task, head) => {
+          expect(head).toBe(savedHead);
+          Object.assign(f.remote, { head, mergeConflict: false, mergeable: true });
+        });
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'queued',
+          revision: { head: savedHead },
+        });
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await repair.worker.stop();
+      }
+      f.restart();
+    }
+
+    const verification = reviewer(f);
+    try {
+      await verification.worker.tick();
+      await vi.waitFor(() => expect(verification.run).toHaveBeenCalledTimes(1));
+      const input = verification.run.mock.calls[0][0];
+      expect(input).toMatchObject({
+        job: { kind: 'review', role: 'reviewer' },
+        task: {
+          round: held.round + 1,
+          review: { id: '124', revision: { head: f.remote.head } },
+          latestClarification: { text: clarification },
+          feedback: { comments: [{ id: '456', body: '**Original finding**' }] },
+        },
+      });
+      expect(input.prompt).toContain(clarification);
+      expect(f.writeAttempts).toEqual(['POST', 'POST']);
+    } finally {
+      await verification.worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
 
 it('keeps the clarification of a retry received before the original draft becomes visible', async () => {
   const f = await reviewFixture();
