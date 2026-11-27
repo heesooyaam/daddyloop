@@ -7,6 +7,8 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
   question?: OwnerQuestion;
+  requestedMenu?: boolean;
+  menuTopicGroupId?: string;
   reminder?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
@@ -29,6 +31,8 @@ type Delivery = {
   options: DeliveryOptions;
   revision: number;
   createdAt: number;
+  firstAttemptAt?: number;
+  sentAt?: number;
   status: 'queued' | 'sending' | 'sent' | 'cancelled';
   attempts: number;
   nextAttemptAt: number;
@@ -39,6 +43,9 @@ type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
   onCleanupError?: (error: unknown) => void;
 };
+type Lane = 'ordered' | 'menu';
+const laneFor = (options: DeliveryOptions): Lane => (options.requestedMenu ? 'menu' : 'ordered');
+const waitForTelegram = Symbol('wait for the shared Telegram retry deadline');
 const prefix = 'telegram.delivery:';
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const isIndependent = ({ options }: Delivery) =>
@@ -50,8 +57,9 @@ export function deliveryStatus(result: unknown) {
 /** Durable, ordered delivery. Text for a running turn is replaced, not appended to a backlog. */
 export class TelegramDelivery {
   private pending = new Map<string, Delivery>();
-  private running?: Promise<void>;
-  private controller?: AbortController;
+  private running = new Map<Lane, Promise<void>>();
+  private wake = new Set<Lane>();
+  private controllers = new Set<AbortController>();
   private timer?: NodeJS.Timeout;
   private stopped = false;
   private rateLimitUntil = 0;
@@ -105,6 +113,22 @@ export class TelegramDelivery {
     const pair = this.store.setting<{ chatId: number; userId: number }>('telegram.pairing');
     const room = this.store.setting<{ chatId: number; ownerId: number }>('telegram.group');
     if (value.ownerId !== pair?.userId) return false;
+    if (
+      value.options.menuTopicGroupId &&
+      !this.store.db
+        .prepare(
+          `SELECT 1 FROM telegram_topics
+      WHERE group_id=? AND json_extract(data,'$.ownerId')=? AND json_extract(data,'$.chatId')=?
+        AND json_extract(data,'$.threadId')=? LIMIT 1`,
+        )
+        .get(
+          value.options.menuTopicGroupId,
+          value.ownerId!,
+          value.destination.chatId,
+          value.destination.threadId ?? null,
+        )
+    )
+      return false;
     return (
       !pair ||
       value.destination.chatId === pair.chatId ||
@@ -221,6 +245,8 @@ export class TelegramDelivery {
       value.content = structuredClone(content);
       value.options = {
         ...options,
+        requestedMenu: value.options.requestedMenu,
+        menuTopicGroupId: value.options.menuTopicGroupId,
         deletePrevious: value.options.deletePrevious ?? options.deletePrevious,
       };
       value.revision++;
@@ -228,9 +254,11 @@ export class TelegramDelivery {
       value.nextAttemptAt = this.clock();
     } else value = this.createDelivery(destination, content, options);
     this.save(key, value);
-    // New text also wakes the oldest buffered message for this conversation. Never bypass retry_after.
+    const lane = laneFor(value.options);
+    // A new reply can wake earlier entries in its own stream without retrying unrelated agent output.
     for (const [otherKey, other] of this.pending)
       if (
+        laneFor(other.options) === lane &&
         !isIndependent(other) &&
         digest(other.destination) === digest(destination) &&
         other.status === 'queued'
@@ -238,11 +266,15 @@ export class TelegramDelivery {
         other.nextAttemptAt = this.clock();
         this.save(otherKey, other);
       }
-    if (!this.running && !this.stopped) await this.flush(1);
-    else if (this.running && !this.stopped)
-      void this.running.then(() => {
-        if (!this.stopped) return this.flush(1);
-      });
+    if (!this.stopped) {
+      const active = this.running.get(lane);
+      if (active) this.wake.add(lane);
+      else {
+        const sending = this.flushLane(lane, 1);
+        // A menu request is acknowledged once its response is durable. Polling can accept the next update.
+        if (lane === 'ordered') await sending;
+      }
+    }
     return {
       status: value.status === 'sent' ? 'sent' : 'queued',
       deliveryId: value.id,
@@ -262,34 +294,59 @@ export class TelegramDelivery {
     };
   }
   async flush(limit = 10) {
-    if (this.running || this.stopped) return this.running;
-    this.running = (async () => {
-      const attempted = new Set<string>();
-      for (let i = 0; i < limit && !this.stopped; i++) {
-        if (this.clock() < this.rateLimitUntil) break;
-        const seen = new Set<string>();
-        const ready = [...this.pending.entries()]
-          .sort(
-            (a, b) =>
-              Number(a[1].options.operation === 'pin') - Number(b[1].options.operation === 'pin') ||
-              a[1].createdAt - b[1].createdAt,
-          )
-          .filter(([key, value]) => {
-            const route = isIndependent(value) ? key : digest(value.destination);
-            if (seen.has(route)) return false;
-            seen.add(route);
-            return value.nextAttemptAt <= this.clock();
-          })
-          .find(([key]) => !attempted.has(key));
-        if (!ready) break;
-        attempted.add(ready[0]);
-        await this.attempt(...ready);
-      }
-    })().catch((error) => this.store.setSetting('telegram.deliveryError', redact(String(error))));
+    await Promise.all([this.flushLane('ordered', limit), this.flushLane('menu', limit)]);
+  }
+  private flushLane(lane: Lane, limit: number): Promise<void> {
+    const active = this.running.get(lane);
+    if (active) return active;
+    if (this.stopped || !this.pending.size) return Promise.resolve();
+    const sending = Promise.resolve()
+      .then(async () => {
+        const attempted = new Set<string>();
+        for (let i = 0; i < limit && !this.stopped; ++i) {
+          if (this.clock() < this.rateLimitUntil) break;
+          const seen = new Set<string>();
+          const ready = [...this.pending.entries()]
+            .filter(([, value]) => laneFor(value.options) === lane)
+            .sort(
+              (a, b) =>
+                Number(a[1].options.operation === 'pin') -
+                  Number(b[1].options.operation === 'pin') || a[1].createdAt - b[1].createdAt,
+            )
+            .find(([key, value]) => {
+              const route = isIndependent(value) ? key : digest(value.destination);
+              if (seen.has(route)) return false;
+              seen.add(route);
+              return value.nextAttemptAt <= this.clock() && !attempted.has(key);
+            });
+          if (!ready) break;
+          attempted.add(ready[0]);
+          await this.attempt(...ready);
+        }
+      })
+      .catch((error) => this.store.setSetting('telegram.deliveryError', redact(String(error))))
+      .finally(() => {
+        this.running.delete(lane);
+        if (this.wake.delete(lane) && !this.stopped) void this.flushLane(lane, 10);
+      });
+    this.running.set(lane, sending);
+    return sending;
+  }
+  private async call<T>(method: string, body: unknown, signal: AbortSignal): Promise<T> {
+    if (this.clock() < this.rateLimitUntil) throw waitForTelegram;
+    signal.throwIfAborted();
     try {
-      await this.running;
-    } finally {
-      this.running = undefined;
+      return await this.api.call<T>(method, body, signal);
+    } catch (error) {
+      const seconds = Number((error as { retryAfter?: number })?.retryAfter);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        this.rateLimitUntil = Math.max(
+          this.rateLimitUntil,
+          Math.min(8.64e15, this.clock() + seconds * 1000),
+        );
+        this.store.setSetting(`telegram.deliveryLimit:${this.bot}`, this.rateLimitUntil);
+      }
+      throw error;
     }
   }
   private async attempt(key: string, value: Delivery) {
@@ -307,12 +364,14 @@ export class TelegramDelivery {
       content = structuredClone(value.content),
       options = { ...value.options };
     value.status = 'sending';
+    if (options.requestedMenu) value.firstAttemptAt ??= this.clock();
     this.save(key, value);
-    this.controller = new AbortController();
+    const controller = new AbortController();
+    this.controllers.add(controller);
     try {
       if (options.operation === 'reaction' || options.operation === 'pin') {
         const reaction = options.operation === 'reaction';
-        await this.api.call(
+        await this.call(
           reaction ? 'setMessageReaction' : 'pinChatMessage',
           reaction
             ? {
@@ -325,7 +384,7 @@ export class TelegramDelivery {
                 message_id: options.pinMessageId,
                 disable_notification: true,
               },
-          AbortSignal.any([this.controller.signal, AbortSignal.timeout(4000)]),
+          AbortSignal.any([controller.signal, AbortSignal.timeout(4000)]),
         );
         value.status = 'sent';
         value.error = undefined;
@@ -335,14 +394,14 @@ export class TelegramDelivery {
       }
       if (options.operation === 'renameTopic') {
         try {
-          await this.api.call(
+          await this.call(
             'editForumTopic',
             {
               chat_id: value.destination.chatId,
               message_thread_id: value.destination.threadId,
               name: content.text,
             },
-            this.controller.signal,
+            controller.signal,
           );
         } catch (error) {
           if (!/topic[_ ](?:is[_ ])?not[_ ]modified/i.test(String(error))) throw error;
@@ -372,10 +431,10 @@ export class TelegramDelivery {
         if (existing?.fingerprint === fingerprint) continue;
         if (existing) {
           try {
-            await this.api.call(
+            await this.call(
               'editMessageText',
               { ...body, message_id: existing.id },
-              this.controller.signal,
+              controller.signal,
             );
           } catch (error) {
             if (/message to edit not found/i.test(String(error))) existing = undefined;
@@ -385,7 +444,7 @@ export class TelegramDelivery {
         if (existing) {
           existing.fingerprint = fingerprint;
         } else {
-          const result = await this.api.call<{ message_id: number }>(
+          const result = await this.call<{ message_id: number }>(
             'sendMessage',
             {
               ...body,
@@ -393,7 +452,7 @@ export class TelegramDelivery {
                 ? {}
                 : { message_thread_id: value.destination.threadId }),
             },
-            this.controller.signal,
+            controller.signal,
           );
           if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0)
             throw new Error('Telegram did not return a message ID');
@@ -404,10 +463,10 @@ export class TelegramDelivery {
       while (value.revision === revision && value.messages.length > chunks.length) {
         const part = value.messages.at(-1)!;
         try {
-          await this.api.call(
+          await this.call(
             'deleteMessage',
             { chat_id: value.destination.chatId, message_id: part.id },
-            this.controller.signal,
+            controller.signal,
           );
         } catch (error) {
           if (!/message to delete not found/i.test(String(error))) throw error;
@@ -419,6 +478,7 @@ export class TelegramDelivery {
         if (options.pin && value.messages[0])
           this.enqueuePin(value.destination, value.messages[0].id);
         value.status = 'sent';
+        if (options.requestedMenu) value.sentAt ??= this.clock();
         value.error = undefined;
         value.attempts = 0;
         if (options.notificationId)
@@ -427,15 +487,20 @@ export class TelegramDelivery {
             .run(new Date(this.clock()).toISOString(), options.notificationId);
         if (options.deletePrevious) {
           try {
-            await this.api.call(
+            await this.call(
               'deleteMessage',
               {
                 chat_id: options.deletePrevious.chatId,
                 message_id: options.deletePrevious.messageId,
               },
-              this.controller.signal,
+              controller.signal,
             );
           } catch (error) {
+            if (
+              error === waitForTelegram ||
+              Number((error as { retryAfter?: number })?.retryAfter) > 0
+            )
+              throw error;
             this.api.onCleanupError?.(error);
           }
           value.options.deletePrevious = undefined;
@@ -443,6 +508,12 @@ export class TelegramDelivery {
       } else value.status = 'queued';
       this.save(key, value);
     } catch (error) {
+      if (error === waitForTelegram) {
+        value.status = 'queued';
+        value.nextAttemptAt = Math.max(value.nextAttemptAt, this.rateLimitUntil);
+        this.save(key, value);
+        return;
+      }
       const status = Number((error as { telegramStatus?: number })?.telegramStatus);
       if (options.operation === 'pin') {
         const description = String(error);
@@ -474,11 +545,6 @@ export class TelegramDelivery {
       value.status = 'queued';
       value.attempts++;
       value.error = redact(String(error));
-      const retryAfter = Number((error as { retryAfter?: number }).retryAfter);
-      if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        this.rateLimitUntil = Math.min(8.64e15, this.clock() + retryAfter * 1000);
-        this.store.setSetting(`telegram.deliveryLimit:${this.bot}`, this.rateLimitUntil);
-      }
       value.nextAttemptAt = Math.max(
         this.rateLimitUntil,
         this.clock() + Math.min(300000, 1000 * 2 ** Math.min(value.attempts - 1, 9)),
@@ -489,14 +555,14 @@ export class TelegramDelivery {
           .prepare("UPDATE notifications SET status='queued' WHERE id=?")
           .run(options.notificationId);
     } finally {
-      this.controller = undefined;
+      this.controllers.delete(controller);
     }
   }
   async stop() {
     this.stopped = true;
     clearInterval(this.timer);
     this.timer = undefined;
-    this.controller?.abort();
-    await this.running;
+    for (const controller of this.controllers) controller.abort();
+    await Promise.all(this.running.values());
   }
 }

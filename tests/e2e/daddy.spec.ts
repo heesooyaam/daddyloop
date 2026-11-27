@@ -1882,6 +1882,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
   for (const [next, action] of [
     ['needs_input', actions[0]],
     ['awaiting_checks', actions[1]],
+    ['awaiting_review_checks', actions[1]],
     ['awaiting_plan_approval', actions[2]],
     ['paused', undefined],
     ['complete', undefined],

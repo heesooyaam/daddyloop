@@ -1,3 +1,4 @@
+import { checkWaiverReasonLimit } from '../core/task-activity.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Daddy } from '../core/daddy.js';
@@ -284,11 +285,26 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       );
     },
   );
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/review-limit',
+    async (request) => {
+      const { limit } = z
+        .object({ limit: z.number().int().positive().nullable() })
+        .strict()
+        .parse(request.body);
+      return daddy.taskReviewLimit(
+        id.parse(request.params.id),
+        id.parse(request.params.taskId),
+        limit,
+      );
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {
     const input = z
       .object({
         taskId: id,
         action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
+        reason: z.string().trim().max(checkWaiverReasonLimit).optional(),
         expectedHead: z.string().max(128),
         expectedRevision: z
           .object({
@@ -298,7 +314,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
             revisionId: z.string().optional(),
           })
           .strict(),
-        reason: z.string().trim().max(2000).optional(),
         expectedGeneration: z.number().int().positive(),
       })
       .strict()
@@ -315,6 +330,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       generation: input.expectedGeneration,
       groupId: request.params.id,
     };
-    return daddy.engine.action(task.id, input.action, input.reason, expected);
+    return daddy.engine.action(task.id, input.action, input.reason ?? '', expected);
   });
 }

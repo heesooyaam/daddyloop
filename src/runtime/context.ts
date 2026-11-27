@@ -78,6 +78,8 @@ export function buildContext(
           mergeCommit: task.pr.mergeCommit,
           branch: task.pr.branch,
           targetBranch: task.pr.targetBranch,
+          failingCI:
+            job.kind === 'fix' && task.pr.checks === 'failing' ? task.pr.checkDetails : undefined,
         }
       : undefined,
     source: task.source,

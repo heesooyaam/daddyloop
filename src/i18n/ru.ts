@@ -1,6 +1,8 @@
 /** English source copy is the stable key; protocol values and user content are not translated. */
 export const ru: Record<string, string> = {
   'Continue in the private bot chat.': 'Продолжи в личке бота.',
+  'The CI waiver reason must be at most {limit} characters.':
+    'Причина исключения для CI должна быть не длиннее {limit} символов.',
   'Reason for waiving CI checks': 'Причина исключения для проверок CI',
   'Waive CI checks': 'Разрешить исключение для проверок CI',
   'This action expired. Open a fresh card.': 'Действие устарело. Открой новую карточку.',
@@ -548,6 +550,14 @@ Object.assign(ru, {
   'Changes need to be pushed': 'Нужна отправка изменений',
   "The author's work is saved locally. Next step: push.":
     'Работа автора сохранена локально. Следующий этап — push.',
+  'Waiting for CI before review': 'Ждёт CI перед ревью',
+  'Fixing failing CI': 'Исправляет упавшие проверки CI',
+  'Worker assigned to fix failing CI': 'Воркер исправляет упавшие проверки CI',
+  'Waiting for CI results before review': 'Ждёт появления проверок CI перед ревью',
+  'Waiting for CI to finish before review': 'Ждёт завершения CI перед ревью',
+  'Waiting for CI to pass after the worker investigated':
+    'Воркер проверил сбой. Задача ждёт зелёного CI',
+  'This task reached its review round limit': 'Задача достигла своего лимита раундов ревью',
   'Waiting for CI': 'Ожидаем проверки',
   'Review is complete. Required checks must finish first.':
     'Ревью завершено. Осталось дождаться обязательных проверок.',

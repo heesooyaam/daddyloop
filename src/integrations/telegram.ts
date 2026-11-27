@@ -5,6 +5,7 @@ import {
   type TelegramOperationResult,
 } from './telegram-receipts.js';
 import { commandHelp, telegramCommands, normalizeTelegramText } from './telegram-commands.js';
+import { requestedMenu, handleMenuRequest, menuDelivery } from './telegram-menu-request.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
 import { randomBytes, createHash } from 'node:crypto';
@@ -389,7 +390,7 @@ export class TelegramApi {
       return this.delivery.send(
         target,
         { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-        { ...delivery, deletePrevious: cleanup },
+        { ...menuDelivery(this, target, delivery), deletePrevious: cleanup },
       );
     }
     let result: unknown;
@@ -541,7 +542,6 @@ export class Telegram {
         return;
       update = { ...update, message: { ...message, text, caption } };
     }
-    const message = update.message;
     const pending = resultKey(update.update_id);
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) {
       const result = store.setting<TelegramOperationResult>(pending);
@@ -566,6 +566,21 @@ export class Telegram {
       }
       return;
     }
+    const menu = requestedMenu(update, this.username);
+    if (menu)
+      await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), () =>
+        this.handleUpdate(update),
+      );
+    else await this.handleUpdate(update);
+    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    this.clearOperationResult(pending);
+  }
+  private clearOperationResult(key: string) {
+    this.engine.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
+  }
+  private async handleUpdate(update: Update) {
+    const store = this.engine.store;
+    const message = update.message;
     const sender = update.callback_query?.from ?? message?.from;
     const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
     const paired = this.paired();
@@ -581,22 +596,8 @@ export class Telegram {
       // Persist voice, conversation input and task commands before acknowledging the update.
       const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
-      store.db
-        .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
-        .run(update.update_id, now());
-      this.clearOperationResult(pending);
       return;
     }
-    await this.handleUpdate(update);
-    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
-    this.clearOperationResult(pending);
-  }
-  private clearOperationResult(key: string) {
-    this.engine.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
-  }
-  private async handleUpdate(update: Update) {
-    const store = this.engine.store;
-    const message = update.message;
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;

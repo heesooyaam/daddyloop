@@ -343,7 +343,11 @@ export class Worker {
           }
         }
       for (const task of store.tasks())
-        if (task.state === 'queued' && !store.busy(task.id) && !githubWait(store, task.ref)) {
+        if (
+          (task.state === 'queued' || (poll && task.state === 'awaiting_review_checks')) &&
+          !store.busy(task.id) &&
+          !githubWait(store, task.ref)
+        ) {
           try {
             await this.engine.review(task.id);
             if (this.stopped) return;
@@ -352,7 +356,7 @@ export class Worker {
             const current = store.getTask(task.id);
             if (
               current.generation === task.generation &&
-              current.state === 'queued' &&
+              current.state === task.state &&
               !store.busy(current.id)
             ) {
               current.state = 'needs_input';
@@ -575,12 +579,25 @@ export class Worker {
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
       const revisingPlan = job.kind === 'plan' && !isTicket(task);
+      if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR)) {
+        await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
       if (
         revisingPlan &&
         startingPR &&
         (!sameOpenTarget(task.pr, startingPR) || !sameRevision(startingPR, task.revision))
       ) {
         await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
+      if (
+        job.kind === 'review' &&
+        startingPR &&
+        (await this.engine.deferQueuedReview(job, startingPR))
+      ) {
         job.status = 'cancelled';
         return;
       }
@@ -619,6 +636,11 @@ export class Worker {
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
+      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
+      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
+        job.status = 'cancelled';
+        return;
+      }
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
@@ -703,7 +725,7 @@ export class Worker {
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if (job.kind === 'fix' || revisingPlan) {
+      } else if ((job.kind === 'fix' && !repairingCI) || revisingPlan) {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
@@ -875,7 +897,9 @@ export class Worker {
                   current,
                   repairingConflict
                     ? 'Resolve conflict with the target branch'
-                    : `Address review feedback (round ${current.round})`,
+                    : repairingCI
+                      ? 'Fix failing CI'
+                      : `Address review feedback (round ${current.round})`,
                   abort.signal,
                 )
             : undefined;

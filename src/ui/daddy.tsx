@@ -69,6 +69,8 @@ import { QueueTaskForm, WorkerControls, TaskArchitectSettings } from './daddy-ta
 import {
   activityReason,
   activityStatus,
+  canWaiveChecks,
+  checkWaiverReasonLimit,
   profileText,
   taskReference,
 } from '../core/task-activity.js';
@@ -2183,7 +2185,7 @@ function TaskReport({
               {t('Verify merge')}
             </button>
           )}
-          {canAct && live?.state === 'awaiting_checks' && live.revision && (
+          {canAct && live?.revision && canWaiveChecks(live.state) && (
             <form
               onSubmit={(event) => {
                 event.preventDefault();
@@ -2194,7 +2196,7 @@ function TaskReport({
                 {t('Reason for waiving CI checks')}
                 <input
                   value={waiverReason}
-                  maxLength={2000}
+                  maxLength={checkWaiverReasonLimit}
                   onChange={(event) => setWaiver({ key: waiverKey, reason: event.target.value })}
                   required
                 />

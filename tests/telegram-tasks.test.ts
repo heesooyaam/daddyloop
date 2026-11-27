@@ -53,9 +53,15 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       catalogue,
       updates: new UpdateMonitor(f.store, { agents: [] }),
     });
+    const receive = bot.handle.bind(bot);
+    vi.spyOn(bot, 'handle').mockImplementation(async (update) => {
+      await receive(update);
+      await api.delivery!.flush();
+    });
     return { api, bot };
   };
   let { api, bot } = createBot();
+
   setLocale(f.store, 'en');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
@@ -449,6 +455,39 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     expect(f.store.events(tenth.id).filter(({ type }) => type === 'checks.waived')).toMatchObject([
       { data: { reason: 'Reviewed locally', head: withPr.revision!.head } },
     ]);
+
+    const beforeReview = { ...withPr, pr, state: 'awaiting_review_checks' as const };
+    f.store.saveTask(beforeReview);
+    const offlineReason = 'Verified on the offline build. '.repeat(140).slice(0, 4000);
+    const webWaiver = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: { ...currentWaiver, reason: offlineReason },
+    });
+    expect(webWaiver.statusCode).toBe(200);
+    expect(f.store.getTask(tenth.id).state).toBe('awaiting_review_checks');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeDefined();
+
+    f.store.saveTask(beforeReview);
+    await bot.handle(click(openTenth));
+    const preReview = keyboard().find((button) => button.text.startsWith('Waive CI checks'));
+    expect(preReview?.url).toBeDefined();
+    const preReviewStart = new URL(preReview!.url!).searchParams.get('start')!;
+    await bot.handle(privateMessage('/start ' + preReviewStart));
+    expect(lastText()).toContain('Reason for waiving CI checks');
+    const preReviewKey = preReviewStart.slice('waive_'.length);
+    await bot.handle(privateMessage('/waive ' + preReviewKey + ' ' + offlineReason + 'x'));
+    expect(lastText()).toContain('at most 4000 characters');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+    await bot.handle(privateMessage('/waive ' + preReviewKey + ' ' + offlineReason));
+    expect(f.store.getTask(tenth.id).state).toBe('awaiting_review_checks');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeDefined();
+    expect(
+      f.store
+        .events(tenth.id)
+        .filter(({ type }) => type === 'checks.waived')
+        .at(-1)?.data,
+    ).toMatchObject({ reason: offlineReason, head: withPr.revision!.head });
 
     f.store.saveTask({ ...tenth, state: 'complete' });
     await bot.handle(click(backToQueue));

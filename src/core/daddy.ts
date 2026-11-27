@@ -649,6 +649,21 @@ export class Daddy {
     }
     return setTaskMergeMode(this.store, group, task, mode);
   }
+  async taskReviewLimit(groupId: string, taskId: string, limit: number | null) {
+    return this.engine.lock(taskId, async () => {
+      const task = this.task(groupId, taskId);
+      const group = this.group(groupId);
+      if (group.deletedAt || group.deletion)
+        throw new AppError('session_deleting', 'This session is being deleted');
+      if (task.reviewRoundLimit !== (limit ?? undefined))
+        this.store.transaction(() => {
+          task.reviewRoundLimit = limit ?? undefined;
+          this.store.saveTask(task);
+          this.store.event(task.id, 'review.limit_changed', { limit });
+        });
+      return { limit: task.reviewRoundLimit ?? null };
+    });
+  }
   async taskArchitect(
     groupId: string,
     taskId: string,

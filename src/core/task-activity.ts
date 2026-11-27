@@ -9,6 +9,11 @@ import {
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const checkWaiverReasonLimit = 4000;
+export function canWaiveChecks(state: State) {
+  return state === 'awaiting_checks' || state === 'awaiting_review_checks';
+}
+
 export const draftSyncPending =
   'Waiting to confirm the GitHub draft or its target branch before restarting review.';
 
@@ -38,6 +43,7 @@ const statusLabels: Record<State, string> = {
   awaiting_push: 'Sending fixes',
   awaiting_merge: 'Waiting for GitHub merge',
   awaiting_checks: 'Waiting for CI',
+  awaiting_review_checks: 'Waiting for CI before review',
   awaiting_plan_approval: 'Waiting for plan approval',
   needs_input: 'Action needed',
   paused: 'Paused',
@@ -255,6 +261,8 @@ export function activityStatus({
     )
       return 'Review reached the run time limit';
   }
+  if (task.state === 'fixing' && sameRevision(task.ciRepairRevision, task.revision))
+    return 'Fixing failing CI';
   if (task.fixingMergeConflict && task.state === 'fixing') {
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker

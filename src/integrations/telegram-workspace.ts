@@ -66,7 +66,7 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus, sessionAutoMerge } from '../core/auto-merge.js';
-import { taskReference } from '../core/task-activity.js';
+import { canWaiveChecks, checkWaiverReasonLimit, taskReference } from '../core/task-activity.js';
 import { workerPool, workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -337,18 +337,15 @@ export class TelegramWorkspace {
         JSON.stringify(topic),
       );
   }
-  private groupAt(destination: Destination) {
+  groupAt(destination: Destination) {
     const room = this.room();
     if (!room || room.chatId !== destination.chatId || !destination.threadId) return;
-    const rows = this.store.db.prepare('SELECT data FROM telegram_topics').all();
-    return rows
-      .map((row) => JSON.parse(row.data as string) as Topic)
-      .find(
-        (topic) =>
-          topic.chatId === room.chatId &&
-          topic.threadId === destination.threadId &&
-          topic.ownerId === room.ownerId,
-      )?.groupId;
+    return this.store.db
+      .prepare(
+        `SELECT json_extract(data,'$.groupId') AS groupId FROM telegram_topics
+      WHERE json_extract(data,'$.chatId')=? AND json_extract(data,'$.threadId')=? AND json_extract(data,'$.ownerId')=? LIMIT 1`,
+      )
+      .get(room.chatId, destination.threadId, room.ownerId)?.groupId as string | undefined;
   }
   private link(topic: Topic) {
     return `https://t.me/c/${String(topic.chatId).replace(/^-100/, '')}/${topic.threadId}`;
@@ -834,7 +831,7 @@ export class TelegramWorkspace {
       const task = this.daddy.task(action.expected.groupId, action.taskId);
       assertTaskVersion(task, action.expected);
       if (action.command === 'waive-checks' && !reason) {
-        if (task.state !== 'awaiting_checks')
+        if (!canWaiveChecks(task.state))
           throw new Error(this.t('This action expired. Open a fresh card.'));
         await this.api.send(
           destination,
@@ -885,7 +882,7 @@ export class TelegramWorkspace {
         ? 'verify-merge'
         : task.state === 'awaiting_plan_approval'
           ? 'approve-plan'
-          : task.state === 'awaiting_checks'
+          : canWaiveChecks(task.state)
             ? 'waive-checks'
             : undefined;
     if (command && task.ref.kind !== 'ticket' && task.revision) {
@@ -2434,10 +2431,17 @@ export class TelegramWorkspace {
         );
         return true;
       }
-      const waiver = /^\/waive ([A-Za-z0-9_-]{16}) ([\s\S]{1,2000})$/.exec(text);
+      const waiver = /^\/waive ([A-Za-z0-9_-]{16}) ([\s\S]+)$/.exec(text);
       const handoff = /^\/start waive_([A-Za-z0-9_-]{16})$/.exec(text);
       if (privateChat && (waiver || handoff)) {
-        await this.confirmTask((waiver ?? handoff)![1], destination, waiver?.[2].trim());
+        const reason = waiver?.[2].trim();
+        if (reason && reason.length > checkWaiverReasonLimit)
+          throw new Error(
+            this.t('The CI waiver reason must be at most {limit} characters.', {
+              limit: checkWaiverReasonLimit,
+            }),
+          );
+        await this.confirmTask((waiver ?? handoff)![1], destination, reason);
         return true;
       }
       const deleteHandoff = /^\/start delete_([A-Za-z0-9_-]{16})$/.exec(text);
