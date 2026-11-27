@@ -150,6 +150,12 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     crossCommand,
     delayedConfirmation = false,
     splitRoute = false,
+    resetState,
+    changedInstructions = false,
+    renamedView,
+    beforeFirstReply,
+    repeatedWebChange = true,
+    middleMenu,
   } = options;
   const mixedSettings = scenario === 'mixed settings';
   const kind = mixedSettings
@@ -186,7 +192,8 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
       const method = new URL(url).pathname.split('/').at(-1);
       const body = JSON.parse(init.body);
-      if (method === 'answerCallbackQuery') return Response.json({ ok: true, result: true });
+      if (['answerCallbackQuery', 'editForumTopic'].includes(method))
+        return Response.json({ ok: true, result: true });
       assert.ok(['sendMessage', 'editMessageText'].includes(method));
       sent.push({ chat: body.chat_id, text: body.text });
       const limited =
@@ -207,7 +214,11 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     // The task path writes through the released Engine without starting workers
     // or asking a repository provider to describe a working copy.
     const needsEngine =
-      !!crossCommand || ['task', 'worker'].includes(kind) || kind in sessionActions;
+      !!crossCommand ||
+      !!beforeFirstReply ||
+      !!renamedView ||
+      ['task', 'worker'].includes(kind) ||
+      kind in sessionActions;
     const engine = needsEngine
       ? new Engine(store, () => {
           throw new Error('Offline fixture');
@@ -323,6 +334,8 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
         task: '/task Legacy task',
         'text language': '/language ru',
         pool: '/pool ' + poolSize,
+        board: 'dad:open:' + group,
+        settings: 'dad:settings:' + group,
       };
       const command =
         action === 'browse'
@@ -348,8 +361,30 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
         store.setSetting('telegram.offsetAt', Date.now());
       });
     };
-    await reply('A', 'Reply A', 'progress');
-    clock += 1;
+    if (renamedView) daddy.rename(group, 'Old name');
+    if (beforeFirstReply) {
+      // Pause between applying the command and enqueueing the confirmation.
+      const send = api.send.bind(api);
+      if (beforeFirstReply === 'after A') {
+        await reply('A', 'Reply A', 'progress');
+        clock++;
+        await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+        await menu(privateChat);
+      } else {
+        api.send = async (...args) => {
+          api.send = send;
+          clock++;
+          await reply('A', 'Reply A', 'progress');
+          clock++;
+          await send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+          return send(...args);
+        };
+        await menu(privateChat);
+      }
+    } else {
+      await reply('A', 'Reply A', 'progress');
+      clock += 1;
+    }
     if (scenario === 'third') {
       await reply('B', 'Reply B', 'progress');
       await reply('C', 'Reply C', 'final');
@@ -362,10 +397,56 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
       if (!scenario.includes('tail')) await reply('C', 'Reply C', 'final');
       assert.equal(sent.length, scenario.endsWith('acknowledged') ? 2 : 1);
     } else {
-      if (!attempted) await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+      if (!attempted && !beforeFirstReply)
+        await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
       const mixedRoutes = scenario.startsWith('mixed ') && !mixedSettings;
       const twoCards = mixedRoutes || mixedSettings || scenario.startsWith('two ');
-      if (nextTurn) {
+      if (middleMenu) {
+        await reply('B', 'Reply B', 'final');
+        if (middleMenu === 'before C') await menu(privateChat);
+        await reply('C', 'Reply C', 'progress', 'next');
+        if (middleMenu === 'after C') await menu(privateChat);
+        await reply('D', 'Reply D', 'final', 'next');
+      } else if (renamedView) {
+        if (!menuFirst) await reply('B', 'Reply B', 'final');
+        daddy.rename(group, 'Recovered title');
+        await menu(privateChat, renamedView);
+        if (menuFirst) await reply('B', 'Reply B', 'final');
+      } else if (resetState) {
+        await views[kind][1](daddy, store);
+        await menu(privateChat, 'browse');
+        clock += gap;
+        if (kind === 'pool') await daddy.settings(group, { workerLimit: 1 });
+        if (kind === 'pause') await daddy.resume(group);
+        if (kind === 'resume') await daddy.pause(group);
+        if (kind === 'session merge') await daddy.settings(group, { autoMerge: false });
+        if (kind === 'task merge') daddy.taskAutoMerge(group, taskId, 'off');
+        if (kind === 'language') setLocale(store, 'en');
+        clock++;
+        await reply('B', 'Reply B', 'final');
+        await menu(privateChat);
+      } else if (changedInstructions) {
+        await menu(privateChat, 'browse');
+        await views.instructions[1](daddy, store);
+        clock++;
+        if (menuFirst) await menu(privateChat, 'browse');
+        await reply('B', 'Reply B', 'final');
+        if (!menuFirst) await menu(privateChat, 'browse');
+        await views.instructions[1](daddy, store);
+      } else if (beforeFirstReply) {
+        await menu(privateChat, 'task');
+        await reply('B', 'Reply B', 'final');
+        if (repeatedWebChange) {
+          if (kind === 'rename') daddy.rename(group, 'Recovered title');
+          else
+            await daddy.configureWorker(group, 1, {
+              engine: 'codex',
+              model: 'example',
+              effort: 'max',
+            });
+        }
+        await menu(privateChat, crossCommand);
+      } else if (nextTurn) {
         if (nextTurn !== 'last') await reply('C', 'Reply C', 'progress', 'next');
         if (menuBetweenTurns) await menu(privateChat);
         await reply('B', 'Reply B', promote ? 'progress' : 'final');
@@ -517,7 +598,7 @@ function sentLabel(body) {
   return '/status';
 }
 
-async function replay(path, acknowledgedReply, includePrivate = false) {
+async function replay(path, acknowledgedReply, includePrivate = false, captureTitle = false) {
   const { Store: CurrentStore } = await import(
     replayRevision ? pinned('src/core/store.ts', replayRevision) : '../../src/core/store.ts'
   );
@@ -539,7 +620,9 @@ async function replay(path, acknowledgedReply, includePrivate = false) {
         )
           actions.push(
             (body.chat_id === 7 ? 'private ' : body.message_thread_id === 18 ? '18 ' : '') +
-              sentLabel(body),
+              (captureTitle && body.text.split('\n').includes('Recovered title')
+                ? 'title card'
+                : sentLabel(body)),
           );
         return { message_id: 102 + actions.length };
       },
@@ -1053,6 +1136,124 @@ try {
               scenario,
             );
           }
+        }
+      }
+    }
+  }
+  if (!wanted || wanted === 'tick boundaries') {
+    for (const privateChat of [false, true]) {
+      const route = privateChat ? 'private ' : '';
+      for (const [scenario, label] of [
+        ['pool', 'pool'],
+        ['pause', 'pause'],
+        ['resume', 'resume'],
+        ['language', 'language:ru'],
+        ['session merge', 'session merge'],
+        ['task merge', 'task merge'],
+      ]) {
+        for (const gap of [0, 1]) {
+          const path = join(directory, 'reset-' + [scenario, gap, privateChat].join('-'));
+          await run(path, false, gap, scenario, { privateChat, resetState: true });
+          assert.deepEqual(
+            await replay(path, 'A', true),
+            [label, 'B', label].map((x) => route + x),
+            scenario,
+          );
+        }
+      }
+    }
+  }
+  if (!wanted || wanted === 'tick boundaries' || wanted === 'instruction carry') {
+    for (const privateChat of [false, true]) {
+      const route = privateChat ? 'private ' : '';
+      const before = join(directory, 'instructions-before-' + privateChat);
+      const after = join(directory, 'instructions-after-' + privateChat);
+      const left = await run(before, true, 0, 'instructions', {
+        privateChat,
+        changedInstructions: true,
+      });
+      const right = await run(after, false, 0, 'instructions', {
+        privateChat,
+        changedInstructions: true,
+      });
+      assert.equal(Object.keys(left).length, 18);
+      assert.deepEqual(left, right);
+      for (const path of [before, after]) {
+        clock = at + 2;
+        assert.deepEqual(
+          await replay(path, 'A', true),
+          ['instructions:old', 'instructions', 'B'].map((x) => route + x),
+        );
+      }
+    }
+  }
+  if (!wanted || wanted === 'title ordering') {
+    for (const privateChat of [false, true]) {
+      for (const renamedView of ['status', 'board', 'settings', 'browse']) {
+        for (const menuFirst of [false, true]) {
+          const path = join(directory, 'title-' + [privateChat, renamedView, menuFirst].join('-'));
+          await run(path, menuFirst, 0, 'pool', { privateChat, renamedView });
+          assert.deepEqual(
+            await replay(path, 'A', true, true),
+            (menuFirst ? ['title card', 'B'] : ['B', 'title card']).map((x) =>
+              privateChat ? 'private ' + x : x,
+            ),
+          );
+        }
+      }
+    }
+  }
+  if (!wanted || wanted === 'delayed past A') {
+    for (const privateChat of [false, true]) {
+      for (const [scenario, crossCommand] of [
+        ['rename', 'worker'],
+        ['worker', 'rename'],
+      ]) {
+        for (const beforeFirstReply of ['before A', 'after A']) {
+          for (const repeatedWebChange of [true, false]) {
+            const path = join(
+              directory,
+              'delayed-past-A-' +
+                [privateChat, scenario, beforeFirstReply, repeatedWebChange].join('-'),
+            );
+            await run(path, false, 0, scenario, {
+              privateChat,
+              crossCommand,
+              beforeFirstReply,
+              repeatedWebChange,
+            });
+            assert.deepEqual(
+              await replay(path, 'A', true),
+              ['/' + scenario, '/task', 'B', '/' + crossCommand].map((x) =>
+                privateChat ? 'private ' + x : x,
+              ),
+            );
+          }
+        }
+      }
+    }
+  }
+  if (!wanted || wanted === 'overwritten reply with menu') {
+    for (const privateChat of [false, true]) {
+      for (const scenario of ['status', 'rename']) {
+        for (const middleMenu of ['after C', 'before C']) {
+          const path = join(
+            directory,
+            'middle-menu-' + [privateChat, scenario, middleMenu].join('-'),
+          );
+          await run(path, false, 0, scenario, { privateChat, middleMenu });
+          const expected =
+            middleMenu === 'after C'
+              ? ['B', 'C', '/' + scenario, 'D']
+              : ['/' + scenario, 'B', 'C', 'D'];
+          // Before C, an untracked status could have preceded B. A rename
+          // event after B establishes B's position independently of C.
+          if (middleMenu === 'before C' && scenario === 'rename')
+            expected.splice(0, 2, 'B', '/rename');
+          assert.deepEqual(
+            await replay(path, 'A', true),
+            expected.map((x) => (privateChat ? 'private ' + x : x)),
+          );
         }
       }
     }
