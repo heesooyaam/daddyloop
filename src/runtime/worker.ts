@@ -615,6 +615,16 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      if (
+        job.kind === 'fix' &&
+        !task.fixingMergeConflict &&
+        startingPR &&
+        !sameOpenTarget(task.pr, startingPR)
+      )
+        throw new AppError(
+          'repair_target_changed',
+          'The PR branches, repository or open state changed before the queued fix started. The author copy was preserved.',
+        );
       const revisingPlan = job.kind === 'plan' && !isTicket(task);
       if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR)) {
         await this.engine.reconcile(task.id);

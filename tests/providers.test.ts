@@ -798,6 +798,10 @@ async function publicationFixture(provider: string) {
   task.ref.provider = provider;
   const arc = provider === 'arcadia';
   const github = provider === 'github';
+  if (github) {
+    task.ref.host = 'github.com';
+    task.ref.url = 'https://github.com/test/repo/pull/1';
+  }
   if (arc) {
     task.revision = { ...task.revision!, revisionId: '7' };
     task.pr = { ...task.pr!, ...task.revision, diffHead: task.revision.head };
@@ -808,7 +812,7 @@ async function publicationFixture(provider: string) {
     id: '10',
     nodeId: '7',
     authorId: arc ? 'worker' : '7',
-    marker: 'daddyloop:current',
+    marker: `daddyloop:${task.id}:0:1`,
     baselineNoteId: 9,
     revision: task.revision!,
   };
@@ -858,6 +862,32 @@ async function publicationFixture(provider: string) {
       }),
     };
   };
+  let nextDraft: ReviewHandle | undefined;
+  vi.spyOn(f.provider as ReviewProvider, 'createReview').mockImplementation(
+    async (_ref, revision, marker) => {
+      nextDraft = {
+        ...handle,
+        id: '30',
+        marker,
+        revision,
+        nodeId: revision.revisionId,
+        baselineNoteId: 12,
+      };
+      return nextDraft;
+    },
+  );
+  const draftNotes = () =>
+    nextDraft
+      ? [
+          {
+            ...note(0),
+            id: 30,
+            body: tag(nextDraft.marker),
+            content: tag(nextDraft.marker),
+            is_draft: true,
+          },
+        ]
+      : [];
   const readNotes = (indices: number[]) => {
     const result = indices.filter((index) => index !== nativeState.omitted).map(note);
     if (nativeState.omitOnce && indices.includes(nativeState.omitted)) nativeState.omitted = -1;
@@ -887,7 +917,8 @@ async function publicationFixture(provider: string) {
       return {};
     }
     expect(method).toBe('GET');
-    if (path.includes('draft_notes') === nativeState.published) return [];
+    if (path.includes('draft_notes') && nativeState.published) return draftNotes();
+    if (!path.includes('draft_notes') && !nativeState.published) return [];
     return readNotes([0, 1, 2]);
   });
   const bridge = new ArcBridge();
@@ -900,7 +931,13 @@ async function publicationFixture(provider: string) {
       return {} as T;
     }
     expect(args[1]).toBe('comments');
-    return readNotes(args[0] === 'pr' ? [0, 1] : [2]) as T;
+    return (
+      args[0] === 'pr'
+        ? [...readNotes([0, 1]), ...draftNotes()]
+        : args.includes('8')
+          ? []
+          : readNotes([2])
+    ) as T;
   });
   const native = arc
     ? new ArcadiaProvider(bridge)
@@ -941,6 +978,7 @@ async function publicationFixture(provider: string) {
     task,
     nativeState,
     expected,
+    workspaces,
     worker,
     markPublished,
     editDuringPublication,
@@ -1236,18 +1274,22 @@ it.each(
         'unrecorded feedback link',
       ] as const
     ).map((evidence) => ({ entry, evidence, provider: 'github' })),
-    ...['github', 'gitlab', 'arcadia'].map((provider) => ({
-      entry,
-      evidence: 'full snapshot',
-      provider,
-    })),
+    ...['github', 'gitlab', 'arcadia'].flatMap((provider) =>
+      ['full snapshot', 'empty snapshot'].map((evidence) => ({ entry, evidence, provider })),
+    ),
+    ...(entry === 'external merge'
+      ? [{ entry, evidence: 'task snapshot only', provider: 'github' }]
+      : []),
   ]),
 )(
   'requires all known findings from a legacy publication during $entry (provider=$provider, evidence=$evidence)',
   async ({ entry, evidence, provider }) => {
-    const linksFeedback = evidence.endsWith('link') || evidence === 'linked feedback';
+    const taskSnapshotOnly = evidence === 'task snapshot only';
+    const linksFeedback =
+      evidence.endsWith('link') || evidence === 'linked feedback' || taskSnapshotOnly;
+    const hasSnapshot = evidence === 'full snapshot' || evidence === 'empty snapshot';
     const partialList = evidence !== 'count' && !linksFeedback;
-    const missingId = ['native URL', 'full snapshot'].includes(evidence) ? 12 : 11;
+    const missingId = evidence === 'native URL' || hasSnapshot ? 12 : 11;
     const arc = provider === 'arcadia';
     const gitlab = provider === 'gitlab';
     const nativeId = (id: number) => (arc ? 'pr:' + id : String(id));
@@ -1378,7 +1420,7 @@ it.each(
     f.engine.setFeedback(task, knownLatest, latest);
     if (linksFeedback) delete task.feedbackReview;
     if (entry === 'external merge') {
-      if (!linksFeedback) {
+      if (!linksFeedback || taskSnapshotOnly) {
         task.review = latest;
         task.snapshot = knownLatest;
       }
@@ -1390,10 +1432,14 @@ it.each(
       });
     }
     f.store.saveTask(task);
-    if (evidence === 'full snapshot') {
+    if (hasSnapshot) {
       omit = true;
       const snapshot = await native.getReview(prRef(task), old, { publishedEvidence: true });
-      f.store.event(task.id, 'review.published', { reviewId: old.id, handle: old, snapshot });
+      f.store.event(task.id, 'review.published', {
+        reviewId: old.id,
+        handle: old,
+        snapshot: evidence === 'empty snapshot' ? { ...snapshot, comments: [] } : snapshot,
+      });
     } else
       f.store.event(task.id, 'review.findings_published', {
         reviewId: old.id,
@@ -1417,9 +1463,9 @@ it.each(
         status: 'published',
         revision: old.revision,
         comments: listed.map((id) => ({ id: nativeId(id), body: 'Old wording ' + id })),
-        ...(evidence === 'native URL' || (evidence === 'full snapshot' && provider === 'github')
+        ...(evidence === 'native URL' || (hasSnapshot && provider === 'github')
           ? { url: task.ref.url + '#pullrequestreview-10' }
-          : evidence === 'full snapshot'
+          : hasSnapshot
             ? { reviewId: old.id }
             : {}),
       },
@@ -1437,11 +1483,12 @@ it.each(
         },
         'later-author-run',
       );
-    f.store.event(task.id, 'review.published', {
-      reviewId: latest.id,
-      handle: latest,
-      snapshot: publishedLatest,
-    });
+    if (!taskSnapshotOnly)
+      f.store.event(task.id, 'review.published', {
+        reviewId: latest.id,
+        handle: latest,
+        snapshot: publishedLatest,
+      });
     const workspaces = new Workspaces('/tmp');
     vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
     const seen: string[][] = [];
@@ -1477,7 +1524,7 @@ it.each(
     try {
       await queue(false);
       await runQueued();
-      if (evidence === 'linked feedback') {
+      if (evidence === 'linked feedback' || taskSnapshotOnly) {
         expect(f.store.getTask(task.id).state).toBe('complete');
         expect(seen[0]).toEqual(expect.arrayContaining(allIds));
         return;
@@ -1505,11 +1552,19 @@ it.each(
 
 it.each(
   ['github', 'gitlab', 'arcadia'].flatMap((provider) =>
-    [false, true].flatMap((manual) => [false, true].map((omit) => ({ provider, manual, omit }))),
+    [false, true].flatMap((manual) =>
+      [
+        'current',
+        'short feedback',
+        'legacy receipt',
+        ...(manual ? ['legacy ambiguous'] : []),
+        ...(provider === 'github' ? ['legacy link'] : ['next draft']),
+      ].flatMap((scenario) => [false, true].map((omit) => ({ provider, manual, omit, scenario }))),
+    ),
   ),
 )(
-  'admits a $provider CI fix only with current published feedback (manual=$manual, omitted=$omit)',
-  async ({ provider, manual, omit }) => {
+  'admits a $provider CI fix only with current published feedback (manual=$manual, omitted=$omit, scenario=$scenario)',
+  async ({ provider, manual, omit, scenario }) => {
     const f = await publicationFixture(provider);
     const { task, engine, store, nativeState, expected } = f;
     const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
@@ -1539,28 +1594,135 @@ it.each(
       const original = store.claim()!;
       await engine.completeJob(original, f.result(), async () => h2);
       store.saveJob({ ...original, status: 'completed' });
-      store.setSetting('demo-pr:1', {
+      const pr = {
         ...task.pr,
         head: h2,
-        checks: 'failing',
+        checks: scenario === 'next draft' ? 'passing' : 'failing',
         ...(provider === 'arcadia' && { revisionId: '8', diffHead: h2 }),
-      });
+      };
+      store.setSetting('demo-pr:1', pr);
       await engine.reconcile(task.id);
       expect(store.getTask(task.id).state).toBe('queued');
       await engine.review(task.id);
+      if (scenario === 'next draft') {
+        expect(store.getTask(task.id).review?.id).toBe('30');
+        store.setSetting('demo-pr:1', { ...pr, checks: 'failing' });
+        await worker.tick();
+        await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('awaiting_review_checks'));
+        await engine.review(task.id);
+      }
       const queued = store.getTask(task.id);
       expect(queued.ciRepairRevision?.head).toBe(h2);
-      expect(queued.review).toBeUndefined();
+      expect(queued.review?.id).toBe(scenario === 'next draft' ? '30' : undefined);
+      if (scenario === 'short feedback' || scenario === 'legacy link')
+        queued.feedback!.comments = queued.feedback!.comments.slice(1);
+      if (scenario.startsWith('legacy')) {
+        const originalReview = queued.feedbackReview!;
+        queued.feedback!.url =
+          scenario === 'legacy link' ? queued.ref.url + '#pullrequestreview-10' : queued.ref.url;
+        delete queued.feedbackReview;
+        if (scenario === 'legacy receipt') {
+          store.db
+            .prepare(
+              "UPDATE events SET data=json_remove(data, '$.handle') WHERE task_id=? AND type='review.published'",
+            )
+            .run(task.id);
+          store.db
+            .prepare("INSERT INTO operations VALUES(?, ?, 'done', ?, ?)")
+            .run(originalReview.marker, task.id, 'fixture', JSON.stringify(originalReview));
+        }
+        if (scenario === 'legacy ambiguous') {
+          const other = { ...originalReview, id: '40', marker: originalReview.marker + ':other' };
+          store.event(task.id, 'review.published', {
+            reviewId: other.id,
+            handle: other,
+            snapshot: queued.feedback,
+          });
+        }
+      }
+      store.saveTask(queued);
       nativeState.edited = true;
       if (omit) nativeState.omitted = 1;
       await worker.tick();
       await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
-      if (omit) {
+      if (omit || scenario === 'legacy ambiguous') {
         expect(run).not.toHaveBeenCalled();
         expect(store.getTask(task.id).feedback).toEqual(queued.feedback);
       } else {
         expect(run).toHaveBeenCalledOnce();
         expect(store.getTask(task.id).reason).toBe('CI worker got current feedback');
+      }
+      expect(store.getTask(task.id).review).toEqual(queued.review);
+    } finally {
+      await worker.stop();
+      store.close();
+    }
+  },
+);
+
+it.each(
+  ['github', 'gitlab', 'arcadia'].flatMap((provider) =>
+    [false, true].flatMap((ci) =>
+      ['unchanged', 'target branch', 'source branch', 'source repo', 'closed', 'merged'].map(
+        (change) => ({ provider, ci, change }),
+      ),
+    ),
+  ),
+)(
+  'checks the $provider PR destination before preparing a repair (ci=$ci, change=$change)',
+  async ({ provider, ci, change }) => {
+    const f = await publicationFixture(provider);
+    const { task, engine, store } = f;
+    const h2 = 'e'.repeat(40);
+    const run = vi.fn(async () => ({
+      status: 'needs_input' as const,
+      summary: 'Author received the pinned repair',
+      checkedHead: ci ? h2 : task.revision!.head,
+    }));
+    const worker = f.worker(run);
+    try {
+      await engine.publish(task.id);
+      if (ci) {
+        const original = store.claim()!;
+        await engine.completeJob(original, f.result(), async () => h2);
+        store.saveJob({ ...original, status: 'completed' });
+        store.setSetting('demo-pr:1', {
+          ...task.pr,
+          head: h2,
+          checks: 'failing',
+          ...(provider === 'arcadia' && { revisionId: '8', diffHead: h2 }),
+        });
+        await engine.reconcile(task.id);
+        await engine.review(task.id);
+      }
+      const queued = store.getTask(task.id);
+      expect(queued.state).toBe('fixing');
+      const pr = queued.pr!;
+      const changes = {
+        unchanged: {},
+        'target branch': { targetBranch: 'release' },
+        'source branch': { branch: 'another-source' },
+        'source repo': { cloneUrl: 'https://example.com/another/repo.git' },
+        closed: { state: 'closed' },
+        merged: { state: 'merged' },
+      } as const;
+      const getPR = f.provider.getPR.bind(f.provider);
+      vi.spyOn(f.provider, 'getPR').mockImplementation(async (ref) => {
+        const current = await getPR(ref);
+        return store.jobs(task.id).some((job) => job.kind === 'fix' && job.status === 'running')
+          ? { ...pr, ...changes[change as keyof typeof changes] }
+          : current;
+      });
+      await worker.tick();
+      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
+      if (change === 'unchanged') {
+        expect(run).toHaveBeenCalledOnce();
+        expect(f.workspaces.prepare).toHaveBeenCalledOnce();
+      } else {
+        expect(run).not.toHaveBeenCalled();
+        expect(f.workspaces.prepare).not.toHaveBeenCalled();
+        expect(store.getTask(task.id).reason).toContain('before the queued fix started');
+        expect(store.getTask(task.id).pr).toEqual(pr);
       }
     } finally {
       await worker.stop();

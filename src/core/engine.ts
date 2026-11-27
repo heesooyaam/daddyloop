@@ -1,4 +1,3 @@
-import { githubReviewIdFromUrl } from '../providers/github.js';
 import { findingVersion } from './review-decisions.js';
 import { attestReviewLesson, savePublishedLesson } from './review-lessons.js';
 import { feedbackFingerprint, repeatedReviewFindings } from './review-recovery.js';
@@ -2261,91 +2260,11 @@ export class Engine {
     task.feedbackReview = handle;
   }
 
-  private publications(task: Task) {
-    return this.store.db
-      .prepare(
-        "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published') ORDER BY id DESC",
-      )
-      .all(task.id)
-      .map(
-        (event) =>
-          JSON.parse(String(event.data)) as {
-            reviewId?: string;
-            handle?: ReviewHandle;
-            snapshot?: ReviewSnapshot;
-            revision?: Revision;
-            comments?: number;
-          },
-      );
-  }
-
-  private publicationHandle(task: Task, publication: ReturnType<Engine['publications']>[number]) {
-    const { reviewId, handle, snapshot } = publication;
-    const revision = snapshot?.revision ?? publication.revision;
-    if (!reviewId || !revision) return;
-    if (handle && handle.id === reviewId && sameRevision(handle.revision, revision)) return handle;
-    const record = this.store.db
-      .prepare(
-        `SELECT result FROM operations WHERE task_id=? AND status='done'
-        AND id GLOB ? AND json_extract(result,'$.id')=? AND json_extract(result,'$.marker')=id
-        LIMIT 1`,
-      )
-      .get(task.id, `daddyloop:${task.id}:*`, reviewId);
-    if (typeof record?.result === 'string') {
-      const saved = JSON.parse(record.result) as ReviewHandle;
-      if (sameRevision(saved.revision, revision)) return saved;
-    }
-    // GitHub fetches directly by review ID. Other providers need the native marker.
-    if (task.ref.provider === 'github') return { id: reviewId, marker: '', revision };
-  }
-
-  private async feedbackHandle(task: Task) {
-    if (task.feedbackReview) return task.feedbackReview;
-    if (!task.feedback?.comments.length) return;
-    if (task.ref.provider === 'github' && task.feedback.url?.includes('#pullrequestreview-'))
-      return this.broker.publishedReviewFromLink(task, task.feedback);
-    const matches = (snapshot?: ReviewSnapshot) =>
-      snapshot?.status === 'published' &&
-      sameRevision(snapshot.revision, task.feedback?.revision) &&
-      task.feedback!.comments.every((finding) =>
-        snapshot.comments.some((c) => c.id === finding.id),
-      );
-    const handles = new Map<string, ReviewHandle | undefined>();
-    for (const publication of this.publications(task)) {
-      if (
-        !publication.reviewId ||
-        !sameRevision(
-          publication.snapshot?.revision ?? publication.revision,
-          task.feedback.revision,
-        )
-      )
-        continue;
-      const handle = this.publicationHandle(task, publication);
-      if (matches(publication.snapshot)) handles.set(publication.reviewId, handle);
-      else if (!publication.snapshot && publication.comments && handle) {
-        // Older partial-publication events retained a count without the native comment IDs.
-        const native = await this.provider(prRef(task)).getReview(prRef(task), handle, {
-          publishedEvidence: true,
-        });
-        if (matches(native)) handles.set(publication.reviewId, handle);
-      }
-    }
-    if (task.review && matches(task.snapshot)) handles.set(task.review.id, task.review);
-    if (handles.size === 1) return handles.values().next().value;
-  }
-
-  private earlierPublications(task: Task) {
-    return this.publications(task).filter(
-      (event) =>
-        event.reviewId !== task.review?.id && (event.snapshot?.comments.length || event.comments),
-    );
-  }
-
   async refreshFindingEvidence(task: Task, job: FindingEvidence): Promise<ReviewSnapshot[]> {
     if (job.kind !== 'review' && job.kind !== 'verify_merge') return [];
     const latest = job.publishedFindingReviews
       ? job.publishedFindingReview
-      : (job.publishedFindingReview ?? (await this.feedbackHandle(task)));
+      : (job.publishedFindingReview ?? (await this.broker.feedbackHandle(task)));
     if (!latest && task.feedback?.comments.length && !job.publishedFindingReviews)
       throw new AppError(
         'feedback_unconfirmed',
@@ -2356,9 +2275,9 @@ export class Engine {
     if (job.publishedFindingReviews) {
       for (const handle of job.publishedFindingReviews) handles.set(handle.id, handle);
     } else {
-      for (const publication of this.earlierPublications(task)) {
+      for (const publication of this.broker.earlierPublications(task)) {
         if (publication.reviewId && handles.has(publication.reviewId)) continue;
-        const handle = this.publicationHandle(task, publication);
+        const handle = this.broker.publicationHandle(task, publication);
         if (!handle)
           throw new AppError(
             'feedback_unconfirmed',
@@ -2367,78 +2286,17 @@ export class Engine {
         handles.set(handle.id, handle);
       }
     }
-    const provider = this.provider(prRef(task));
-    const publications = this.publications(task);
-    const recordedFindings = (handle: ReviewHandle) => {
-      const known = new Set(job.reviewFindingIds?.[handle.id]);
-      let minimumCount = 0;
-      const remember = (snapshot?: ReviewSnapshot) => {
-        if (snapshot?.status === 'published' && sameRevision(snapshot.revision, handle.revision))
-          for (const { id } of snapshot.comments) known.add(id);
-      };
-      for (const publication of publications) {
-        if (publication.reviewId !== handle.id) continue;
-        remember(publication.snapshot);
-        // Old partial publications preserve a count without native IDs.
-        if (
-          !publication.snapshot &&
-          sameRevision(publication.revision, handle.revision) &&
-          typeof publication.comments === 'number' &&
-          Number.isSafeInteger(publication.comments)
-        )
-          minimumCount = Math.max(minimumCount, publication.comments);
-      }
-      if (
-        task.feedbackReview?.id === handle.id ||
-        (!task.feedbackReview && !job.publishedFindingReviews && latest?.id === handle.id)
-      )
-        remember(task.feedback);
-      if (task.review?.id === handle.id) remember(task.snapshot);
-      // GitHub keeps a comment ID when publishing its draft. An old author
-      // snapshot without a review ID needs a completed write to this review.
-      const receipts = new Set(
-        (task.ref.provider === 'github' && handle.marker
-          ? this.store.db
-              .prepare(
-                `SELECT json_extract(result,'$.id') AS id FROM operations
-               WHERE task_id=? AND status='done' AND id GLOB ?`,
-              )
-              .all(task.id, handle.marker + ':comment:*')
-          : []
-        ).map((row) => String(row.id)),
-      );
-      const snapshots = this.store.db
-        .prepare(
-          `SELECT data FROM events WHERE task_id=? AND type='author.feedback_snapshot'
-         AND json_extract(data,'$.revision.head')=?`,
-        )
-        .all(task.id, handle.revision.head);
-      for (const row of snapshots) {
-        const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
-        if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
-          continue;
-        const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
-        if (snapshot.reviewId && linkedId && snapshot.reviewId !== linkedId) continue;
-        const reviewId = snapshot.reviewId ?? linkedId;
-        for (const { id } of snapshot.comments) {
-          if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
-        }
-      }
-      return { known: [...known], minimumCount };
-    };
     const readFindingReview = async (handle: ReviewHandle) => {
-      const { known, minimumCount } = recordedFindings(handle);
+      const recorded = this.broker.recordedFindings(task, handle, latest?.id === handle.id);
+      const known = [...new Set([...recorded.known, ...(job.reviewFindingIds?.[handle.id] ?? [])])];
+      const { minimumCount } = recorded;
       const checkingMerge = job.kind === 'verify_merge';
       const current = checkingMerge && task.review?.id === handle.id;
-      const native = current
-        ? await this.broker.readCurrentReview(task, known)
-        : await provider.getReview(prRef(task), handle, {
-            publishedEvidence: true,
-            knownCommentIds: known,
-          });
+      if (!current) return this.broker.readPublishedFindings(task, handle, { known, minimumCount });
+      const native = await this.broker.readCurrentReview(task, known);
       const ids = new Set(native.comments.map((comment) => comment.id));
       const expectsPublished =
-        !current || known.length > 0 || minimumCount > 0 || task.snapshot?.status === 'published';
+        known.length > 0 || minimumCount > 0 || task.snapshot?.status === 'published';
       if (
         !sameRevision(native.revision, handle.revision) ||
         native.status === 'missing' ||
@@ -2517,7 +2375,7 @@ export class Engine {
             job.generation <= task.generation,
         );
     if (receipt && !review) return false;
-    const earlier = this.earlierPublications(task);
+    const earlier = this.broker.earlierPublications(task);
     const known = new Set(review?.publishedFindingReviews?.map((handle) => handle.id));
     if (review?.publishedFindingReview) known.add(review.publishedFindingReview.id);
     if (earlier.some((publication) => !publication.reviewId || !known.has(publication.reviewId)))
@@ -2586,9 +2444,9 @@ export class Engine {
     const verified = task.verifiedMerge;
     if (!verified) return true;
     const known = new Set(verified.publishedFindingReviews?.map((handle) => handle.id));
-    const coversPublications = this.earlierPublications(task).every(
-      (publication) => publication.reviewId && known.has(publication.reviewId),
-    );
+    const coversPublications = this.broker
+      .earlierPublications(task)
+      .every((publication) => publication.reviewId && known.has(publication.reviewId));
     const hasEvidence = verified.findingVersions && verified.mergeFindingVersions;
     const noFindings =
       !task.feedback?.comments.length &&
@@ -2723,7 +2581,7 @@ export class Engine {
         );
         return false;
       }
-      const handle = task.review ?? task.feedbackReview ?? observedReview;
+      const handle = observedReview ?? task.review ?? task.feedbackReview;
       this.setFeedback(task, snapshot, handle);
       if (
         job.kind === 'fix' &&
