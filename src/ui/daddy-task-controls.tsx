@@ -26,7 +26,7 @@ export function QueueTaskForm({
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [requirements, setRequirements] = useState('');
   const [slot, setSlot] = useState('');
-  const [profile, setProfile] = useState<AgentProfile>({ engine: board.workerDefault.engine });
+  const [profile, setProfile] = useState<AgentProfile>();
   const [repository, setRepository] = useState<RepositorySelection>();
   const [editingRepository, setEditingRepository] = useState(false);
   const [validatePlan, setValidatePlan] = useState(true);
@@ -44,7 +44,7 @@ export function QueueTaskForm({
       repository,
       workerRequest: {
         slot: slot ? Number(slot) : undefined,
-        profile: profile.model ? profile : undefined,
+        profile,
       },
     };
     const key = JSON.stringify(input);
@@ -120,10 +120,11 @@ export function QueueTaskForm({
           {t('Choose a model')}
         </summary>
         <AgentProfileFields
-          profile={profile}
+          profile={profile ?? { engine: board.workerDefault.engine }}
           catalogue={catalogue}
           onChange={setProfile}
-          modelPlaceholder="Use the worker model"
+          modelPlaceholder={profile ? 'Engine configuration' : 'Use the worker model'}
+          inheritEngine={{ active: !profile, onSelect: () => setProfile(undefined) }}
         />
         {validatePlan && (
           <ArchitectProfileFields

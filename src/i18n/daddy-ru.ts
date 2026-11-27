@@ -775,6 +775,7 @@ export const daddyRu: Record<string, string> = {
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',
+  'Inherit worker profile': 'Наследовать профиль воркера',
   'Use the worker model': 'Модель воркера',
   'Configure worker {number}': 'Настроить воркера {number}',
   'Save model': 'Сохранить модель',
@@ -938,6 +939,8 @@ export const daddyRu: Record<string, string> = {
   'Open the site from your computer or phone': 'Как подключить компьютер или телефон',
   'Agent module': 'Модуль агента',
   'The model list could not be loaded.': 'Не удалось загрузить список моделей.',
+  'Settings changed. Reload before editing workerTaskProfiles':
+    'Профили задач изменились. Открой настройки заново.',
   'Settings changed. Reload before editing workerSlotProfiles':
     'Профили отдельных воркеров изменились. Открой настройки заново.',
   'Engine configuration': 'Настройки движка',

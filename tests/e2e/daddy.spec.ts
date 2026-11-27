@@ -1863,6 +1863,98 @@ test('bulk worker settings preserve a slot edited after the form opened', async 
   expect(saved.workers.slots[0]?.profile).toBeUndefined();
 });
 
+test('session settings save belongs to the generation shown on open', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Stale form generation');
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  await page.goto('/#session/' + group.id);
+  const dialog = page.getByRole('dialog', { name: 'Session settings' });
+  const open = async () => {
+    await page.getByRole('button', { name: 'Session settings' }).click();
+    await dialog
+      .getByLabel('All workers Model', { exact: true })
+      .selectOption({ label: 'Engine configuration' });
+  };
+  const save = async () => {
+    const response = page.waitForResponse(
+      (res) => res.url().endsWith(session + '/settings') && res.request().method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save settings' }).click();
+    return response;
+  };
+  await open();
+  const original = await board();
+  expect(
+    (
+      await page.request.post(session + '/pause', {
+        headers,
+        data: { expectedGeneration: original.group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  const paused = await board();
+  expect(
+    (
+      await page.request.post(session + '/resume', {
+        headers,
+        data: { expectedGeneration: paused.group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await board()).workerDefault).toEqual(original.workerDefault);
+  expect((await save()).status()).toBe(409);
+  await expect(dialog.getByRole('alert')).toContainText('session changed');
+  expect((await board()).workerDefault).toEqual(original.workerDefault);
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await open();
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workerDefault).toEqual({ engine: 'codex' });
+});
+
+test('the phone task form sends an explicit engine without a named worker model', async ({
+  page,
+}) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Engine-only worker');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/agents', async (route) => {
+    const response = await route.fetch();
+    const catalogue = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...catalogue,
+        engines: [
+          ...catalogue.engines.filter(({ id }: { id: string }) => id !== 'claude'),
+          { id: 'claude', name: 'Claude' },
+        ],
+      },
+    });
+  });
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
+  const queue = page.getByRole('dialog', { name: 'Queue task' });
+  await queue.getByLabel('Task description').fill('Use the Claude configuration');
+  await queue.getByLabel('Check architecture and plan before implementation').uncheck();
+  await queue.getByText('Choose a model', { exact: true }).click();
+  await queue.getByLabel('Agent module', { exact: true }).selectOption('claude');
+  const submitted = page.waitForResponse(
+    (res) => res.url().endsWith('/tasks') && res.request().method() === 'POST',
+  );
+  await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+  const response = await submitted;
+  expect(response.status()).toBe(201);
+  expect(response.request().postDataJSON().workerRequest.profile).toEqual({ engine: 'claude' });
+  const { id } = await response.json();
+  const { jobs } = await (await page.request.get('/api/tasks/' + id)).json();
+  expect(jobs.find(({ kind }: { kind: string }) => kind === 'implement').profile).toEqual({
+    engine: 'claude',
+  });
+});
+
 test('edits the review round limit and rejects a stale task card', async ({ page }) => {
   await login(page);
   await page.setViewportSize({ width: 390, height: 844 });

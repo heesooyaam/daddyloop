@@ -62,12 +62,17 @@ export function parseTaskInput(args: string, engine: string, architectEngine = e
     if ((values.plan || architectOverride) && values['no-plan']) return;
     if (!values['architect-model'] && values['architect-effort']) return;
     if (values.worker && !/^[1-8]$/.test(values.worker)) return;
-    if (!values.model && (values.engine || values.effort)) return;
+    if (!values.model && values.effort) return;
     const workerRequest: WorkerRequest = {
       slot: values.worker ? Number(values.worker) : undefined,
-      profile: values.model
-        ? { engine: values.engine ?? engine, model: values.model, effort: values.effort }
-        : undefined,
+      profile:
+        values.model || values.engine
+          ? {
+              engine: values.engine ?? engine,
+              ...(values.model ? { model: values.model } : {}),
+              ...(values.effort ? { effort: values.effort } : {}),
+            }
+          : undefined,
     };
     return {
       requirements,

@@ -47,6 +47,7 @@ export function AgentProfileFields({
   onChange,
   modelPlaceholder = 'Engine configuration',
   selectDefaultEffort = false,
+  inheritEngine,
 }: {
   label?: string;
   profile: AgentProfile;
@@ -54,6 +55,7 @@ export function AgentProfileFields({
   onChange: (profile: AgentProfile) => void;
   modelPlaceholder?: string;
   selectDefaultEffort?: boolean;
+  inheritEngine?: { active: boolean; onSelect: () => void };
 }) {
   const { t } = useLocale();
   const choices = catalogue.models.filter((model) => model.engine === profile.engine);
@@ -65,9 +67,13 @@ export function AgentProfileFields({
         {t('Agent module')}
         <select
           aria-label={scopedLabel('Agent module')}
-          value={profile.engine}
-          onChange={(event) => onChange({ engine: event.target.value })}
+          value={inheritEngine?.active ? '' : profile.engine}
+          onChange={(event) => {
+            if (!event.target.value) inheritEngine?.onSelect();
+            else onChange({ engine: event.target.value });
+          }}
         >
+          {inheritEngine && <option value="">{t('Inherit worker profile')}</option>}
           {!catalogue.engines.some((engine) => engine.id === profile.engine) && (
             <option value={profile.engine}>{profile.engine}</option>
           )}

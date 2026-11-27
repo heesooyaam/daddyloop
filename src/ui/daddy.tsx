@@ -1,4 +1,4 @@
-import { workerSlotProfiles } from '../core/worker-pool.js';
+import { workerSlotProfiles, workerTaskProfiles } from '../core/worker-pool.js';
 import { VoiceInput, appendDictation } from './voice-input.js';
 import { sameAgentProfile, sameRevision } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
@@ -1138,6 +1138,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               applyWorkers,
               architectProfile,
               baseline,
+              expectedGeneration,
             ) => {
               await model.action(
                 'settings',
@@ -1149,6 +1150,7 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   applyWorkers,
                   architectProfile,
                   baseline,
+                  expectedGeneration,
                 },
                 board.group.id,
               );
@@ -1803,10 +1805,12 @@ function SessionSettings({
     baseline?: {
       profiles?: Partial<AgentProfiles>;
       workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
+      workerTaskProfiles?: ReturnType<typeof workerTaskProfiles>;
       instructions?: SessionInstructions | null;
       autoMerge?: boolean;
       architectProfile?: AgentProfile | null;
     },
+    expectedGeneration?: number,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1828,6 +1832,8 @@ function SessionSettings({
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
   const originalWorkerSlots = useRef(workerSlotProfiles(board.group));
+  const originalWorkerTasks = useRef(workerTaskProfiles(board.tasks));
+  const originalGeneration = useRef(board.group.generation);
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
   const overrides = originalWorkerSlots.current.filter(
@@ -1863,7 +1869,7 @@ function SessionSettings({
           changedInstructions ? instructions : undefined,
           changedAutoMerge ? autoMerge : undefined,
           forceDaddy || undefined,
-          applyWorkers || undefined,
+          changed.worker ? true : undefined,
           changedArchitect ? (architect ?? null) : undefined,
           {
             profiles: {
@@ -1871,10 +1877,12 @@ function SessionSettings({
               ...(changed.worker ? { worker: originalProfiles.current.worker } : {}),
             },
             workerSlotProfiles: changed.worker ? originalWorkerSlots.current : undefined,
+            workerTaskProfiles: changed.worker ? originalWorkerTasks.current : undefined,
             instructions: changedInstructions ? (originalInstructions.current ?? null) : undefined,
             autoMerge: changedAutoMerge ? originalAutoMerge.current : undefined,
             architectProfile: changedArchitect ? (originalArchitect.current ?? null) : undefined,
           },
+          originalGeneration.current,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));

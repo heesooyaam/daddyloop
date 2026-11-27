@@ -52,6 +52,7 @@ import {
   workerPool,
   workerSlots,
   workerSlotProfiles,
+  workerTaskProfiles,
 } from './worker-pool.js';
 import {
   dependencyDetail,
@@ -780,6 +781,7 @@ export class Daddy {
       baseline?: {
         profiles?: Partial<AgentProfiles>;
         workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
+        workerTaskProfiles?: ReturnType<typeof workerTaskProfiles>;
         workerLimit?: number;
         instructions?: SessionInstructions | null;
         architectProfile?: AgentProfile | null;
@@ -871,10 +873,17 @@ export class Daddy {
       const changeWorkers =
         nextWorker &&
         (input.applyWorkers ||
-          !sameAgentProfile(group.worker ?? this.engine.defaultAgents().worker, nextWorker));
+          !sameAgentProfile(
+            base?.profiles?.worker ?? group.worker ?? this.engine.defaultAgents().worker,
+            nextWorker,
+          ));
       if (changeWorkers && base?.profiles?.worker) {
         const shown = base.workerSlotProfiles ?? [];
         assertSetting('workerSlotProfiles', shown, shown, workerSlotProfiles(group));
+        for (const [taskId, profile] of Object.entries(workerTaskProfiles(tasks))) {
+          const shownProfile = base.workerTaskProfiles?.[taskId];
+          assertSetting('workerTaskProfiles', shownProfile, shownProfile, profile);
+        }
       }
       const turns = this.store
         .daddyJobs(id)

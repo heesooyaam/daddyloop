@@ -572,10 +572,14 @@ it.each(
 );
 
 it.each(
-  ['http', 'telegram'].flatMap((client) => [false, true].map((occupied) => ({ client, occupied }))),
+  ['http', 'telegram'].flatMap((client) =>
+    [false, true].flatMap((occupied) =>
+      [false, true].map((converged) => ({ client, occupied, converged })),
+    ),
+  ),
 )(
-  'checks the $client bulk profile against shown slot overrides, occupied=$occupied',
-  async ({ client, occupied }) => {
+  'checks the $client bulk profile against shown slot overrides, occupied=$occupied, converged=$converged',
+  async ({ client, occupied, converged }) => {
     const f = daddyFixture();
     const runs = occupied ? holdWorker(f) : [];
     const group = f.daddy.create({ workspaceId: f.workspace.id });
@@ -592,15 +596,16 @@ it.each(
       }
       const baseline = profiles.worker;
       const later = { ...baseline, effort: 'medium' };
-      const preview = async () => {
+      const preview = async (fresh = false) => {
         const board = (await controls.read()).json();
         if (client === 'http')
           return () =>
             controls.post('/settings', {
               profiles: { worker: { engine: 'codex' } },
               autoMerge: true,
+              applyWorkers: fresh,
               baseline: {
-                profiles: { worker: baseline },
+                profiles: { worker: board.workerDefault },
                 workerSlotProfiles:
                   board.group.workerSlots?.flatMap(
                     ({ number, profile }: { number: number; profile?: AgentProfile }) =>
@@ -618,8 +623,13 @@ it.each(
         return () => controls.confirm(button.callback_data!);
       };
       const stale = await preview();
+      if (converged)
+        await f.daddy.settings(group.id, { profiles: { worker: { engine: 'codex' } } });
       if (client === 'http') await controls.command('gpt-5.6-sol medium');
-      else expect((await controls.save(later, baseline)).statusCode).toBe(200);
+      else
+        expect(
+          (await controls.save(later, converged ? { engine: 'codex' } : baseline)).statusCode,
+        ).toBe(200);
       const response = await stale();
       if (client === 'http') expect(response).toMatchObject({ statusCode: 409 });
       else expect(controls.cards.at(-1)?.text).toContain('workerSlotProfiles');
@@ -627,12 +637,128 @@ it.each(
       expect(kept.workers.slots[0].profile).toEqual(later);
       expect(kept.group.autoMerge).toBe(false);
       await (
-        await preview()
+        await preview(true)
       )();
       const saved = (await controls.read()).json();
       expect(saved.workerDefault).toEqual({ engine: 'codex' });
       expect(saved.workers.slots[0].profile).toBeUndefined();
       for (const { input } of runs) expect(input.signal.aborted).toBe(false);
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'queues explicit worker engine, named model and inheritance in topic=%s',
+  async (inTopic) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, 'en', inTopic);
+    const runs = holdWorker(f);
+    try {
+      await controls.send('/task --no-plan --engine claude -- Engine only');
+      await controls.send('/task --no-plan --model gpt-5.6-sol --effort medium -- Named model');
+      await controls.send('/task --no-plan -- Inherited worker');
+      const byTitle = Object.fromEntries(
+        f.store
+          .tasks(group.id)
+          .map((task) => [task.requirements, f.store.jobs(task.id)[0]?.profile]),
+      );
+      expect(byTitle).toEqual({
+        'Engine only': { engine: 'claude' },
+        'Named model': { ...profiles.worker, effort: 'medium' },
+        'Inherited worker': profiles.worker,
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      expect(runs[0]!.input.job.profile).toEqual({ engine: 'claude' });
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each(['http', 'telegram'] as const)(
+  'preserves a later queued worker request during %s bulk save, before and after assignment',
+  async (client) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id);
+    const runs = holdWorker(f);
+    const profile = { ...profiles.worker, effort: 'medium' };
+    try {
+      let callback = '';
+      if (client === 'telegram') {
+        await controls.confirm('dad:models:' + group.id + ':worker');
+        const button = controls.cards
+          .at(-1)!
+          .buttons!.flat()
+          .find((button) => button.text === 'codex · Engine configuration');
+        if (!button || !('callback_data' in button) || !button.callback_data)
+          throw new Error('Missing choice');
+        callback = button.callback_data;
+      }
+      const bulk = async () => {
+        if (client === 'telegram') {
+          await controls.confirm(callback);
+          expect(controls.cards.at(-1)?.text).toContain('workerTaskProfiles');
+        } else {
+          const result = await controls.post('/settings', {
+            profiles: { worker: { engine: 'codex' } },
+            autoMerge: true,
+            baseline: { profiles: { worker: profiles.worker }, workerSlotProfiles: [] },
+          });
+          expect(result.statusCode).toBe(409);
+        }
+      };
+      if (client === 'http')
+        await controls.send(
+          '/task --no-plan --worker 1 --model gpt-5.6-sol --effort medium -- Preserve request',
+        );
+      else
+        expect(
+          (
+            await controls.post('/tasks', {
+              requirements: 'Preserve request',
+              requestId: randomUUID(),
+              validatePlan: false,
+              workerRequest: { slot: 1, profile },
+            })
+          ).statusCode,
+        ).toBe(201);
+      const task = f.store.tasks(group.id)[0]!;
+      await bulk();
+      expect(f.store.getTask(task.id).workerRequest?.profile).toEqual(profile);
+      expect(f.store.jobs(task.id)[0]?.profile).toEqual(profile);
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      expect(runs[0]!.input.job.profile).toEqual(profile);
+      if (client === 'http') {
+        await bulk();
+      } else {
+        await controls.confirm(callback);
+        expect(controls.cards.at(-1)?.text).toMatch(/workerSlotProfiles|workerTaskProfiles/);
+      }
+      expect((await controls.read()).json().group.autoMerge).toBe(false);
+      if (client === 'http') {
+        const board = (await controls.read()).json();
+        const fresh = await controls.post('/settings', {
+          profiles: { worker: { engine: 'codex' } },
+          baseline: {
+            profiles: { worker: board.workerDefault },
+            workerSlotProfiles: [{ number: 1, profile }],
+            workerTaskProfiles: { [task.id]: profile },
+          },
+        });
+        expect(fresh.statusCode).toBe(200);
+        expect(f.store.getTask(task.id).workerRequest?.profile).toEqual({ engine: 'codex' });
+        expect(runs[0]!.input.signal.aborted).toBe(false);
+      }
     } finally {
       runs.forEach(({ finish }) => finish());
       await controls.close();

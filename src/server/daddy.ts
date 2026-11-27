@@ -134,6 +134,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
                   .array(z.object({ number: workerNumber, profile: profileSchema }).strict())
                   .max(8)
                   .optional(),
+                workerTaskProfiles: z.record(id, profileSchema).optional(),
                 architectProfile: profileSchema.nullable().optional(),
                 instructions: sessionInstructionsSchema.nullable().optional(),
                 autoMerge: z.boolean().optional(),

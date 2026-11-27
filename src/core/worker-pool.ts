@@ -13,6 +13,14 @@ export function workerSlotProfiles(group: ReviewGroup) {
     .sort((a, b) => a.number - b.number);
 }
 
+export function workerTaskProfiles(tasks: Pick<Task, 'id' | 'state' | 'workerRequest'>[]) {
+  return Object.fromEntries(
+    tasks.flatMap(({ id, state, workerRequest }) =>
+      state !== 'complete' && workerRequest?.profile ? [[id, workerRequest.profile] as const] : [],
+    ),
+  );
+}
+
 export function workerSlots(store: Store, group: ReviewGroup): WorkerSlot[] {
   const target = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
   const saved: WorkerSlot[] =
