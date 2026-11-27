@@ -19,7 +19,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
-import { assertConsistentReview } from './review-evidence.js';
+import { assertReviewNotDismissed } from './review-evidence.js';
 import { autoMergeEnabled, autoMergeRequested, pendingMerge } from './auto-merge.js';
 import {
   AppError,
@@ -364,17 +364,16 @@ export class Engine {
         throw new AppError('merge_unconfirmed', 'The original merged PR is no longer confirmed');
       if (task.reviewAdmission) {
         const handle = task.review!;
-        const ref = prRef(task);
         let native: ReviewSnapshot;
         let publication: Awaited<ReturnType<Engine['readHeldPublication']>> | undefined;
         try {
-          native = await provider.getReview(ref, handle);
+          native = await this.broker.readReviewObservation(task, handle, task.snapshot, provider);
           if (native.status === 'missing' && !native.authorId)
             throw new AppError(
               'draft_lookup_pending',
               'Waiting for the original GitHub review to become visible.',
             );
-          assertConsistentReview(task.snapshot, native);
+          assertReviewNotDismissed(native);
           if (native.status === 'published' && retry)
             publication = await this.readHeldPublication(task, pr, native);
         } catch (error) {
@@ -565,6 +564,7 @@ export class Engine {
     previousPublishedReview?: ReviewHandle,
   ) {
     const { branch, targetBranch, cloneUrl, targetCloneUrl } = pr;
+    if (previousPublishedReview) task.previousPublishedReview = previousPublishedReview;
     task.draftStart = {
       marker: `daddyloop:${task.id}:${task.generation}:${task.round}`,
       ref: prRef(task),
@@ -682,6 +682,18 @@ export class Engine {
     this.store.saveJob(job);
     this.state(task, 'awaiting_review_checks', 'Waiting for CI results before review');
   }
+  private hasRefusedDraft(task: Task) {
+    const intent = task.draftStart;
+    if (!intent) return false;
+    const evidence = this.broker.outbox.writeEvidence(task.id, intent.marker);
+    return (
+      evidence === 'refused' ||
+      (evidence === 'not_started' &&
+        !!intent.refusedMarker &&
+        this.broker.outbox.writeEvidence(task.id, intent.refusedMarker) === 'refused')
+    );
+  }
+
   private async holdReviewForChecks(task: Task, pr: PullRequest) {
     task.pr = pr;
     if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
@@ -693,9 +705,7 @@ export class Engine {
       );
       return;
     }
-    const refused =
-      task.draftStart &&
-      this.broker.outbox.writeEvidence(task.id, task.draftStart.marker) === 'refused';
+    const refused = this.hasRefusedDraft(task);
     if (
       pr.checks === 'failing' &&
       (!task.draftStart || refused) &&
@@ -730,6 +740,8 @@ export class Engine {
         task.draftRecheck = undefined;
       }
       this.store.transaction(() => {
+        if (refused && task.draftStart?.clarification?.trim())
+          this.rememberClarification(task, task.draftStart.clarification);
         task.ciRepairRevision = revisionOf(pr);
         task.resumeState = 'fixing';
         this.state(task, 'fixing', 'Worker assigned to fix failing CI');
@@ -830,6 +842,12 @@ export class Engine {
       openTarget(pr) && !confirmedAutoMergeConflict(pr, autoMergeEnabled(this.store, task));
     try {
       this.checkDraftStartRef(task);
+      const source = provider.reviewAccount && this.restoreDraftPublication(task);
+      if (source && !task.previousPublishedReview) {
+        task.previousPublishedReview = source;
+        intent.previousPublishedReview = source;
+        this.store.saveTask(task);
+      }
       const request = intent.mergeVerificationRequested ?? (retry ? 'retry' : undefined);
       const observed = await this.readReviewRoutingPR(task, provider, request);
       if (!observed || !current()) return this.store.getTask(task.id);
@@ -848,7 +866,7 @@ export class Engine {
       } else if (
         intent.mergeVerification ||
         request === 'verify' ||
-        ((request || intent.previousPublishedReview) && observed.state === 'merged')
+        ((request || source) && observed.state === 'merged')
       )
         return await this.queueMergeVerification(task, observed, false, intent.clarification);
       if (intent.mergeVerificationRequested) {
@@ -969,6 +987,7 @@ export class Engine {
         // Preserve the owner's retry after a definitive refusal. No draft needs replacing.
         if (
           pr.checks === 'failing' &&
+          !this.hasRefusedDraft(task) &&
           this.broker.outbox.writeEvidence(task.id, intent.marker) === 'not_started'
         ) {
           if (intent.clarification?.trim()) this.rememberClarification(task, intent.clarification);
@@ -1010,6 +1029,10 @@ export class Engine {
     } catch (error) {
       if (!current()) return this.store.getTask(task.id);
       if (isDraftStartRetry(error)) return this.deferDraftStart(task, error);
+      if (error instanceof AppError && error.code === 'draft_dismissed') {
+        this.state(task, 'needs_input', error.message);
+        return task;
+      }
       this.state(task, 'needs_input', redact(String(error)));
       throw error;
     }
@@ -1063,10 +1086,20 @@ export class Engine {
         return false;
       const ref = prRef(task);
       const provider = this.provider(ref);
-      const [owner, snapshot] = await Promise.all([
-        provider.reviewAccount?.(),
-        provider.getReview(ref, task.review),
-      ]);
+      const owner = await provider.reviewAccount?.();
+      if (owner !== task.review.authorId)
+        throw new AppError('draft_changed', draftInspectionRequired);
+      const snapshot = await this.broker.readReviewObservation(
+        task,
+        task.review,
+        task.snapshot,
+        provider,
+      );
+      assertReviewNotDismissed(snapshot);
+      if (!this.initialDraftMatches(task, snapshot, owner)) {
+        task.snapshot = snapshot;
+        this.store.saveTask(task);
+      }
       const pr = await provider.getPR(ref);
       const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
       if (
@@ -1084,7 +1117,6 @@ export class Engine {
           'draft_lookup_pending',
           'Waiting for the original GitHub review to become visible.',
         );
-      assertConsistentReview(task.snapshot, snapshot);
       const open =
         sameOpenTarget(task.pr, pr) &&
         task.pr?.targetCloneUrl === pr.targetCloneUrl &&
@@ -1096,6 +1128,22 @@ export class Engine {
           return false;
         }
         if (sameRevision(task.revision, pr)) {
+          const previous = await this.readPreviousPublication(task, pr);
+          if (
+            !this.currentReviewStart(task) ||
+            (task.groupId && this.store.getGroup(task.groupId).generation !== group?.generation)
+          )
+            return false;
+          if (previous) {
+            if (confirmedAutoMergeConflict(previous.pr, autoMergeEnabled(this.store, task)))
+              throw new AppError('draft_changed', draftInspectionRequired);
+            if (needsReviewChecks(task, previous.pr)) {
+              this.parkReviewForCI(task, job, previous.pr);
+              return false;
+            }
+            task.pr = previous.pr;
+            task.feedback = previous.snapshot;
+          }
           delete task.reviewAdmission;
           this.store.saveTask(task);
           return true;
@@ -1515,6 +1563,7 @@ export class Engine {
     delete task.mergeVerificationActive;
     delete task.mergeVerificationRequest;
     delete task.conflictFeedbackReview;
+    if (!pr || !sameReviewTarget(task.pr, pr)) delete task.previousPublishedReview;
     delete task.reviewLessonProof;
     delete task.publicationRetry;
     task.partialReview = undefined;
@@ -2047,52 +2096,125 @@ export class Engine {
     );
   }
 
-  async readHeldPublication(task: Task, observed: PullRequest, snapshot?: ReviewSnapshot) {
-    const ref = prRef(task);
-    const provider = this.provider(ref);
+  async readHeldPublication(
+    task: Task,
+    observed: PullRequest,
+    snapshot?: ReviewSnapshot,
+    allowMerge = false,
+  ) {
     const handle = task.review;
     if (
       !handle?.authorId ||
       handle.id !==
         (observed.state === 'merged'
           ? (this.heldMergeReviewId(task) ?? task.reviewAdmission)
-          : task.reviewAdmission) ||
-      !sameReviewTarget(task.pr, observed) ||
-      observed.draft
+          : task.reviewAdmission)
     )
       throw new AppError('draft_changed', draftInspectionRequired);
-    const native = snapshot ?? (await provider.getReview(ref, handle));
-    if (native.status === 'missing' && !native.authorId)
-      throw new GitHubRetryError(
-        'github_read_unavailable',
-        'Waiting for the original GitHub review to become visible.',
-        Date.now() + 15000,
-        false,
-        503,
-      );
-    assertConsistentReview(task.snapshot, native);
+    return this.readOriginalPublication(
+      task,
+      observed,
+      handle,
+      task.snapshot,
+      snapshot,
+      allowMerge,
+    );
+  }
+
+  private async readOriginalPublication(
+    task: Task,
+    observed: PullRequest,
+    handle: ReviewHandle,
+    previous?: ReviewSnapshot,
+    snapshot?: ReviewSnapshot,
+    allowMerge = false,
+  ) {
+    if (!sameReviewTarget(task.pr, observed) || observed.draft)
+      throw new AppError('draft_changed', draftInspectionRequired);
+    const ref = prRef(task);
+    const provider = this.provider(ref);
     const owner = await provider.reviewAccount?.();
+    if (!owner || owner !== handle.authorId)
+      throw new AppError('draft_changed', draftInspectionRequired);
+    const native =
+      snapshot ?? (await this.broker.readReviewObservation(task, handle, previous, provider));
+    assertReviewNotDismissed(native);
+    if ((await this.provider(ref).reviewAccount?.()) !== owner)
+      throw new AppError('draft_changed', draftInspectionRequired);
     const unchangedDraft =
-      observed.state === 'merged' && this.initialDraftMatches(task, native, owner);
+      observed.state === 'merged' &&
+      this.initialDraftMatches({ ...task, review: handle }, native, owner);
     if (
       (native.status !== 'published' && !unchangedDraft) ||
-      owner !== handle.authorId ||
-      native.authorId !== handle.authorId ||
-      !sameRevision(native.revision, handle.revision) ||
       !(await this.publicationRevisionApplies(task, native.revision, observed))
     )
       throw new AppError('draft_changed', draftInspectionRequired);
     const pr = await provider.getPR(ref);
+    const merged =
+      allowMerge && observed.state === 'open' && pr.state === 'merged' && !!pr.mergeCommit;
     if (
       !sameReviewTarget(observed, pr) ||
       !sameRevision(observed, pr) ||
-      pr.state !== observed.state ||
+      (!merged && (pr.state !== observed.state || pr.mergeCommit !== observed.mergeCommit)) ||
       pr.state === 'closed' ||
-      pr.draft ||
-      pr.mergeCommit !== observed.mergeCommit
+      pr.draft
     )
       throw new AppError('draft_changed', draftInspectionRequired);
     return { snapshot: native, pr };
+  }
+
+  async readPreviousPublication(task: Task, pr: PullRequest) {
+    const handle = task.previousPublishedReview;
+    if (!handle || handle.id === task.review?.id) return;
+    // A verified submission changes the head. Its historical feedback remains context,
+    // and only the publication on the pinned head is applicable as a live review.
+    if (handle.revision.head !== pr.head) return;
+    return this.readOriginalPublication(task, pr, handle, task.feedback);
+  }
+
+  private restoreDraftPublication(task: Task) {
+    const intent = task.draftStart!;
+    if (intent.previousPublishedReview) return intent.previousPublishedReview;
+    if (task.previousPublishedReview) return task.previousPublishedReview;
+    const feedback = task.feedback;
+    if (
+      !intent.retry ||
+      feedback?.status !== 'published' ||
+      !intent.ref ||
+      !intent.target ||
+      intent.revision.head !== feedback.revision.head
+    )
+      return;
+    const archivePrefix = 'review.archive:' + task.id + ':';
+    const archivedIds = this.store.db
+      .prepare('SELECT key, value FROM settings WHERE key GLOB ?')
+      .all(archivePrefix + '*')
+      .filter((row) => isDeepStrictEqual(JSON.parse(String(row.value)), feedback))
+      .map((row) => String(row.key).slice(archivePrefix.length));
+    // A normal published review can leave historical feedback without archiving an early publication.
+    if (!archivedIds.length) return;
+    const rows = this.store.db
+      .prepare("SELECT id, result FROM operations WHERE task_id=? AND status='done' AND id<>?")
+      .all(task.id, intent.marker);
+    const originals: ReviewHandle[] = [];
+    for (const row of rows) {
+      const handle = JSON.parse(String(row.result)) as ReviewHandle | null;
+      if (
+        !handle?.id ||
+        !/^\d+$/.test(handle.id) ||
+        handle.marker !== row.id ||
+        !handle.marker.startsWith('daddyloop:' + task.id + ':') ||
+        handle.authorId !== feedback.authorId ||
+        !sameRevision(handle.revision, feedback.revision)
+      )
+        continue;
+      if (archivedIds.includes(handle.id)) originals.push(handle);
+    }
+    if (originals.length === 1) return originals[0];
+    throw new AppError(
+      'unconfirmed_feedback',
+      'Cannot identify the original published review. Inspect it before retrying.',
+    );
   }
 
   conflictPublication(task: Task) {
@@ -2161,6 +2283,7 @@ export class Engine {
   ): Promise<{
     handle?: ReviewHandle;
     snapshot?: ReviewSnapshot;
+    source?: ReviewHandle;
     pr: PullRequest;
   }> {
     const intent = task.draftStart!;
@@ -2169,16 +2292,13 @@ export class Engine {
       throw new AppError('draft_changed', draftInspectionRequired);
     const evidence = this.broker.outbox.writeEvidence(task.id, intent.marker);
     const unsent = evidence === 'not_started' && !!intent.ref && !!intent.target;
-    if (unsent && intent.previousPublishedReview) {
-      const handle = intent.previousPublishedReview;
-      const candidate = {
-        ...task,
-        review: handle,
-        reviewAdmission: handle.id,
-        snapshot: task.feedback,
-      };
-      return { handle, ...(await this.readHeldPublication(candidate, pr)) };
-    }
+    const source = this.restoreDraftPublication(task);
+    const fromSource = async () => {
+      const handle = source!;
+      const publication = await this.readOriginalPublication(task, pr, handle, task.feedback);
+      return { handle, source: handle, ...publication };
+    };
+    if (source && (unsent || evidence === 'refused')) return fromSource();
     if (evidence === 'refused' || unsent) {
       if (!(await this.publicationRevisionApplies(task, intent.revision, pr)))
         throw new AppError('draft_changed', draftInspectionRequired);
@@ -2195,7 +2315,17 @@ export class Engine {
     if (!intent.owner)
       throw new AppError('draft_owner_unknown', 'The original GitHub account was not recorded.');
     const candidate = { ...task };
-    const handle = await this.broker.resolveGitHubDraft(candidate, this.provider(prRef(task)));
+    let handle: ReviewHandle | undefined;
+    try {
+      handle = await this.broker.resolveGitHubDraft(candidate, this.provider(prRef(task)));
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'draft_dismissed') {
+        task.review = candidate.review;
+        task.reviewAdmission = candidate.reviewAdmission;
+        task.snapshot = candidate.snapshot;
+      }
+      throw error;
+    }
     if (!handle)
       throw new AppError(
         'draft_lookup_pending',
@@ -2207,6 +2337,24 @@ export class Engine {
       !sameRevision(handle.revision, intent.revision)
     )
       throw new AppError('draft_changed', draftInspectionRequired);
+    if (source) {
+      // Reconcile the successor separately. It must not hide edits or findings on either review.
+      if (
+        !candidate.snapshot ||
+        !this.initialDraftMatches(
+          { ...candidate, review: handle },
+          candidate.snapshot,
+          intent.owner,
+        )
+      ) {
+        task.review = handle;
+        task.reviewAdmission = handle.id;
+        task.snapshot = candidate.snapshot;
+        this.store.saveTask(task);
+        throw new AppError('draft_changed', draftInspectionRequired);
+      }
+      return fromSource();
+    }
     task.snapshot = candidate.snapshot;
     candidate.review = handle;
     candidate.reviewAdmission = handle.id;
@@ -2219,7 +2367,9 @@ export class Engine {
         !(
           task.state === 'awaiting_review_checks' &&
           (task.mergeVerificationRequest?.kind === 'retry' ||
-            task.draftStart?.previousPublishedReview)
+            task.draftStart?.previousPublishedReview ||
+            task.previousPublishedReview ||
+            (task.draftStart?.retry && task.feedback?.status === 'published'))
         ) &&
         !(resume && task.state === 'paused') &&
         !(
@@ -2316,10 +2466,14 @@ export class Engine {
     this.store.transaction(() => {
       if (recovered) {
         if (
-          intent?.previousPublishedReview &&
-          recovered.handle?.id === intent.previousPublishedReview.id
+          recovered.source &&
+          intent &&
+          ['not_started', 'refused'].includes(
+            this.broker.outbox.writeEvidence(task.id, intent.marker),
+          )
         )
           task.round = Math.max(0, task.round - 1);
+        if (recovered.source) task.previousPublishedReview = recovered.source;
         task.review = recovered.handle;
         delete task.draftStart;
       }
@@ -2336,6 +2490,8 @@ export class Engine {
       delete task.mergeVerificationRequest;
       task.pendingFix = undefined;
       if (original) task.snapshot = original.snapshot;
+      if (task.previousPublishedReview?.id === originalId && original?.snapshot)
+        task.feedback = original.snapshot;
       task.reviewerThreadId = undefined;
       if (clarification?.trim()) this.rememberClarification(task, clarification);
       this.state(task, 'reviewing', 'Checking the merged result');
@@ -2870,9 +3026,23 @@ export class Engine {
         old && !task.reviewFinished
           ? await this.provider(prRef(task)).getReview(prRef(task), old)
           : undefined;
+      const refused = this.hasRefusedDraft(task) ? task.draftStart : undefined;
       this.store.transaction(() => {
         this.invalidate(task, pr, false);
         task.pendingAuthorHead = head;
+        if (refused) {
+          this.prepareGitHubDraft(
+            task,
+            pr,
+            refused.retry,
+            refused.clarification,
+            refused.previousPublishedReview,
+          );
+          task.draftStart!.owner = refused.owner;
+          task.draftStart!.refusedMarker = refused.refusedMarker ?? refused.marker;
+          this.store.saveTask(task);
+          return;
+        }
         if (old && (snapshot?.status === 'draft' || snapshot?.status === 'partial')) {
           task.review = old;
           task.snapshot = snapshot;
@@ -4099,9 +4269,11 @@ export class Engine {
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
-          const observed = await this.provider(prRef(task)).getReview(prRef(task), task.review);
-          if (task.reviewAdmission === task.review.id)
-            assertConsistentReview(task.snapshot, observed);
+          const observed =
+            task.reviewAdmission === task.review.id
+              ? await this.broker.readReviewObservation(task, task.review, task.snapshot)
+              : await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          assertReviewNotDismissed(observed);
           task.snapshot = observed;
           task.summary = result.summary;
         }

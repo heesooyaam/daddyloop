@@ -5,11 +5,17 @@ import { AppError, type ReviewSnapshot } from './types.js';
 export function assertConsistentReview(
   previous: ReviewSnapshot | undefined,
   current: ReviewSnapshot,
+  placeholder?: string,
 ) {
   const visibleIds = new Set(current.comments.map((comment) => comment.id));
   const incomplete = previous?.comments.some((comment) => !visibleIds.has(comment.id));
   if (
     incomplete ||
+    (placeholder &&
+      previous?.status === 'draft' &&
+      previous.body !== placeholder &&
+      current.status === 'draft' &&
+      current.body === placeholder) ||
     (current.status === 'missing' && !current.authorId) ||
     (previous?.status === 'published' && current.status !== 'published' && !current.dismissed)
   )
@@ -20,6 +26,9 @@ export function assertConsistentReview(
       false,
       503,
     );
+}
+
+export function assertReviewNotDismissed(current: ReviewSnapshot) {
   if (current.dismissed)
     throw new AppError(
       'draft_dismissed',

@@ -19,7 +19,8 @@ import { activityStatus } from '../src/core/task-activity.js';
 async function reviewFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'daddyloop-draft-'));
   const db = join(dir, 'tasks.db');
-  let store = new Store(db);
+  let activeDb = db;
+  let store = new Store(activeDb);
   const f = await fixture({}, store);
   const task = store.getTask(f.task.id);
   task.ref = {
@@ -54,6 +55,8 @@ async function reviewFixture() {
     missing: undefined as 'review' | 'comments' | undefined,
     firstPostStatus: 502,
     firstPostAccepted: true,
+    secondPostStatus: 200,
+    secondPostAccepted: true,
     owner: 12,
   };
   const github = new GitHubProvider('github.com', 'test', async (url, init) => {
@@ -104,9 +107,12 @@ async function reviewFixture() {
         state: 'PENDING',
         body: body.body,
       };
-      if (posts.length > 1 || options.firstPostAccepted) reviews.push(review);
+      if (posts.length === 1 ? options.firstPostAccepted : options.secondPostAccepted)
+        reviews.push(review);
       if (posts.length === 1)
         return new Response('Create failed', { status: options.firstPostStatus });
+      if (options.secondPostStatus !== 200)
+        return new Response('Create failed', { status: options.secondPostStatus });
       return Response.json(review);
     }
     throw Error(`Unexpected native request ${init?.method} ${pathname}`);
@@ -166,9 +172,15 @@ async function reviewFixture() {
       pending.retryAt = Date.now() - 1;
       store.saveTask(saved);
     },
-    restart() {
+    capture() {
+      const path = join(dir, 'interrupted.db');
+      store.db.prepare('VACUUM INTO ?').run(path);
+      return path;
+    },
+    restart(path = activeDb) {
       store.close();
-      store = new Store(db);
+      activeDb = path;
+      store = new Store(activeDb);
       engine = new Engine(store, () => github);
       engine.recoverInterruptedJobs();
     },
@@ -952,6 +964,196 @@ it.each([
   },
 );
 
+it.each(['draft recovery', 'external merge'] as const)(
+  'keeps an observation across an interrupted control GET during %s',
+  async (route) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: 'Original **note**', html_url: f.task.ref.url });
+      f.due();
+      const merge = () => Object.assign(f.remote, { state: 'merged', mergeCommit: 'f'.repeat(40) });
+      if (route === 'external merge') merge();
+      let captured: string | undefined;
+      vi.mocked(f.github.getPR)
+        .mockResolvedValueOnce({ ...f.remote })
+        .mockImplementationOnce(async () => {
+          captured = f.capture();
+          throw new AppError('provider_503', 'Control GET did not return before restart');
+        });
+      if (route === 'external merge') await f.engine.action(f.task.id, 'verify-merge');
+      else await f.engine.review(f.task.id);
+      expect(captured).toBeDefined();
+      f.restart(captured);
+      merge();
+      f.options.incompleteComments = true;
+      await f.engine.action(f.task.id, 'verify-merge');
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      f.due();
+      f.options.incompleteComments = false;
+      f.comments[0].body = 'Fresh **note**';
+      await f.engine.action(f.task.id, 'verify-merge');
+      const { worker, run } = reviewer(f);
+      run.mockResolvedValue({
+        status: 'completed',
+        summary: 'Checked the merge',
+        checkedHead: f.remote.head,
+        verifiedCommentIds: [],
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('needs_input'));
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0][0].task.snapshot?.comments).toMatchObject([
+          { id: '456', body: 'Fresh **note**' },
+        ]);
+      } finally {
+        await worker.stop();
+      }
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it('keeps owner edits observed before the control GET at reviewer admission', async () => {
+  const f = await reviewFixture();
+  try {
+    await f.engine.review(f.task.id);
+    f.options.hidden = false;
+    f.due();
+    await f.engine.review(f.task.id);
+    const placeholder = f.reviews[0].body;
+    f.reviews[0].body = 'Owner **edits**\n\n' + placeholder;
+    let observed = false;
+    let captured: string | undefined;
+    const read = f.github.getReview.bind(f.github);
+    vi.spyOn(f.github, 'getReview').mockImplementation(async (...args) => {
+      const snapshot = await read(...args);
+      observed = true;
+      return snapshot;
+    });
+    vi.mocked(f.github.getPR).mockImplementation(async () => {
+      if (observed && !captured) {
+        captured = f.capture();
+        throw new AppError('provider_503', 'Interrupted after reading owner edits');
+      }
+      return { ...f.remote };
+    });
+    const initial = reviewer(f);
+    try {
+      await initial.worker.tick();
+      await vi.waitFor(() => expect(captured).toBeDefined());
+      expect(initial.run).not.toHaveBeenCalled();
+    } finally {
+      await initial.worker.stop();
+    }
+    f.restart(captured);
+    const [queued] = f.store.activeJobs(f.task.id);
+    f.store.saveJob({ ...queued, notBefore: undefined });
+    f.reviews[0].body = placeholder;
+    const retry = reviewer(f);
+    try {
+      await retry.worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([
+          { kind: 'review', status: 'queued', notBefore: expect.any(String) },
+        ]),
+      );
+      expect(retry.run).not.toHaveBeenCalled();
+      expect(f.store.getTask(f.task.id).snapshot?.body).toContain('Owner **edits**');
+      f.reviews[0].body = 'Current owner **edits**\n\n' + placeholder;
+      const [deferred] = f.store.activeJobs(f.task.id);
+      f.store.saveJob({ ...deferred, notBefore: undefined });
+      await retry.worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          snapshot: { body: expect.stringContaining('Current owner **edits**') },
+        }),
+      );
+      expect(retry.run).not.toHaveBeenCalled();
+    } finally {
+      await retry.worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['unbound', 'bound', 'unchanged'] as const)(
+  'compares recovered draft Markdown before admitting the reviewer (%s)',
+  async (binding) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      const placeholder = f.reviews[0].body;
+      f.options.hidden = false;
+      if (binding !== 'unchanged') f.reviews[0].body = 'Owner **rollout notes**\n\n' + placeholder;
+      f.due();
+      if (binding === 'unbound')
+        vi.mocked(f.github.getPR)
+          .mockResolvedValueOnce({ ...f.remote })
+          .mockRejectedValueOnce(new AppError('provider_503', 'Control GET failed'));
+      await f.engine.review(f.task.id);
+      f.restart();
+      if (binding === 'unbound') f.due();
+      f.reviews[0].body = placeholder;
+      if (binding !== 'unchanged') await f.engine.review(f.task.id, true);
+      const { worker, run } = reviewer(f);
+      try {
+        await worker.tick();
+        if (binding === 'unchanged') await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        else {
+          expect(run).not.toHaveBeenCalled();
+          expect(f.store.getTask(f.task.id).snapshot?.body).toContain('Owner **rollout notes**');
+        }
+      } finally {
+        await worker.stop();
+      }
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['open', 'merged'] as const)(
+  'preserves the first complete dismissed original review on an %s PR',
+  async (state) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'DISMISSED';
+      f.reviews[0].body = 'Owner **summary**\n\n' + f.reviews[0].body;
+      f.comments.push({ id: 456, body: 'Owner **note**', html_url: f.task.ref.url });
+      f.due();
+      if (state === 'merged') {
+        Object.assign(f.remote, { state, mergeCommit: 'f'.repeat(40) });
+        await f.engine.action(f.task.id, 'verify-merge');
+      } else await f.engine.review(f.task.id, true);
+      f.restart();
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: 'needs_input',
+        reason: expect.stringContaining('dismissed the original review'),
+        review: { id: '123' },
+        snapshot: {
+          dismissed: true,
+          body: expect.stringContaining('Owner **summary**'),
+          comments: [{ id: '456', body: 'Owner **note**' }],
+        },
+      });
+      expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  },
+);
+
 it('keeps a known publication when completing a reviewer chat reads an incomplete list', async () => {
   const f = await reviewFixture();
   try {
@@ -1027,6 +1229,197 @@ it('checks known findings again when the CI agent reads the review', async () =>
   }
 });
 
+it.each(['reviewer chat', 'CI worker'] as const)(
+  'retains a new finding first observed through read_review by the %s',
+  async (role) => {
+    const f = await reviewFixture();
+    try {
+      await holdEarlyPublication(f);
+      if (role === 'reviewer chat')
+        await f.engine.chat(f.task.id, 'reviewer', 'Explain the original review');
+      else {
+        f.remote.checks = 'failing';
+        await f.engine.review(f.task.id, true);
+      }
+      const first = reviewer(f);
+      let readBoth = false;
+      first.run.mockImplementationOnce(async (input) => {
+        f.comments.push({ id: 789, body: 'New **finding**', html_url: f.task.ref.url });
+        expect(await input.onTool('read_review', {}, 'full')).toMatchObject({
+          comments: [{ id: '456' }, { id: '789' }],
+        });
+        f.comments.pop();
+        if (role === 'CI worker')
+          await expect(input.onTool('read_review', {}, 'partial')).rejects.toMatchObject({
+            code: 'github_read_unavailable',
+          });
+        readBoth = true;
+        return { status: 'completed', summary: 'Read both findings', checkedHead: f.remote.head };
+      });
+      try {
+        await first.worker.tick();
+        await vi.waitFor(() => expect(readBoth).toBe(true));
+        await vi.waitFor(() => expect(f.store.jobs(f.task.id).at(-1)?.status).not.toBe('running'));
+      } finally {
+        await first.worker.stop();
+      }
+      f.restart();
+      // The chat may be parked after its final read. Finish that same job on a complete response.
+      const parked = f.store.activeJobs(f.task.id)[0];
+      if (role === 'reviewer chat') {
+        expect(parked).toMatchObject({ kind: 'chat', notBefore: expect.any(String) });
+        f.comments.push({ id: 789, body: 'Latest **finding**', html_url: f.task.ref.url });
+        f.store.saveJob({ ...parked, notBefore: undefined });
+        const chat = reviewer(f);
+        try {
+          await chat.worker.tick();
+          await vi.waitFor(() => expect(f.store.activeJobs(f.task.id)).toHaveLength(0));
+        } finally {
+          await chat.worker.stop();
+        }
+        f.comments.pop();
+      }
+      Object.assign(f.remote, { state: 'merged', mergeCommit: 'f'.repeat(40), checks: 'passing' });
+      await f.engine.action(f.task.id, 'verify-merge');
+      const verify = reviewer(f);
+      verify.run.mockResolvedValue({
+        status: 'completed',
+        checkedHead: f.remote.head,
+        summary: 'Checked only one',
+        verifiedCommentIds: ['456'],
+      });
+      try {
+        await verify.worker.tick();
+        expect(verify.run).not.toHaveBeenCalled();
+        f.comments.push({ id: 789, body: 'Latest **finding**', html_url: f.task.ref.url });
+        const queued = f.store.activeJobs(f.task.id)[0];
+        f.store.saveJob({ ...queued, notBefore: undefined });
+        await verify.worker.tick();
+        await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('needs_input'));
+        expect(verify.run).toHaveBeenCalledTimes(1);
+        expect(verify.run.mock.calls[0][0].task.snapshot?.comments).toMatchObject([
+          { id: '456' },
+          { id: '789', body: 'Latest **finding**' },
+        ]);
+      } finally {
+        await verify.worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each(['CI worker', 'reviewer chat', 'conflict repair'] as const)(
+  'checks original publication applicability inside read_review for the %s',
+  async (role) => {
+    const f = await reviewFixture();
+    try {
+      if (role === 'conflict repair') f.enableAutoMerge();
+      await holdEarlyPublication(f);
+      if (role === 'reviewer chat')
+        await f.engine.chat(f.task.id, 'reviewer', 'Explain the original review');
+      else {
+        if (role === 'CI worker') f.remote.checks = 'failing';
+        else Object.assign(f.remote, { mergeConflict: true, mergeable: false });
+        await f.engine.review(f.task.id, true);
+      }
+      const { worker, run } = reviewer(f);
+      let checked = false;
+      run.mockImplementationOnce(async (input) => {
+        expect(await input.onTool('read_review', {}, 'original')).toMatchObject({
+          status: 'published',
+          comments: [{ id: '456' }],
+        });
+        const { targetBranch } = f.remote;
+        f.remote.targetBranch = 'release';
+        await expect(input.onTool('read_review', {}, 'retargeted')).rejects.toMatchObject({
+          code: 'draft_changed',
+        });
+        f.remote.targetBranch = targetBranch;
+        f.options.owner = 77;
+        await expect(input.onTool('read_review', {}, 'different-account')).rejects.toMatchObject({
+          code: 'draft_changed',
+        });
+        f.options.owner = 12;
+        f.reviews[0].user.id = 77;
+        await expect(input.onTool('read_review', {}, 'different-owner')).rejects.toMatchObject({
+          code: 'draft_changed',
+        });
+        f.reviews[0].user.id = 12;
+        const { commit_id } = f.reviews[0];
+        f.reviews[0].commit_id = 'e'.repeat(40);
+        await expect(input.onTool('read_review', {}, 'different-commit')).rejects.toMatchObject({
+          code: 'draft_changed',
+        });
+        f.reviews[0].commit_id = commit_id;
+        checked = true;
+        return { status: 'incomplete', summary: 'Checked tool access', checkedHead: f.remote.head };
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(checked).toBe(true));
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['refused', 'verify-merge'],
+  ['uncertain', 'retry'],
+  ['accepted', 'open'],
+] as const)(
+  'passes the original publication to the agent after a %s successor POST (%s)',
+  async (outcome, route) => {
+    const f = await reviewFixture();
+    try {
+      await holdEarlyPublication(f);
+      f.options.secondPostAccepted = outcome !== 'refused';
+      f.options.secondPostStatus =
+        outcome === 'refused' ? 422 : outcome === 'uncertain' ? 502 : 200;
+      const retry = f.engine.review(f.task.id, true, 'Owner **checklist**');
+      if (outcome === 'refused')
+        await expect(retry).rejects.toMatchObject({ code: 'provider_422' });
+      else await retry;
+      f.restart();
+      f.comments[0].body = 'Fresh **source finding**';
+      if (route !== 'open') {
+        Object.assign(f.remote, { state: 'merged', mergeCommit: 'f'.repeat(40) });
+        if (route === 'verify-merge') await f.engine.action(f.task.id, 'verify-merge');
+        else await f.engine.review(f.task.id, true);
+      }
+      const { worker, run } = reviewer(f);
+      run.mockResolvedValue({
+        status: 'completed',
+        summary: 'Did not verify the original finding',
+        checkedHead: f.remote.head,
+        verifiedCommentIds: [],
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        const input = run.mock.calls[0][0];
+        expect(input.task.review?.id).toBe(route === 'open' ? '124' : '123');
+        expect(input.prompt).toContain('Owner **checklist**');
+        expect(
+          (route === 'open' ? input.task.feedback : input.task.snapshot)?.comments,
+        ).toMatchObject([{ id: '456', body: 'Fresh **source finding**' }]);
+        if (route !== 'open')
+          await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('needs_input'));
+        expect(f.writeAttempts).toEqual(['POST', 'POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
 it.each(['open retry', 'verify merge', 'queued CI'] as const)(
   'holds a confirmed dismissed review for inspection (%s)',
   async (route) => {
@@ -1070,6 +1463,8 @@ it.each([
   ['pending', 'original'],
   ['failing', 'original'],
   ['failing', 'changed'],
+  ['fixed and pushed', 'original'],
+  ['fixed and pushed', 'changed'],
 ] as const)(
   'retains the refused attempt at the review limit through %s CI with %s account',
   async (checks, account) => {
@@ -1081,11 +1476,39 @@ it.each([
       f.store.saveTask({ ...task, reviewRoundLimit: 1 });
       await expect(f.engine.review(task.id)).rejects.toMatchObject({ code: 'provider_422' });
       const intent = f.store.getTask(task.id).draftStart!;
-      f.remote.checks = checks;
-      await f.engine.review(task.id, true);
+      const clarification = 'Inspect the rollout checks';
+      f.remote.checks = checks === 'fixed and pushed' ? 'failing' : checks;
+      await f.engine.review(task.id, true, clarification);
       expect
         .soft(f.store.getTask(task.id).draftStart)
         .toMatchObject({ marker: intent.marker, owner: '12' });
+      if (checks === 'fixed and pushed') {
+        const ci = reviewer(f);
+        const head = 'e'.repeat(40);
+        vi.spyOn(ci.workspaces, 'commitFix').mockResolvedValue(head);
+        ci.run.mockResolvedValue({
+          status: 'completed',
+          summary: 'Fixed CI',
+          checkedHead: f.remote.head,
+        });
+        try {
+          await ci.worker.tick();
+          await vi.waitFor(() =>
+            expect(f.store.getTask(task.id)).toMatchObject({
+              state: 'awaiting_push',
+              pendingAuthorHead: head,
+            }),
+          );
+          expect.soft(ci.run.mock.calls[0][0].prompt).toContain(clarification);
+        } finally {
+          await ci.worker.stop();
+        }
+        f.restart();
+        await f.engine.submitSavedFix(task.id, async (_task, saved) => {
+          expect(saved).toBe(head);
+          f.remote.head = head;
+        });
+      }
       f.remote.checks = 'passing';
       if (account === 'changed') f.options.owner = 77;
       f.restart();
@@ -1108,9 +1531,12 @@ it.each([
           });
           expect(run.mock.calls[0][0].task).toMatchObject({
             round: 1,
-            review: { id: '123', marker: intent.marker },
+            review: { id: '123', revision: { head: f.remote.head } },
+            latestClarification: { text: clarification },
           });
-          expect(f.posts).toEqual([f.posts[0], f.posts[0]]);
+          expect(run.mock.calls[0][0].prompt).toContain(clarification);
+          if (checks === 'fixed and pushed') expect(f.posts[1]).not.toBe(f.posts[0]);
+          else expect(f.posts).toEqual([f.posts[0], f.posts[0]]);
           expect(f.writeAttempts).toEqual(['POST', 'POST']);
         }
       } finally {
@@ -1128,6 +1554,9 @@ it.each([
   'staged missing',
   'before CI worker',
   'during CI preparation',
+  'during CI publication read',
+  'retargeted during CI publication read',
+  'legacy staged pending',
   'staged red CI',
   'retargeted',
 ] as const)(
@@ -1138,13 +1567,15 @@ it.each([
       await holdEarlyPublication(f);
       const clarification = 'Verify rollout';
       const duringPrep = timing === 'during CI preparation';
+      const duringRead = timing.endsWith('during CI publication read');
+      const retargeted = timing.startsWith('retargeted');
       const merge = () =>
         Object.assign(f.remote, {
           state: 'merged',
           mergeCommit: 'f'.repeat(40),
           checks: 'passing',
         });
-      const afterStaging = timing.startsWith('staged') || timing === 'retargeted';
+      const afterStaging = timing.includes('staged') || timing === 'retargeted';
       if (afterStaging) {
         vi.mocked(f.github.getPR).mockImplementation(async () => ({
           ...f.remote,
@@ -1159,8 +1590,23 @@ it.each([
         }));
       } else f.remote.checks = timing === 'before staging' ? 'pending' : 'failing';
       await f.engine.review(f.task.id, true, clarification);
+      if (timing === 'legacy staged pending') {
+        const legacy = f.store.getTask(f.task.id);
+        delete legacy.previousPublishedReview;
+        delete legacy.draftStart!.previousPublishedReview;
+        f.store.saveTask(legacy);
+      }
       f.comments[0].body = '**New Markdown after waiting**';
-      if (!duringPrep) merge();
+      if (!duringPrep && !duringRead) merge();
+      if (duringRead) {
+        const read = f.github.getReview.bind(f.github);
+        vi.spyOn(f.github, 'getReview').mockImplementationOnce(async (...args) => {
+          const publication = await read(...args);
+          merge();
+          if (retargeted) f.remote.targetBranch = 'release';
+          return publication;
+        });
+      }
       if (timing === 'retargeted') f.remote.targetBranch = 'release';
       f.restart();
       const { worker, prepare, run } = reviewer(f);
@@ -1170,11 +1616,12 @@ it.each([
           return '/tmp';
         });
       try {
-        if (timing === 'retargeted') {
+        if (retargeted) {
           await worker.tick();
-          expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+          await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('needs_input'));
           expect(run).not.toHaveBeenCalled();
-          expect(f.store.getTask(f.task.id).feedback?.comments).toMatchObject([{ id: '456' }]);
+          const saved = f.store.getTask(f.task.id);
+          expect((saved.snapshot ?? saved.feedback)?.comments).toMatchObject([{ id: '456' }]);
         } else {
           await vi.waitFor(async () => {
             await worker.tick();
@@ -2170,7 +2617,7 @@ it.each([
             comments: [
               {
                 id: '456',
-                body: failure === 'immediate' ? '**Earlier Markdown**' : f.comments[0].body,
+                body: f.comments[0].body,
               },
             ],
           },
@@ -2208,9 +2655,10 @@ it.each(['immediate', 'deferred'] as const)(
 
       const interrupted = new Error('Stopped immediately after the archive commit');
       const commit = f.store.transaction.bind(f.store);
-      vi.spyOn(f.store, 'transaction').mockImplementationOnce((write) => {
-        commit(write);
-        throw interrupted;
+      vi.spyOn(f.store, 'transaction').mockImplementation((write) => {
+        const result = commit(write);
+        if (f.store.setting('review.archive:' + f.task.id + ':123')) throw interrupted;
+        return result;
       });
       const retry =
         entry === 'immediate'

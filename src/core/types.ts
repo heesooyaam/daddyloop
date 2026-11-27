@@ -319,6 +319,7 @@ export interface Task {
     ref?: PRRef;
     target?: Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl' | 'targetCloneUrl'>;
     owner?: string;
+    refusedMarker?: string;
     revision: Revision;
     retry: boolean;
     clarification?: string;
@@ -382,6 +383,7 @@ export interface Task {
   feedback?: ReviewSnapshot;
   /** The published review to reread before starting a conflict repair. */
   conflictFeedbackReview?: ReviewHandle;
+  previousPublishedReview?: ReviewHandle;
   createdAt: string;
   updatedAt: string;
 }

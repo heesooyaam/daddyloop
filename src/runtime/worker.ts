@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
-import { assertConsistentReview } from '../core/review-evidence.js';
+import { assertReviewNotDismissed } from '../core/review-evidence.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import { sameOpenTarget, sameReviewTarget, staleConflictPreparation } from '../core/pr-routing.js';
@@ -748,8 +748,12 @@ export class Worker {
         const ref = prRef(task);
         const provider = this.engine.provider(ref);
         const handle = repairingConflict ? conflictReview : task.review;
-        const actual = handle && (await provider.getReview(ref, handle));
-        if (repairingConflict && actual) assertConsistentReview(task.feedback, actual);
+        const actual =
+          handle &&
+          (repairingConflict && ref.provider === 'github' && handle.authorId
+            ? await this.engine.broker.readReviewObservation(task, handle, task.feedback, provider)
+            : await provider.getReview(ref, handle));
+        if (actual) assertReviewNotDismissed(actual);
         const freshPR = await provider.getPR(ref);
         if (
           (!repairingConflict && !handle) ||
@@ -798,12 +802,16 @@ export class Worker {
         }
         const publication =
           task.reviewAdmission && task.snapshot?.status === 'published'
-            ? await this.engine.readHeldPublication(task, observed)
+            ? await this.engine.readHeldPublication(task, observed, undefined, true)
             : undefined;
         const pr = publication?.pr ?? observed;
         const current = store.getTask(job.taskId);
         if (current.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+        if (await this.engine.skipObsoleteCIFix(job, pr)) {
+          job.status = 'cancelled';
+          return;
+        }
         if (
           !sameOpenTarget(current.pr, pr) ||
           !sameReviewTarget(startingPR, pr) ||
@@ -811,10 +819,6 @@ export class Worker {
           pr.draft
         )
           throw new AppError('stale_feedback', 'The PR changed before CI repair could start');
-        if (await this.engine.skipObsoleteCIFix(job, pr)) {
-          job.status = 'cancelled';
-          return;
-        }
         task = current;
         task.pr = pr;
         if (publication) {
@@ -888,6 +892,9 @@ export class Worker {
       ) {
         job.status = 'cancelled';
         return;
+      }
+      if (job.kind === 'review' && task.previousPublishedReview) {
+        task.feedback = store.getTask(task.id).feedback;
       }
       if (abort.signal.aborted) {
         job.status = 'cancelled';
