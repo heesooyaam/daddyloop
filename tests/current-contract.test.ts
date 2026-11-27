@@ -53,47 +53,62 @@ it('initializes an empty database and rejects earlier schemas before changing us
   }
 });
 
-it('exposes the current CLI and rejects retired commands and model flags', () => {
+function cli(args: string[]) {
   const dir = mkdtempSync(join(tmpdir(), 'daddy-cli-contract-'));
   const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ version: 3, dataDir: dir }));
-  const cli = (args: string[]) =>
-    spawnSync(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), ...args], {
-      encoding: 'utf8',
-      timeout: 15000,
-      env: {
-        ...process.env,
-        DADDYLOOP_CONFIG: config,
-        DADDYLOOP_DATA_DIR: dir,
-        DADDYLOOP_LANG: 'en',
-      },
-    });
   try {
-    const help = cli(['--help']);
-    expect(help.status).toBe(0);
-    expect(help.stdout).toContain('workspaces');
-    expect(help.stdout).toContain('sessions');
-    for (const args of [
-      ['projects'],
-      ['start', 'ticket'],
-      ['child', 'parent', 'ticket'],
-      ['attach', 'url'],
-      ['chat', 'id', 'text'],
-      ['groups'],
-      ['new', '--project', 'Work'],
-      ['console', '--role', 'reviewer'],
-      ['agents', 'defaults', '--author-model', 'old'],
-      ['agents', 'defaults', '--writer-model', 'old'],
-      ['new', '--writers', '2'],
-    ]) {
-      const result = cli(args);
-      expect(result.status, args.join(' ')).not.toBe(0);
-      expect(result.stderr, args.join(' ')).toMatch(/unknown (command|option)|too many arguments/i);
-    }
-    const profiles = cli(['agents', 'defaults', '--help']);
-    expect(profiles.stdout).toContain('--worker-model');
-    expect(profiles.stdout).toContain('--daddy-model');
+    writeFileSync(config, JSON.stringify({ version: 3, dataDir: dir }));
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', resolve('src/cli.ts'), ...args],
+      {
+        encoding: 'utf8',
+        timeout: 15000,
+        env: {
+          ...process.env,
+          DADDYLOOP_CONFIG: config,
+          DADDYLOOP_DATA_DIR: dir,
+          DADDYLOOP_LANG: 'en',
+        },
+      },
+    );
+    expect(result.error).toBeUndefined();
+    return result;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+it('exposes the current CLI and model flags', () => {
+  const help = cli(['--help']);
+  expect(help.status).toBe(0);
+  expect(help.stdout).toContain('workspaces');
+  expect(help.stdout).toContain('sessions');
+  const profiles = cli(['agents', 'defaults', '--help']);
+  expect(profiles.stdout).toContain('--worker-model');
+  expect(profiles.stdout).toContain('--daddy-model');
 }, 20000);
+
+it.each(
+  [
+    ['projects'],
+    ['start', 'ticket'],
+    ['child', 'parent', 'ticket'],
+    ['attach', 'url'],
+    ['chat', 'id', 'text'],
+    ['groups'],
+    ['new', '--project', 'Work'],
+    ['console', '--role', 'reviewer'],
+    ['agents', 'defaults', '--author-model', 'old'],
+    ['agents', 'defaults', '--writer-model', 'old'],
+    ['new', '--writers', '2'],
+  ].map((args) => ({ name: args.join(' '), args })),
+)(
+  'rejects the retired CLI invocation $name',
+  ({ args }) => {
+    const result = cli(args);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/unknown (command|option)|too many arguments/i);
+  },
+  20000,
+);

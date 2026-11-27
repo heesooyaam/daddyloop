@@ -49,6 +49,9 @@ async function scenario() {
     await f.engine.review(task.id);
     const t = current(),
       job = claimed();
+    const evidence = await f.engine.refreshFindingEvidence(t, job);
+    f.store.saveTask(t);
+    f.store.saveJob(job);
     await f.engine.broker.call(job, 'set_summary', {
       body: 'Published evidence on the pinned revision. ' + text,
     });
@@ -63,7 +66,9 @@ async function scenario() {
       status: 'completed',
       checkedHead: t.revision!.head,
       summary: text || 'Verified with the regression test',
-      verifiedCommentIds: key ? [] : t.feedback?.comments.map((c) => c.id),
+      verifiedCommentIds: key
+        ? []
+        : evidence.flatMap((snapshot) => snapshot.comments.map((c) => c.id)),
     });
     finish(job);
     await f.engine.publish(task.id);

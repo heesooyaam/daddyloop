@@ -42,6 +42,7 @@ it('waits without a round, assigns red CI to the worker, and reviews only the ne
   const id = f.task.id;
   const original = f.current().revision!.head;
   const draft = vi.spyOn(f.provider, 'createReview');
+  const readReview = vi.spyOn(f.provider, 'getReview');
   try {
     await f.ci('pending');
     await f.worker.tick();
@@ -52,7 +53,9 @@ it('waits without a round, assigns red CI to the worker, and reviews only the ne
     await f.engine.review(id);
     expect(f.store.activeJobs(id)).toMatchObject([{ kind: 'fix', role: 'author' }]);
     await f.worker.tick();
-    await vi.waitFor(() => expect(f.current().state).toBe('queued'));
+    await vi.waitFor(() => expect(f.store.busy(id)).toBe(false));
+    expect(f.current().state, f.current().reason).toBe('queued');
+    expect(readReview).not.toHaveBeenCalled();
     expect(f.run).toHaveBeenCalledTimes(1);
     expect(f.run.mock.calls[0][0].prompt).toContain('https://example.org/jobs/42');
     const repaired = f.current().revision!.head;

@@ -4,12 +4,13 @@ import { nativeReviewInstruction } from '../core/instructions.js';
 import { reviewDecisionContext } from '../core/review-decisions.js';
 import { codexInputLimit } from './agent.js';
 import type { Store } from '../core/store.js';
-import { AppError, type Task, type Job } from '../core/types.js';
+import { AppError, type Task, type Job, type ReviewSnapshot } from '../core/types.js';
 export function buildContext(
   store: Store,
   task: Task,
   job: Job,
   additions: (string | false | undefined)[] = [],
+  publishedReviews?: ReviewSnapshot[],
 ): string {
   const group = task.groupId ? store.getGroup(task.groupId) : undefined;
   const siblings = group ? store.tasks(group.id) : [];
@@ -43,6 +44,9 @@ export function buildContext(
     : undefined;
   if (reportReview && !report)
     throw new AppError('report_missing', 'The saved worker report could not be loaded');
+  const earlierPublishedReviews = publishedReviews?.filter(
+    (review) => review.comments.length && review !== task.feedback && review !== task.snapshot,
+  );
   const recovery = task.reviewRecovery;
   const revisingPlan = job.kind === 'plan' && !ticket && recovery;
   const relevantPlan =
@@ -123,6 +127,9 @@ export function buildContext(
       ? {
           nativeReview: task.snapshot,
           previousPublishedFeedback: task.feedback,
+          earlierPublishedReviews: earlierPublishedReviews?.length
+            ? earlierPublishedReviews
+            : undefined,
         }
       : {
           publishedFeedback:
@@ -169,11 +176,25 @@ Read the native review before editing it. Use add_comment/edit_comment/remove_co
           ]
         : []),
     ].join('\n\n');
-  const remaining = limit - render({ ...material, decisions: [], moreDecisions: false }).length;
-  if (remaining < 0) return render(material) + suffix;
-  const prompt = render({
-    ...material,
-    ...reviewDecisionContext(store, task, job.role, remaining),
-  });
+  const budget = (context: object) =>
+    limit - render({ ...context, decisions: [], moreDecisions: false }).length;
+  let context: object = material;
+  let remaining = budget(context);
+  if (remaining < 0 && job.role === 'reviewer' && publishedReviews?.length) {
+    context = {
+      ...material,
+      nativeReview: task.snapshot?.status === 'published' ? undefined : task.snapshot,
+      previousPublishedFeedback: undefined,
+      earlierPublishedReviews: undefined,
+      publishedReviewHistory: {
+        publicationCount: publishedReviews.length,
+        instruction:
+          'Use read_published_review for publications 0 through publicationCount - 1. Read every published finding needed for verification and report its native ID.',
+      },
+    };
+    remaining = budget(context);
+  }
+  if (remaining < 0) return render(context) + suffix;
+  const prompt = render({ ...context, ...reviewDecisionContext(store, task, job.role, remaining) });
   return appendReviewLessons(store, task, job, prompt, limit) + suffix;
 }

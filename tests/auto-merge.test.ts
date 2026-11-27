@@ -1,3 +1,7 @@
+import { Store } from '../src/core/store.js';
+import { Engine } from '../src/core/engine.js';
+import { Worker } from '../src/runtime/worker.js';
+import { healthy } from './planning-fixture.js';
 import { buildContext } from '../src/runtime/context.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1403,39 +1407,101 @@ describe('opt-in GitHub merging', () => {
       }
     },
   );
-  it('hands an incomplete published fix to conflict repair, keeping the local checkpoint and the worker’s slot', async () => {
-    const f = await setup();
+  it('uses the exact Git checkpoint for conflict repair even when the author copy advances', async () => {
+    const fixture = daddyFixture();
     try {
+      const repo = join(fixture.dir, 'source');
+      mkdirSync(repo);
+      await git(['init'], repo);
+      const commit = (cwd: string, subject: string) =>
+        git(['-c', 'user.name=Test', '-c', 'user.email=test@local', 'commit', '-am', subject], cwd);
+      writeFileSync(join(repo, 'file'), 'H1\n');
+      await git(['add', '.'], repo);
+      await commit(repo, 'H1');
+      const head = await git(['rev-parse', 'HEAD'], repo);
+      const remote = join(fixture.dir, 'remote.git');
+      await git(['clone', '--bare', repo, remote], fixture.dir);
+      await git(['push', remote, 'HEAD:refs/heads/feature'], repo);
+      writeFileSync(join(repo, 'file'), 'target\n');
+      await commit(repo, 'Target branch advanced');
+      const target = await git(['rev-parse', 'HEAD'], repo);
+      const cloneUrl = 'ssh://git@github.com/test/repo.git';
+      const f = await setup(
+        fixture,
+        { head, base: head, start: head, branch: 'feature', cloneUrl },
+        repo,
+      );
       await f.daddy.settings(f.group.id, { autoMerge: true });
       const task = f.store.getTask(f.task.id);
       task.state = 'fixing';
-      task.authorWorktree = f.dir;
+      const author = await f.checkouts.prepare(task, 'author');
       f.store.saveTask(task);
       saveWorkerSlots(f.store, f.store.getGroup(f.group.id), [{ number: 1, taskId: task.id }]);
-      f.setRemote({ mergeable: false, mergeConflict: true });
-      const job = f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
-      f.store.claim();
-      const save = vi.fn(async () => 'c'.repeat(40));
+      f.setRemote({ base: target, start: target, mergeable: false, mergeConflict: true });
+      f.store.enqueue(task, 'author', 'fix', 'Fix the published findings');
+      const job = f.store.claim()!;
+      writeFileSync(join(author, 'file'), 'H2\n');
+      let h2 = '',
+        h3 = '';
       await f.engine.completeJob(
         job,
-        {
-          status: 'incomplete',
-          summary: 'Integration blocked on conflict',
-          checkedHead: task.revision!.head,
+        { status: 'incomplete', summary: 'Integration blocked on conflict', checkedHead: head },
+        async (current, save) => {
+          expect(save?.runId).toBe(job.id);
+          h2 = await f.checkouts.commitFix(current, 'H2', undefined, save);
+          writeFileSync(join(author, 'file'), 'H3\n');
+          await commit(author, 'H3');
+          h3 = await git(['rev-parse', 'HEAD'], author);
+          writeFileSync(join(author, 'staged.txt'), 'keep in index');
+          await git(['add', 'staged.txt'], author);
+          writeFileSync(join(author, 'untracked.txt'), 'keep untracked');
+          await git(['config', 'protocol.allow', 'never'], author);
+          await git(['config', 'protocol.file.allow', 'always'], author);
+          await git(['config', 'url.' + remote + '.insteadOf', cloneUrl], author);
+          return h2;
         },
-        save,
       );
-      f.store.saveJob({ ...job, status: 'completed' });
-      expect(save).toHaveBeenCalledOnce();
+      expect(h2).not.toBe(h3);
       expect(f.store.getTask(task.id)).toMatchObject({
         state: 'fixing',
         fixingMergeConflict: true,
-        conflictCheckpoint: 'c'.repeat(40),
+        conflictCheckpoint: h2,
       });
-      expect(f.store.activeJobs(task.id)).toHaveLength(1);
+      expect(await git(['rev-parse', 'HEAD'], author)).toBe(h3);
+      expect(readFileSync(join(author, 'file'), 'utf8')).toBe('H3\n');
+      const preserved = author + '-before-conflict-' + h2;
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.role).toBe('author');
+        expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(h2);
+        expect(await git(['rev-parse', 'MERGE_HEAD'], input.cwd)).toBe(target);
+        expect(await git(['rev-parse', 'HEAD'], preserved)).toBe(h3);
+        expect(await git(['show', ':staged.txt'], preserved)).toBe('keep in index');
+        expect(readFileSync(join(preserved, 'untracked.txt'), 'utf8')).toBe('keep untracked');
+        writeFileSync(join(input.cwd, 'file'), 'combined\n');
+        return { status: 'completed', summary: 'Both branches preserved', checkedHead: head };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_push'));
+      const saved = f.store.getTask(task.id).pendingAuthorHead!;
+      await f.engine.submitSavedFix(task.id, async (current, sha) => {
+        await f.checkouts.pushSavedFix(current, sha);
+        expect(await git(['rev-parse', 'refs/heads/feature'], remote)).toBe(saved);
+        expect(await git(['show', '-s', '--format=%P', saved], remote)).toBe(h2 + ' ' + target);
+        f.setRemote({ head: saved, mergeable: true, mergeConflict: false });
+      });
+      await f.engine.review(task.id);
+      expect(f.store.getTask(task.id).review?.revision.head).toBe(saved);
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.role).toBe('reviewer');
+        expect(await git(['rev-parse', 'HEAD'], input.cwd)).toBe(saved);
+        return { status: 'completed', summary: 'Checked the repaired merge', checkedHead: saved };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(task.id).state).toBe('awaiting_publication'));
+      expect(await git(['rev-parse', 'HEAD'], preserved)).toBe(h3);
       expect(f.daddy.board(f.group.id).workers.slots[0].taskId).toBe(task.id);
     } finally {
-      await f.close();
+      await fixture.close();
     }
   });
 
@@ -1625,3 +1691,154 @@ describe('opt-in GitHub merging', () => {
     }
   });
 });
+
+it.each(
+  ['manual', 'service'].flatMap((publication) =>
+    [false, true]
+      .flatMap((conflict) =>
+        (['before preparation', 'during preparation'] as const).flatMap((phase) =>
+          [false, true].map((omit) => ({
+            publication,
+            conflict,
+            omit,
+            phase,
+            legacy: undefined as string | undefined,
+            retarget: false,
+          })),
+        ),
+      )
+      .concat(
+        ['linked', 'ambiguous'].map((legacy) => ({
+          publication,
+          conflict: true,
+          omit: false,
+          phase: 'before preparation' as const,
+          legacy,
+          retarget: false,
+        })),
+      )
+      .concat([
+        {
+          publication,
+          conflict: true,
+          omit: false,
+          phase: 'during preparation' as const,
+          legacy: undefined,
+          retarget: true,
+        },
+      ]),
+  ),
+)(
+  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit, $phase, legacy=$legacy, retarget=$retarget)',
+  async ({ publication, conflict, omit, phase, legacy, retarget }) => {
+    const f = await setup(daddyFixture(!!legacy));
+    let reopened: Store | undefined;
+    let restartedWorker: Worker | undefined;
+    try {
+      if (conflict) await f.daddy.settings(f.group.id, { autoMerge: true });
+      const id = f.task.id;
+      await f.engine.review(id, true);
+      const draft = f.store.getTask(id);
+      const review = { ...draft.review! };
+      if (legacy) {
+        const initial = await f.provider.getReview(prRef(draft), review);
+        review.id = '147';
+        draft.review = review;
+        f.store.saveTask(draft);
+        f.store.setSetting('demo-review:' + review.id, {
+          ...initial,
+          url: draft.ref.url + '#pullrequestreview-147',
+        });
+      }
+      const job = f.store.claim()!;
+      await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
+      const { id: finding } = (await f.engine.broker.call(job, 'add_comment', {
+        key: 'handoff',
+        body: 'Original finding',
+      })) as { id: string };
+      await f.engine.completeJob(job, {
+        status: 'completed',
+        summary: 'Reviewed',
+        checkedHead: f.task.revision!.head,
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      f.setRemote({ mergeable: !conflict, mergeConflict: conflict });
+      const ref = prRef(f.task);
+      if (publication === 'manual') {
+        await f.provider.publish(ref, review);
+        await f.engine.reconcile(id);
+      } else await f.engine.publish(id);
+      const queued = f.store.getTask(id);
+      expect(queued.state).toBe('fixing');
+      expect(!!queued.fixingMergeConflict).toBe(conflict);
+      expect(queued.feedbackReview?.id).toBe(review.id);
+      const edited = 'Updated **Markdown** from the published review';
+      const update = async () => {
+        if (omit) await f.provider.deleteComment(ref, review, finding);
+        else await f.provider.updateComment(ref, review, finding, edited);
+      };
+      if (phase === 'before preparation') await update();
+      vi.spyOn(f.checkouts, 'prepare').mockImplementation(async () => {
+        if (!conflict && phase === 'during preparation') await update();
+        return f.dir;
+      });
+      const prepareConflict = vi
+        .spyOn(f.checkouts, 'prepareConflict')
+        .mockImplementation(async () => {
+          if (retarget) f.setRemote({ targetBranch: 'release' });
+          if (phase === 'during preparation') await update();
+          return undefined;
+        });
+      if (legacy) {
+        const old = f.store.getTask(id);
+        delete old.feedbackReview;
+        if (legacy === 'ambiguous') old.feedback!.url = old.ref.url + '#pullrequestreview-148';
+        f.store.saveTask(old);
+        reopened = new Store(join(f.dir, 'state.sqlite'));
+        const provider = new DemoProvider(reopened);
+        const engine = new Engine(reopened, () => provider);
+        engine.recoverInterruptedJobs();
+        restartedWorker = new Worker(engine, f.checkouts, f.agentRuntime, f.agentRuntime, healthy);
+      }
+      const store = reopened ?? f.store;
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.kind).toBe('fix');
+        if (!omit) {
+          expect(input.prompt).toContain(edited);
+          expect(input.task.feedback?.comments).toMatchObject([{ id: finding, body: edited }]);
+          expect(await input.onTool('read_review', {})).toMatchObject({
+            status: 'published',
+            comments: [{ id: finding, body: edited }],
+          });
+        }
+        return {
+          status: 'needs_input',
+          summary: 'Author received the findings',
+          checkedHead: input.task.revision!.head,
+        };
+      });
+      await (restartedWorker ?? f.worker).tick();
+      await vi.waitFor(() => expect(store.getTask(id).state).toBe('needs_input'));
+      if (retarget) {
+        expect(f.agentRuntime.run).not.toHaveBeenCalled();
+        expect(prepareConflict).toHaveBeenCalledOnce();
+        expect(store.getTask(id).reason).toContain('before the queued fix started');
+        expect(store.getTask(id).pr?.targetBranch).toBe(queued.pr?.targetBranch);
+      } else if (omit || legacy === 'ambiguous') {
+        expect(f.agentRuntime.run).not.toHaveBeenCalled();
+        expect(prepareConflict).toHaveBeenCalledTimes(
+          conflict && phase === 'during preparation' ? 1 : 0,
+        );
+        expect(store.getTask(id).feedback?.comments).toEqual(queued.feedback?.comments);
+      } else {
+        expect(f.agentRuntime.run).toHaveBeenCalledOnce();
+        expect(store.getTask(id).reason).toBe('Author received the findings');
+        expect(prepareConflict).toHaveBeenCalledTimes(conflict ? 1 : 0);
+      }
+    } finally {
+      await restartedWorker?.stop();
+      reopened?.close();
+      await f.close();
+    }
+  },
+);

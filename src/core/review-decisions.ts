@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Store } from './store.js';
-import { AppError, type Decision, type Job, type Task } from './types.js';
+import { AppError, type Decision, type Job, type Task, type ReviewSnapshot } from './types.js';
 
 const promptBudget = 64 * 1024;
 const pageSize = 10;
@@ -21,6 +22,51 @@ export const reviewDecisionTool = {
     'Read recorded decisions for the pinned task. Filter by commentId or head. Pass nextBefore unchanged as before with the same filters until null. When reasonOffset is present, the single decision contains a fragment of its reason. Join reason fragments for the same decision ID in order. If recordFragment is present, join its json strings for that ID and parse the combined JSON when complete is true.',
   inputSchema: z.toJSONSchema(reviewDecisionQuery, { target: 'draft-7' }),
 };
+
+export const publishedReviewQuery = z
+  .object({
+    publication: z.number().int().nonnegative(),
+    comment: z.number().int().nonnegative().optional(),
+    offset: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const publishedReviewTool = {
+  name: 'read_published_review',
+  description:
+    'Read the published evidence captured for this review run. Start at publication 0. Omit comment to read the summary, or use a zero-based comment index below commentCount to read one finding with its native ID and Markdown. Join json fragments for the same publication and comment by passing nextOffset back as offset until null, then parse the combined JSON.',
+  inputSchema: z.toJSONSchema(publishedReviewQuery, { target: 'draft-7' }),
+};
+
+export function readPublishedReview(evidence: ReviewSnapshot[], input: unknown) {
+  const { publication, comment, offset = 0 } = publishedReviewQuery.parse(input);
+  const snapshot = evidence[publication];
+  const finding = comment === undefined ? undefined : snapshot?.comments[comment];
+  if (!snapshot || snapshot.status !== 'published' || (comment !== undefined && !finding))
+    throw new AppError('published_evidence_missing', 'No published evidence at that index', 404);
+  const data = JSON.stringify(
+    finding ?? {
+      body: snapshot.body,
+      url: snapshot.url,
+      revision: snapshot.revision,
+    },
+  );
+  if (offset >= data.length)
+    throw new AppError(
+      'invalid_review_offset',
+      'The published evidence offset is out of range',
+      400,
+    );
+  const page = {
+    commentCount: snapshot.comments.length,
+    json: '',
+    nextOffset: data.length as number | null,
+  };
+  const end = fragmentEnd(data, offset, pageByteLimit - Buffer.byteLength(JSON.stringify(page)));
+  page.json = data.slice(offset, end);
+  page.nextOffset = end < data.length ? end : null;
+  return page;
+}
 
 function publishedCommentIds(task: Task) {
   return task.feedback?.status === 'published'
@@ -189,4 +235,21 @@ export function readReviewDecisions(
     page.nextBefore = nextBefore;
   }
   return page;
+}
+
+export function findingVersion(comment: import('./types.js').ReviewComment) {
+  const { body, location, resolved } = comment;
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        body,
+        location?.path,
+        location?.line,
+        location?.side,
+        location?.oldPath,
+        location?.startLine,
+        resolved ?? false,
+      ]),
+    )
+    .digest('hex');
 }

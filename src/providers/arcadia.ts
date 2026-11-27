@@ -9,7 +9,7 @@ import type {
 } from '../core/types.js';
 import { AppError } from '../core/types.js';
 import { ArcBridge } from '../integrations/arcadia.js';
-import { type ReviewProvider, tag, assertDraft } from './provider.js';
+import { type ReviewProvider, type ReviewReadOptions, tag, assertDraft } from './provider.js';
 type Note = {
   id: number;
   content: string;
@@ -22,7 +22,14 @@ export class ArcadiaProvider implements ReviewProvider {
   constructor(private bridge = new ArcBridge()) {}
   async getPR(ref: PRRef): Promise<PullRequest> {
     const { pr, base } = await this.bridge.metadata(ref.number),
-      diffId = await this.bridge.activeDiff(ref.number);
+      diff = await this.bridge.activeDiffDetails(ref.number);
+    if (diff.head !== pr.from_id)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed a diff for the current PR commit',
+        503,
+      );
+    const diffId = diff.id;
     const checks: {
       name: string;
       status: string;
@@ -73,6 +80,7 @@ export class ArcadiaProvider implements ReviewProvider {
       base,
       start: base,
       revisionId: diffId,
+      diffHead: diff.head,
       title: pr.summary,
       body: pr.description ?? '',
       branch: pr.from_branch,
@@ -113,7 +121,8 @@ export class ArcadiaProvider implements ReviewProvider {
         ? {
             location: {
               path: anchor.file_path ?? anchor.path!,
-              line: anchor.line,
+              line: anchor.line + Math.max(0, (anchor.size ?? 1) - 1),
+              startLine: (anchor.size ?? 1) > 1 ? anchor.line : undefined,
               side: anchor.side === 'old' ? ('LEFT' as const) : ('RIGHT' as const),
             },
           }
@@ -121,8 +130,14 @@ export class ArcadiaProvider implements ReviewProvider {
     };
   }
   async findReview(ref: PRRef, marker: string) {
-    const { user } = await this.bridge.metadata(ref.number),
-      diffId = await this.bridge.activeDiff(ref.number);
+    const { pr, user } = await this.bridge.metadata(ref.number);
+    const { id: diffId, head } = await this.bridge.activeDiffDetails(ref.number);
+    if (head !== pr.from_id)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed a diff for the current PR commit',
+        503,
+      );
     const [notes] = await this.notes(ref, diffId),
       summary = notes.find(
         (n) => n.author?.name === user && n.content.includes(tag(marker)) && !n.deleted_at,
@@ -133,13 +148,19 @@ export class ArcadiaProvider implements ReviewProvider {
           marker,
           nodeId: diffId,
           authorId: user,
-          revision: { head: '', base: '', start: '', revisionId: diffId },
+          revision: { head: pr.from_id, base: '', start: '', revisionId: diffId },
         }
       : undefined;
   }
   async createReview(ref: PRRef, revision: Revision, marker: string): Promise<ReviewHandle> {
-    const { user } = await this.bridge.metadata(ref.number),
-      diffId = revision.revisionId ?? (await this.bridge.activeDiff(ref.number));
+    const { pr, user } = await this.bridge.metadata(ref.number);
+    const { id: diffId, head } = await this.bridge.activeDiffDetails(ref.number);
+    if (head !== pr.from_id || head !== revision.head || diffId !== revision.revisionId)
+      throw new AppError(
+        'diff_unavailable',
+        'Arcanum has not confirmed the pinned diff for this review',
+        503,
+      );
     const [notes, inline] = await this.notes(ref, diffId);
     if ([...notes, ...inline].some((n) => n.author?.name === user && n.is_draft && !n.deleted_at))
       throw new AppError(
@@ -167,23 +188,43 @@ export class ArcadiaProvider implements ReviewProvider {
       revision,
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    options?: ReviewReadOptions,
+  ): Promise<ReviewSnapshot> {
     const [general, inline] = await this.notes(ref, review.nodeId!);
     const owned = (note: Note) => !note.deleted_at && note.author?.name === review.authorId;
     const summary = general.find((n) => owned(n) && n.content.includes(tag(review.marker)));
-    const isFinding = (n: Note) => owned(n) && n.content.includes(`<!-- ${review.marker}:comment:`);
-    const notes = [...general.filter(isFinding), ...inline.filter(isFinding)];
-    const unknown = [...general, ...inline].some(
-      (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
-    );
+    const publishedEvidence = options?.publishedEvidence && summary && !summary.is_draft;
+    const known = summary && !summary.is_draft ? new Set(options?.knownCommentIds) : undefined;
+    const findings = (items: Note[], kind: 'pr' | 'diff') =>
+      items.filter(
+        (n) =>
+          owned(n) &&
+          (n.content.includes(`<!-- ${review.marker}:comment:`) || known?.has(`${kind}:${n.id}`)),
+      );
+    const generalFindings = findings(general, 'pr');
+    const diffFindings = findings(inline, 'diff');
+    const notes = [...generalFindings, ...diffFindings];
+    const unknown =
+      !publishedEvidence &&
+      [...general, ...inline].some(
+        (n) => owned(n) && n.is_draft && !n.content.includes(`<!-- ${review.marker}`),
+      );
+    const unresolvedIdentity = (items: Note[], kind: 'pr' | 'diff') =>
+      items.some((n) => !n.deleted_at && known?.has(`${kind}:${n.id}`) && !owned(n));
     const partial =
-      unknown || (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
+      unresolvedIdentity(general, 'pr') ||
+      unresolvedIdentity(inline, 'diff') ||
+      unknown ||
+      (!!summary && notes.some((n) => !!n.is_draft !== !!summary.is_draft));
     return {
       status: partial ? 'partial' : !summary ? 'missing' : summary.is_draft ? 'draft' : 'published',
       body: summary?.content ?? '',
       comments: [
-        ...general.filter(isFinding).map((n) => this.map(ref, n, 'pr')),
-        ...inline.filter(isFinding).map((n) => this.map(ref, n, 'diff')),
+        ...generalFindings.map((n) => this.map(ref, n, 'pr')),
+        ...diffFindings.map((n) => this.map(ref, n, 'diff')),
       ],
       url: ref.url,
       revision: review.revision,

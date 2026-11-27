@@ -129,7 +129,9 @@ export class ArcBridge {
     await this.helper(['--json', 'release', '--owner-id', lease.ownerId, lease.mount]);
   }
   async native(args: string[], mount: string, signal?: AbortSignal) {
-    return (await command('arc', args, { cwd: mount, timeoutMs: 120000, signal })).stdout.trimEnd();
+    const result = await command('arc', args, { cwd: mount, timeoutMs: 120000, signal });
+    // The commit summary may be routed through Arc's user log.
+    return (args[0] === 'commit' ? result.stdout + '\n' + result.stderr : result.stdout).trimEnd();
   }
   async withMount<T>(fn: (mount: string) => Promise<T>) {
     if (
@@ -225,18 +227,18 @@ export class ArcBridge {
       throw new Error('Arcanum returned an API error; inspect its local CLI output');
     return (data && typeof data === 'object' && 'data' in data ? data.data : data) as T;
   }
-  async activeDiff(id: number) {
-    const value = await this.api<{ id: number }>([
+  async activeDiffDetails(id: number) {
+    const value = await this.api<{ id: number; commit_ids?: { head?: string } }>([
       'diff',
       'get',
       '--pr',
       String(id),
       '--fields',
-      'id',
+      'id,commit_ids(head)',
     ]);
-    if (!Number.isSafeInteger(value.id))
-      throw new Error('Arcanum did not return an active diff ID');
-    return String(value.id);
+    if (!Number.isSafeInteger(value?.id))
+      throw new AppError('diff_unavailable', 'Arcanum did not return an active diff ID', 503);
+    return { id: String(value.id), head: value.commit_ids?.head };
   }
   async doctor(workspace?: string) {
     const sources = await this.sourceMounts();

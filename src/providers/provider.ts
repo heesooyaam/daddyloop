@@ -10,6 +10,11 @@ import {
   type Revision,
 } from '../core/types.js';
 
+export interface ReviewReadOptions {
+  publishedEvidence?: boolean;
+  knownCommentIds?: readonly string[];
+}
+
 export interface ReviewProvider {
   getPR(ref: PRRef): Promise<PullRequest>;
   targetAdvanced?(ref: PRRef, before: string, after: string): Promise<boolean>;
@@ -21,7 +26,7 @@ export interface ReviewProvider {
     marker: string,
     confirmOwner?: (owner: string) => Promise<void>,
   ): Promise<ReviewHandle>;
-  getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot>;
+  getReview(ref: PRRef, review: ReviewHandle, options?: ReviewReadOptions): Promise<ReviewSnapshot>;
   discardSupersededDraft?(
     ref: PRRef,
     review: ReviewHandle,

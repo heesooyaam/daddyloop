@@ -1,4 +1,5 @@
-import { it, expect } from 'vitest';
+import { findingVersion } from '../src/core/review-decisions.js';
+import { it, expect, vi } from 'vitest';
 import { ArcadiaProvider } from '../src/providers/arcadia.js';
 import { ArcBridge } from '../src/integrations/arcadia.js';
 import { parsePR, tag } from '../src/providers/provider.js';
@@ -11,6 +12,7 @@ class FakeArc extends ArcBridge {
   inline = [
     {
       id: -9,
+      anchor: { file_path: 'file.cpp', line: 5, size: 5, side: 'new' },
       content: 'Exact markdown\n```cpp\nreturn;\n```\n' + tag('daddyloop:test:comment:R1'),
       is_draft: true,
       author: { name: 'tester' },
@@ -112,4 +114,53 @@ it('checks Arcanum, the helper and journals without allocating a probe copy', as
     'helper',
     'arc:info --json',
   ]);
+});
+
+it('keeps the native Arcanum range in the version of a published finding', async () => {
+  const bridge = new FakeArc();
+  bridge.general[0].is_draft = false;
+  bridge.inline[0].is_draft = false;
+  const provider = new ArcadiaProvider(bridge);
+  const before = (await provider.getReview(ref, review)).comments[0];
+  bridge.inline[0].anchor.size = 3;
+  const after = (await provider.getReview(ref, review)).comments[0];
+  expect(before.location).toMatchObject({ startLine: 5, line: 9 });
+  expect(after.location).toMatchObject({ startLine: 5, line: 7 });
+  expect(findingVersion(after)).not.toBe(findingVersion(before));
+});
+
+it('checks the head reported by the active diff before reading its checks', async () => {
+  const head = 'c'.repeat(40);
+  const bridge = new FakeArc();
+  vi.spyOn(bridge, 'metadata').mockResolvedValue({
+    pr: {
+      from_id: head,
+      from_branch: 'users/me/fix',
+      to_branch: 'trunk',
+      status: 'open',
+      summary: 'Fix',
+    },
+    base: review.revision.base,
+    user: 'tester',
+  } as Awaited<ReturnType<ArcBridge['metadata']>>);
+  let active = { id: 101, commit_ids: { head: review.revision.head } };
+  const calls: string[][] = [];
+  bridge.api = async <T>(args: string[]) => {
+    calls.push(args);
+    return (args[1] === 'get' ? active : { checks: [] }) as T;
+  };
+  const provider = new ArcadiaProvider(bridge);
+  await expect(provider.getPR(ref)).rejects.toMatchObject({ code: 'diff_unavailable' });
+  expect(calls).toEqual([
+    ['diff', 'get', '--pr', String(ref.number), '--fields', 'id,commit_ids(head)'],
+  ]);
+  active = { id: 103, commit_ids: { head } };
+  expect(await provider.getPR(ref)).toMatchObject({ head, revisionId: '103', diffHead: head });
+  expect(calls.at(-1)).toContain('103');
+  active = { id: 101, commit_ids: { head: review.revision.head } };
+  calls.length = 0;
+  await expect(
+    provider.createReview(ref, { ...review.revision, head, revisionId: '103' }, 'test'),
+  ).rejects.toMatchObject({ code: 'diff_unavailable' });
+  expect(calls.every((args) => args[1] === 'get')).toBe(true);
 });

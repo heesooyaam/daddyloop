@@ -147,3 +147,68 @@ it('resumes a PR with known pending CI without putting its saved draft in the sh
     await f.close();
   }
 });
+
+it.each([false, true])(
+  'resumes an author after a session pause without repeating an interrupted save (interrupted=%s)',
+  async (interrupted) => {
+    const f = daddyFixture();
+    try {
+      const group = f.daddy.create({ workspaceId: f.workspace.id });
+      const ref = {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 13,
+        url: 'https://demo.local/pull/13',
+      };
+      const task = await f.engine.create({
+        groupId: group.id,
+        repoPath: f.dir,
+        requirements: 'Deliver the fix',
+        ref,
+      });
+      task.state = 'fixing';
+      f.store.saveTask(task);
+      f.store.enqueue(task, 'author', 'fix', 'Address the finding');
+      const original = f.store.claim()!;
+      expect(original.kind).toBe('fix');
+      const save = {
+        runId: original.id,
+        generation: original.generation,
+        revision: task.revision!,
+        pr: task.pr!,
+        ref,
+        summary: 'Saved the correction',
+      };
+      if (interrupted) f.store.saveTask({ ...task, fixSave: save });
+      const savedHead = 'e'.repeat(40);
+      let recovered = 0;
+      f.engine.readFixSave = async (_task, pending) => {
+        expect(pending).toEqual(save);
+        recovered++;
+        return savedHead;
+      };
+      await f.daddy.pause(group.id);
+      await f.engine.recoverFixSave(task.id);
+      expect(recovered).toBe(0);
+      await f.daddy.resume(group.id);
+      if (interrupted) {
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        expect(f.store.getTask(task.id).fixSave).toEqual(save);
+        await f.engine.recoverFixSave(task.id);
+        expect(f.store.getTask(task.id)).toMatchObject({
+          state: 'awaiting_push',
+          pendingAuthorHead: savedHead,
+        });
+        expect(f.store.getTask(task.id).fixSave).toBeUndefined();
+        expect(recovered).toBe(1);
+      } else {
+        expect(f.store.activeJobs(task.id)).toMatchObject([
+          { kind: 'fix', firstAttemptId: original.id, status: 'queued' },
+        ]);
+      }
+    } finally {
+      await f.close();
+    }
+  },
+);

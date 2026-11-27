@@ -2,30 +2,49 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { reviewDecisionQuery, reviewDecisionTool } from '../../../core/review-decisions.js';
+import {
+  publishedReviewQuery,
+  publishedReviewTool,
+  reviewDecisionQuery,
+  reviewDecisionTool,
+} from '../../../core/review-decisions.js';
 import { redact, safeEqual } from '../../../core/security.js';
 import type { SessionInput } from '../../../runtime/agent.js';
 
 export async function startReviewHistory(input: SessionInput) {
   const authorization = 'Bearer ' + randomBytes(32).toString('hex');
   const mcp = new McpServer({ name: 'daddyloop_history', version: '1' });
-  mcp.registerTool(
-    reviewDecisionTool.name,
-    {
-      description: reviewDecisionTool.description,
-      inputSchema: reviewDecisionQuery,
-      annotations: { readOnlyHint: true },
-    },
-    async (args) => {
-      try {
-        input.signal.throwIfAborted();
-        const page = await input.onTool(reviewDecisionTool.name, args);
-        return { content: [{ type: 'text', text: JSON.stringify(page) }] };
-      } catch (error) {
-        return { isError: true, content: [{ type: 'text', text: redact(String(error)) }] };
-      }
-    },
-  );
+  const read = async (name: string, args: unknown) => {
+    try {
+      input.signal.throwIfAborted();
+      const page = await input.onTool(name, args);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(page) }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: 'text' as const, text: redact(String(error)) }] };
+    }
+  };
+  if (input.tools?.some((tool) => tool.name === reviewDecisionTool.name)) {
+    mcp.registerTool(
+      reviewDecisionTool.name,
+      {
+        description: reviewDecisionTool.description,
+        inputSchema: reviewDecisionQuery,
+        annotations: { readOnlyHint: true },
+      },
+      (args) => read(reviewDecisionTool.name, args),
+    );
+  }
+  if (input.tools?.some((tool) => tool.name === publishedReviewTool.name)) {
+    mcp.registerTool(
+      publishedReviewTool.name,
+      {
+        description: publishedReviewTool.description,
+        inputSchema: publishedReviewQuery,
+        annotations: { readOnlyHint: true },
+      },
+      (args) => read(publishedReviewTool.name, args),
+    );
+  }
   const transport = new WebStandardStreamableHTTPServerTransport({
     enableJsonResponse: true,
     sessionIdGenerator: randomUUID,

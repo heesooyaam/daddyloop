@@ -1,3 +1,4 @@
+import { githubReviewIdFromUrl } from '../providers/github.js';
 import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -8,6 +9,9 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type ReviewComment,
+  type ReviewHandle,
+  type Revision,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
@@ -149,8 +153,22 @@ export class Broker {
         if (task.ref.provider === 'github' && task.draftStart)
           return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
+        if (
+          task.ref.provider === 'arcadia' &&
+          existing &&
+          (existing.nodeId !== revision.revisionId || existing.revision.head !== revision.head)
+        )
+          throw new AppError(
+            'diff_unavailable',
+            'Arcanum has not confirmed the pinned diff for this review',
+            503,
+          );
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
+      (error) =>
+        task.ref.provider === 'arcadia' &&
+        error instanceof AppError &&
+        error.code === 'diff_unavailable',
     );
     task.review = review;
     return review;
@@ -226,7 +244,7 @@ export class Broker {
       }
     });
   }
-  readDecisions(job: Job, pinned: Task, input: unknown) {
+  assertReviewHistoryAccess(job: Job, pinned: Task) {
     const task = this.store.getTask(job.taskId);
     if (
       task.id !== pinned.id ||
@@ -238,8 +256,11 @@ export class Broker {
     )
       throw new AppError(
         'stale_run',
-        'This run no longer has access to the pinned decision history',
+        'This run no longer has access to the pinned decision history or published review evidence',
       );
+  }
+  readDecisions(job: Job, pinned: Task, input: unknown) {
+    this.assertReviewHistoryAccess(job, pinned);
     return readReviewDecisions(this.store, pinned, job.role, reviewDecisionQuery.parse(input));
   }
   async call(
@@ -259,19 +280,24 @@ export class Broker {
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
+    if (tool === 'read_review' && job.role === 'author') {
+      schemas.read_review.parse(input);
+      const { snapshot } = await this.readAuthorReview(task);
+      if (snapshot.status !== 'published')
+        throw new AppError('draft_private', 'Draft feedback has not been published', 403);
+      return snapshot;
+    }
     const provider = this.provider(prRef(task));
     if (!task.review)
       throw new AppError('review_missing', 'No native review is attached to this task');
     const snapshot = await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
-      if (job.role === 'author' && snapshot.status !== 'published')
-        throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;
     }
     const current = await provider.getPR(prRef(task));
     if (
-      current.state !== 'open' ||
+      !sameOpenTarget(task.pr, current) ||
       !sameRevision(current, task.revision) ||
       this.store.getTask(task.id).generation !== job.generation
     )
@@ -461,6 +487,406 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
+  private publications(task: Task) {
+    return this.store.db
+      .prepare(
+        "SELECT data FROM events WHERE task_id=? AND type IN ('review.published','review.findings_published') ORDER BY id DESC",
+      )
+      .all(task.id)
+      .map(
+        (event) =>
+          JSON.parse(String(event.data)) as {
+            reviewId?: string;
+            handle?: ReviewHandle;
+            snapshot?: ReviewSnapshot;
+            revision?: Revision;
+            comments?: number;
+          },
+      );
+  }
+
+  publicationHandle(task: Task, publication: ReturnType<Broker['publications']>[number]) {
+    const { reviewId, handle, snapshot } = publication;
+    const revision = snapshot?.revision ?? publication.revision;
+    if (!reviewId || !revision) return;
+    if (handle && handle.id === reviewId && sameRevision(handle.revision, revision)) return handle;
+    const record = this.store.db
+      .prepare(
+        `SELECT result FROM operations WHERE task_id=? AND status='done'
+        AND id GLOB ? AND json_extract(result,'$.id')=? AND json_extract(result,'$.marker')=id
+        LIMIT 1`,
+      )
+      .get(task.id, `daddyloop:${task.id}:*`, reviewId);
+    if (typeof record?.result === 'string') {
+      const saved = JSON.parse(record.result) as ReviewHandle;
+      if (sameRevision(saved.revision, revision)) return saved;
+    }
+    for (const { handle: observed } of this.observedPublications(task)) {
+      if (observed.id === reviewId && sameRevision(observed.revision, revision)) return observed;
+    }
+    // GitHub fetches directly by review ID. Other providers need the native marker.
+    if (task.ref.provider === 'github') return { id: reviewId, marker: '', revision };
+  }
+
+  private hasUnmatchedReviewLink(task: Task, snapshot: ReviewSnapshot, id?: string) {
+    if (!snapshot.url) return false;
+    let url: URL;
+    let expected: URL;
+    try {
+      url = new URL(snapshot.url);
+      expected = new URL(task.ref.url);
+    } catch {
+      return true;
+    }
+    const path = (value: URL) => {
+      const normalized = value.pathname.replace(/\/$/, '');
+      return task.ref.provider === 'github' ? normalized.toLowerCase() : normalized;
+    };
+    if (
+      url.origin !== expected.origin ||
+      path(url) !== path(expected) ||
+      url.username ||
+      url.password
+    )
+      return true;
+    if (task.ref.provider !== 'github' || !url.hash.startsWith('#pullrequestreview-')) return false;
+    const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
+    return !linkedId || !!(id && linkedId !== id);
+  }
+
+  hasRepairFeedback(task: Task) {
+    const feedback = task.feedback;
+    if (feedback?.status !== 'published') return false;
+    return (
+      !!task.feedbackReview ||
+      feedback.comments.length > 0 ||
+      !!githubReviewIdFromUrl(prRef(task), feedback.url) ||
+      this.publications(task).some((publication) => {
+        if (
+          !sameRevision(publication.snapshot?.revision ?? publication.revision, feedback.revision)
+        )
+          return false;
+        if (publication.snapshot?.comments.length || publication.comments) return true;
+        const handle = this.publicationHandle(task, publication);
+        return !!handle && this.recordedFindings(task, handle).known.length > 0;
+      })
+    );
+  }
+
+  async feedbackHandle(task: Task) {
+    const feedback = task.feedback;
+    if (
+      feedback?.status !== 'published' ||
+      this.hasUnmatchedReviewLink(task, feedback, task.feedbackReview?.id)
+    )
+      return;
+    if (task.feedbackReview)
+      return sameRevision(task.feedbackReview.revision, feedback.revision)
+        ? task.feedbackReview
+        : undefined;
+    const linkedId = githubReviewIdFromUrl(prRef(task), feedback.url);
+    const matches = (snapshot?: ReviewSnapshot) =>
+      snapshot?.status === 'published' &&
+      sameRevision(snapshot.revision, feedback.revision) &&
+      !this.hasUnmatchedReviewLink(task, snapshot, linkedId) &&
+      (!!linkedId ||
+        ((feedback.comments.length > 0 || snapshot.comments.length > 0) &&
+          feedback.comments.every((finding) =>
+            snapshot.comments.some((comment) => comment.id === finding.id),
+          )));
+    const handles = new Map<string, ReviewHandle | undefined>();
+    for (const publication of this.publications(task)) {
+      const { reviewId, snapshot } = publication;
+      if (
+        !reviewId ||
+        (linkedId && linkedId !== reviewId) ||
+        !sameRevision(snapshot?.revision ?? publication.revision, feedback.revision)
+      )
+        continue;
+      const handle = this.publicationHandle(task, publication);
+      if (matches(snapshot) || (linkedId && !snapshot)) handles.set(reviewId, handle);
+      else if (
+        handle &&
+        feedback.comments.length &&
+        (!snapshot || snapshot.status === 'published')
+      ) {
+        // A later author snapshot can include findings absent at publication time.
+        // Use only independently attributed IDs to read the native candidate.
+        const evidence = this.recordedFindings(task, handle);
+        if (handle.marker) {
+          const prefix = `<!-- ${handle.marker}:comment:`;
+          for (const finding of feedback.comments) {
+            if (
+              finding.body
+                .trimEnd()
+                .match(/<!-- daddyloop:[^<>\s]+:comment:[a-zA-Z0-9_-]+ -->$/)?.[0]
+                .startsWith(prefix)
+            )
+              evidence.known.push(finding.id);
+          }
+        }
+        const native = await this.readPublishedFindings(task, handle, evidence).catch(
+          (error: unknown) => {
+            if (!(error instanceof AppError) || error.code !== 'feedback_unconfirmed') throw error;
+            return undefined;
+          },
+        );
+        if (matches(native)) handles.set(reviewId, handle);
+      } else if (handle && !feedback.comments.length) {
+        const { known, minimumCount } = this.recordedFindings(task, handle);
+        if (known.length || minimumCount) handles.set(reviewId, handle);
+      }
+    }
+    if (
+      task.review &&
+      (!linkedId || linkedId === task.review.id) &&
+      sameRevision(task.review.revision, feedback.revision) &&
+      matches(task.snapshot)
+    )
+      handles.set(task.review.id, task.review);
+    if (handles.size === 1) return handles.values().next().value;
+  }
+
+  private *observedPublications(task: Task) {
+    for (const job of this.store.jobs(task.id)) {
+      if (job.kind !== 'review' && job.kind !== 'verify_merge') continue;
+      const handles = [
+        ...(job.publishedFindingReviews ?? [job.publishedFindingReview]),
+        job.mergeFindingReview,
+      ];
+      for (const handle of handles) {
+        const ids = handle && job.reviewFindingIds?.[handle.id];
+        if (handle && ids?.length) yield { handle, ids };
+      }
+    }
+  }
+
+  earlierPublications(task: Task) {
+    const publications = this.publications(task).filter((publication) => {
+      if (publication.reviewId === task.review?.id) return false;
+      if (publication.snapshot?.comments.length || publication.comments) return true;
+      const revision = publication.snapshot?.revision ?? publication.revision;
+      if (!publication.reviewId || !revision) return false;
+      const handle = this.publicationHandle(task, publication) ?? {
+        id: publication.reviewId,
+        revision,
+        marker: '',
+      };
+      return this.recordedFindings(task, handle).known.length > 0;
+    });
+    for (const { handle } of this.observedPublications(task)) {
+      if (
+        handle.id !== task.review?.id &&
+        !publications.some((publication) => publication.reviewId === handle.id)
+      )
+        publications.push({ reviewId: handle.id, handle, revision: handle.revision });
+    }
+    return publications;
+  }
+
+  recordedFindings(task: Task, handle: ReviewHandle, linkedFeedback = false) {
+    const known = new Set<string>();
+    let minimumCount = 0;
+    const remember = (snapshot?: ReviewSnapshot) => {
+      if (
+        snapshot?.status === 'published' &&
+        sameRevision(snapshot.revision, handle.revision) &&
+        !this.hasUnmatchedReviewLink(task, snapshot, handle.id)
+      )
+        for (const { id } of snapshot.comments) known.add(id);
+    };
+    for (const publication of this.publications(task)) {
+      if (publication.reviewId !== handle.id) continue;
+      remember(publication.snapshot);
+      // Old partial publications preserve a count without native IDs.
+      if (
+        !publication.snapshot &&
+        sameRevision(publication.revision, handle.revision) &&
+        typeof publication.comments === 'number' &&
+        Number.isSafeInteger(publication.comments)
+      )
+        minimumCount = Math.max(minimumCount, publication.comments);
+    }
+    if (task.feedbackReview?.id === handle.id || (!task.feedbackReview && linkedFeedback))
+      remember(task.feedback);
+    if (task.review?.id === handle.id) remember(task.snapshot);
+    // GitHub keeps a comment ID when publishing its draft. An old author
+    // snapshot without a review ID needs a completed write to this review.
+    const receipts = new Set(
+      (task.ref.provider === 'github' && handle.marker
+        ? this.store.db
+            .prepare(
+              `SELECT json_extract(result,'$.id') AS id FROM operations
+               WHERE task_id=? AND status='done' AND id GLOB ?`,
+            )
+            .all(task.id, handle.marker + ':comment:*')
+        : []
+      ).map((row) => String(row.id)),
+    );
+    const snapshots = this.store.db
+      .prepare(
+        `SELECT data FROM events WHERE task_id=? AND type='author.feedback_snapshot'
+         AND json_extract(data,'$.revision.head')=?`,
+      )
+      .all(task.id, handle.revision.head);
+    for (const row of snapshots) {
+      const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
+      if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
+        continue;
+      const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
+      if (this.hasUnmatchedReviewLink(task, snapshot, snapshot.reviewId)) continue;
+      const reviewId = snapshot.reviewId ?? linkedId;
+      for (const { id } of snapshot.comments) {
+        if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
+      }
+    }
+    for (const { handle: observed, ids } of this.observedPublications(task)) {
+      if (observed.id === handle.id && sameRevision(observed.revision, handle.revision))
+        for (const id of ids) known.add(id);
+    }
+    return { known: [...known], minimumCount };
+  }
+
+  async readPublishedFindings(
+    task: Task,
+    handle: ReviewHandle,
+    { known, minimumCount }: ReturnType<Broker['recordedFindings']>,
+  ) {
+    const native = await this.provider(prRef(task)).getReview(prRef(task), handle, {
+      publishedEvidence: true,
+      knownCommentIds: known,
+    });
+    const ids = new Set(native.comments.map((comment) => comment.id));
+    if (
+      native.status !== 'published' ||
+      !sameRevision(native.revision, handle.revision) ||
+      this.hasUnmatchedReviewLink(task, native, handle.id) ||
+      ids.size < minimumCount ||
+      known.some((id) => !ids.has(id))
+    )
+      throw new AppError(
+        'feedback_unconfirmed',
+        `Could not confirm the recorded findings in review ${handle.id}. Its last snapshot was preserved.`,
+      );
+    return native;
+  }
+
+  async readAuthorReview(task: Task) {
+    const repair = task.fixingMergeConflict || sameRevision(task.ciRepairRevision, task.revision);
+    if (!repair) {
+      const handle = task.review;
+      const evidence = handle ? this.recordedFindings(task, handle) : undefined;
+      const snapshot = await this.readCurrentReview(task, evidence?.known);
+      if (
+        snapshot.status === 'published' &&
+        new Set(snapshot.comments.map(({ id }) => id)).size < (evidence?.minimumCount ?? 0)
+      )
+        throw new AppError(
+          'feedback_unconfirmed',
+          'The native review returned fewer findings than recorded. Its last snapshot was preserved.',
+        );
+      return { snapshot, handle };
+    }
+    const handle = await this.feedbackHandle(task);
+    if (!handle)
+      throw new AppError(
+        'feedback_unconfirmed',
+        'Could not identify the published review for repair. The author copy was preserved.',
+      );
+    const evidence = this.recordedFindings(task, handle, true);
+    return { snapshot: await this.readPublishedFindings(task, handle, evidence), handle };
+  }
+
+  async readCurrentReview(
+    task: Task,
+    confirmedPublishedIds: readonly string[] = [],
+  ): Promise<ReviewSnapshot> {
+    const handle = task.review;
+    if (!handle) throw new AppError('review_missing', 'No native review to read');
+    const ref = prRef(task);
+    const provider = this.provider(ref);
+    if (!['gitlab', 'arcadia', 'github'].includes(ref.provider))
+      return provider.getReview(ref, handle);
+
+    // A snapshot is evidence only for its own review and revision.
+    const snapshots = [
+      task.snapshot,
+      task.feedbackReview?.id === handle.id ? task.feedback : undefined,
+    ].filter(
+      (snapshot): snapshot is ReviewSnapshot =>
+        !!snapshot &&
+        sameRevision(snapshot.revision, handle.revision) &&
+        (snapshot.status === 'draft' || snapshot.status === 'published'),
+    );
+    const hasPublishedSnapshot =
+      confirmedPublishedIds.length > 0 ||
+      snapshots.some((snapshot) => snapshot.status === 'published');
+    const nativeIds = new Set(confirmedPublishedIds);
+    const draftNotes = new Map<string, ReviewComment>();
+    for (const snapshot of snapshots) {
+      for (const comment of snapshot.comments) {
+        // A confirmed publication supersedes its draft, whose IDs can differ.
+        if (snapshot.status === 'published') nativeIds.add(comment.id);
+        else if (!hasPublishedSnapshot) draftNotes.set(comment.id, comment);
+      }
+    }
+    const requestedIds =
+      ref.provider === 'arcadia' ? [...nativeIds, ...draftNotes.keys()] : [...nativeIds];
+    const native = await provider.getReview(ref, handle, { knownCommentIds: requestedIds });
+    const hold = () => {
+      throw new AppError(
+        'feedback_unconfirmed',
+        'Could not account for the recorded findings in the native review. Inspect the preserved snapshot before continuing.',
+      );
+    };
+    if (native.status === 'partial' || native.status === 'missing') {
+      if (nativeIds.size || draftNotes.size) hold();
+      return native;
+    }
+    if (draftNotes.size) {
+      // A confirmed deletion through the review tool is durable even if the
+      // application stops before it refreshes the saved draft.
+      const removed = this.store.db
+        .prepare(
+          `SELECT json_extract(result,'$.id') AS comment_id FROM operations
+          WHERE task_id=? AND id GLOB ? AND status='done'`,
+        )
+        .all(task.id, handle.marker + ':*:remove_comment:*');
+      for (const row of removed)
+        if (typeof row.comment_id === 'string') draftNotes.delete(row.comment_id);
+    }
+    const ids = new Set(native.comments.map((comment) => comment.id));
+    if (native.status === 'draft') {
+      if (hasPublishedSnapshot || [...draftNotes.keys()].some((id) => !ids.has(id))) hold();
+      return native;
+    }
+    if (
+      !sameRevision(native.revision, handle.revision) ||
+      (!snapshots.length && (task.state === 'awaiting_publication' || task.state === 'fixing')) ||
+      [...nativeIds].some((id) => !ids.has(id))
+    )
+      hold();
+
+    // GitLab allocates a new ID on publication. Arcanum can also return a
+    // different ID for a draft; an intact marker proves that correspondence.
+    const marker = (comment: ReviewComment) =>
+      comment.body
+        .match(/<!-- ([^\s]+:comment:[a-zA-Z0-9_-]+) -->/g)
+        ?.find((tag) => tag.startsWith(`<!-- ${handle.marker}:comment:`));
+    const matched = new Set<string>();
+    for (const draft of draftNotes.values()) {
+      const key = marker(draft);
+      const candidates = native.comments.filter(
+        (note) =>
+          (ref.provider !== 'gitlab' && note.id === draft.id) ||
+          (ref.provider !== 'github' && key !== undefined && marker(note) === key),
+      );
+      if (candidates.length !== 1 || matched.has(candidates[0].id)) hold();
+      matched.add(candidates[0].id);
+    }
+    return native;
+  }
+
   async publish(
     task: Task,
     verifyFindings?: (pr: PullRequest, snapshot: ReviewSnapshot) => Promise<void>,
@@ -481,7 +907,7 @@ export class Broker {
           'stale_revision',
           'PR revision changed. This review cannot release feedback for the new revision.',
         );
-      const draft = await provider.getReview(ref, handle);
+      const draft = await this.readCurrentReview(task);
       if (verifyFindings) await verifyFindings(pr, draft);
       return draft;
     };
@@ -553,6 +979,6 @@ export class Broker {
         return { found: true, value: await send() };
       },
     );
-    return provider.getReview(prRef(task), task.review);
+    return this.readCurrentReview(task);
   }
 }

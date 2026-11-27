@@ -168,6 +168,7 @@ export interface Revision {
   revisionId?: string;
 }
 export interface PullRequest extends Revision {
+  diffHead?: string;
   draft?: boolean;
   mergeable?: boolean | null;
   mergeConflict?: boolean;
@@ -216,6 +217,16 @@ export interface ReviewSnapshot {
   url: string;
   revision: Revision;
 }
+export interface FixSave {
+  runId: string;
+  generation: number;
+  revision: Revision;
+  pr: PullRequest;
+  ref: PRRef;
+  summary: string;
+  checkpointTarget?: Revision;
+}
+
 /** Confirmed worker commits and the published feedback they were meant to fix. */
 export interface ReviewFixAttempt {
   runId: string;
@@ -295,7 +306,13 @@ export interface Task {
   authorThreadId?: string;
   reviewerThreadId?: string;
   reviewFinished?: boolean;
-  verifiedMerge?: Revision & { mergeCommit?: string };
+  verifiedMerge?: Revision & {
+    mergeCommit?: string;
+    publishedFindingReviews?: ReviewHandle[];
+    reviewFindingIds?: Record<string, string[]>;
+    findingVersions?: Record<string, string>;
+    mergeFindingVersions?: Record<string, string>;
+  };
   authorWorktree?: string;
   authorBaseHead?: string;
   pendingAuthorHead?: string;
@@ -320,6 +337,7 @@ export interface Task {
   fixingMergeConflict?: boolean;
   conflictCheckpoint?: string;
   deferredWorkerInstructions?: { id: string; text: string }[];
+  fixSave?: FixSave;
   pendingFix?: { revision: Revision; attempted?: boolean; confirmUntil?: string };
   reviewerWorktree?: string;
   arcWorkspaces?: Partial<
@@ -361,6 +379,8 @@ export interface Task {
   resumeState?: State;
   lastFeedbackHash?: string;
   feedback?: ReviewSnapshot;
+  feedbackReview?: ReviewHandle;
+  completedReview?: { runId: string; reviewId: string; revision: Revision };
   createdAt: string;
   updatedAt: string;
 }
@@ -402,12 +422,19 @@ export interface Decision {
   id: string;
   taskId: string;
   commentId?: string;
+  commentVersion?: string;
   outcome: 'withdrawn' | 'deferred' | 'rejected' | 'accepted' | 'verified' | 'disputed';
   reason: string;
   head: string;
   at: string;
 }
 export interface Job {
+  mergeFindingReview?: ReviewHandle;
+  publishedFindingReview?: ReviewHandle;
+  publishedFindingReviews?: ReviewHandle[];
+  reviewFindingIds?: Record<string, string[]>;
+  findingVersions?: Record<string, string>;
+  mergeFindingVersions?: Record<string, string>;
   instructions?: import('./instructions.js').AgentInstructions;
   id: string;
   taskId: string;

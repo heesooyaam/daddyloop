@@ -1,15 +1,23 @@
 import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
-import { reviewDecisionTool } from '../core/review-decisions.js';
+import {
+  publishedReviewTool,
+  readPublishedReview,
+  reviewDecisionTool,
+} from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
-import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
+import {
+  sameOpenTarget,
+  samePullRequestTarget,
+  staleConflictPreparation,
+} from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
-import type { Job, ResourceStatus, Task } from '../core/types.js';
+import type { FixSave, Job, ResourceStatus, ReviewSnapshot, Task } from '../core/types.js';
 import { AppError, now, sameRevision, sameAgentProfile, prRef, isTicket } from '../core/types.js';
 import { redact, redactEvent } from '../core/security.js';
-import type { AgentRuntime } from './agent.js';
+import type { AgentRuntime, RuntimeTool } from './agent.js';
 import { Workspaces, git } from './workspaces.js';
 import { DemoProvider } from '../providers/demo.js';
 import { buildContext } from './context.js';
@@ -104,6 +112,7 @@ export class Worker {
     private pollMs = 15000,
     private maxAgents = 1,
   ) {
+    engine.readFixSave = (task, save) => this.workspaces.recoverFix(task, save);
     engine.onCancel = (id) => this.active.get(id)?.abort();
   }
   start() {
@@ -216,6 +225,28 @@ export class Worker {
           }
         }
         for (const task of tasks) {
+          if (
+            task.fixSave &&
+            task.state !== 'paused' &&
+            resources.ok &&
+            !this.active.has(task.id)
+          ) {
+            const group = task.groupId ? store.getGroup(task.groupId) : undefined;
+            if (
+              !group ||
+              (!group.deletedAt &&
+                !group.deletion &&
+                !['paused', 'archived'].includes(group.daddyState ?? ''))
+            )
+              try {
+                await this.engine.recoverFixSave(task.id);
+              } catch (error) {
+                store.event(task.id, 'author.save_recovery_failed', {
+                  error: redact(String(error)),
+                });
+              }
+            continue;
+          }
           if (githubWait(store, task.ref)) continue;
           if (
             this.refreshIssueSource &&
@@ -252,8 +283,13 @@ export class Worker {
             task.ref.provider === 'github'
           ) {
             try {
-              await this.engine.recoverInterruptedFix(task.id, (t) =>
-                this.workspaces.commitFix(t, 'Preserve review fixes before conflict resolution'),
+              await this.engine.recoverInterruptedFix(task.id, (t, save) =>
+                this.workspaces.commitFix(
+                  t,
+                  'Preserve review fixes before conflict resolution',
+                  undefined,
+                  save,
+                ),
               );
             } catch (error) {
               store.event(task.id, 'conflict.recovery_failed', { error: redact(String(error)) });
@@ -348,7 +384,11 @@ export class Worker {
             await this.engine.review(task.id);
             if (this.stopped) return;
           } catch (error) {
-            if (error instanceof GitHubRetryError) continue;
+            if (
+              error instanceof GitHubRetryError ||
+              (error instanceof AppError && error.code === 'diff_unavailable')
+            )
+              continue;
             const current = store.getTask(task.id);
             if (
               current.generation === task.generation &&
@@ -559,11 +599,12 @@ export class Worker {
           job.kind === 'fix' &&
             job.deferredResult.status === 'incomplete' &&
             !task.fixingMergeConflict
-            ? (t) =>
+            ? (t, save) =>
                 this.workspaces.commitFix(
                   t,
                   'Preserve review fixes before conflict resolution',
                   abort.signal,
+                  save,
                 )
             : undefined,
         );
@@ -574,6 +615,16 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      if (
+        job.kind === 'fix' &&
+        !task.fixingMergeConflict &&
+        startingPR &&
+        !sameOpenTarget(task.pr, startingPR)
+      )
+        throw new AppError(
+          'repair_target_changed',
+          'The PR branches, repository or open state changed before the queued fix started. The author copy was preserved.',
+        );
       const revisingPlan = job.kind === 'plan' && !isTicket(task);
       if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR)) {
         await this.engine.reconcile(task.id);
@@ -626,9 +677,13 @@ export class Worker {
           'The PR changed before the queued job started. Reconcile and review the new revision.',
         );
       }
+      if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR))
+        throw new AppError('stale_revision', 'The PR target changed before review started.');
       if (
         job.kind === 'verify_merge' &&
-        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+        (startingPR?.state !== 'merged' ||
+          !samePullRequestTarget(task.pr, startingPR) ||
+          startingPR.mergeCommit !== task.pr?.mergeCommit)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
@@ -718,19 +773,42 @@ export class Worker {
         return;
       }
 
-      let preservedCopy: string | undefined;
-      if (repairingConflict) {
-        preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if ((job.kind === 'fix' && !repairingCI) || revisingPlan) {
-        const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
-        if (actual.status !== 'published')
+      let publishedReviews: ReviewSnapshot[] | undefined;
+      if (!isTicket(task) && (job.kind === 'review' || job.kind === 'verify_merge')) {
+        publishedReviews = await this.engine.refreshFindingEvidence(task, job);
+        if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'The task changed while findings were being read.');
+        store.saveTask(task);
+        store.saveJob(job);
+      }
+      const repairHasFeedback = job.kind === 'fix' && this.engine.broker.hasRepairFeedback(task);
+      const needsFixFeedback =
+        job.kind === 'fix' && (!(repairingConflict || repairingCI) || repairHasFeedback);
+      const readFeedback = async () => {
+        const actual =
+          job.kind === 'fix'
+            ? await this.engine.broker.readAuthorReview(task)
+            : { snapshot: await this.engine.broker.readCurrentReview(task), handle: task.review };
+        if (actual.snapshot.status !== 'published')
           throw new Error(
             'The published review changed before the author started; feedback was not released.',
           );
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        if (!(await this.engine.admitReviewWork(job, actual, startingPR!))) {
+        return actual;
+      };
+      if (repairingConflict && repairHasFeedback) {
+        const { snapshot, handle } = await readFeedback();
+        this.engine.setFeedback(task, snapshot, handle);
+        store.saveTask(task);
+      }
+      const preservedCopy = repairingConflict
+        ? await this.workspaces.prepareConflict(task, abort.signal)
+        : undefined;
+      if (needsFixFeedback || revisingPlan) {
+        const { snapshot, handle } = await readFeedback();
+        if (!(await this.engine.admitReviewWork(job, snapshot, startingPR!, handle))) {
           job.status = 'cancelled';
           return;
         }
@@ -744,7 +822,7 @@ export class Worker {
       }
       const readOnlyWork =
         job.kind === 'plan' || (task.reportOnly && isTicket(task) && job.kind === 'implement');
-      const tools = readOnlyWork
+      const tools: RuntimeTool[] = readOnlyWork
         ? []
         : job.kind === 'verify_merge'
           ? [reviewDecisionTool]
@@ -753,12 +831,57 @@ export class Worker {
             : isTicket(task)
               ? dynamicTools
               : [...dynamicTools, reviewDecisionTool];
+      if (publishedReviews?.length) tools.push(publishedReviewTool);
       let unconfirmedTools: { name: string; args: unknown; error: GitHubRetryError }[] = [];
       const forgetRetry = (name: string, args: unknown) => {
         unconfirmedTools = unconfirmedTools.filter(
           (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
         );
       };
+      if (
+        startingPR &&
+        !demo &&
+        (job.kind === 'fix' || job.kind === 'review' || job.kind === 'verify_merge')
+      ) {
+        const current = await this.engine.provider(prRef(task)).getPR(prRef(task));
+        if (job.kind === 'verify_merge') {
+          if (
+            current.state !== 'merged' ||
+            !samePullRequestTarget(task.pr, current) ||
+            current.mergeCommit !== startingPR.mergeCommit ||
+            !sameRevision(startingPR, current)
+          )
+            throw new AppError(
+              'merge_unconfirmed',
+              'The merged revision changed before verification',
+            );
+        } else if (job.kind === 'review') {
+          if (!sameOpenTarget(task.pr, current) || !sameRevision(startingPR, current))
+            throw new AppError('stale_revision', 'The PR target changed before review started.');
+          if (await this.engine.deferQueuedReview(job, current)) {
+            job.status = 'cancelled';
+            return;
+          }
+        } else {
+          if (
+            !sameOpenTarget(task.pr, current) ||
+            (repairingConflict && current.draft !== false) ||
+            (!sameRevision(startingPR, current) &&
+              (repairingConflict ||
+                !(await this.engine.fixCanContinueOnAdvancedBase(task, current))))
+          )
+            throw new AppError(
+              'repair_target_changed',
+              'The PR destination, revision or open state changed before the queued fix started. The author copy was preserved.',
+            );
+          if (repairingCI && (await this.engine.skipObsoleteCIFix(job, current))) {
+            job.status = 'cancelled';
+            return;
+          }
+        }
+        if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed before the agent started');
+      }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,
@@ -770,13 +893,19 @@ export class Worker {
               ...(this.workspaces.readPaths?.(task) ?? []),
               ...(preservedCopy ? [preservedCopy] : []),
             ],
-        prompt: buildContext(store, task, job, [
-          preservedCopy &&
-            `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
-          job.kind === 'review' &&
-            task.draftRecheck &&
-            `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
-        ]),
+        prompt: buildContext(
+          store,
+          task,
+          job,
+          [
+            preservedCopy &&
+              `Earlier uncommitted work is preserved at ${preservedCopy}. Inspect its Git diff and untracked files. Reconcile relevant changes with the current merge in your active checkout, leave unrelated files in the preserved copy, and account for the earlier work in your report.`,
+            job.kind === 'review' &&
+              task.draftRecheck &&
+              `The target branch advanced. Independently recheck each remaining draft finding (${task.draftRecheck.commentIds.join(', ')}). For every finding still valid, call edit_comment with its native ID and the verified text (omit the service marker). Remove obsolete findings with a reason. Call set_summary with your current assessment. Publication waits for these checks.`,
+          ],
+          publishedReviews,
+        ),
         signal: abort.signal,
         tools,
         onSession: (threadId, turnId) => {
@@ -836,6 +965,16 @@ export class Worker {
                 );
               return this.engine.broker.readDecisions(job, task, args);
             }
+            if (name === publishedReviewTool.name) {
+              if (!publishedReviews?.length || !tools.includes(publishedReviewTool))
+                throw new AppError(
+                  'role_forbidden',
+                  'Published evidence is unavailable to this run',
+                  403,
+                );
+              this.engine.broker.assertReviewHistoryAccess(job, task);
+              return readPublishedReview(publishedReviews, args);
+            }
             const value = await this.engine.broker.call(job, name, args, callId);
             if (unconfirmedTools.length) forgetRetry(name, args);
             return value;
@@ -888,7 +1027,7 @@ export class Worker {
           await new DemoProvider(store).advance(prRef(task));
         const saveFix =
           !demo && job.kind === 'fix'
-            ? (current: Task) =>
+            ? (current: Task, save?: FixSave) =>
                 this.workspaces.commitFix(
                   current,
                   repairingConflict
@@ -897,12 +1036,17 @@ export class Worker {
                       ? 'Fix failing CI'
                       : `Address review feedback (round ${current.round})`,
                   abort.signal,
+                  save,
                 )
             : undefined;
         try {
           await this.engine.completeJob(job, result, saveFix);
         } catch (error) {
-          if (error instanceof GitHubRetryError) job.deferredResult = result;
+          if (
+            error instanceof GitHubRetryError ||
+            (error instanceof AppError && error.code === 'diff_unavailable')
+          )
+            job.deferredResult = result;
           throw error;
         }
       }
@@ -911,11 +1055,17 @@ export class Worker {
       const capacity =
         error instanceof AppError && error.code === 'workspace_capacity' && !abort.signal.aborted;
       const quota = error instanceof GitHubRetryError && !abort.signal.aborted;
-      job.status = capacity || quota ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
+      const diffPending =
+        error instanceof AppError &&
+        error.code === 'diff_unavailable' &&
+        !abort.signal.aborted &&
+        (job.kind === 'review' || job.kind === 'verify_merge' || !!job.deferredResult);
+      job.status =
+        capacity || quota || diffPending ? 'queued' : abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = redact(String(error));
       if (error instanceof AppError) job.errorCode = error.code;
       if (quota) job.notBefore = new Date(error.until).toISOString();
-      else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
+      else if (capacity || diffPending) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
       if (

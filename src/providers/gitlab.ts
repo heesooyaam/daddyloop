@@ -8,7 +8,7 @@ import {
   type ReviewComment,
   type Location,
 } from '../core/types.js';
-import { type ReviewProvider, tag } from './provider.js';
+import { type ReviewProvider, type ReviewReadOptions, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 type Note = {
   id: number;
@@ -61,6 +61,7 @@ export class GitLabProvider implements ReviewProvider {
       source_branch: string;
       target_branch: string;
       source_project_id: number;
+      target_project_id?: number;
       diff_refs: { head_sha: string; base_sha: string; start_sha: string };
       merge_commit_sha?: string;
       squash_commit_sha?: string;
@@ -71,7 +72,7 @@ export class GitLabProvider implements ReviewProvider {
         web_url: string;
       } | null;
     }>('GET', path(ref));
-    if (!mr.diff_refs?.head_sha)
+    if (!mr.diff_refs?.head_sha || (mr.sha && mr.sha !== mr.diff_refs.head_sha))
       throw new AppError(
         'diff_unavailable',
         'GitLab has not prepared the merge request diff yet',
@@ -81,6 +82,13 @@ export class GitLabProvider implements ReviewProvider {
       'GET',
       `/projects/${mr.source_project_id}`,
     );
+    const target =
+      mr.target_project_id && mr.target_project_id !== mr.source_project_id
+        ? await this.http.request<{ http_url_to_repo: string }>(
+            'GET',
+            `/projects/${mr.target_project_id}`,
+          )
+        : undefined;
     const pipeline = mr.head_pipeline?.sha === mr.diff_refs.head_sha ? mr.head_pipeline : null;
     const status = pipeline?.status;
     return {
@@ -91,6 +99,7 @@ export class GitLabProvider implements ReviewProvider {
       title: mr.title,
       body: mr.description ?? '',
       cloneUrl: workspace.http_url_to_repo,
+      targetCloneUrl: target?.http_url_to_repo,
       branch: mr.source_branch,
       targetBranch: mr.target_branch,
       state: mr.state === 'merged' ? 'merged' : mr.state === 'opened' ? 'open' : 'closed',
@@ -172,7 +181,11 @@ export class GitLabProvider implements ReviewProvider {
       baselineNoteId: Math.max(0, ...notes.map((n) => n.id)),
     };
   }
-  async getReview(ref: PRRef, review: ReviewHandle): Promise<ReviewSnapshot> {
+  async getReview(
+    ref: PRRef,
+    review: ReviewHandle,
+    options?: ReviewReadOptions,
+  ): Promise<ReviewSnapshot> {
     const [drafts, notes] = await Promise.all([
       this.http.pages<Note>(`${path(ref)}/draft_notes`),
       this.http.pages<Note>(`${path(ref)}/notes`),
@@ -180,27 +193,38 @@ export class GitLabProvider implements ReviewProvider {
     const isSummary = (n: Note) => body(n).includes(tag(review.marker));
     const isComment = (n: Note) => body(n).includes(`<!-- ${review.marker}:comment:`);
     const ownAuthor = (n: Note) => String(n.author_id ?? n.author?.id) === review.authorId;
-    const summary = drafts.find(isSummary) ?? notes.find((n) => isSummary(n) && ownAuthor(n));
+    const draft = drafts.find(isSummary);
+    const summary = draft ?? notes.find((n) => isSummary(n) && ownAuthor(n));
+    const publishedEvidence = options?.publishedEvidence && summary && !draft;
+    const known = summary && !draft ? new Set(options?.knownCommentIds) : undefined;
     const draftComments = drafts.filter(isComment);
-    const published = notes.filter((n) => isComment(n) && ownAuthor(n));
+    // GitLab allocates draft and published IDs separately.
+    const published = notes.filter(
+      (n) => ownAuthor(n) && (isComment(n) || known?.has(String(n.id))),
+    );
+    const unresolvedIdentity = notes.some((n) => known?.has(String(n.id)) && !ownAuthor(n));
     const unknown =
-      drafts.some((n) => !isSummary(n) && !isComment(n)) ||
-      notes.some(
-        (n) =>
-          ownAuthor(n) &&
-          !n.system &&
-          n.id > (review.baselineNoteId ?? Infinity) &&
-          !isSummary(n) &&
-          !isComment(n),
-      );
-    const stillDraft = drafts.some(isSummary);
+      !publishedEvidence &&
+      (drafts.some((n) => !isSummary(n) && !isComment(n)) ||
+        notes.some(
+          (n) =>
+            ownAuthor(n) &&
+            !n.system &&
+            n.id > (review.baselineNoteId ?? Infinity) &&
+            !isSummary(n) &&
+            !isComment(n) &&
+            !known?.has(String(n.id)),
+        ));
     return {
       status:
-        unknown || (stillDraft && published.length > 0) || (!stillDraft && draftComments.length > 0)
+        unresolvedIdentity ||
+        unknown ||
+        (draft && published.length > 0) ||
+        (!draft && draftComments.length > 0)
           ? 'partial'
           : !summary
             ? 'missing'
-            : stillDraft
+            : draft
               ? 'draft'
               : 'published',
       body: summary ? body(summary) : '',
