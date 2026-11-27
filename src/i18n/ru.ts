@@ -542,6 +542,14 @@ Object.assign(ru, {
   'Waiting for CI to finish before review': 'Ждёт завершения CI перед ревью',
   'Waiting for CI to pass after the worker investigated':
     'Воркер проверил сбой. Задача ждёт зелёного CI',
+  'Paused after repeated planning': 'На паузе после повторного планирования',
+  'Repeated architecture planning stopped': 'Повторный запуск архитектора остановлен',
+  'Automatic planning repeated on the same published review without a recoverable plan':
+    'Сервис повторно запросил план по тем же замечаниям. Подтверждённый план восстановить не удалось. Задача на паузе.',
+  'Paused at the review round limit': 'На паузе по лимиту ревью',
+  'Review round limit reached': 'Достигнут лимит раундов ревью',
+  'Paused before review round {next}. Task limit: {limit}.':
+    'Следующий раунд — {next}. Задача остановлена на лимите {limit}.',
   'This task reached its review round limit': 'Задача достигла своего лимита раундов ревью',
   'Waiting for CI': 'Ожидаем проверки',
   'Review is complete. Required checks must finish first.':

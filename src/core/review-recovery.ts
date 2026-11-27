@@ -65,6 +65,18 @@ export function repeatedReviewFindings(
     !sameRevision(snapshot.revision, task.review.revision)
   )
     return;
+  const last = task.reviewRecovery;
+  // The worker consumes the whole publication and the accepted plan. Re-entering
+  // with the same evidence must not elect a different subset of its findings.
+  if (
+    last &&
+    last.reviewId === task.review.id &&
+    sameRevision(last.revision, snapshot.revision) &&
+    last.branch === task.pr.branch &&
+    last.targetBranch === task.pr.targetBranch &&
+    last.fingerprint === feedbackFingerprint(snapshot)
+  )
+    return;
   let keys = [
     ...new Set(
       snapshot.comments.map((c) => findingKey(task.id, c)).filter((k): k is string => !!k),
@@ -113,7 +125,6 @@ export function repeatedReviewFindings(
     cursor = Number(row.id);
   }
   if (attempts.length !== 2) return;
-  const last = task.reviewRecovery;
   if (
     last &&
     last.branch === task.pr.branch &&
@@ -132,6 +143,67 @@ export function repeatedReviewFindings(
     criteria: keys.sort(),
     attempts: attempts.reverse(),
   };
+}
+
+/** Recover a previously completed handoff on stores affected by repeated planning. */
+export function completedArchitectPlan(store: Store, task: Task, recovery: ReviewRecovery) {
+  const row = store.db
+    .prepare(
+      `
+    SELECT p.data AS receipt, q.data AS request, m.data AS message, p.run_id AS runId
+    FROM events p
+    JOIN jobs j ON j.id=p.run_id AND j.task_id=p.task_id AND j.status='completed'
+    JOIN jobs original ON original.id=? AND original.task_id=p.task_id
+    JOIN events q ON q.run_id=j.id AND q.task_id=p.task_id AND q.type='review.architect_requested'
+    JOIN messages m ON m.id=j.id AND m.task_id=p.task_id
+    WHERE p.task_id=? AND p.type='review.architect_planned'
+      AND json_extract(j.data,'$.kind')='plan'
+      AND json_extract(j.data,'$.generation')=json_extract(original.data,'$.generation')
+      AND json_extract(p.data,'$.reviewId')=? AND json_extract(p.data,'$.criteria')=?
+      AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.task_id=p.task_id AND n.rowid>m.rowid
+        AND json_extract(n.data,'$.sender')='user')
+    ORDER BY p.id DESC LIMIT 1
+  `,
+    )
+    .get(recovery.runId, task.id, recovery.reviewId, JSON.stringify(recovery.criteria));
+  if (!row) return;
+  const receipt = JSON.parse(String(row.receipt));
+  const request = JSON.parse(String(row.request));
+  const message = JSON.parse(String(row.message));
+  if (
+    !sameRevision(receipt.revision, recovery.revision) ||
+    request.reviewId !== recovery.reviewId ||
+    !sameRevision(request.revision, recovery.revision) ||
+    JSON.stringify(request.attempts) !== JSON.stringify(recovery.attempts) ||
+    message.role !== 'author' ||
+    message.sender !== 'agent' ||
+    message.runId !== row.runId ||
+    typeof message.text !== 'string' ||
+    !message.text.trim()
+  )
+    return;
+  if (receipt.fingerprint !== undefined) {
+    if (receipt.fingerprint !== recovery.fingerprint) return;
+  } else {
+    // Old receipts predate fingerprints. Require the original published snapshot,
+    // the same worker commit edges and the original job generation as evidence.
+    const publication = store.db
+      .prepare(
+        `SELECT json_extract(data,'$.snapshot') AS snapshot
+      FROM events WHERE task_id=? AND type='review.published' AND json_extract(data,'$.reviewId')=?
+      ORDER BY id DESC LIMIT 1`,
+      )
+      .get(task.id, recovery.reviewId);
+    if (typeof publication?.snapshot !== 'string') return;
+    const published: ReviewSnapshot = JSON.parse(publication.snapshot);
+    if (
+      published.status !== 'published' ||
+      !sameRevision(published.revision, recovery.revision) ||
+      feedbackFingerprint(published) !== recovery.fingerprint
+    )
+      return;
+  }
+  return { runId: String(row.runId), text: message.text.trim() as string };
 }
 
 export function recoveryEvidence(store: Store, task: Task, recovery: ReviewRecovery) {
