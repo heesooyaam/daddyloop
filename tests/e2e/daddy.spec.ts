@@ -565,7 +565,34 @@ test('supports the phone task board, pool controls and workspace directory choos
     engine: 'codex',
     model: 'gpt-6-astra',
   });
-  await choose();
+  let releaseCatalogue!: () => void;
+  const pendingCatalogue = new Promise<void>((resolve) => {
+    releaseCatalogue = resolve;
+  });
+  const agentsRoute = '**/api/agents';
+  await page.route(agentsRoute, async (route) => {
+    await pendingCatalogue;
+    await route.continue();
+  });
+  const requestedCatalogue = page.waitForRequest(agentsRoute);
+  const model = workers.getByLabel('Model', { exact: true });
+  const effort = workers.getByLabel('Reasoning effort', { exact: true });
+  try {
+    await slot.click();
+    await requestedCatalogue;
+    await expect(model).toHaveValue('gpt-6-astra');
+    await model.selectOption('gpt-6-astra');
+    await expect(model).toHaveValue('gpt-6-astra');
+    await expect(effort).toBeEnabled();
+    await model.selectOption('');
+    await expect(model).toHaveValue('');
+    await expect(effort).toBeDisabled();
+  } finally {
+    releaseCatalogue();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+  await model.selectOption('gpt-6-astra');
+  await effort.selectOption('medium');
   expect((await save()).status()).toBe(200);
   await expect(slot).toContainText('gpt-6-astra · medium');
   await slot.click();

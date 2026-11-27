@@ -84,7 +84,9 @@ export function AgentProfileFields({
           aria-label={scopedLabel('Model')}
           value={profile.model ?? ''}
           onChange={(event) => {
-            const selected = choices.find((item) => item.id === event.target.value);
+            const modelId = event.target.value;
+            if (modelId === profile.model) return;
+            const selected = choices.find((item) => item.id === modelId);
             onChange({
               engine: profile.engine,
               ...(selected
