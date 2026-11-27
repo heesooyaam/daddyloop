@@ -18,7 +18,7 @@ When a worker disputes a published finding, the task shows **Waiting for daddyâ€
 
 ## Regression tests and independent review
 
-For a pull request that requires CI, the service checks the pushed commit before opening a review round and again before starting a queued reviewer. Pending or missing checks put the task in **Waiting for CI before review**. A failed check goes to the assigned worker with its name and link. A new commit goes through CI again. An explicit waiver applies only to the pinned revision. Automatic merge still requires passing CI.
+For a pull request that requires CI, the service checks the pushed commit before opening a review round and again before starting a queued reviewer. The same check applies when the target branch moves during a pause and a draft needs to continue on the new base. Pending or missing checks put the task in **Waiting for CI before review**. A failed check goes to the assigned worker with its name and link. A new commit goes through CI again. An explicit waiver applies only to the pinned revision. Automatic merge still requires passing CI.
 
 A task may have its own review round limit. A limit of 15 allows round 15 and pauses that task before round 16. Existing drafts can continue within their round. Other tasks keep running. Change or clear the limit and resume the task to continue.
 

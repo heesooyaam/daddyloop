@@ -395,8 +395,8 @@ export class Engine {
         task.round++;
       }
       const parked =
-        task.reviewChecksJob && this.store.jobs(id).find((j) => j.id === task.reviewChecksJob);
-      delete task.reviewChecksJob;
+        task.reviewAfterChecks ??
+        (task.reviewChecksJob && this.store.jobs(id).find((j) => j.id === task.reviewChecksJob));
       delete task.ciRepairRevision;
       if (!task.review && task.ref.provider === 'github') {
         if (!task.draftStart) {
@@ -456,24 +456,19 @@ export class Engine {
       this.store.transaction(() => {
         task.pendingFix = undefined;
         if (clarification?.trim()) this.rememberClarification(task, clarification);
-        this.state(task, 'reviewing', `Independent review, round ${task.round}`);
-        const job = this.store.enqueue(
-          task,
-          'reviewer',
-          'review',
-          parked && !clarification?.trim()
-            ? parked.input
-            : retry
-              ? clarification?.trim()
-                ? clarifiedReviewPrefix + clarification.trim()
-                : reviewRetryInstruction
-              : nativeReviewInstruction(task),
-        );
-        if (parked) {
-          job.freshContextRetry = parked.freshContextRetry;
-          job.timeoutRetry = parked.timeoutRetry;
-          this.store.saveJob(job);
-        }
+        const input =
+          clarification?.trim() && retry
+            ? clarifiedReviewPrefix + clarification.trim()
+            : parked
+              ? parked.input
+              : retry
+                ? reviewRetryInstruction
+                : nativeReviewInstruction(task);
+        this.queueNativeReview(task, pr, `Independent review, round ${task.round}`, {
+          input,
+          freshContextRetry: parked ? parked.freshContextRetry : undefined,
+          timeoutRetry: parked ? parked.timeoutRetry : undefined,
+        });
       });
       return task;
     });
@@ -505,7 +500,11 @@ export class Engine {
       if (!needsReviewChecks(task, pr)) return false;
       this.store.transaction(() => {
         if (sameRevision(task.revision, pr)) task.pr = pr;
-        task.reviewChecksJob = job.id;
+        task.reviewAfterChecks = {
+          input: job.input,
+          freshContextRetry: job.freshContextRetry,
+          timeoutRetry: job.timeoutRetry,
+        };
         this.parkForCI(task, job);
       });
       return true;
@@ -1018,6 +1017,7 @@ export class Engine {
     task.approvedAt = undefined;
     task.checksWaivedAt = undefined;
     delete task.reviewChecksJob;
+    delete task.reviewAfterChecks;
     delete task.ciRepairRevision;
     task.reviewFinished = false;
     task.pr = pr;
@@ -1041,7 +1041,35 @@ export class Engine {
       'Verify the worker report and its evidence against the original requirements. Report any missing work.',
     );
   }
-  private restartNativeReview(task: Task, pr: PullRequest, draft: ReviewSnapshot, reason: string) {
+  private queueNativeReview(
+    task: Task,
+    pr: PullRequest,
+    reason: string,
+    turn: NonNullable<Task['reviewAfterChecks']>,
+  ) {
+    task.pr = pr;
+    delete task.reviewChecksJob;
+    if (needsReviewChecks(task, pr)) {
+      task.reviewAfterChecks = turn;
+      this.state(task, 'awaiting_review_checks', 'Waiting for CI results before review');
+      return;
+    }
+    delete task.reviewAfterChecks;
+    this.state(task, 'reviewing', reason);
+    const job = this.store.enqueue(task, 'reviewer', 'review', turn.input);
+    if (turn.freshContextRetry || turn.timeoutRetry) {
+      job.freshContextRetry = turn.freshContextRetry;
+      job.timeoutRetry = turn.timeoutRetry;
+      this.store.saveJob(job);
+    }
+  }
+  private restartNativeReview(
+    task: Task,
+    pr: PullRequest,
+    draft: ReviewSnapshot,
+    reason: string,
+    retry: Pick<Job, 'freshContextRetry' | 'timeoutRetry'> = task.reviewAfterChecks ?? {},
+  ) {
     const handle = task.review!;
     const recheck =
       !sameRevision(handle.revision, pr) && this.draftHasWork(handle, draft)
@@ -1054,13 +1082,11 @@ export class Engine {
     task.snapshot = { ...draft, revision: revisionOf(pr) };
     task.draftRecheck = recheck;
     task.resumeState = 'reviewing';
-    this.state(task, 'reviewing', reason);
-    return this.store.enqueue(
-      task,
-      'reviewer',
-      'review',
-      'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
-    );
+    this.queueNativeReview(task, pr, reason, {
+      ...retry,
+      input:
+        'Independently review the full current revision. Read the existing native draft and recorded decisions before editing. Verify all earlier published findings.',
+    });
   }
   private draftHasWork(handle: ReviewHandle, draft: ReviewSnapshot) {
     return (
@@ -1467,17 +1493,18 @@ export class Engine {
         }
         if (restarted && this.draftHasWork(task.review!, draft))
           task.draftRecheck = { commentIds: draft.comments.map((comment) => comment.id) };
-        const retry = this.restartNativeReview(
+        this.restartNativeReview(
           task,
           pr,
           draft,
           context
             ? 'Reviewer context was full. Restarting the independent review.'
             : 'Continuing the independent review on the verified PR head',
+          {
+            freshContextRetry: job.freshContextRetry || !!context,
+            timeoutRetry: job.timeoutRetry || timeout,
+          },
         );
-        retry.freshContextRetry = job.freshContextRetry || !!context;
-        retry.timeoutRetry = job.timeoutRetry || timeout;
-        this.store.saveJob(retry);
       });
     });
   }
@@ -3063,18 +3090,17 @@ export class Engine {
         if (task.draftRecheck) {
           if (!this.draftRechecked(task, job.id, snapshot)) {
             if (!task.draftRecheck.retried) {
-              task.draftRecheck.retried = true;
-              this.state(
-                task,
-                'reviewing',
-                'Rechecking the existing draft on the updated target branch',
-              );
-              this.store.enqueue(
-                task,
-                'reviewer',
-                'review',
-                'Finish rechecking the carried draft before publication.',
-              );
+              this.store.transaction(() => {
+                task.draftRecheck!.retried = true;
+                this.queueNativeReview(
+                  task,
+                  pr,
+                  'Rechecking the existing draft on the updated target branch',
+                  {
+                    input: 'Finish rechecking the carried draft before publication.',
+                  },
+                );
+              });
             } else {
               this.state(
                 task,
