@@ -216,6 +216,52 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       ).inline_keyboard.flat();
     const buttonFor = (label: string) =>
       keyboard().find((button) => button.text.replace(/^✓ /, '') === label)!.callback_data;
+    const limitUrl = session + '/tasks/' + task!.id + '/review-limit';
+    const setLimit = (limit: number | null, previous: number | null) =>
+      app.inject({
+        method: 'POST',
+        url: limitUrl,
+        payload: {
+          limit,
+          expected: {
+            task: {
+              head: task!.revision?.head ?? '',
+              revision: task!.revision,
+              generation: task!.generation,
+            },
+            groupGeneration: group.generation,
+            limit: previous,
+          },
+        },
+      });
+    const openLimit = async (inPrivate: boolean) => {
+      await bot.handle((inPrivate ? privateMessage : message)(`/task ${id}`));
+      const update = click(buttonFor('Review round limit'));
+      if (inPrivate) {
+        update.callback_query!.message!.chat = { id: 7, type: 'private' };
+        delete update.callback_query!.message!.message_thread_id;
+      }
+      await bot.handle(update);
+      const command = /\/review_limit [A-Za-z0-9_-]{16}/.exec(String(lastText()))?.[0];
+      expect(command).toBeDefined();
+      return command;
+    };
+    expect((await setLimit(15, null)).statusCode).toBe(200);
+    const staleLimit = await openLimit(false);
+    expect((await setLimit(16, 15)).statusCode).toBe(200);
+    expect((await setLimit(null, 15)).statusCode).toBe(409);
+    await bot.handle(message(staleLimit + ' off'));
+    expect(lastText()).toContain('Settings changed');
+    const freshLimit = await openLimit(false);
+    await bot.handle(message(freshLimit + ' off', 7, 18));
+    expect(f.store.getTask(task!.id).reviewRoundLimit).toBe(16);
+    await bot.handle(message(freshLimit + ' off'));
+    expect((await app.inject(session)).json().tasks[0].reviewRoundLimit).toBeNull();
+    const privateLimit = await openLimit(true);
+    await bot.handle(privateMessage(privateLimit + ' 18'));
+    expect((await app.inject(session)).json().tasks[0].reviewRoundLimit).toBe(18);
+    expect((await setLimit(null, 18)).statusCode).toBe(200);
+
     const queuedPlan = () => f.store.activeJobs(task!.id).find((job) => job.kind === 'plan')!;
     expect(queuedPlan().profile).toMatchObject({ model: 'gpt-6-astra', effort: 'max' });
     const architectUrl = session + '/tasks/' + task!.id + '/architect';
@@ -488,6 +534,34 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         .filter(({ type }) => type === 'checks.waived')
         .at(-1)?.data,
     ).toMatchObject({ reason: offlineReason, head: withPr.revision!.head });
+
+    const reviewPr = { ...pr, checks: 'passing' as const };
+    f.store.setSetting('demo-pr:10', reviewPr);
+    f.store.cancelJobs(tenth.id);
+    f.store.saveTask({
+      ...beforeReview,
+      pr: reviewPr,
+      state: 'queued',
+      round: 15,
+      reviewRoundLimit: 15,
+    });
+    await f.engine.review(tenth.id);
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'paused', round: 15 });
+    await bot.handle(click(openTenth));
+    expect(lastText()).toContain('Review round limit · 15');
+    expect(keyboard().some(({ text }) => text === 'Resume task')).toBe(false);
+    await bot.handle(click(buttonFor('Review round limit')));
+    const enterLimit = /\/review_limit [A-Za-z0-9_-]{16}/.exec(String(lastText()))?.[0];
+    await bot.handle(message(enterLimit + ' 16'));
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'paused', reviewRoundLimit: 16 });
+    const resumeButton = buttonFor('Resume task');
+    await bot.handle(click(resumeButton, 7, 18));
+    expect(f.store.getTask(tenth.id).state).toBe('paused');
+    await bot.handle(click(resumeButton));
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'queued', round: 15 });
+    await f.engine.review(tenth.id);
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'reviewing', round: 16 });
+    f.store.cancelJobs(tenth.id);
 
     f.store.saveTask({ ...tenth, state: 'complete' });
     await bot.handle(click(backToQueue));

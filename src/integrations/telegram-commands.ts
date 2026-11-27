@@ -44,12 +44,12 @@ const commands: Command[] = [
   },
   {
     name: 'worker',
-    args: 'N MODEL [EFFORT|default] [--engine ENGINE] [--force]',
+    args: 'N MODEL [EFFORT|default] [--engine ENGINE] [--force] | N --engine ENGINE [--force]',
     en: 'Change the profile of a numbered worker',
     ru: 'Изменить профиль воркера по номеру',
     detail: {
-      en: 'Without --force the profile applies to the next task. --force asks you to confirm a specific active task before restarting its author turn in the same copy. Use default to clear the reasoning effort. Use /models for available profiles.',
-      ru: 'Обычно смена применяется к следующей задаче. --force запрашивает подтверждение для конкретной задачи перед перезапуском её хода в той же копии. Укажи default, чтобы вернуться к штатному уровню. Доступные модели показывает /models.',
+      en: 'Without --force the profile applies to the next task. --force asks you to confirm a specific active task before restarting its author turn in the same copy. Use default to clear the reasoning effort. Use /worker N --engine ENGINE for the engine configuration. Use /models for available profiles.',
+      ru: 'Обычно смена применяется к следующей задаче. --force запрашивает подтверждение для конкретной задачи перед перезапуском её хода в той же копии. Укажи default, чтобы вернуться к штатному уровню. /worker N --engine ENGINE возвращает настройки движка. Доступные модели показывает /models.',
     },
   },
   { name: 'status', en: 'Show the latest session progress', ru: 'Показать текущий этап сессии' },

@@ -18,7 +18,7 @@ import {
 import { commandHelp } from './telegram-commands.js';
 import { githubBackoff } from '../providers/github-quota.js';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
-import type { Daddy } from '../core/daddy.js';
+import type { Daddy, ExpectedReviewLimit } from '../core/daddy.js';
 import {
   sameAgentProfile,
   sameRevision,
@@ -66,7 +66,12 @@ import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
 import { deliveryStatus } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus, sessionAutoMerge } from '../core/auto-merge.js';
-import { canWaiveChecks, checkWaiverReasonLimit, taskReference } from '../core/task-activity.js';
+import {
+  canResumeAfterReviewLimit,
+  canWaiveChecks,
+  checkWaiverReasonLimit,
+  taskReference,
+} from '../core/task-activity.js';
 import { workerPool, workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -854,6 +859,48 @@ export class TelegramWorkspace {
       await this.showTask(action.expected.groupId, action.taskId, destination, action.page);
     });
   }
+  private async reviewLimit(
+    destination: Destination,
+    key: string,
+    intent: 'edit' | 'resume' | number | null,
+  ) {
+    const read = () => {
+      const action = this.readAction<{
+        kind: string;
+        groupId: string;
+        taskId: string;
+        expected: ExpectedReviewLimit;
+        page: number;
+      }>(key, destination);
+      if (action.kind !== 'review-limit')
+        throw new Error(this.t('This action expired. Open a fresh card.'));
+      this.authorize(destination, action.groupId);
+      return action;
+    };
+    const { groupId, taskId, expected, page } = read();
+    if (intent === 'edit') {
+      await this.api.send(
+        destination,
+        new TelegramText()
+          .add(taskReference({ id: taskId }) + ' · ' + this.t('Review round limit'))
+          .add(' · ' + (expected.limit ?? this.t('No limit')))
+          .add('\n' + this.t('Send the command with a positive number or off.') + '\n')
+          .add('/review_limit ' + key + ' ', 'code'),
+      );
+      return;
+    }
+    if (intent === 'resume') {
+      await this.daddy.resumeAfterReviewLimit(groupId, taskId, expected, read);
+      this.mutate(() => this.finishAction(key));
+    } else {
+      await this.daddy.taskReviewLimit(groupId, taskId, intent, expected, () => {
+        read();
+        this.finishAction(key);
+        this.receipt();
+      });
+    }
+    await this.showTask(groupId, taskId, destination, page);
+  }
   private async showTask(groupId: string, taskId: string, destination: Destination, queuePage = 0) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
@@ -877,6 +924,33 @@ export class TelegramWorkspace {
         ? autoMergeSettings(this.store, group, task)
         : undefined;
     const card = taskCard(this.locale(), activity!, slot, merge, queuePage);
+    if (task.state !== 'complete' && !group.deletion) {
+      const limit = task.reviewRoundLimit ?? null;
+      const key = this.actionKey(
+        destination,
+        {
+          kind: 'review-limit',
+          page: queuePage,
+          groupId,
+          taskId,
+          expected: {
+            task: {
+              groupId,
+              generation: task.generation,
+              head: task.revision?.head ?? '',
+              revision: task.revision,
+            },
+            groupGeneration: group.generation,
+            limit,
+          },
+        },
+        true,
+      );
+      card.buttons?.push([{ text: this.t('Review round limit'), callback_data: 'dad:rl:' + key }]);
+      if (canResumeAfterReviewLimit(task))
+        card.buttons?.push([{ text: this.t('Resume task'), callback_data: 'dad:rr:' + key }]);
+    }
+
     const command =
       task.state === 'needs_input'
         ? 'verify-merge'
@@ -937,7 +1011,7 @@ export class TelegramWorkspace {
       if (!input) {
         await this.api.send(
           destination,
-          this.t('Use /worker NUMBER MODEL [EFFORT] [--force]. See /workers and /models.'),
+          this.t('Use /worker NUMBER MODEL [EFFORT] [--force] or /worker NUMBER --engine ENGINE.'),
         );
         return;
       }
@@ -945,7 +1019,8 @@ export class TelegramWorkspace {
       if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       const baseline = slot.profile ?? defaults;
       const engine = input.engine ?? baseline.engine;
-      const explicitEffort = input.effort !== undefined;
+      const explicitEffort = !input.model || input.effort !== undefined;
+      const explicitEngine = input.engine !== undefined;
       const inheritedEffort = !explicitEffort && engine === baseline.engine;
       const profile = {
         engine,
@@ -981,6 +1056,7 @@ export class TelegramWorkspace {
           baseline,
           inheritedEffort,
           explicitEffort,
+          explicitEngine,
           groupGeneration: group.generation,
           taskId: task.id,
           expected: {
@@ -1006,6 +1082,8 @@ export class TelegramWorkspace {
         baseline,
         inheritedEffort,
         explicitEffort,
+        explicitEngine,
+        explicitModel: true,
         expectedGeneration,
         check: checkRoute,
         onCommit: this.receipt,
@@ -1263,7 +1341,7 @@ export class TelegramWorkspace {
     this.authorize(destination, groupId);
     const pageSize = 30;
     page = Math.min(page, Math.max(0, Math.ceil(models.length / pageSize) - 1));
-    const buttons = models.slice(page * pageSize, (page + 1) * pageSize).map((model) => {
+    const choice = (model: { engine: string; id?: string; name: string; efforts: string[] }) => {
       const id = 'dad-model:' + randomBytes(12).toString('base64url');
       this.store.db.prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)').run(
         id,
@@ -1297,8 +1375,32 @@ export class TelegramWorkspace {
           expiresAt: new Date(Date.now() + 10 * 60000).toISOString(),
         }),
       );
-      return [{ text: model.engine + ' · ' + model.name, callback_data: id }];
-    });
+      return [
+        {
+          text: model.engine + ' · ' + model.name,
+          callback_data: model.id ? id : id + ':default',
+        },
+        ...(!model.id && role === 'daddy'
+          ? [
+              {
+                text: this.t('Apply now · {effort}', { effort: model.engine }),
+                callback_data: id + ':default:force',
+              },
+            ]
+          : []),
+      ];
+    };
+    const engines = new Set([
+      (role === 'architect' ? architect : role === 'daddy' ? group.daddy : defaults).engine,
+      ...(this.daddy.catalogue.engines?.().map(({ id }) => id) ??
+        models.map(({ engine }) => engine)),
+    ]);
+    const buttons = [
+      ...[...engines].map((engine) =>
+        choice({ engine, name: this.t('Engine configuration'), efforts: [] }),
+      ),
+      ...models.slice(page * pageSize, (page + 1) * pageSize).map(choice),
+    ];
     if (role === 'architect')
       buttons.unshift([
         {
@@ -1796,7 +1898,18 @@ export class TelegramWorkspace {
       });
       return true;
     }
-    const modelAction = data.match(/^dad-model:([A-Za-z0-9_-]{16})(?::([0-9]{1,2})(:force)?)?$/);
+    const reviewLimit = /^dad:r(l|r):([A-Za-z0-9_-]{16})$/.exec(data);
+    if (reviewLimit) {
+      await this.reviewLimit(
+        destination,
+        reviewLimit[2]!,
+        reviewLimit[1] === 'l' ? 'edit' : 'resume',
+      );
+      return true;
+    }
+    const modelAction = data.match(
+      /^dad-model:([A-Za-z0-9_-]{16})(?::(default|[0-9]{1,2})(:force)?)?$/,
+    );
     if (modelAction) {
       const key = 'dad-model:' + modelAction[1],
         row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(key);
@@ -1811,11 +1924,10 @@ export class TelegramWorkspace {
         baseline?: AgentProfile;
         expectedTask?: ExpectedTask;
         model: {
-          id: string;
+          id?: string;
           engine: string;
           name: string;
           efforts: string[];
-          defaultEffort: string;
         };
         chatId: number;
         threadId?: number;
@@ -1837,51 +1949,88 @@ export class TelegramWorkspace {
           .add('\n\n' + this.t('Reasoning effort'));
         await this.api.send(destination, {
           ...text,
-          buttons: (action.model.efforts.length ? action.model.efforts : [this.t('Default')]).map(
-            (effort, index) => [
-              { text: effort, callback_data: `${key}:${index}` },
-              ...(action.role === 'daddy'
-                ? [
-                    {
-                      text: this.t('Apply now · {effort}', { effort }),
-                      callback_data: `${key}:${index}:force`,
-                    },
-                  ]
-                : []),
-            ],
-          ),
+          buttons: [
+            [this.t('Default'), 'default'],
+            ...action.model.efforts.map((effort, index) => [effort, String(index)]),
+          ].map(([effort, value]) => [
+            { text: effort, callback_data: `${key}:${value}` },
+            ...(action.role === 'daddy'
+              ? [
+                  {
+                    text: this.t('Apply now · {effort}', { effort }),
+                    callback_data: `${key}:${value}:force`,
+                  },
+                ]
+              : []),
+          ]),
         });
       } else {
-        const effort = action.model.efforts[Number(modelAction[2])];
-        if (!effort && (action.model.efforts.length || modelAction[2] !== '0'))
+        const selection = modelAction[2];
+        const effort = action.model.efforts[Number(selection)];
+        if (
+          !effort &&
+          selection !== 'default' &&
+          (action.model.efforts.length || selection !== '0')
+        )
           throw new Error('Unsupported reasoning effort');
-        const profile = { engine: action.model.engine, model: action.model.id, effort };
+        const profile = {
+          engine: action.model.engine,
+          ...(action.model.id ? { model: action.model.id } : {}),
+          ...(effort ? { effort } : {}),
+        };
+        const onCommit = () => {
+          this.authorize(destination, group.id);
+          const consumed = this.store.db
+            .prepare('UPDATE bot_actions SET consumed=1 WHERE id=? AND consumed=0')
+            .run(key);
+          if (
+            !consumed.changes ||
+            action.ownerId !== this.pair()?.userId ||
+            action.expiresAt <= now()
+          )
+            throw new Error(this.t('This model selection expired. Open Models again.'));
+          this.receipt();
+        };
         if (action.role === 'architect') {
           if (action.taskId) {
             if (!action.expectedTask)
               throw new Error(this.t('This model selection expired. Open Models again.'));
-            await this.daddy.taskArchitect(group.id, action.taskId, profile, undefined, {
-              task: action.expectedTask,
-              groupGeneration: action.generation,
-              architectProfile: action.baseline ?? null,
-            });
+            await this.daddy.taskArchitect(
+              group.id,
+              action.taskId,
+              profile,
+              undefined,
+              {
+                task: action.expectedTask,
+                groupGeneration: action.generation,
+                architectProfile: action.baseline ?? null,
+              },
+              onCommit,
+            );
           } else
-            await this.settings(group.id, {
-              architectProfile: profile,
-              expectedGeneration: action.generation,
-              baseline: { architectProfile: action.baseline ?? null },
-            });
+            await this.settings(
+              group.id,
+              {
+                architectProfile: profile,
+                expectedGeneration: action.generation,
+                baseline: { architectProfile: action.baseline ?? null },
+              },
+              onCommit,
+            );
         } else
-          await this.settings(group.id, {
-            expectedGeneration: action.generation,
-            baseline: { profiles: { [action.role]: action.baseline } },
-            profiles: {
-              [action.role]: profile,
+          await this.settings(
+            group.id,
+            {
+              expectedGeneration: action.generation,
+              baseline: { profiles: { [action.role]: action.baseline } },
+              profiles: {
+                [action.role]: profile,
+              },
+              forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
+              applyWorkers: action.role === 'worker',
             },
-            forceDaddy: action.role === 'daddy' && modelAction[3] === ':force',
-            applyWorkers: action.role === 'worker',
-          });
-        this.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(key);
+            onCommit,
+          );
         if (action.taskId) await this.showTask(group.id, action.taskId, destination);
         else await this.models(group.id, destination);
       }
@@ -2021,6 +2170,7 @@ export class TelegramWorkspace {
         baseline?: AgentProfile;
         inheritedEffort?: boolean;
         explicitEffort?: boolean;
+        explicitEngine?: boolean;
         taskId: string;
         groupGeneration: number;
         expected: ExpectedTask;
@@ -2035,6 +2185,8 @@ export class TelegramWorkspace {
         confirmedProfile: action.confirmedProfile,
         inheritedEffort: action.inheritedEffort,
         explicitEffort: action.explicitEffort ?? action.inheritedEffort === false,
+        explicitEngine: action.explicitEngine ?? true,
+        explicitModel: true,
         onCommit: () => {
           this.finishAction(key);
           this.receipt();
@@ -2279,11 +2431,15 @@ export class TelegramWorkspace {
     });
   }
 
-  private settings(groupId: string, input: Parameters<Daddy['settings']>[1]) {
+  private settings(
+    groupId: string,
+    input: Parameters<Daddy['settings']>[1],
+    onCommit = this.receipt,
+  ) {
     return this.daddy.settings(
       groupId,
       { expectedGeneration: this.update.getStore()?.expectedGeneration, ...input },
-      this.receipt,
+      onCommit,
     );
   }
 
@@ -2429,6 +2585,14 @@ export class TelegramWorkspace {
           destination,
           commandHelp(this.locale(), privateChat ? 'private' : 'group', help[1]),
         );
+        return true;
+      }
+      const reviewLimit = /^\/review_limit\s+([A-Za-z0-9_-]{16})\s+(off|[1-9]\d*)$/i.exec(text);
+      if (reviewLimit) {
+        const limit = reviewLimit[2]?.toLowerCase() === 'off' ? null : Number(reviewLimit[2]);
+        if (limit !== null && !Number.isSafeInteger(limit))
+          throw new Error(this.t('Send the command with a positive number or off.'));
+        await this.reviewLimit(destination, reviewLimit[1]!, limit);
         return true;
       }
       const waiver = /^\/waive ([A-Za-z0-9_-]{16}) ([\s\S]+)$/.exec(text);

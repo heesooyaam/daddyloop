@@ -94,7 +94,8 @@ export function parseWorkerInput(args: string) {
       allowPositionals: true,
     });
     const [slot, model, effort] = positionals;
-    if (positionals.length > 3 || !slot || !/^[1-8]$/.test(slot) || !model) return;
+    if (positionals.length > 3 || !slot || !/^[1-8]$/.test(slot) || (!model && !values.engine))
+      return;
     return { number: Number(slot), model, effort, engine: values.engine, force: values.force };
   } catch {
     return;
@@ -316,6 +317,8 @@ export function taskCard(
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
+  if (task.state !== 'complete')
+    text.add('\n\n' + t('Review round limit') + ' · ' + (task.reviewRoundLimit ?? t('No limit')));
   const buttons = [queueButtons(task.groupId!, locale, queuePage)];
   if (
     task.state !== 'complete' &&

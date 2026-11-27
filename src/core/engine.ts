@@ -13,6 +13,7 @@ import {
 } from './pr-routing.js';
 import {
   canWaiveChecks,
+  reviewRoundLimitPause,
   disputedFindings,
   draftInspectionRequired,
   draftSyncPending,
@@ -389,7 +390,7 @@ export class Engine {
         if (task.reviewRoundLimit !== undefined && task.round >= task.reviewRoundLimit) {
           task.resumeState = 'queued';
           this.store.transaction(() => {
-            this.state(task, 'paused', 'This task reached its review round limit');
+            this.state(task, 'paused', reviewRoundLimitPause);
             this.store.event(task.id, 'review.limit_reached', {
               limit: task.reviewRoundLimit,
               round: task.round,

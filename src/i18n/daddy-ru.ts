@@ -488,6 +488,18 @@ export const daddyRu: Record<string, string> = {
   'Waiting for CI to finish before review': 'Ждёт завершения CI перед ревью',
   'Waiting for CI to pass after the worker investigated':
     'Воркер проверил сбой. Задача ждёт зелёного CI',
+  'Review round limit': 'Лимит раундов ревью',
+  'No limit': 'Без лимита',
+  'Resume task': 'Продолжить задачу',
+  'Send the command with a positive number or off.':
+    'Отправь команду с положительным числом или off.',
+  'Settings changed. Reload before editing reviewRoundLimit':
+    'Лимит раундов уже изменился. Открой настройку заново.',
+  'This task is not ready to resume after reaching its review round limit':
+    'Задача пока не готова продолжиться после достижения лимита раундов.',
+  'This task is already complete': 'Эта задача уже завершена.',
+  'Use /worker NUMBER MODEL [EFFORT] [--force] or /worker NUMBER --engine ENGINE.':
+    'Используй /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force] или /worker НОМЕР --engine ДВИЖОК.',
   'This task reached its review round limit': 'Задача достигла своего лимита раундов ревью',
   'Waiting for CI': 'Ожидает CI',
   'daddy is checking': 'daddy разбирается',

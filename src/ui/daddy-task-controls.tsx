@@ -2,9 +2,9 @@ import { VoiceInput, appendDictation } from './voice-input.js';
 import { useRef, useState } from 'react';
 import { ChevronDown, RefreshCw, Settings2 } from 'lucide-react';
 import type { DaddyApi, DaddyBoard } from '../client/daddy.js';
-import { sameAgentProfile, type AgentProfile, type WorkerSlot } from '../core/types.js';
+import { sameAgentProfile, type AgentProfile, type Task, type WorkerSlot } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
-import { profileText, taskReference } from '../core/task-activity.js';
+import { canResumeAfterReviewLimit, profileText, taskReference } from '../core/task-activity.js';
 import {
   AgentProfileFields,
   ArchitectProfileFields,
@@ -282,7 +282,7 @@ function WorkerProfileForm({
   }));
   const task = shown.task;
   const submit = async () => {
-    if (busy || !profile.model) return;
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
@@ -352,11 +352,130 @@ function WorkerProfileForm({
         <button type="button" className="daddy-button quiet" onClick={onCancel}>
           {t('Back')}
         </button>
-        <button className="daddy-button primary" disabled={busy || !profile.model}>
+        <button className="daddy-button primary" disabled={busy}>
           {t('Save model')}
         </button>
       </div>
     </form>
+  );
+}
+
+export function TaskReviewLimitSettings({
+  api,
+  board,
+  task,
+  disabled,
+  onSaved,
+}: {
+  api: DaddyApi;
+  board: DaddyBoard;
+  task: Task;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+}) {
+  const { t } = useLocale();
+  const expected = {
+    task: {
+      generation: task.generation,
+      head: task.revision?.head ?? '',
+      revision: task.revision,
+    },
+    groupGeneration: board.group.generation,
+    limit: task.reviewRoundLimit ?? null,
+  };
+  const [draft, setDraft] = useState<{ expected: typeof expected; value: string }>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const path = `/daddy/sessions/${board.group.id}/tasks/${task.id}/review-limit`;
+  const save = async (resume: boolean) => {
+    if (disabled || busy) return;
+    const limit = draft?.value === '' ? null : Number(draft?.value);
+    if (!resume && (!draft || (limit !== null && (!Number.isSafeInteger(limit) || limit < 1))))
+      return;
+    setBusy(true);
+    setError('');
+    try {
+      if (resume) await api(path + '/resume', expected);
+      else {
+        await api(path, { expected: draft!.expected, limit });
+        setDraft(undefined);
+      }
+      await onSaved();
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      {draft ? (
+        <form
+          className="daddy-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save(false);
+          }}
+        >
+          <label>
+            {t('Review round limit')}
+            <input
+              type="number"
+              min={1}
+              step={1}
+              placeholder={t('No limit')}
+              value={draft.value}
+              disabled={disabled || busy}
+              onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+            />
+          </label>
+          <div className="daddy-actions">
+            <button
+              type="button"
+              className="daddy-button quiet"
+              onClick={() => {
+                setDraft(undefined);
+                setError('');
+              }}
+            >
+              {t('Cancel')}
+            </button>
+            <button className="daddy-button primary" disabled={disabled || busy}>
+              {t('Save')}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="daddy-actions">
+          <button
+            type="button"
+            className="daddy-button outline"
+            disabled={disabled || busy}
+            onClick={() => {
+              setError('');
+              setDraft({ expected, value: expected.limit?.toString() ?? '' });
+            }}
+          >
+            {t('Review round limit')} · {expected.limit ?? t('No limit')}
+          </button>
+          {canResumeAfterReviewLimit(task) && (
+            <button
+              type="button"
+              className="daddy-button primary"
+              disabled={disabled || busy}
+              onClick={() => void save(true)}
+            >
+              {t('Resume task')}
+            </button>
+          )}
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="daddy-field-error">
+          {t(error)}
+        </p>
+      )}
+    </div>
   );
 }
 

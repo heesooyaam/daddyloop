@@ -285,18 +285,33 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       );
     },
   );
+  const roundLimit = z.number().int().positive().nullable();
+  const expectedReviewLimit = z
+    .object({ task: expectedTask, groupGeneration: generation, limit: roundLimit })
+    .strict();
   app.post<{ Params: { id: string; taskId: string } }>(
     '/api/daddy/sessions/:id/tasks/:taskId/review-limit',
-    async (request) => {
-      const { limit } = z
-        .object({ limit: z.number().int().positive().nullable() })
+    (request) => {
+      const { limit, expected } = z
+        .object({ limit: roundLimit, expected: expectedReviewLimit })
         .strict()
         .parse(request.body);
-      return daddy.taskReviewLimit(
-        id.parse(request.params.id),
-        id.parse(request.params.taskId),
-        limit,
-      );
+      const groupId = id.parse(request.params.id);
+      return daddy.taskReviewLimit(groupId, id.parse(request.params.taskId), limit, {
+        ...expected,
+        task: { ...expected.task, groupId },
+      });
+    },
+  );
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/review-limit/resume',
+    (request) => {
+      const expected = expectedReviewLimit.parse(request.body);
+      const groupId = id.parse(request.params.id);
+      return daddy.resumeAfterReviewLimit(groupId, id.parse(request.params.taskId), {
+        ...expected,
+        task: { ...expected.task, groupId },
+      });
     },
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {

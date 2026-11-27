@@ -51,6 +51,7 @@ import {
   dependencyDetail,
   queueDetail,
   activityReason,
+  canResumeAfterReviewLimit,
   activityStatus,
   outstandingActivity,
   waitingForDaddy,
@@ -63,6 +64,12 @@ import {
   withInstructions,
   type SessionInstructions,
 } from './instructions.js';
+
+export type ExpectedReviewLimit = {
+  task: ExpectedTask;
+  groupGeneration: number;
+  limit: number | null;
+};
 
 export class Daddy {
   private running = new Map<
@@ -281,6 +288,7 @@ export class Daddy {
               ? item.job.profile
               : undefined) ?? this.engine.effectiveAgents(task).worker,
           architectProfile: task.architectProfile,
+          reviewRoundLimit: task.reviewRoundLimit ?? null,
           workerRequest: task.workerRequest,
           running: item.job?.status === 'running',
           queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
@@ -383,6 +391,8 @@ export class Daddy {
       baseline,
       inheritedEffort = false,
       explicitEffort = false,
+      explicitEngine = false,
+      explicitModel = false,
       confirmedProfile,
       check,
       expected,
@@ -394,6 +404,8 @@ export class Daddy {
       baseline?: AgentProfile;
       inheritedEffort?: boolean;
       explicitEffort?: boolean;
+      explicitEngine?: boolean;
+      explicitModel?: boolean;
       confirmedProfile?: AgentProfile;
       expected?: { groupGeneration: number; task: ExpectedTask };
       check?: () => void;
@@ -423,7 +435,12 @@ export class Daddy {
     const resolve = (group: ReviewGroup, slot: WorkerSlot) => {
       if (!baseline) return requested;
       const current = slot.profile ?? group.worker ?? this.engine.defaultAgents().worker;
-      if (explicitEffort)
+      if (explicitEngine)
+        assertSetting('worker.profile.engine', baseline.engine, requested.engine, current.engine);
+      if (explicitModel)
+        assertSetting('worker.profile.model', baseline.model, requested.model, current.model);
+      // A profile without a model cannot keep an independently added effort.
+      if (explicitEffort || (!requested.model && baseline.model))
         assertSetting('worker.profile.effort', baseline.effort, requested.effort, current.effort);
       return mergeSetting(
         'worker.profile',
@@ -649,21 +666,60 @@ export class Daddy {
     }
     return setTaskMergeMode(this.store, group, task, mode);
   }
-  async taskReviewLimit(groupId: string, taskId: string, limit: number | null) {
+  async taskReviewLimit(
+    groupId: string,
+    taskId: string,
+    limit: number | null,
+    expected: ExpectedReviewLimit,
+    onCommit?: () => void,
+  ) {
     return this.engine.lock(taskId, async () => {
       const task = this.task(groupId, taskId);
       const group = this.group(groupId);
       if (group.deletedAt || group.deletion)
         throw new AppError('session_deleting', 'This session is being deleted');
-      if (task.reviewRoundLimit !== (limit ?? undefined))
-        this.store.transaction(() => {
+      this.checkSessionGeneration(group, expected.groupGeneration);
+      assertTaskVersion(task, expected.task);
+      if (task.state === 'complete')
+        throw new AppError('task_complete', 'This task is already complete', 409);
+      const current = task.reviewRoundLimit ?? null;
+      assertSetting('reviewRoundLimit', expected.limit, limit, current);
+      this.store.transaction(() => {
+        if (current !== limit) {
           task.reviewRoundLimit = limit ?? undefined;
           this.store.saveTask(task);
           this.store.event(task.id, 'review.limit_changed', { limit });
-        });
+        }
+        onCommit?.();
+      });
       return { limit: task.reviewRoundLimit ?? null };
     });
   }
+
+  async resumeAfterReviewLimit(
+    groupId: string,
+    taskId: string,
+    expected: ExpectedReviewLimit,
+    check?: () => void,
+  ) {
+    return this.engine.action(taskId, 'resume', '', expected.task, () => {
+      check?.();
+      this.checkSessionGeneration(this.group(groupId), expected.groupGeneration);
+      const task = this.task(groupId, taskId);
+      assertSetting(
+        'reviewRoundLimit',
+        expected.limit,
+        expected.limit,
+        task.reviewRoundLimit ?? null,
+      );
+      if (!canResumeAfterReviewLimit(task))
+        throw new AppError(
+          'cannot_resume',
+          'This task is not ready to resume after reaching its review round limit',
+        );
+    });
+  }
+
   async taskArchitect(
     groupId: string,
     taskId: string,
@@ -674,6 +730,7 @@ export class Daddy {
       groupGeneration: number;
       architectProfile: AgentProfile | null;
     },
+    onCommit?: () => void,
   ) {
     if (profile) await this.catalogue.validate(profile);
     return this.engine.lock(taskId, async () => {
@@ -702,6 +759,7 @@ export class Daddy {
         this.store.saveTask(task);
         this.store.refreshQueuedPlans(task, group);
         this.store.event(task.id, 'architect.configured', { profile }, actionId);
+        onCommit?.();
       });
       return { taskId, architectProfile: task.architectProfile };
     });

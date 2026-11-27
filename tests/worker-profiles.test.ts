@@ -167,7 +167,12 @@ it('forces only the active author attempt to restart and preserves its queue ord
   }
 });
 
-function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string, locale: Locale = 'en') {
+function confirmWorker(
+  f: ReturnType<typeof daddyFixture>,
+  groupId: string,
+  locale: Locale = 'en',
+  inTopic = false,
+) {
   const app = Fastify();
   registerDaddy(app, f.daddy);
   const cards: TelegramCard[] = [];
@@ -181,13 +186,25 @@ function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string, loca
   const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.currentDaddy', groupId);
-  const chat = { id: 7, type: 'private' };
+  const chat = inTopic ? { id: -10042, type: 'supergroup' } : { id: 7, type: 'private' };
+  const message_thread_id = inTopic ? 17 : undefined;
+  if (inTopic) {
+    f.store.setSetting('telegram.group', { chatId: chat.id, title: 'Work', ownerId: 7 });
+    f.store.db
+      .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+      .run(
+        `7:${chat.id}:${groupId}`,
+        groupId,
+        JSON.stringify({ chatId: chat.id, threadId: message_thread_id, groupId, ownerId: 7 }),
+      );
+  }
   let updateId = 0;
-  const command = (choice: string) =>
+  const send = (text: string) =>
     workspace.handle({
       update_id: ++updateId,
-      message: { from: { id: 7 }, chat, text: '/worker 1 ' + choice },
+      message: { from: { id: 7 }, chat, message_thread_id, text },
     });
+  const command = (choice: string) => send('/worker 1 ' + choice);
   const prompt = async (choice = 'gpt-6-astra') => {
     await command(choice + ' --force');
     const button = cards.at(-1)!.buttons![0]![0]!;
@@ -198,7 +215,12 @@ function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string, loca
   const confirm = (data: string) =>
     workspace.handle({
       update_id: ++updateId,
-      callback_query: { id: String(updateId), data, from: { id: 7 }, message: { chat } },
+      callback_query: {
+        id: String(updateId),
+        data,
+        from: { id: 7 },
+        message: { chat, message_thread_id },
+      },
     });
   const save = (profile: AgentProfile, baseline: AgentProfile) =>
     app.inject({
@@ -405,6 +427,161 @@ it.each(
     }
   },
 );
+
+it.each(
+  [false, true].flatMap((force) =>
+    (['model', 'engine', 'effort'] as const).map((field) => ({ force, field })),
+  ),
+)('worker named selection: $field, force=$force', async ({ force, field }) => {
+  const f = daddyFixture();
+  const runs = holdWorker(f);
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const controls = confirmWorker(f, group.id);
+  const baseline = profiles.worker;
+  const later =
+    field === 'model'
+      ? { ...baseline, model: profiles.daddy.model }
+      : field === 'engine'
+        ? { engine: 'claude', model: 'sonnet', effort: 'high' }
+        : { ...baseline, effort: 'medium' };
+  const choice = baseline.model! + (field === 'engine' ? ' --engine codex' : '');
+  try {
+    const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
+      requirements: 'Keep the explicitly selected model and engine',
+      requestId: 'worker-named-selection',
+    });
+    await f.worker.tick();
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    const active = runs[0]!.input;
+    if (force) {
+      const confirmation = await controls.prompt(choice);
+      expect((await controls.save(later, baseline)).statusCode).toBe(200);
+      await controls.confirm(confirmation);
+    } else {
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const validation = vi
+        .spyOn(f.daddy.catalogue, 'validate')
+        .mockImplementationOnce(() => blocked);
+      const pending = controls.command(choice);
+      try {
+        await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+        expect((await controls.save(later, baseline)).statusCode).toBe(200);
+      } finally {
+        release();
+        await pending;
+        validation.mockRestore();
+      }
+    }
+    expect((await controls.read()).json().workers.slots[0].profile).toEqual(later);
+    const restarted = force && field === 'effort';
+    expect(active.signal.aborted).toBe(restarted);
+    expect(f.store.getTask(task.id).generation).toBe(task.generation + Number(restarted));
+    if (field !== 'effort')
+      expect(controls.cards.at(-1)?.text).toContain('worker.profile.' + field);
+    if (restarted)
+      expect(f.store.activeJobs(task.id).find((job) => job.status === 'queued')?.profile).toEqual(
+        later,
+      );
+  } finally {
+    runs.forEach(({ finish }) => finish());
+    await controls.close();
+    await f.close();
+  }
+});
+
+it.each(
+  (['daddy', 'worker', 'architect', 'task'] as const).flatMap((role) => [
+    { role, inTopic: false },
+    { role, inTopic: true },
+  ]),
+)(
+  'offers default effort and engine configuration in the $role profile menu, topic=$inTopic',
+  async ({ role, inTopic }) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const locale = inTopic ? 'ru' : 'en';
+    const controls = confirmWorker(f, group.id, locale, inTopic);
+    try {
+      const task =
+        role === 'task'
+          ? await f.daddy.createTask(group.id, {
+              requirements: 'Choose an explicit task architect',
+              requestId: 'architect-default',
+            })
+          : undefined;
+      const menu = () =>
+        controls.confirm(task ? 'dad:arch-task:' + task.id : 'dad:models:' + group.id + ':' + role);
+      const click = async (name: string) => {
+        const button = controls.cards
+          .at(-1)
+          ?.buttons?.flat()
+          .find((button) => button.text === name);
+        expect(button, 'missing button ' + name).toBeDefined();
+        if (button && 'callback_data' in button && button.callback_data)
+          await controls.confirm(button.callback_data);
+      };
+      const profile = async () => {
+        const board = (await controls.read()).json();
+        return task
+          ? board.tasks.find(({ id }: { id: string }) => id === task.id)?.architectProfile
+          : board.group[role === 'architect' ? 'architectProfile' : role];
+      };
+      const select = async (model: string, effort: string) => {
+        await menu();
+        await click('codex · ' + model);
+        await click(effort);
+      };
+      await select('gpt-6-astra', 'max');
+      expect(await profile()).toEqual(profiles.daddy);
+      await select('gpt-5.6-sol', translate(locale, 'Default'));
+      expect(await profile()).toEqual({ engine: 'codex', model: 'gpt-5.6-sol' });
+      await menu();
+      await click('codex · ' + translate(locale, 'Engine configuration'));
+      expect(await profile()).toEqual({ engine: 'codex' });
+      if (role === 'task' || role === 'architect') {
+        expect(f.daddy.group(group.id).daddy.model).toBeDefined();
+        await menu();
+        await click(
+          translate(
+            locale,
+            task ? 'Use the session architect profile' : 'Use the shared reviewer profile',
+          ),
+        );
+        expect(await profile()).toBeUndefined();
+      }
+    } finally {
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it('clears a worker slot model through Telegram and HTTP while retaining its engine', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const controls = confirmWorker(f, group.id);
+  const engineProfile = { engine: profiles.worker.engine };
+  try {
+    await controls.command('--engine codex');
+    expect((await controls.read()).json().workers.slots[0].profile).toEqual(engineProfile);
+    await controls.command('gpt-5.6-sol max');
+    expect((await controls.read()).json().workers.slots[0].profile).toEqual(profiles.worker);
+    const baseline = { engine: 'codex', model: profiles.worker.model };
+    expect((await controls.save(baseline, profiles.worker)).statusCode).toBe(200);
+    expect((await controls.save(profiles.worker, baseline)).statusCode).toBe(200);
+    expect((await controls.save(engineProfile, baseline)).statusCode).toBe(409);
+    expect((await controls.read()).json().workers.slots[0].profile).toEqual(profiles.worker);
+    expect((await controls.save(engineProfile, profiles.worker)).statusCode).toBe(200);
+    expect((await controls.read()).json().workers.slots[0].profile).toEqual(engineProfile);
+  } finally {
+    await controls.close();
+    await f.close();
+  }
+});
 
 it.each(
   (['en', 'ru'] as const).flatMap((locale) =>

@@ -65,7 +65,12 @@ import {
   ArchitectProfileFields,
   useAgentCatalogue,
 } from './agent-profile-fields.js';
-import { QueueTaskForm, WorkerControls, TaskArchitectSettings } from './daddy-task-controls.js';
+import {
+  QueueTaskForm,
+  WorkerControls,
+  TaskArchitectSettings,
+  TaskReviewLimitSettings,
+} from './daddy-task-controls.js';
 import {
   activityReason,
   activityStatus,
@@ -2009,6 +2014,7 @@ function TaskReport({
     live?.state,
     live?.revision,
     live?.architectProfile,
+    live?.reviewRoundLimit,
     live?.autoMerge.mode,
   ]);
   const value = read?.value.task.id === id ? read.value : undefined;
@@ -2017,6 +2023,7 @@ function TaskReport({
     task.id === id &&
     task.generation === live.generation &&
     task.state === live.state &&
+    (task.reviewRoundLimit ?? null) === live.reviewRoundLimit &&
     ((!live.revision && !task.revision) || sameRevision(live.revision, task.revision));
   const canAct =
     connected &&
@@ -2106,6 +2113,17 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? activityReason(value.task))}</p>
+          {board && live && live.state !== 'complete' && !board.group.deletion && (
+            <TaskReviewLimitSettings
+              key={id}
+              api={api}
+              board={board}
+              task={value.task}
+              disabled={!canAct}
+              onSaved={onChange}
+            />
+          )}
+
           {canAct &&
             board &&
             live &&

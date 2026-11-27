@@ -603,6 +603,11 @@ test('supports the phone task board, pool controls and workspace directory choos
     engine: 'codex',
     model: 'gpt-5.6-sol',
   });
+  await slot.click();
+  await model.selectOption({ label: 'Engine configuration' });
+  await expect(workers.getByRole('button', { name: 'Save model', exact: true })).toBeEnabled();
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workers.slots[2]?.profile).toEqual({ engine: 'codex' });
   await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
@@ -1815,6 +1820,71 @@ test('sets the session architect and overrides it when queueing a task', async (
     architectProfile: { model: 'gpt-6-astra' },
     validatePlan: true,
   });
+});
+
+test('edits the review round limit and rejects a stale task card', async ({ page }) => {
+  await login(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const group = await sessionFixture(page, 'Task review limit');
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const created = await page.request.post(session + '/tasks', {
+    headers,
+    data: { requirements: 'Inspect the round limit', requestId: randomUUID() },
+  });
+  expect(created.status()).toBe(201);
+  const { id } = await created.json();
+  const path = session + '/tasks/' + id + '/review-limit';
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  const task = async () => (await board()).tasks.find((task) => task.id === id)!;
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  const item = page.locator('.daddy-work-item').first();
+  await expect(item).toContainText('Ready for review');
+  await item.click();
+  const report = page.getByRole('dialog');
+  const edit = (label: string) =>
+    report.getByRole('button', { name: 'Review round limit · ' + label });
+  const input = report.getByLabel('Review round limit', { exact: true });
+  const submit = async () => {
+    const response = page.waitForResponse(
+      (response) => response.url().endsWith(path) && response.request().method() === 'POST',
+    );
+    await report.getByRole('button', { name: 'Save', exact: true }).click();
+    return response;
+  };
+  await expect(edit('No limit')).toBeEnabled();
+  await edit('No limit').click();
+  await input.fill('15');
+  expect((await submit()).status()).toBe(200);
+  await edit('15').click();
+  const snapshot = await task();
+  const latest = await page.request.post(path, {
+    headers,
+    data: {
+      limit: 16,
+      expected: {
+        limit: 15,
+        groupGeneration: group.generation,
+        task: {
+          generation: snapshot.generation,
+          head: snapshot.revision?.head ?? '',
+          revision: snapshot.revision,
+        },
+      },
+    },
+  });
+  expect(latest.status()).toBe(200);
+  await input.fill('');
+  expect((await submit()).status()).toBe(409);
+  await expect(report.getByRole('alert')).toContainText('Settings changed');
+  expect((await task()).reviewRoundLimit).toBe(16);
+  await report.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await edit('16').click();
+  await input.fill('');
+  expect((await submit()).status()).toBe(200);
+  expect((await task()).reviewRoundLimit).toBeNull();
+  await expect(edit('No limit')).toBeVisible();
 });
 
 test('an open task report follows live confirmation stages', async ({ page }) => {
