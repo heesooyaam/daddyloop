@@ -932,7 +932,11 @@ export class Daddy {
     )
       return;
     if (event.type === 'job.completed' && !isTicket(task)) {
-      if (transition.kind === 'review' && task.state === 'awaiting_publication') return;
+      if (
+        transition.kind === 'review' &&
+        ['awaiting_publication', 'awaiting_review_checks'].includes(task.state)
+      )
+        return;
       if (
         transition.kind === 'fix' &&
         task.state === 'awaiting_push' &&

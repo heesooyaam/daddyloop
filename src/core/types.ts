@@ -281,6 +281,8 @@ export interface Task {
   round: number;
   noProgress: number;
   reviewRoundLimit?: number;
+  reviewAfterChecks?: Pick<Job, 'input' | 'freshContextRetry' | 'timeoutRetry'>;
+  /** Previously saved jobs held at CI admission. */
   reviewChecksJob?: string;
   ciRepairRevision?: Revision;
   revision?: Revision;

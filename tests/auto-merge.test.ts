@@ -1209,17 +1209,29 @@ describe('opt-in GitHub merging', () => {
         ...draft,
         body: `Review in progress.\n\n<!-- ${old.review!.marker} -->`,
       });
+      f.setRemote({ checks: 'pending' });
       await Promise.all([
         f.engine.retryInterruptedStep(old.id),
         f.engine.retryInterruptedStep(old.id),
       ]);
       expect(f.store.getTask(old.id)).toMatchObject({
-        state: 'reviewing',
+        state: 'awaiting_review_checks',
         reviewFinished: false,
         review: { id: old.review!.id, revision: { base: tip } },
       });
       expect(f.store.getGroup(group.id).daddyThreadId).toBe('codex:coordinator');
       expect(f.store.getGroup(group.id).reviewerThreadId).toBeUndefined();
+      const round = f.store.getTask(old.id).round;
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      await f.engine.review(old.id);
+      expect(f.store.activeJobs(old.id)).toHaveLength(0);
+      f.setRemote({ checks: 'passing' });
+      await f.engine.review(old.id);
+      expect(f.store.getTask(old.id)).toMatchObject({
+        state: 'reviewing',
+        round,
+        review: { id: old.review!.id },
+      });
       const retry = f.store.claim()!;
       expect(retry.freshContextRetry).toBe(true);
       f.engine.failJob(retry, failure);
