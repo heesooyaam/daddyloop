@@ -578,6 +578,16 @@ export class Worker {
           task.pr?.targetCloneUrl !== startingPR.targetCloneUrl)
       )
         throw new AppError('stale_feedback', 'The PR branches changed before the author started');
+      const revisingPlan = job.kind === 'plan' && !isTicket(task);
+      if (
+        revisingPlan &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) || !sameRevision(startingPR, task.revision))
+      ) {
+        await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
       if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
@@ -631,7 +641,7 @@ export class Worker {
         ? this.workspaces.dataDir
         : isTicket(task)
           ? await this.workspaces.prepareTicket(task, job.role, abort.signal)
-          : await this.workspaces.prepare(task, job.role, abort.signal);
+          : await this.workspaces.prepare(task, revisingPlan ? 'reviewer' : job.role, abort.signal);
       if (task.kind === 'plan' && (job.kind === 'review' || job.kind === 'verify_merge')) {
         if (demo)
           task.planDocuments = [
@@ -739,14 +749,34 @@ export class Worker {
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
         if (actual) {
-          task.feedback = actual;
-          if (repairingConflict) task.conflictFeedbackReview = handle;
-          store.saveTask(task);
-          store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+          if (repairingConflict) {
+            task.feedback = actual;
+            task.conflictFeedbackReview = handle;
+            store.saveTask(task);
+            store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+          } else {
+            if (!(await this.engine.admitReviewWork(job, actual, freshPR))) {
+              job.status = 'cancelled';
+              return;
+            }
+            task = store.getTask(job.taskId);
+          }
         } else {
           // The stored feedback can belong to an earlier PR head.
           task.feedback = undefined;
         }
+      } else if (revisingPlan) {
+        const ref = prRef(task);
+        const provider = this.engine.provider(ref);
+        const actual = await provider.getReview(ref, task.review!);
+        const pr = await provider.getPR(ref);
+        if (abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+        if (!(await this.engine.admitReviewWork(job, actual, pr))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
       }
       if (job.kind === 'verify_merge' && this.engine.heldMergeReviewId(task) && startingPR) {
         const publication = await this.engine.readHeldPublication(task, startingPR);
@@ -961,7 +991,10 @@ export class Worker {
       else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
-      if (job.role === 'reviewer') {
+      if (
+        job.role === 'reviewer' ||
+        (job.kind === 'plan' && !isTicket(store.getTask(job.taskId)))
+      ) {
         const task = store.getTask(job.taskId);
         if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
           try {

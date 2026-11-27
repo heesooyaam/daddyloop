@@ -476,6 +476,7 @@ it('repins the unstarted reviewer after the target advances while preparing its 
 
 it.each([
   ['ordinary', 'current'],
+  ['ordinary', 'held by review recovery'],
   ['ordinary', 'redirected before claim'],
   ['ordinary', 'redirected during preparation'],
   ['ordinary', 'author changed'],
@@ -552,6 +553,8 @@ it.each([
     }
 
     const { worker, prepare, prepareConflict, run } = reviewer(f);
+    const admission = vi.spyOn(f.engine, 'admitReviewWork');
+    if (scenario === 'held by review recovery') admission.mockResolvedValueOnce(false);
     if (scenario === 'redirected before claim') f.remote.targetBranch = 'release';
     const duringPreparation = () => {
       f.comments[0].body = '**Current comment**\nPreserve this Markdown';
@@ -570,6 +573,18 @@ it.each([
     try {
       await worker.tick();
       await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
+      if (
+        kind === 'ordinary' &&
+        (scenario === 'current' || scenario === 'held by review recovery')
+      ) {
+        expect(admission).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ kind: 'fix' }),
+          expect.objectContaining({
+            comments: [expect.objectContaining({ id: '456', body: f.comments[0].body })],
+          }),
+          expect.objectContaining({ head: f.remote.head, targetBranch: f.remote.targetBranch }),
+        );
+      } else expect(admission).not.toHaveBeenCalled();
       if (scenario === 'advanced' || scenario === 'rewritten')
         expect(f.github.targetAdvanced).toHaveBeenCalledWith(
           prRef(task),
@@ -586,6 +601,9 @@ it.each([
         expect(run.mock.calls[0][0].task.feedback?.comments).toMatchObject([
           { id: '456', body: f.comments[0].body },
         ]);
+      } else if (scenario === 'held by review recovery') {
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.jobs(task.id).at(-1)).toMatchObject({ kind: 'fix', status: 'cancelled' });
       } else {
         expect(run).not.toHaveBeenCalled();
         expect(f.store.getTask(task.id)).toMatchObject({

@@ -556,6 +556,7 @@ export class TelegramWorkspace {
           job,
         ),
       slots,
+      (id) => this.store.prerequisiteState(groupId, id),
     );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
@@ -2321,7 +2322,8 @@ export class TelegramWorkspace {
           return;
         if (question && !reminderOpen(this.store, question)) return;
         if (task) {
-          const worker = task.inputRequest?.role === 'author';
+          const worker =
+            task.inputRequest?.role === 'author' && task.inputRequest.reviewDispute !== 'owner';
           text
             .add(worker ? this.t('Worker') : 'daddy', 'bold')
             .add(' · ')

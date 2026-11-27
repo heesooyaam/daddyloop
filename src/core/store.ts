@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { correctionDependencies, disputedFindings } from './task-activity.js';
 import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
@@ -18,12 +19,6 @@ import {
   type Workspace,
   type DaddyJob,
 } from './types.js';
-
-function readTask(data: string): Task {
-  const task: Task = JSON.parse(data);
-  if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
-  return task;
-}
 
 // A replacement run keeps the queue position of the original, including across restarts.
 const jobOrder = (table: 'jobs' | 'daddy_jobs') => `ORDER BY coalesce(
@@ -61,6 +56,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, run_id TEXT, type TEXT NOT NULL, data TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS event_task ON events(task_id,id);
+      CREATE INDEX IF NOT EXISTS saved_fix_by_head ON events(task_id,json_extract(data,'$.head'),id) WHERE type='author.fixes_saved';
+      CREATE INDEX IF NOT EXISTS released_feedback_by_run ON events(task_id,run_id,id) WHERE type='author.feedback_snapshot';
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS job_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS jobs_by_task ON jobs(task_id);
@@ -82,6 +79,23 @@ export class Store {
       CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
       CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS review_lessons (
+        repository TEXT NOT NULL, id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        review_id TEXT NOT NULL, head TEXT NOT NULL, confirmed_at TEXT NOT NULL, data TEXT NOT NULL, terms TEXT NOT NULL,
+        PRIMARY KEY(repository,id)
+      );
+      CREATE TABLE IF NOT EXISTS review_lesson_terms (
+        repository TEXT NOT NULL, term TEXT NOT NULL, lesson_id TEXT NOT NULL, weight INTEGER NOT NULL,
+        PRIMARY KEY(repository,term,lesson_id), FOREIGN KEY(repository,lesson_id) REFERENCES review_lessons(repository,id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS review_terms_by_lesson ON review_lesson_terms(repository,lesson_id);
+      CREATE TRIGGER IF NOT EXISTS index_review_lesson AFTER INSERT ON review_lessons BEGIN
+        INSERT INTO review_lesson_terms SELECT NEW.repository,key,NEW.id,value FROM json_each(NEW.terms);
+      END;
+      CREATE TRIGGER IF NOT EXISTS reindex_review_lesson AFTER UPDATE OF terms ON review_lessons BEGIN
+        DELETE FROM review_lesson_terms WHERE repository=NEW.repository AND lesson_id=NEW.id;
+        INSERT INTO review_lesson_terms SELECT NEW.repository,key,NEW.id,value FROM json_each(NEW.terms);
+      END;
       PRAGMA user_version=7;
     `);
     this.db.exec(`
@@ -109,10 +123,28 @@ export class Store {
       this.transactionEvents = undefined;
     }
   }
+  private readTask(data: string): Task {
+    const task: Task = JSON.parse(data);
+    if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');
+    if (
+      task.state === 'needs_input' &&
+      task.reason === disputedFindings &&
+      task.inputRequest?.role === 'author' &&
+      !task.inputRequest.reviewDispute &&
+      task.groupId &&
+      this.db
+        .prepare(
+          "SELECT id FROM review_groups WHERE id=? AND json_extract(data,'$.orchestrated')=1",
+        )
+        .get(task.groupId)
+    )
+      task.inputRequest.reviewDispute = 'daddy';
+    return task;
+  }
   getTask(id: string): Task {
     const row = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
     if (!row) throw new AppError('not_found', 'Task not found', 404);
-    return readTask(row.data as string);
+    return this.readTask(row.data as string);
   }
   tasks(groupId?: string): Task[] {
     const rows =
@@ -123,7 +155,7 @@ export class Store {
               "SELECT data FROM tasks WHERE json_extract(data,'$.groupId')=? ORDER BY rowid DESC",
             )
             .all(groupId);
-    return rows.map((row) => readTask(row.data as string));
+    return rows.map((row) => this.readTask(row.data as string));
   }
   taskCountsByGroup() {
     const rows = this.db
@@ -259,6 +291,13 @@ export class Store {
       if (job.kind === 'plan' && job.status === 'queued' && job.generation === task.generation)
         this.saveJob({ ...job, profile: architectProfileFor(task, group) });
   }
+  prerequisiteState(groupId: string, id: string) {
+    return this.db
+      .prepare(
+        "SELECT json_extract(data,'$.state') AS state FROM tasks WHERE id=? AND json_extract(data,'$.groupId')=?",
+      )
+      .get(id, groupId)?.state as Task['state'] | undefined;
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,
@@ -277,6 +316,12 @@ export class Store {
           this.saveJob(job);
           continue;
         }
+        if (
+          task.dependsOn?.length &&
+          correctionDependencies(task, job, (id) => this.prerequisiteState(task.groupId!, id))
+            .length
+        )
+          continue;
         if (!eligible(job)) continue;
         if (job.notBefore && job.notBefore > now()) continue;
         if (
