@@ -373,6 +373,7 @@ export class Engine {
               'draft_lookup_pending',
               'Waiting for the original GitHub review to become visible.',
             );
+          this.assertConsistentPublication(task.snapshot, native);
           if (native.status === 'published' && retry)
             publication = await this.readHeldPublication(task, pr, native);
         } catch (error) {
@@ -425,6 +426,7 @@ export class Engine {
           task.mergeVerificationRequest = { kind: 'retry', clarification, retryAt: 0, delay: 7500 };
           task.snapshot = native;
           if (this.pauseAtReviewRoundLimit(task)) return task;
+          if (clarification?.trim()) this.rememberClarification(task, clarification);
           task.revision = revisionOf(latestPR);
           await this.holdReviewForChecks(task, latestPR);
           return task;
@@ -633,6 +635,7 @@ export class Engine {
       )
         return false;
       this.store.transaction(() => {
+        task.pr = pr;
         delete task.ciRepairRevision;
         this.parkForCI(task, job);
       });
@@ -938,6 +941,12 @@ export class Engine {
         // No matching or unresolved write remains. A red check can be repaired without a draft.
         if (pr.checks === 'failing') {
           if (intent.clarification?.trim()) this.rememberClarification(task, intent.clarification);
+          if (
+            intent.ref &&
+            intent.target &&
+            this.broker.outbox.writeEvidence(task.id, intent.marker) === 'not_started'
+          )
+            task.round = Math.max(0, task.round - 1);
           delete task.draftStart;
           task.revision = revisionOf(pr);
         }
@@ -1038,6 +1047,7 @@ export class Engine {
           'draft_lookup_pending',
           'Waiting for the original GitHub review to become visible.',
         );
+      this.assertConsistentPublication(task.snapshot, snapshot);
       const open =
         sameOpenTarget(task.pr, pr) &&
         task.pr?.targetCloneUrl === pr.targetCloneUrl &&
@@ -2000,6 +2010,22 @@ export class Engine {
     );
   }
 
+  assertConsistentPublication(previous: ReviewSnapshot | undefined, current: ReviewSnapshot) {
+    if (previous?.status !== 'published') return;
+    const visibleIds = new Set(current.comments.map((comment) => comment.id));
+    if (
+      current.status !== 'published' ||
+      previous.comments.some((comment) => !visibleIds.has(comment.id))
+    )
+      throw new GitHubRetryError(
+        'github_read_unavailable',
+        'Waiting for GitHub to confirm the status and known findings of the original publication.',
+        Date.now() + 15000,
+        false,
+        503,
+      );
+  }
+
   async readHeldPublication(task: Task, observed: PullRequest, snapshot?: ReviewSnapshot) {
     const ref = prRef(task);
     const provider = this.provider(ref);
@@ -2023,6 +2049,7 @@ export class Engine {
         false,
         503,
       );
+    this.assertConsistentPublication(task.snapshot, native);
     const owner = await provider.reviewAccount?.();
     const unchangedDraft =
       observed.state === 'merged' && this.initialDraftMatches(task, native, owner);
@@ -2157,6 +2184,9 @@ export class Engine {
   private assertMergeVerificationIdle(task: Task, resume = false) {
     if (
       (task.state !== 'needs_input' &&
+        !(
+          task.state === 'awaiting_review_checks' && task.mergeVerificationRequest?.kind === 'retry'
+        ) &&
         !(resume && task.state === 'paused') &&
         !(
           (resume || task.draftStart || task.mergeVerificationRequest) &&

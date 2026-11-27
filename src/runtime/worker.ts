@@ -748,6 +748,8 @@ export class Worker {
         const provider = this.engine.provider(ref);
         const handle = repairingConflict ? conflictReview : task.review;
         const actual = handle && (await provider.getReview(ref, handle));
+        if (repairingConflict && actual)
+          this.engine.assertConsistentPublication(task.feedback, actual);
         const freshPR = await provider.getPR(ref);
         if (
           (!repairingConflict && !handle) ||
@@ -787,19 +789,36 @@ export class Worker {
           // The stored feedback can belong to an earlier PR head.
           task.feedback = undefined;
         }
-      } else if (repairingCI) {
-        // CI-only work must not inherit findings from a different head.
-        if (task.reviewAdmission && task.snapshot?.status === 'published' && startingPR) {
-          const publication = await this.engine.readHeldPublication(task, startingPR);
-          const current = store.getTask(job.taskId);
-          if (current.generation !== job.generation || abort.signal.aborted)
-            throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-          task = current;
-          task.feedback = publication.snapshot;
-          store.saveTask(task);
-        } else {
-          task.feedback = undefined;
+      } else if (repairingCI && startingPR) {
+        const ref = prRef(task);
+        const publication =
+          task.reviewAdmission && task.snapshot?.status === 'published'
+            ? await this.engine.readHeldPublication(task, startingPR)
+            : undefined;
+        const pr = publication?.pr ?? (await this.engine.provider(ref).getPR(ref));
+        const current = store.getTask(job.taskId);
+        if (current.generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+        if (
+          !sameOpenTarget(current.pr, pr) ||
+          !sameReviewTarget(startingPR, pr) ||
+          !sameRevision(startingPR, pr) ||
+          pr.draft
+        )
+          throw new AppError('stale_feedback', 'The PR changed before CI repair could start');
+        if (await this.engine.skipObsoleteCIFix(job, pr)) {
+          job.status = 'cancelled';
+          return;
         }
+        task = current;
+        task.pr = pr;
+        if (publication) {
+          task.snapshot = publication.snapshot;
+          task.feedback = publication.snapshot;
+        }
+        store.saveTask(task);
+        // Preserve historical findings in SQLite without passing them to CI-only work.
+        if (!publication) task.feedback = undefined;
       } else if (revisingPlan) {
         const ref = prRef(task);
         const provider = this.engine.provider(ref);
