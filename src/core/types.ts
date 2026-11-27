@@ -11,6 +11,7 @@ export type State =
   | 'fixing'
   | 'awaiting_push'
   | 'awaiting_merge'
+  | 'awaiting_review_checks'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'
@@ -279,6 +280,9 @@ export interface Task {
   contextVersion: number;
   round: number;
   noProgress: number;
+  reviewRoundLimit?: number;
+  reviewChecksJob?: string;
+  ciRepairRevision?: Revision;
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;

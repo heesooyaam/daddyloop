@@ -18,6 +18,10 @@ When a worker disputes a published finding, the task shows **Waiting for daddyâ€
 
 ## Regression tests and independent review
 
+For a pull request that requires CI, the service checks the pushed commit before opening a review round and again before starting a queued reviewer. Pending or missing checks put the task in **Waiting for CI before review**. A failed check goes to the assigned worker with its name and link. A new commit goes through CI again. An explicit waiver applies only to the pinned revision. Automatic merge still requires passing CI.
+
+A task may have its own review round limit. A limit of 15 allows round 15 and pauses that task before round 16. Existing drafts can continue within their round. Other tasks keep running. Change or clear the limit and resume the task to continue.
+
 The worker adds or extends a repository test for each behavior-changing issue and each behavioral finding fixed in review. For example, if a setting can be cleared in the web panel, its Telegram equivalent must clear the same stored value. The worker reports the test path, case, command, and the observed results before and after the fix. One parameterized test can protect several related cases.
 
 On the first review, the reviewer checks all promised outcomes and affected entry points and reports confirmed blockers together. On later reviews, the reviewer independently runs the relevant tests on the pinned revision and checks that they detect the pre-fix behavior. A missing or ineffective regression test is a blocking review finding for the worker. Plans, research reports and documentation use their own acceptance checks.

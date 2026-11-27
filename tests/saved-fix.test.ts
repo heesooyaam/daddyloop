@@ -507,31 +507,44 @@ it.each([true, false])(
   },
 );
 
-it('routes a saved fix merged externally to read-only verification of that exact head', async () => {
-  const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
-  try {
-    const t = f.store.getTask(f.task.id);
-    t.pendingFix = { revision: t.revision!, attempted: true };
-    f.store.saveTask(t);
-    const pr = { ...t.pr!, head: savedHead, state: 'merged' as const, mergeCommit: 'merged-h2' };
-    f.store.setSetting('demo-pr:1', { ...pr, targetBranch: 'other' });
-    await expect(f.engine.action(t.id, 'verify-merge')).rejects.toMatchObject({
-      code: 'merge_unconfirmed',
-    });
-    f.store.setSetting('demo-pr:1', pr);
-    await f.engine.review(t.id, true);
-    expect(f.store.getTask(t.id).revision?.head).toBe(savedHead);
-    expect(f.store.activeJobs(t.id)[0]).toMatchObject({ kind: 'verify_merge' });
-    await f.run({ status: 'incomplete', summary: 'Integration check unavailable' });
-    expect(f.store.getTask(t.id)).toMatchObject({
-      state: 'needs_input',
-      reason: 'Integration check unavailable',
-    });
-    expect(f.store.getTask(t.id).verifiedMerge).toBeUndefined();
-  } finally {
-    f.store.close();
-  }
-});
+it.each([false, true])(
+  'routes a saved fix merged externally to read-only verification of that exact head (draft delay=%s)',
+  async (delayedDraft) => {
+    const f = await fixture({ state: 'needs_input', pendingAuthorHead: savedHead });
+    try {
+      const t = f.store.getTask(f.task.id);
+      t.pendingFix = { revision: t.revision!, attempted: true };
+      if (delayedDraft) {
+        t.revision = { ...t.revision!, head: savedHead };
+        t.pr = { ...t.pr!, head: savedHead };
+        t.draftStart = {
+          marker: `daddyloop:${t.id}:pending`,
+          revision: t.revision,
+          retry: false,
+          retryAt: Date.now() + 60_000,
+        };
+      }
+      f.store.saveTask(t);
+      const pr = { ...t.pr!, head: savedHead, state: 'merged' as const, mergeCommit: 'merged-h2' };
+      f.store.setSetting('demo-pr:1', { ...pr, targetBranch: 'other' });
+      await expect(f.engine.action(t.id, 'verify-merge')).rejects.toMatchObject({
+        code: 'merge_unconfirmed',
+      });
+      f.store.setSetting('demo-pr:1', pr);
+      await f.engine.review(t.id, true);
+      expect(f.store.getTask(t.id).revision?.head).toBe(savedHead);
+      expect(f.store.activeJobs(t.id)[0]).toMatchObject({ kind: 'verify_merge' });
+      await f.run({ status: 'incomplete', summary: 'Integration check unavailable' });
+      expect(f.store.getTask(t.id)).toMatchObject({
+        state: 'needs_input',
+        reason: 'Integration check unavailable',
+      });
+      expect(f.store.getTask(t.id).verifiedMerge).toBeUndefined();
+    } finally {
+      f.store.close();
+    }
+  },
+);
 
 it.each([
   'legacy receipt',

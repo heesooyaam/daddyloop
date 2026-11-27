@@ -38,6 +38,11 @@ it('serves scoped Russian help and installs localized suggestions without consum
     },
   });
   const messages = () => sent.filter((x) => x.method === 'sendMessage');
+  const help = async (update: Update) => {
+    const previous = messages().length;
+    await bot.handle(update);
+    await vi.waitFor(() => expect(messages()).toHaveLength(previous + 1));
+  };
   try {
     bot.start();
     await vi.waitFor(() =>
@@ -49,17 +54,17 @@ it('serves scoped Russian help and installs localized suggestions without consum
       );
       expect(body.commands.some((x: { command: string }) => x.command === 'help')).toBe(true);
     }
-    await bot.handle(msg('/help'));
+    await help(msg('/help'));
     expect(messages().at(-1)?.body.text).toContain('/cleanup');
-    await bot.handle(msg('/help@fixture_bot', true));
+    await help(msg('/help@fixture_bot', true));
     expect(messages().at(-1)?.body.text).toContain('/attach');
     expect(messages().at(-1)?.body.text).not.toContain('/cleanup');
-    await bot.handle(msg('/help@fixture_bot /task', true));
+    await help(msg('/help@fixture_bot /task', true));
     expect(messages().at(-1)?.body).toMatchObject({
       message_thread_id: 17,
       text: expect.stringContaining('--worker 2 -- Почини поиск'),
     });
-    await bot.handle(msg('/help nonsense'));
+    await help(msg('/help nonsense'));
     expect(messages().at(-1)?.body.text).toContain('Неизвестная команда');
     const count = messages().length;
     await bot.handle(msg('/help@other_bot task', true));

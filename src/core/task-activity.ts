@@ -38,6 +38,7 @@ const statusLabels: Record<State, string> = {
   awaiting_push: 'Sending fixes',
   awaiting_merge: 'Waiting for GitHub merge',
   awaiting_checks: 'Waiting for CI',
+  awaiting_review_checks: 'Waiting for CI before review',
   awaiting_plan_approval: 'Waiting for plan approval',
   needs_input: 'Action needed',
   paused: 'Paused',
@@ -255,6 +256,8 @@ export function activityStatus({
     )
       return 'Review reached the run time limit';
   }
+  if (task.state === 'fixing' && sameRevision(task.ciRepairRevision, task.revision))
+    return 'Fixing failing CI';
   if (task.fixingMergeConflict && task.state === 'fixing') {
     if (job?.status === 'running') return 'Resolving the merge conflict';
     return assignedWorker
