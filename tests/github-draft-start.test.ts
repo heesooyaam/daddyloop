@@ -211,12 +211,21 @@ it.each(['during recovery', 'during workspace preparation'] as const)(
       f.options.hidden = false;
       f.due();
       const before = reviewer(f);
+      const savedTurn = {
+        input: 'Continue the original recovered review after CI',
+        freshContextRetry: true,
+        timeoutRetry: true,
+      };
       if (timing === 'during recovery') f.remote.checks = 'pending';
-      else
+      else {
+        await f.engine.review(f.task.id);
+        const [job] = f.store.activeJobs(f.task.id);
+        f.store.saveJob({ ...job, ...savedTurn });
         before.prepare.mockImplementationOnce(async () => {
           f.remote.checks = 'pending';
           return '/tmp';
         });
+      }
       try {
         await before.worker.tick();
         await vi.waitFor(() =>
@@ -227,7 +236,10 @@ it.each(['during recovery', 'during workspace preparation'] as const)(
         const held = f.store.getTask(f.task.id);
         if (timing === 'during recovery')
           expect(held.draftStart).toMatchObject({ marker: intent.marker });
-        else expect(held.review).toMatchObject({ id: '123', marker: intent.marker });
+        else {
+          expect.soft(held.reviewAfterChecks).toEqual(savedTurn);
+          expect(held.review).toMatchObject({ id: '123', marker: intent.marker });
+        }
       } finally {
         await before.worker.stop();
       }
@@ -241,6 +253,8 @@ it.each(['during recovery', 'during workspace preparation'] as const)(
           job: { kind: 'review' },
           task: { round: 1, review: { id: '123', marker: intent.marker } },
         });
+        if (timing === 'during workspace preparation')
+          expect(after.run.mock.calls[0][0].job).toMatchObject(savedTurn);
         expect(f.writeAttempts).toEqual(['POST']);
       } finally {
         await after.worker.stop();
