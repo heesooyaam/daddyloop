@@ -1670,3 +1670,78 @@ describe('opt-in GitHub merging', () => {
     }
   });
 });
+
+it.each(
+  ['manual', 'service'].flatMap((publication) =>
+    [false, true].flatMap((conflict) =>
+      [false, true].map((omit) => ({ publication, conflict, omit })),
+    ),
+  ),
+)(
+  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit)',
+  async ({ publication, conflict, omit }) => {
+    const f = await setup();
+    try {
+      if (conflict) await f.daddy.settings(f.group.id, { autoMerge: true });
+      const id = f.task.id;
+      await f.engine.review(id, true);
+      const review = f.store.getTask(id).review!;
+      const job = f.store.claim()!;
+      await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
+      const { id: finding } = (await f.engine.broker.call(job, 'add_comment', {
+        key: 'handoff',
+        body: 'Original finding',
+      })) as { id: string };
+      await f.engine.completeJob(job, {
+        status: 'completed',
+        summary: 'Reviewed',
+        checkedHead: f.task.revision!.head,
+      });
+      f.store.saveJob({ ...job, status: 'completed' });
+      f.setRemote({ mergeable: !conflict, mergeConflict: conflict });
+      const ref = prRef(f.task);
+      if (publication === 'manual') {
+        await f.provider.publish(ref, review);
+        await f.engine.reconcile(id);
+      } else await f.engine.publish(id);
+      const queued = f.store.getTask(id);
+      expect(queued.state).toBe('fixing');
+      expect(!!queued.fixingMergeConflict).toBe(conflict);
+      expect(queued.feedbackReview?.id).toBe(review.id);
+      const edited = 'Updated **Markdown** from the published review';
+      if (omit) await f.provider.deleteComment(ref, review, finding);
+      else await f.provider.updateComment(ref, review, finding, edited);
+      vi.spyOn(f.checkouts, 'prepare').mockResolvedValue(f.dir);
+      const prepareConflict = vi.spyOn(f.checkouts, 'prepareConflict').mockResolvedValue(undefined);
+      f.agentRuntime.run.mockImplementationOnce(async (input) => {
+        expect(input.job.kind).toBe('fix');
+        if (!omit) {
+          expect(input.prompt).toContain(edited);
+          expect(input.task.feedback?.comments).toMatchObject([{ id: finding, body: edited }]);
+          expect(await input.onTool('read_review', {})).toMatchObject({
+            status: 'published',
+            comments: [{ id: finding, body: edited }],
+          });
+        }
+        return {
+          status: 'needs_input',
+          summary: 'Author received the findings',
+          checkedHead: input.task.revision!.head,
+        };
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(f.store.getTask(id).state).toBe('needs_input'));
+      if (omit) {
+        expect(f.agentRuntime.run).not.toHaveBeenCalled();
+        expect(prepareConflict).not.toHaveBeenCalled();
+        expect(f.store.getTask(id).feedback).toEqual(queued.feedback);
+      } else {
+        expect(f.agentRuntime.run).toHaveBeenCalledOnce();
+        expect(f.store.getTask(id).reason).toBe('Author received the findings');
+        expect(prepareConflict).toHaveBeenCalledTimes(conflict ? 1 : 0);
+      }
+    } finally {
+      await f.close();
+    }
+  },
+);

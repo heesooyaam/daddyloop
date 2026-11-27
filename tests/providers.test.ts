@@ -1224,18 +1224,24 @@ it.each(['manual publication', 'automatic publication', 'queued author'])(
   },
 );
 
-it.each(['repeat review', 'external merge'] as const)(
-  'requires both findings from a legacy publication and its successor during %s',
-  async (entry) => {
+it.each(
+  (['repeat review', 'external merge'] as const).flatMap((entry) =>
+    [false, true].map((partialList) => ({ entry, partialList })),
+  ),
+)(
+  'requires all known findings from a legacy publication during $entry (nonempty incomplete list=$partialList)',
+  async ({ entry, partialList }) => {
     const f = await fixture({ state: entry === 'external merge' ? 'needs_input' : 'queued' });
     const task = f.store.getTask(f.task.id);
     task.ref.provider = 'github';
     const priorRevision = { ...task.revision!, head: 'e'.repeat(40) };
-    const old = { id: '10', marker: 'daddyloop:old', revision: priorRevision };
+    const old = { id: '10', marker: `daddyloop:${task.id}:0:1`, revision: priorRevision };
     const latest = { ...old, id: '20', marker: 'daddyloop:latest' };
     const revisedMarkdown = 'Current **Markdown** of the earlier finding';
     let omit = true;
-    let verifyBoth = false;
+    let verifyAll = false;
+    const listed = partialList ? [11, 12] : [11];
+    const allIds = [...listed.map(String), '21'];
     let newReview: ReviewHandle | undefined;
     let newReviewPublished = false;
     const http = transport((path, method) => {
@@ -1246,14 +1252,13 @@ it.each(['repeat review', 'external merge'] as const)(
       expect(method).toBe('GET');
       const id = /\/reviews\/(\d+)/.exec(path)?.[1];
       if (path.includes('/comments')) {
-        if (id === '30' || (id === '10' && omit)) return [];
-        return [
-          {
-            id: id === '10' ? 11 : 21,
-            body: id === '10' ? revisedMarkdown : 'Finding in the next review',
-            html_url: task.ref.url,
-          },
-        ];
+        if (id === '30') return [];
+        const ids = id === '10' ? listed.filter((id) => !omit || id !== 11) : [21];
+        return ids.map((id) => ({
+          id,
+          body: id === 11 ? revisedMarkdown : 'Finding ' + id,
+          html_url: task.ref.url,
+        }));
       }
       const review = id === '10' ? old : id === '20' ? latest : newReview!;
       return {
@@ -1291,13 +1296,21 @@ it.each(['repeat review', 'external merge'] as const)(
       revision: old.revision,
       comments: 1,
     });
+    if (partialList) {
+      const receipt = (key: string, value: object) =>
+        f.store.db
+          .prepare("INSERT INTO operations VALUES(?, ?, 'done', ?, ?)")
+          .run(key, task.id, 'fixture', JSON.stringify(value));
+      receipt(old.marker, old);
+      for (const id of listed) receipt(`${old.marker}:comment:finding-${id}`, { id: String(id) });
+    }
     f.store.event(
       task.id,
       'author.feedback_snapshot',
       {
         status: 'published',
         revision: old.revision,
-        comments: [{ id: '11', body: 'Old wording' }],
+        comments: listed.map((id) => ({ id: String(id), body: 'Old wording ' + id })),
       },
       'old-author-run',
     );
@@ -1318,7 +1331,7 @@ it.each(['repeat review', 'external merge'] as const)(
         status: 'completed' as const,
         summary: 'Verified published findings',
         checkedHead: task.revision!.head,
-        verifiedCommentIds: verifyBoth ? ['11', '21'] : ['21'],
+        verifiedCommentIds: verifyAll ? allIds : allIds.filter((id) => id !== '11'),
       };
     });
     const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
@@ -1347,12 +1360,12 @@ it.each(['repeat review', 'external merge'] as const)(
       omit = false;
       await queue(true);
       await runQueued();
-      expect(seen[0]).toEqual(expect.arrayContaining(['11', '21']));
+      expect(seen[0]).toEqual(expect.arrayContaining(allIds));
       expect(f.store.getTask(task.id).state).toBe('needs_input');
-      verifyBoth = true;
+      verifyAll = true;
       await queue(true);
       await runQueued();
-      expect(seen[1]).toEqual(expect.arrayContaining(['11', '21']));
+      expect(seen[1]).toEqual(expect.arrayContaining(allIds));
       expect(f.store.getTask(task.id).state).toBe('complete');
     } finally {
       await worker.stop();

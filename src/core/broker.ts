@@ -277,17 +277,19 @@ export class Broker {
       throw new AppError('unknown_tool', 'Unknown review tool', 400);
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
+    if (tool === 'read_review' && job.role === 'author') {
+      schemas.read_review.parse(input);
+      const snapshot = await this.readAuthorReview(task);
+      if (snapshot.status !== 'published')
+        throw new AppError('draft_private', 'Draft feedback has not been published', 403);
+      return snapshot;
+    }
     const provider = this.provider(prRef(task));
     if (!task.review)
       throw new AppError('review_missing', 'No native review is attached to this task');
-    const snapshot =
-      job.role === 'author' && tool === 'read_review'
-        ? await this.readCurrentReview(task)
-        : await provider.getReview(prRef(task), task.review);
+    const snapshot = await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
-      if (job.role === 'author' && snapshot.status !== 'published')
-        throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;
     }
     const current = await provider.getPR(prRef(task));
@@ -482,6 +484,23 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
+  async readAuthorReview(task: Task): Promise<ReviewSnapshot> {
+    if (!task.fixingMergeConflict || task.review) return this.readCurrentReview(task);
+    // Conflict repair clears the draft handle but retains the publication
+    // that supplied its findings. Its pinned revision can have the old base.
+    const { feedback, feedbackReview } = task;
+    if (
+      !feedbackReview ||
+      feedback?.status !== 'published' ||
+      !sameRevision(feedback.revision, feedbackReview.revision)
+    )
+      throw new AppError(
+        'feedback_unconfirmed',
+        'Could not identify the published review for conflict repair. The author copy was preserved.',
+      );
+    return this.readCurrentReview({ ...task, review: feedbackReview, snapshot: feedback });
+  }
+
   async readCurrentReview(
     task: Task,
     confirmedPublishedIds: readonly string[] = [],

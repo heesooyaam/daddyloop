@@ -749,11 +749,14 @@ export class Worker {
         store.saveTask(task);
         store.saveJob(job);
       }
-      let preservedCopy: string | undefined;
-      if (repairingConflict) {
-        preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if (job.kind === 'fix' || revisingPlan) {
-        const actual = await this.engine.broker.readCurrentReview(task);
+      const repairHasFeedback =
+        task.feedback?.status === 'published' &&
+        (!!task.feedbackReview || task.feedback.comments.length > 0);
+      if ((job.kind === 'fix' && (!repairingConflict || repairHasFeedback)) || revisingPlan) {
+        const actual =
+          job.kind === 'fix'
+            ? await this.engine.broker.readAuthorReview(task)
+            : await this.engine.broker.readCurrentReview(task);
         if (actual.status !== 'published')
           throw new Error(
             'The published review changed before the author started; feedback was not released.',
@@ -767,6 +770,9 @@ export class Worker {
         }
         task = store.getTask(job.taskId);
       }
+      const preservedCopy = repairingConflict
+        ? await this.workspaces.prepareConflict(task, abort.signal)
+        : undefined;
       let agentCwd = cwd;
       if (task.scope && !demo) {
         agentCwd = realpathSync(join(cwd, workspaceScope(task.scope)));

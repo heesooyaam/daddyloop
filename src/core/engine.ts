@@ -2216,6 +2216,36 @@ export class Engine {
       )
         remember(task.feedback);
       if (task.review?.id === handle.id) remember(task.snapshot);
+      if (minimumCount > 0) {
+        // GitHub keeps a comment ID when publishing its draft. An old author
+        // snapshot without a review ID needs a completed write to this review.
+        const receipts = new Set(
+          (task.ref.provider === 'github' && handle.marker
+            ? this.store.db
+                .prepare(
+                  `SELECT json_extract(result,'$.id') AS id FROM operations
+                 WHERE task_id=? AND status='done' AND id GLOB ?`,
+                )
+                .all(task.id, handle.marker + ':comment:*')
+            : []
+          ).map((row) => String(row.id)),
+        );
+        const snapshots = this.store.db
+          .prepare(
+            `SELECT data FROM events WHERE task_id=? AND type='author.feedback_snapshot'
+           AND json_extract(data,'$.revision.head')=?`,
+          )
+          .all(task.id, handle.revision.head);
+        for (const row of snapshots) {
+          const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
+          if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
+            continue;
+          for (const { id } of snapshot.comments) {
+            if (snapshot.reviewId === handle.id || (!snapshot.reviewId && receipts.has(id)))
+              known.add(id);
+          }
+        }
+      }
       return { known: [...known], minimumCount };
     };
     const readFindingReview = async (handle: ReviewHandle) => {
@@ -2510,7 +2540,8 @@ export class Engine {
         );
         return false;
       }
-      this.setFeedback(task, snapshot);
+      const handle = task.review ?? task.feedbackReview;
+      this.setFeedback(task, snapshot, handle);
       if (
         job.kind === 'fix' &&
         task.state === 'fixing' &&
@@ -2521,7 +2552,12 @@ export class Engine {
         return false;
       this.store.saveTask(task);
       if (job.kind === 'fix')
-        this.store.event(task.id, 'author.feedback_snapshot', snapshot, job.id);
+        this.store.event(
+          task.id,
+          'author.feedback_snapshot',
+          { ...snapshot, reviewId: handle?.id },
+          job.id,
+        );
       return true;
     });
   }
