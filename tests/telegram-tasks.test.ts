@@ -216,6 +216,47 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       ).inline_keyboard.flat();
     const buttonFor = (label: string) =>
       keyboard().find((button) => button.text.replace(/^✓ /, '') === label)!.callback_data;
+    const choiceSession = f.daddy.create({
+      workspaceId: f.workspace.id,
+      requirements: 'Durable selection',
+    });
+    await bot.handle(message('/attach ' + choiceSession.id.slice(0, 8), 7, 19));
+    for (const privateChoice of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      const text = '/task --no-plan --engine claude -- Durable choice ' + privateChoice;
+      await bot.handle(privateChoice ? privateMessage(text) : message(text, 7, 18));
+      const choice = click(buttonFor(choiceSession.title), 7, 18);
+      if (privateChoice) {
+        choice.callback_query!.message!.chat = { id: 7, type: 'private' };
+        delete choice.callback_query!.message!.message_thread_id;
+      }
+      const update = choice.update_id;
+      const queued = () =>
+        f.store
+          .tasks(choiceSession.id)
+          .filter((task) => task.requirements.endsWith(String(privateChoice)));
+      f.store.db
+        .exec(`CREATE TRIGGER stop_choice_write BEFORE INSERT ON bot_receipts WHEN NEW.id=${update}
+        BEGIN SELECT RAISE(ABORT, 'interrupted before choice receipt'); END`);
+      await expect(bot.handle(choice)).rejects.toThrow('interrupted before choice receipt');
+      expect(queued()).toHaveLength(0);
+      f.store.db.exec('DROP TRIGGER stop_choice_write');
+      await bot.stop();
+      ({ api, bot } = createBot());
+      f.store.db.exec(`CREATE TRIGGER stop_choice_reply BEFORE DELETE ON settings
+        WHEN OLD.key='telegram.operationResult:${update}'
+        BEGIN SELECT RAISE(ABORT, 'interrupted before choice acknowledgement'); END`);
+      await expect(bot.handle(choice)).rejects.toThrow('interrupted before choice acknowledgement');
+      expect(queued()).toHaveLength(1);
+      expect(f.store.jobs(queued()[0]!.id)).toMatchObject([{ profile: { engine: 'claude' } }]);
+      f.store.db.exec('DROP TRIGGER stop_choice_reply');
+      await bot.stop();
+      ({ api, bot } = createBot());
+      await bot.handle(choice);
+      expect(lastText()).toContain('This action has already completed');
+      expect(queued()).toHaveLength(1);
+    }
+    f.store.setSetting('telegram.currentDaddy', group.id);
     const limitUrl = session + '/tasks/' + task!.id + '/review-limit';
     const setLimit = (limit: number | null, previous: number | null) =>
       app.inject({

@@ -1147,14 +1147,24 @@ export class TelegramWorkspace {
       this.store.setSetting(nextKey, null);
       throw new Error(this.t('This selection expired. Choose the repository again.'));
     }
-    const task = await this.daddy.createTask(groupId, {
-      ...request,
-      requestId: receipt,
-      replyTo,
-      expectedGeneration: this.update.getStore()?.expectedGeneration,
-      workspace: next?.workspace,
-    });
-    if (next) this.store.setSetting(nextKey, null);
+    const owner = this.pair()?.userId;
+    const task = await this.daddy.createTask(
+      groupId,
+      {
+        ...request,
+        requestId: receipt,
+        replyTo,
+        expectedGeneration: this.update.getStore()?.expectedGeneration ?? group.generation,
+        workspace: next?.workspace,
+      },
+      () => {
+        if (this.pair()?.userId !== owner)
+          throw new Error(this.t('This action expired. Open a fresh card.'));
+        this.authorize(destination, groupId);
+        if (next) this.store.setSetting(nextKey, null);
+        this.receipt();
+      },
+    );
     await this.api.send(destination, queuedTaskCard(this.locale(), task), undefined, {
       key: receipt,
     });
@@ -1203,6 +1213,7 @@ export class TelegramWorkspace {
     id: string,
     source: Destination,
     shownGeneration?: number,
+    action?: string,
   ) {
     const pendingKey = this.creationKey(source) + ':command';
     await this.daddy.engine.lock(pendingKey, async () => {
@@ -1250,8 +1261,9 @@ export class TelegramWorkspace {
       };
       try {
         if (context)
-          await this.update.run({ ...context, pendingKey, expectedGeneration }, () =>
-            this.handleMessage(selected),
+          await this.update.run(
+            { ...context, action: action ?? context.action, pendingKey, expectedGeneration },
+            () => this.handleMessage(selected),
           );
         else await this.handleMessage(selected);
       } catch (error) {
@@ -2538,7 +2550,13 @@ export class TelegramWorkspace {
                 action.update.update_id
             )
               throw new Error(this.t('This action expired. Open a fresh card.'));
-            await this.runSelected(action.update, action.groupId, destination, action.generation);
+            await this.runSelected(
+              action.update,
+              action.groupId,
+              destination,
+              action.generation,
+              choice[1],
+            );
             this.finishAction(choice[1]);
           } else await this.callback(callback.data!, destination);
         });

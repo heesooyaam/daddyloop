@@ -248,6 +248,103 @@ function confirmWorker(
   };
 }
 
+it.each([false, true])(
+  'queues direct Telegram tasks for the received generation, topic=%s',
+  async (inTopic) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, 'en', inTopic);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const lock = f.engine.lock('create-task:' + group.id, () => blocked);
+      const pause = f.daddy.pause(group.id);
+      const resume = f.daddy.resume(group.id);
+      const create = vi.spyOn(f.daddy, 'createTask');
+      const command = '/task --no-plan --engine claude -- Keep this task and profile';
+      const pending = controls.send(command);
+      try {
+        await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+      } finally {
+        release();
+        await Promise.all([lock, pause, resume, pending]);
+        create.mockRestore();
+      }
+      expect(f.store.tasks(group.id)).toHaveLength(0);
+      expect(controls.cards.at(-1)?.text).toContain('session changed');
+      await controls.send(command);
+      const [task] = f.store.tasks(group.id);
+      expect(task?.requirements).toBe('Keep this task and profile');
+      expect(f.store.jobs(task!.id)).toMatchObject([
+        { kind: 'implement', profile: { engine: 'claude' } },
+      ]);
+    } finally {
+      release();
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each([
+  { field: 'model', choice: 'gpt-6-astra max', late: { ...profiles.worker, model: 'gpt-6-astra' } },
+  { field: 'engine', choice: '--engine claude', late: { engine: 'claude' } },
+  { field: 'effort', choice: 'gpt-5.6-sol medium', late: { ...profiles.worker, effort: 'medium' } },
+])(
+  'rejects a web restart after a Telegram change to the shown $field',
+  async ({ choice, late }) => {
+    const f = daddyFixture();
+    const runs = holdWorker(f);
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id);
+    try {
+      const task = await f.daddy.createTask(group.id, {
+        validatePlan: false,
+        requirements: 'Restart the profile displayed in the form',
+        requestId: 'web-confirm-profile',
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      const active = runs[0]!;
+      const force = (profile: AgentProfile) =>
+        controls.post('/workers/1', {
+          profile,
+          baseline: profile,
+          expectedGeneration: group.generation,
+          forceTaskId: task.id,
+          expected: {
+            groupGeneration: group.generation,
+            task: {
+              head: task.revision?.head ?? '',
+              revision: task.revision,
+              generation: task.generation,
+            },
+          },
+        });
+      expect((await force(profiles.worker)).json()).toEqual({ restarted: false });
+      await controls.command(choice);
+      expect((await controls.read()).json().workers.slots[0].profile).toEqual(late);
+      expect(active.input.signal.aborted).toBe(false);
+      expect((await force(profiles.worker)).statusCode).toBe(409);
+      expect(active.input.signal.aborted).toBe(false);
+      expect((await force(late)).json()).toEqual({ restarted: true });
+      expect(active.input.signal.aborted).toBe(true);
+      active.finish();
+      await vi.waitFor(async () => {
+        await f.worker.tick();
+        expect(runs).toHaveLength(2);
+      });
+      expect(runs[1]!.input.job.profile).toEqual(late);
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
 it('merges an independent web edit at Telegram force confirmation and leaves a conflicting run active', async () => {
   const f = daddyFixture();
   const runs = holdWorker(f);

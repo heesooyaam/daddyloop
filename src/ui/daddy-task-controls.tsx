@@ -25,6 +25,7 @@ export function QueueTaskForm({
   const { t } = useLocale();
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [requirements, setRequirements] = useState('');
+  const [shownGeneration] = useState(board.group.generation);
   const [slot, setSlot] = useState('');
   const [profile, setProfile] = useState<AgentProfile>();
   const [repository, setRepository] = useState<RepositorySelection>();
@@ -39,6 +40,7 @@ export function QueueTaskForm({
     if (busy || voiceBusy || editingRepository || !requirements.trim()) return;
     const input = {
       requirements: requirements.trim(),
+      expectedGeneration: shownGeneration,
       validatePlan,
       architectProfile: validatePlan ? architect : undefined,
       repository,

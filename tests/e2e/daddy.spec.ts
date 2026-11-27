@@ -662,6 +662,22 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(worker).toContainText('Repair the filter cache');
   await expect(worker).toContainText('gpt-6-astra · medium');
   await worker.click();
+  await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
+  const session = '/api/daddy/sessions/' + new URL(page.url()).hash.slice('#session/'.length);
+  expect(
+    (
+      await page.request.post(session + '/workers/2', {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
+      })
+    ).status(),
+  ).toBe(200);
+  const conflict = page.waitForResponse(
+    (res) => res.url().endsWith('/workers/2') && res.request().method() === 'POST',
+  );
+  await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+  expect((await conflict).status()).toBe(409);
+  await expect(workers.getByRole('alert')).toContainText('worker.profile.model');
   await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
   await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('max');
   await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
@@ -1935,17 +1951,49 @@ test('the phone task form sends an explicit engine without a named worker model'
   });
   await page.goto('/#session/' + group.id);
   await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
   const queue = page.getByRole('dialog', { name: 'Queue task' });
-  await queue.getByLabel('Task description').fill('Use the Claude configuration');
-  await queue.getByLabel('Check architecture and plan before implementation').uncheck();
-  await queue.getByText('Choose a model', { exact: true }).click();
-  await queue.getByLabel('Agent module', { exact: true }).selectOption('claude');
-  const submitted = page.waitForResponse(
-    (res) => res.url().endsWith('/tasks') && res.request().method() === 'POST',
-  );
-  await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
-  const response = await submitted;
+  const open = async () => {
+    await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
+    await queue.getByLabel('Task description').fill('Use the Claude configuration');
+    await queue.getByLabel('Check architecture and plan before implementation').uncheck();
+    await queue.getByText('Choose a model', { exact: true }).click();
+    await queue.getByLabel('Agent module', { exact: true }).selectOption('claude');
+  };
+  const submit = async () => {
+    const submitted = page.waitForResponse(
+      (res) => res.url().endsWith('/tasks') && res.request().method() === 'POST',
+    );
+    await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+    return submitted;
+  };
+  await open();
+  const shown = (await board()).group.generation;
+  expect(
+    (
+      await page.request.post(session + '/pause', { headers, data: { expectedGeneration: shown } })
+    ).status(),
+  ).toBe(200);
+  const paused = (await board()).group.generation;
+  expect(
+    (
+      await page.request.post(session + '/resume', {
+        headers,
+        data: { expectedGeneration: paused },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await submit()).status()).toBe(409);
+  await expect(queue.getByRole('alert')).toContainText('session changed');
+  await expect(queue.getByLabel('Task description')).toHaveValue('Use the Claude configuration');
+  await expect(queue.getByLabel('Agent module', { exact: true })).toHaveValue('claude');
+  expect((await board()).tasks).toHaveLength(0);
+  await page.reload();
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  await open();
+  const response = await submit();
   expect(response.status()).toBe(201);
   expect(response.request().postDataJSON().workerRequest.profile).toEqual({ engine: 'claude' });
   const { id } = await response.json();

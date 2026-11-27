@@ -326,12 +326,16 @@ export class Daddy {
       workspace?: Workspace;
       workerRequest?: WorkerRequest;
     },
+    onCommit?: () => void,
   ) {
     return this.engine.lock(`create-task:${id}`, async () => {
       const group = this.group(id);
       const tasks = this.store.tasks(id);
       const existing = tasks.find((task) => task.createdByAction === input.requestId);
-      if (existing) return existing;
+      if (existing) {
+        if (onCommit) this.store.transaction(onCommit);
+        return existing;
+      }
       this.checkSessionGeneration(group, input.expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (group.daddyState === 'paused' || group.daddyState === 'archived')
@@ -355,6 +359,7 @@ export class Daddy {
         startImplementation: true,
         validatePlan: input.validatePlan ?? true,
         architectProfile: input.architectProfile,
+        onCommit,
       });
     });
   }

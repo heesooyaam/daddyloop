@@ -171,6 +171,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       .object({
         requirements: z.string().trim().min(1).max(20000),
         requestId: id,
+        expectedGeneration: generation.optional(),
         repository: repositorySelectionSchema.optional(),
         validatePlan: z.boolean().optional(),
         architectProfile: profileSchema.optional(),
@@ -189,6 +190,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
     const task = await daddy.createTask(sessionId, {
       requirements: input.requirements,
       requestId: `web:task:${input.requestId}`,
+      expectedGeneration: input.expectedGeneration,
       workerRequest: input.workerRequest,
       validatePlan: input.validatePlan,
       architectProfile: input.architectProfile,
@@ -216,12 +218,17 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           'Open the current worker settings before confirming a restart',
         )
         .parse(request.body);
+      const force = !!input.forceTaskId;
       const { restarted } = await daddy.configureWorker(
         id.parse(request.params.id),
         workerNumber.parse(Number(request.params.number)),
         input.profile,
         {
-          force: !!input.forceTaskId,
+          force,
+          // The restart checkbox confirms the entire displayed profile.
+          explicitEngine: force,
+          explicitModel: force,
+          explicitEffort: force,
           expectedTaskId: input.forceTaskId,
           expected: input.expected,
           baseline: input.baseline,

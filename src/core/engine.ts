@@ -3851,6 +3851,7 @@ export class Engine {
     reportOnly?: boolean;
     validatePlan?: boolean;
     id?: string;
+    onCommit?: () => void;
   }) {
     if (
       this.store
@@ -4001,6 +4002,7 @@ export class Engine {
             'chat',
             'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
           );
+        input.onCommit?.();
       });
       return task;
     };
@@ -4012,9 +4014,16 @@ export class Engine {
     instruction?: string,
     validatePlan?: boolean,
     architectProfile?: AgentProfile,
+    commit?: { groupGeneration: number; onCommit?: () => void },
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (
+        commit &&
+        task.groupId &&
+        this.store.getGroup(task.groupId).generation !== commit.groupGeneration
+      )
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
       if (!isTicket(task))
         throw new AppError(
           'already_in_review',
@@ -4036,6 +4045,7 @@ export class Engine {
         if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))
           delete task.planning;
         this.queueImplementation(task, actionId, instruction);
+        commit?.onCommit?.();
       });
       return task;
     });
