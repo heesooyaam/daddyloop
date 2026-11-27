@@ -775,7 +775,7 @@ export class Worker {
         task.feedback?.status === 'published' &&
         (!!task.feedbackReview || task.feedback.comments.length > 0);
       const needsFixFeedback =
-        job.kind === 'fix' && (repairingConflict ? repairHasFeedback : !repairingCI);
+        job.kind === 'fix' && (!(repairingConflict || repairingCI) || repairHasFeedback);
       const readFeedback = async () => {
         const actual =
           job.kind === 'fix'

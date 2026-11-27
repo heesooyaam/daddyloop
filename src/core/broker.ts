@@ -487,7 +487,7 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
-  private legacyConflictReview(task: Task, feedback: ReviewSnapshot): ReviewHandle | undefined {
+  publishedReviewFromLink(task: Task, feedback: ReviewSnapshot): ReviewHandle | undefined {
     const id = githubReviewIdFromUrl(prRef(task), feedback.url);
     if (!id) return;
     const events = this.store.db
@@ -512,14 +512,14 @@ export class Broker {
   }
 
   async readAuthorReview(task: Task) {
-    if (!task.fixingMergeConflict || task.review)
+    const repair = task.fixingMergeConflict || sameRevision(task.ciRepairRevision, task.revision);
+    if (!repair || task.review)
       return { snapshot: await this.readCurrentReview(task), handle: task.review };
-    // Conflict repair clears the draft handle but retains the publication
-    // that supplied its findings. Its pinned revision can have the old base.
+    // Repair can start without a draft while retaining findings from a prior revision.
     const feedback = task.feedback;
     const handle =
       task.feedbackReview ??
-      (feedback?.status === 'published' ? this.legacyConflictReview(task, feedback) : undefined);
+      (feedback?.status === 'published' ? this.publishedReviewFromLink(task, feedback) : undefined);
     if (
       !handle ||
       feedback?.status !== 'published' ||
@@ -527,7 +527,7 @@ export class Broker {
     )
       throw new AppError(
         'feedback_unconfirmed',
-        'Could not identify the published review for conflict repair. The author copy was preserved.',
+        'Could not identify the published review for repair. The author copy was preserved.',
       );
     const snapshot = await this.readCurrentReview({ ...task, review: handle, snapshot: feedback });
     return { snapshot, handle };

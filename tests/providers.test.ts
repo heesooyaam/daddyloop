@@ -1225,71 +1225,163 @@ it.each(['manual publication', 'automatic publication', 'queued author'])(
 );
 
 it.each(
-  (['repeat review', 'external merge'] as const).flatMap((entry) =>
-    (['count', 'receipts', 'native URL'] as const).map((evidence) => ({ entry, evidence })),
-  ),
+  (['repeat review', 'external merge'] as const).flatMap((entry) => [
+    ...(
+      [
+        'count',
+        'receipts',
+        'native URL',
+        'linked feedback',
+        'foreign feedback link',
+        'unrecorded feedback link',
+      ] as const
+    ).map((evidence) => ({ entry, evidence, provider: 'github' })),
+    ...['github', 'gitlab', 'arcadia'].map((provider) => ({
+      entry,
+      evidence: 'full snapshot',
+      provider,
+    })),
+  ]),
 )(
-  'requires all known findings from a legacy publication during $entry (evidence=$evidence)',
-  async ({ entry, evidence }) => {
-    const partialList = evidence !== 'count';
-    const missingId = evidence === 'native URL' ? 12 : 11;
+  'requires all known findings from a legacy publication during $entry (provider=$provider, evidence=$evidence)',
+  async ({ entry, evidence, provider }) => {
+    const linksFeedback = evidence.endsWith('link') || evidence === 'linked feedback';
+    const partialList = evidence !== 'count' && !linksFeedback;
+    const missingId = ['native URL', 'full snapshot'].includes(evidence) ? 12 : 11;
+    const arc = provider === 'arcadia';
+    const gitlab = provider === 'gitlab';
+    const nativeId = (id: number) => (arc ? 'pr:' + id : String(id));
     const f = await fixture({ state: entry === 'external merge' ? 'needs_input' : 'queued' });
     const task = f.store.getTask(f.task.id);
     task.ref = {
       ...task.ref,
-      provider: 'github',
+      provider,
       host: 'github.com',
       url: 'https://github.com/test/repo/pull/1',
     };
-    const priorRevision = { ...task.revision!, head: 'e'.repeat(40) };
-    const old = { id: '10', marker: `daddyloop:${task.id}:0:1`, revision: priorRevision };
-    const latest = { ...old, id: '20', marker: 'daddyloop:latest' };
+    if (arc) {
+      task.revision = { ...task.revision!, revisionId: '8' };
+      task.pr = { ...task.pr!, ...task.revision, diffHead: task.revision.head };
+      f.store.setSetting('demo-pr:1', task.pr);
+    }
+    const priorRevision = {
+      ...task.revision!,
+      head: 'e'.repeat(40),
+      ...(arc && { revisionId: '7' }),
+    };
+    const old = {
+      id: '10',
+      marker: `daddyloop:${task.id}:0:1`,
+      revision: priorRevision,
+      authorId: arc ? 'worker' : '7',
+      nodeId: '7',
+      baselineNoteId: 0,
+    };
+    const latest = { ...old, id: '20', marker: 'daddyloop:latest', baselineNoteId: 12 };
     const revisedMarkdown = 'Current **Markdown** of the earlier finding';
-    let omit = true;
-    let verifyAll = false;
+    let omit = !linksFeedback;
+    let verifyAll = linksFeedback;
+    let added = false;
     const listed = partialList ? [11, 12] : [11];
-    const allIds = [...listed.map(String), '21'];
+    const allIds = [...listed, 21, ...(linksFeedback ? [22] : [])].map(nativeId);
     let newReview: ReviewHandle | undefined;
     let newReviewPublished = false;
+    const note = (id: number, body: string, is_draft: boolean) => ({
+      id,
+      body,
+      content: body,
+      is_draft,
+      author: { id: 7, name: 'worker' },
+      html_url: task.ref.url,
+    });
+    const comments = (handle: ReviewHandle) => {
+      const ids =
+        handle.id === '10'
+          ? listed.filter((id) => !omit || id !== missingId)
+          : handle.id === '20'
+            ? added
+              ? [21, 22]
+              : [21]
+            : [];
+      return ids.map((id) =>
+        note(
+          id,
+          (id === 11 ? revisedMarkdown : 'Finding ' + id) +
+            '\n' +
+            tag(handle.marker + ':comment:fixture-' + id),
+          false,
+        ),
+      );
+    };
+    const notes = () => [
+      note(10, tag(old.marker), false),
+      ...comments(old),
+      note(20, tag(latest.marker), false),
+      ...comments(latest),
+      ...(newReview ? [note(30, tag(newReview.marker), !newReviewPublished)] : []),
+    ];
     const http = transport((path, method) => {
+      if (gitlab) {
+        if (method === 'PUT' && path.endsWith('/draft_notes/30/publish')) {
+          newReviewPublished = true;
+          return {};
+        }
+        expect(method).toBe('GET');
+        return notes().filter((n) => n.is_draft === path.includes('draft_notes'));
+      }
       if (method === 'POST' && path.endsWith('/reviews/30/events')) {
         newReviewPublished = true;
         return {};
       }
       expect(method).toBe('GET');
       const id = /\/reviews\/(\d+)/.exec(path)?.[1];
-      if (path.includes('/comments')) {
-        if (id === '30') return [];
-        const ids = id === '10' ? listed.filter((id) => !omit || id !== missingId) : [21];
-        return ids.map((id) => ({
-          id,
-          body: id === 11 ? revisedMarkdown : 'Finding ' + id,
-          html_url: task.ref.url,
-        }));
-      }
       const review = id === '10' ? old : id === '20' ? latest : newReview!;
+      if (path.includes('/comments')) return comments(review);
       return {
         id: Number(review.id),
         user: { id: 7 },
         body: tag(review.marker),
         commit_id: review.revision.head,
+        html_url: task.ref.url + '#pullrequestreview-' + review.id,
         state: id === '30' && !newReviewPublished ? 'PENDING' : 'COMMENTED',
       };
     });
-    const github = new GitHubProvider('github.com', 'fake', http);
-    vi.spyOn(f.provider, 'getReview').mockImplementation(github.getReview.bind(github));
-    vi.spyOn(f.provider, 'publish').mockImplementation(github.publish.bind(github));
+    const bridge = new ArcBridge();
+    vi.spyOn(bridge, 'api').mockImplementation(async <T>(args: string[]) => {
+      if (args[0] === 'draft-comment' && args[1] === 'publish') {
+        newReviewPublished = true;
+        return {} as T;
+      }
+      expect(args[1]).toBe('comments');
+      return (args[0] === 'pr' ? notes() : []) as T;
+    });
+    const native: ReviewProvider = arc
+      ? new ArcadiaProvider(bridge)
+      : gitlab
+        ? new GitLabProvider('gitlab.example.com', 'fake', http)
+        : new GitHubProvider('github.com', 'fake', http);
+    vi.spyOn(f.provider, 'getReview').mockImplementation(native.getReview.bind(native));
+    vi.spyOn(f.provider, 'publish').mockImplementation(native.publish.bind(native));
     vi.spyOn(f.provider as ReviewProvider, 'createReview').mockImplementation(
       async (_ref, revision, marker) => {
-        newReview = { id: '30', revision, marker };
+        newReview = { ...latest, id: '30', revision, marker, baselineNoteId: 22 };
         return newReview;
       },
     );
-    const knownLatest = await github.getReview(prRef(task), latest);
+    const publishedLatest = await native.getReview(prRef(task), latest);
+    added = linksFeedback;
+    const knownLatest = await native.getReview(prRef(task), latest);
+    if (evidence === 'foreign feedback link')
+      knownLatest.url = 'https://github.com/test/other/pull/1#pullrequestreview-20';
+    else if (evidence === 'unrecorded feedback link')
+      knownLatest.url = task.ref.url + '#pullrequestreview-47';
     f.engine.setFeedback(task, knownLatest, latest);
+    if (linksFeedback) delete task.feedbackReview;
     if (entry === 'external merge') {
-      task.review = latest;
-      task.snapshot = knownLatest;
+      if (!linksFeedback) {
+        task.review = latest;
+        task.snapshot = knownLatest;
+      }
       f.store.setSetting('demo-pr:1', {
         ...task.pr,
         state: 'merged',
@@ -1298,11 +1390,16 @@ it.each(
       });
     }
     f.store.saveTask(task);
-    f.store.event(task.id, 'review.findings_published', {
-      reviewId: old.id,
-      revision: old.revision,
-      comments: 1,
-    });
+    if (evidence === 'full snapshot') {
+      omit = true;
+      const snapshot = await native.getReview(prRef(task), old, { publishedEvidence: true });
+      f.store.event(task.id, 'review.published', { reviewId: old.id, handle: old, snapshot });
+    } else
+      f.store.event(task.id, 'review.findings_published', {
+        reviewId: old.id,
+        revision: old.revision,
+        comments: 1,
+      });
     if (partialList) {
       const receipt = (key: string, value: object) =>
         f.store.db
@@ -1319,8 +1416,12 @@ it.each(
       {
         status: 'published',
         revision: old.revision,
-        comments: listed.map((id) => ({ id: String(id), body: 'Old wording ' + id })),
-        ...(evidence === 'native URL' && { url: task.ref.url + '#pullrequestreview-10' }),
+        comments: listed.map((id) => ({ id: nativeId(id), body: 'Old wording ' + id })),
+        ...(evidence === 'native URL' || (evidence === 'full snapshot' && provider === 'github')
+          ? { url: task.ref.url + '#pullrequestreview-10' }
+          : evidence === 'full snapshot'
+            ? { reviewId: old.id }
+            : {}),
       },
       'old-author-run',
     );
@@ -1339,13 +1440,13 @@ it.each(
     f.store.event(task.id, 'review.published', {
       reviewId: latest.id,
       handle: latest,
-      snapshot: knownLatest,
+      snapshot: publishedLatest,
     });
     const workspaces = new Workspaces('/tmp');
     vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
     const seen: string[][] = [];
     const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
-      expect(input.task.feedback?.comments[0].id).toBe('21');
+      expect(input.task.feedback?.comments[0].id).toBe(nativeId(21));
       const draft = input.job.reviewFindingIds;
       seen.push(Object.values(draft ?? {}).flat());
       if (!omit) expect(input.prompt).toContain(revisedMarkdown);
@@ -1353,7 +1454,7 @@ it.each(
         status: 'completed' as const,
         summary: 'Verified published findings',
         checkedHead: task.revision!.head,
-        verifiedCommentIds: verifyAll ? allIds : allIds.filter((id) => id !== String(missingId)),
+        verifiedCommentIds: verifyAll ? allIds : allIds.filter((id) => id !== nativeId(missingId)),
       };
     });
     const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
@@ -1376,9 +1477,15 @@ it.each(
     try {
       await queue(false);
       await runQueued();
+      if (evidence === 'linked feedback') {
+        expect(f.store.getTask(task.id).state).toBe('complete');
+        expect(seen[0]).toEqual(expect.arrayContaining(allIds));
+        return;
+      }
       expect(f.store.getTask(task.id).state).toBe('needs_input');
       expect(run).not.toHaveBeenCalled();
       expect(f.store.getTask(task.id).feedback).toEqual(knownLatest);
+      if (linksFeedback) return;
       omit = false;
       await queue(true);
       await runQueued();
@@ -1392,6 +1499,72 @@ it.each(
     } finally {
       await worker.stop();
       f.store.close();
+    }
+  },
+);
+
+it.each(
+  ['github', 'gitlab', 'arcadia'].flatMap((provider) =>
+    [false, true].flatMap((manual) => [false, true].map((omit) => ({ provider, manual, omit }))),
+  ),
+)(
+  'admits a $provider CI fix only with current published feedback (manual=$manual, omitted=$omit)',
+  async ({ provider, manual, omit }) => {
+    const f = await publicationFixture(provider);
+    const { task, engine, store, nativeState, expected } = f;
+    const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+      expect(input.job.kind).toBe('fix');
+      expect(input.task.revision?.head).toBe(h2);
+      expect(input.task.feedback?.revision.head).toBe(task.revision!.head);
+      expect(input.task.feedback?.comments).toMatchObject(expected);
+      for (const finding of expected) expect(input.prompt).toContain(JSON.stringify(finding.body));
+      expect(await input.onTool('read_review', {})).toMatchObject({
+        status: 'published',
+        comments: expected,
+      });
+      return {
+        status: 'needs_input' as const,
+        summary: 'CI worker got current feedback',
+        checkedHead: h2,
+      };
+    });
+    const h2 = 'e'.repeat(40);
+    const worker = f.worker(run);
+    try {
+      if (manual) {
+        f.markPublished();
+        await engine.reconcile(task.id);
+      } else await engine.publish(task.id);
+      expect(store.getTask(task.id).state).toBe('fixing');
+      const original = store.claim()!;
+      await engine.completeJob(original, f.result(), async () => h2);
+      store.saveJob({ ...original, status: 'completed' });
+      store.setSetting('demo-pr:1', {
+        ...task.pr,
+        head: h2,
+        checks: 'failing',
+        ...(provider === 'arcadia' && { revisionId: '8', diffHead: h2 }),
+      });
+      await engine.reconcile(task.id);
+      expect(store.getTask(task.id).state).toBe('queued');
+      await engine.review(task.id);
+      const queued = store.getTask(task.id);
+      expect(queued.ciRepairRevision?.head).toBe(h2);
+      expect(queued.review).toBeUndefined();
+      nativeState.edited = true;
+      if (omit) nativeState.omitted = 1;
+      await worker.tick();
+      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
+      if (omit) {
+        expect(run).not.toHaveBeenCalled();
+        expect(store.getTask(task.id).feedback).toEqual(queued.feedback);
+      } else {
+        expect(run).toHaveBeenCalledOnce();
+        expect(store.getTask(task.id).reason).toBe('CI worker got current feedback');
+      }
+    } finally {
+      await worker.stop();
+      store.close();
     }
   },
 );

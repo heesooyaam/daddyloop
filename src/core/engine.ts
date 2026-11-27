@@ -2302,6 +2302,8 @@ export class Engine {
   private async feedbackHandle(task: Task) {
     if (task.feedbackReview) return task.feedbackReview;
     if (!task.feedback?.comments.length) return;
+    if (task.ref.provider === 'github' && task.feedback.url?.includes('#pullrequestreview-'))
+      return this.broker.publishedReviewFromLink(task, task.feedback);
     const matches = (snapshot?: ReviewSnapshot) =>
       snapshot?.status === 'published' &&
       sameRevision(snapshot.revision, task.feedback?.revision) &&
@@ -2392,36 +2394,34 @@ export class Engine {
       )
         remember(task.feedback);
       if (task.review?.id === handle.id) remember(task.snapshot);
-      if (minimumCount > 0) {
-        // GitHub keeps a comment ID when publishing its draft. An old author
-        // snapshot without a review ID needs a completed write to this review.
-        const receipts = new Set(
-          (task.ref.provider === 'github' && handle.marker
-            ? this.store.db
-                .prepare(
-                  `SELECT json_extract(result,'$.id') AS id FROM operations
-                 WHERE task_id=? AND status='done' AND id GLOB ?`,
-                )
-                .all(task.id, handle.marker + ':comment:*')
-            : []
-          ).map((row) => String(row.id)),
-        );
-        const snapshots = this.store.db
-          .prepare(
-            `SELECT data FROM events WHERE task_id=? AND type='author.feedback_snapshot'
-           AND json_extract(data,'$.revision.head')=?`,
-          )
-          .all(task.id, handle.revision.head);
-        for (const row of snapshots) {
-          const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
-          if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
-            continue;
-          const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
-          if (snapshot.reviewId && linkedId && snapshot.reviewId !== linkedId) continue;
-          const reviewId = snapshot.reviewId ?? linkedId;
-          for (const { id } of snapshot.comments) {
-            if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
-          }
+      // GitHub keeps a comment ID when publishing its draft. An old author
+      // snapshot without a review ID needs a completed write to this review.
+      const receipts = new Set(
+        (task.ref.provider === 'github' && handle.marker
+          ? this.store.db
+              .prepare(
+                `SELECT json_extract(result,'$.id') AS id FROM operations
+               WHERE task_id=? AND status='done' AND id GLOB ?`,
+              )
+              .all(task.id, handle.marker + ':comment:*')
+          : []
+        ).map((row) => String(row.id)),
+      );
+      const snapshots = this.store.db
+        .prepare(
+          `SELECT data FROM events WHERE task_id=? AND type='author.feedback_snapshot'
+         AND json_extract(data,'$.revision.head')=?`,
+        )
+        .all(task.id, handle.revision.head);
+      for (const row of snapshots) {
+        const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
+        if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
+          continue;
+        const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
+        if (snapshot.reviewId && linkedId && snapshot.reviewId !== linkedId) continue;
+        const reviewId = snapshot.reviewId ?? linkedId;
+        for (const { id } of snapshot.comments) {
+          if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
         }
       }
       return { known: [...known], minimumCount };
