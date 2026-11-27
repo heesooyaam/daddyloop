@@ -79,6 +79,23 @@ export class Store {
       CREATE INDEX IF NOT EXISTS daddy_job_status ON daddy_jobs(status);
       CREATE TABLE IF NOT EXISTS telegram_topics (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS voice_jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS review_lessons (
+        repository TEXT NOT NULL, id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        review_id TEXT NOT NULL, head TEXT NOT NULL, confirmed_at TEXT NOT NULL, data TEXT NOT NULL, terms TEXT NOT NULL,
+        PRIMARY KEY(repository,id)
+      );
+      CREATE TABLE IF NOT EXISTS review_lesson_terms (
+        repository TEXT NOT NULL, term TEXT NOT NULL, lesson_id TEXT NOT NULL, weight INTEGER NOT NULL,
+        PRIMARY KEY(repository,term,lesson_id), FOREIGN KEY(repository,lesson_id) REFERENCES review_lessons(repository,id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS review_terms_by_lesson ON review_lesson_terms(repository,lesson_id);
+      CREATE TRIGGER IF NOT EXISTS index_review_lesson AFTER INSERT ON review_lessons BEGIN
+        INSERT INTO review_lesson_terms SELECT NEW.repository,key,NEW.id,value FROM json_each(NEW.terms);
+      END;
+      CREATE TRIGGER IF NOT EXISTS reindex_review_lesson AFTER UPDATE OF terms ON review_lessons BEGIN
+        DELETE FROM review_lesson_terms WHERE repository=NEW.repository AND lesson_id=NEW.id;
+        INSERT INTO review_lesson_terms SELECT NEW.repository,key,NEW.id,value FROM json_each(NEW.terms);
+      END;
       PRAGMA user_version=7;
     `);
     this.db.exec(`
