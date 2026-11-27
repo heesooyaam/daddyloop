@@ -20,8 +20,14 @@ import {
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export const groupSelectionKey = 'telegram.pendingGroupSelection';
+type GroupSelectionIdentity = { requestId: number; ownerId: number; updateId?: number };
+export function groupSelectionHold(selection: GroupSelectionIdentity) {
+  return selection.updateId === undefined
+    ? selection.requestId
+    : `${selection.requestId}:${selection.updateId}`;
+}
 export interface DeliveryOptions {
-  groupSelectionHold?: number;
+  groupSelectionHold?: number | string;
   reminder?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
@@ -466,7 +472,19 @@ export class TelegramDelivery {
           );
         });
       });
-      if (matches.length === 1) return Number(matches[0].id);
+      if (matches.length) {
+        return this.pairLegacyMenuEvent(
+          menu,
+          position,
+          matches,
+          (candidate) =>
+            sameDestination(candidate.destination, menu.destination) &&
+            (worker
+              ? !!candidate.options.key?.startsWith('telegram:worker:')
+              : !candidate.options.key) &&
+            candidate.content.text === menu.content.text,
+        );
+      }
     }
     const localeOf = ({ content, options }: Delivery) =>
       (['ru', 'en'] as const).find(
@@ -477,22 +495,36 @@ export class TelegramDelivery {
       );
     const locale = localeOf(menu);
     if (!locale) return;
-    // The old poll processed selections sequentially. Within each locale
-    // and millisecond, only pair cards with events if the counts match.
-    const cards = this.store.db
-      .prepare(
-        `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
-       AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
-       AND json_extract(value,'$.createdAt')=? ORDER BY rowid`,
-      )
-      .all(this.bot, menu.ownerId ?? null, menu.createdAt)
-      .filter((row) => localeOf(JSON.parse(String(row.value))) === locale);
     const events = this.store.db
       .prepare(
         `SELECT id FROM events WHERE type='preferences.changed' AND task_id='_system'
        AND at=? AND json_extract(data,'$.locale')=? ORDER BY id`,
       )
-      .all(new Date(menu.createdAt).toISOString(), locale);
+      .all(time, locale);
+    return this.pairLegacyMenuEvent(
+      menu,
+      position,
+      events,
+      (candidate) => localeOf(candidate) === locale,
+    );
+  }
+  private pairLegacyMenuEvent(
+    menu: Delivery,
+    position: number,
+    events: { id?: unknown }[],
+    compatible: (candidate: Delivery) => boolean,
+  ) {
+    // A released poller processed commands sequentially. Pair compatible
+    // cards and effects by their respective SQLite order within the tick.
+    const cards = this.store.db
+      .prepare(
+        `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
+       AND json_extract(value,'$.bot')=?
+       AND json_extract(value,'$.ownerId') IS ?
+       AND json_extract(value,'$.createdAt')=? ORDER BY rowid`,
+      )
+      .all(this.bot, menu.ownerId ?? null, menu.createdAt)
+      .filter((row) => compatible(JSON.parse(String(row.value))));
     if (cards.length !== events.length) return;
     const index = cards.findIndex((card) => Number(card.position) === position);
     if (index >= 0) return Number(events[index].id);
@@ -915,9 +947,7 @@ export class TelegramDelivery {
       for (let i = 0; i < limit && !this.stopped; i++) {
         if (this.clock() < this.rateLimitUntil) break;
         const seen = new Set<string>();
-        const selection = this.store.setting<{ requestId: number; ownerId: number } | null>(
-          groupSelectionKey,
-        );
+        const selection = this.store.setting<GroupSelectionIdentity | null>(groupSelectionKey);
         const ready = [...this.pending.entries()]
           .sort(
             (a, b) =>
@@ -930,7 +960,7 @@ export class TelegramDelivery {
             seen.add(route);
             if (
               selection &&
-              value.options.groupSelectionHold === selection.requestId &&
+              value.options.groupSelectionHold === groupSelectionHold(selection) &&
               value.ownerId === selection.ownerId
             )
               return false;

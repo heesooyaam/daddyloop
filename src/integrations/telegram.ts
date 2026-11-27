@@ -688,7 +688,12 @@ export class Telegram {
   private async showCleanup(chatId: number, patch?: Record<string, unknown>) {
     const control = this.integrations?.cleanup;
     if (!control) throw new Error('Disk cleanup is unavailable');
-    const status = patch ? await control.update(patch) : control.status();
+    const store = this.engine.store;
+    const key = patch && this.api.updateEffectKey(store, 'cleanup');
+    const prior = store.effectResult<ReturnType<CleanupControls['status']>>(key);
+    const status =
+      prior?.result ??
+      (patch ? store.recordEffect(key, await control.update(patch)) : control.status());
     await this.api.send(chatId, cleanupControlCard(this.locale(), status));
   }
 

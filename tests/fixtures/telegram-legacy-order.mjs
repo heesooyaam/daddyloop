@@ -86,6 +86,7 @@ function snapshot(path) {
 }
 
 async function run(path, menuFirst, gap = 0, scenario = 'status') {
+  const kind = scenario.replace(/^two (rename|worker)$/, '$1');
   clock = at;
   const store = new Store(path);
   const sent = [];
@@ -120,12 +121,12 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
     const bot = new Telegram({ store }, api, 'offline_fixture');
     // The task path writes through the released Engine without starting workers
     // or asking a repository provider to describe a working copy.
-    const engine = ['task', 'worker'].includes(scenario)
+    const engine = ['task', 'worker'].includes(kind)
       ? new Engine(store, () => {
           throw new Error('Offline fixture');
         })
       : { store };
-    if (['task', 'worker'].includes(scenario))
+    if (['task', 'worker'].includes(kind))
       store.saveGroup({
         ...store.getGroup(group),
         generation: 1,
@@ -195,9 +196,9 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
           ? '/language ru'
           : scenario === 'task'
             ? '/task Legacy task'
-            : scenario === 'rename'
+            : kind === 'rename'
               ? '/rename Recovered title'
-              : scenario === 'worker'
+              : kind === 'worker'
                 ? '/worker 1 example max'
                 : '/status';
       await bot.handle(
@@ -234,7 +235,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
         clock += gap;
       }
       await reply('B', 'Reply B', 'final');
-      if (!menuFirst || scenario === 'two languages') {
+      if (!menuFirst || scenario.startsWith('two ')) {
         clock += gap;
         await menu();
       }
@@ -393,6 +394,27 @@ try {
         `${label}, ${menuFirst ? 'command first' : 'reply first'}: respect the released event order`,
       );
     }
+  }
+  for (const [command, event] of [
+    ['rename', 'daddy.renamed'],
+    ['worker', 'daddy.worker_configured'],
+  ]) {
+    if (
+      process.env.DADDYLOOP_LEGACY_ORDER_CASE &&
+      process.env.DADDYLOOP_LEGACY_ORDER_CASE !== command
+    )
+      continue;
+    const path = join(directory, 'two-' + command + '.sqlite');
+    const legacy = await run(path, true, 0, 'two ' + command);
+    assert.deepEqual(
+      legacy.events.map(({ type }) => type),
+      ['daddy.message', event, 'daddy.message', event],
+    );
+    assert.deepEqual(
+      await replay(path),
+      ['/' + command, 'B', '/' + command],
+      command + ': two identical confirmations must surround the reply',
+    );
   }
   const third = join(directory, 'c-then-menu.sqlite');
   await run(third, false, 0, 'third');

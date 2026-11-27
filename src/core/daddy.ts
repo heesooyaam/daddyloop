@@ -560,22 +560,33 @@ export class Daddy {
     taskId: string,
     profile: AgentProfile | null,
     actionId?: string,
+    effectKey?: string,
   ) {
+    const completed = () =>
+      this.store.effectResult<{ taskId: string; architectProfile?: AgentProfile }>(effectKey)
+        ?.result;
+    const prior = completed();
+    if (prior) return prior;
     if (profile) await this.catalogue.validate(profile);
     return this.engine.lock(taskId, async () => {
+      const prior = completed();
+      if (prior) return prior;
       const group = this.group(groupId);
       const task = this.task(groupId, taskId);
       if (group.deletion || group.deletedAt)
         throw new AppError('session_deleting', 'This session is being deleted');
       if (!isTicket(task) || task.state === 'complete')
         throw new AppError('planning_finished', 'Choose a task that can still enter planning', 409);
-      this.store.transaction(() => {
+      return this.store.transaction(() => {
         task.architectProfile = profile ?? undefined;
         this.store.saveTask(task);
         this.store.refreshQueuedPlans(task, group);
         this.store.event(task.id, 'architect.configured', { profile }, actionId);
+        return this.store.recordEffect(effectKey, {
+          taskId,
+          architectProfile: task.architectProfile,
+        });
       });
-      return { taskId, architectProfile: task.architectProfile };
     });
   }
 

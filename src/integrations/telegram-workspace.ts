@@ -52,6 +52,7 @@ import { moduleCatalogue } from '../modules/catalogue.js';
 import {
   deliveryStatus,
   dialogKey,
+  groupSelectionHold,
   groupSelectionKey as selectionKey,
 } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
@@ -72,6 +73,7 @@ type Pair = { chatId: number; userId: number; ownerLabel?: string };
 type Room = { chatId: number; title: string; ownerId: number };
 type Topic = { chatId: number; threadId: number; groupId: string; ownerId: number; title?: string };
 type GroupSelection = {
+  updateId?: number;
   requestId: number;
   chatId: number;
   ownerId: number;
@@ -452,6 +454,7 @@ export class TelegramWorkspace {
     return (
       current?.requestId === selection.requestId &&
       current.chatId === selection.chatId &&
+      current.updateId === selection.updateId &&
       pair?.userId === selection.ownerId &&
       pair.chatId === selection.ownerChatId
     );
@@ -462,9 +465,13 @@ export class TelegramWorkspace {
     );
     if (request?.id === selection.requestId && request.userId === selection.ownerId) return request;
   }
-  private async bind(shared: NonNullable<NonNullable<Update['message']>['chat_shared']>) {
+  private async bind(
+    shared: NonNullable<NonNullable<Update['message']>['chat_shared']>,
+    updateId: number,
+  ) {
     const pair = this.pair()!;
     const selection: GroupSelection = {
+      updateId,
       requestId: shared.request_id,
       chatId: shared.chat_id,
       ownerId: pair.userId,
@@ -478,6 +485,7 @@ export class TelegramWorkspace {
       return true;
     };
     this.api.applyUpdateEffect?.(this.store, 'group-selection', accept) ?? accept();
+    if (this.currentSelection(selection)) await this.reserveGroupReplies(selection);
     const running = this.resumeGroupSelection();
     if (!this.api.delivery?.drainingInBackground) await running;
   }
@@ -540,24 +548,31 @@ export class TelegramWorkspace {
       );
     return { chatId: selection.chatId, title: chat.title, ownerId: selection.ownerId };
   }
+  private async reserveGroupReplies(selection: GroupSelection) {
+    const hold = groupSelectionHold(selection);
+    const key = `group-selection:${selection.ownerId}:${hold}`;
+    const delivery = this.api.delivery;
+    if (delivery) {
+      // Record both slots before continuing the poll. On restart, reuse them
+      // before filling them with the permission check's actual result.
+      await Promise.all(
+        [':connected', ':home'].map((suffix) =>
+          delivery.send({ chatId: selection.ownerChatId }, new TelegramText(), {
+            key: key + suffix,
+            groupSelectionHold: hold,
+          }),
+        ),
+      );
+    }
+    return key;
+  }
   private async finishGroupSelection(selection: GroupSelection, signal: AbortSignal) {
     if (!this.currentSelection(selection)) {
       this.store.setSetting(selectionKey, null);
       return;
     }
-    const key = `group-selection:${selection.ownerId}:${selection.requestId}`;
-    if (this.api.delivery) {
-      // Reserve the private-chat slots before permission checks yield to the
-      // poller. The slots survive a restart and hold only this chat.
-      await Promise.all(
-        [':connected', ':home'].map((suffix) =>
-          this.api.delivery!.send({ chatId: selection.ownerChatId }, new TelegramText(), {
-            key: key + suffix,
-            groupSelectionHold: selection.requestId,
-          }),
-        ),
-      );
-    }
+    const key = await this.reserveGroupReplies(selection);
+    if (!this.currentSelection(selection)) return;
     let result = selection.result;
     if (!result) {
       try {
@@ -631,8 +646,12 @@ export class TelegramWorkspace {
     const group = this.authorize(destination, groupId),
       topic = await this.ensureTopic(group);
     if (!preserveSelection && destination.chatId === this.pair()?.chatId) {
-      this.store.setSetting('telegram.currentDaddy', group.id);
-      this.store.setSetting(this.creationKey(destination), null);
+      const select = () => {
+        this.store.setSetting('telegram.currentDaddy', group.id);
+        this.store.setSetting(this.creationKey(destination), null);
+        return true;
+      };
+      this.api.applyUpdateEffect?.(this.store, 'select-session', select) ?? select();
     }
     await this.api.send(
       destination,
@@ -1651,10 +1670,20 @@ export class TelegramWorkspace {
       const task = resetArchitect[1] === 't' ? this.store.getTask(resetArchitect[2]) : undefined;
       const group = this.authorize(destination, task?.groupId ?? resetArchitect[2]);
       if (task) {
-        await this.daddy.taskArchitect(group.id, task.id, null);
+        await this.daddy.taskArchitect(
+          group.id,
+          task.id,
+          null,
+          undefined,
+          this.effectKey('reset-task-architect'),
+        );
         await this.showTask(group.id, task.id, destination);
       } else {
-        await this.daddy.settings(group.id, { architectProfile: null });
+        await this.daddy.settings(
+          group.id,
+          { architectProfile: null },
+          this.effectKey('reset-session-architect'),
+        );
         await this.models(group.id, destination);
       }
       return true;
@@ -1758,6 +1787,14 @@ export class TelegramWorkspace {
     if (!privateChat && (chat.type !== 'supergroup' || this.room()?.chatId !== chat.id))
       return false;
     const originGroup = privateChat ? undefined : this.groupAt(destination);
+    if (!privateChat && this.api.applyUpdateEffect) {
+      // A topic may be bound by /attach itself. Pin an existing source
+      // session before either its mutation or its outbox write.
+      const key = this.effectKey('topic-route');
+      const saved = this.store.effectResult<string>(key);
+      if (saved && saved.result !== originGroup) return true;
+      if (originGroup) this.api.applyUpdateEffect(this.store, 'topic-route', () => originGroup);
+    }
     const execute = () =>
       this.handlePairedUpdate(update, pair, destination, privateChat, originGroup);
     return originGroup && this.api.forSessionReply
@@ -1825,7 +1862,7 @@ export class TelegramWorkspace {
         return true;
       }
       if (privateChat && message?.chat_shared) {
-        await this.bind(message.chat_shared);
+        await this.bind(message.chat_shared, update.update_id);
         return true;
       }
       if (message?.voice) {
