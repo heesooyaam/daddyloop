@@ -696,6 +696,14 @@ export class Telegram {
     const store = this.engine.store;
     const key = patch && this.api.updateEffectKey(store, 'cleanup');
     const prior = store.effectResult<ReturnType<CleanupControls['status']>>(key);
+    const intent = key && key + ':pending';
+    if (patch && !prior && store.effectResult(intent)) {
+      await this.api.send(chatId, cleanupControlCard(this.locale(), control.status(), true));
+      return;
+    }
+    // Configuration is persisted outside SQLite. If the result is missing
+    // after restart, replay could overwrite a newer change made in the web UI.
+    if (patch && !prior) store.recordEffect(intent, true);
     const status =
       prior?.result ??
       (patch ? store.recordEffect(key, await control.update(patch)) : control.status());

@@ -2,6 +2,7 @@ import { hostCleanupActions } from '../src/ops/host-cleanup.js';
 import { cleanupReportLines } from '../src/core/cleanup-outcomes.js';
 import {
   mkdtempSync,
+  copyFileSync,
   mkdirSync,
   rmSync,
   realpathSync,
@@ -17,7 +18,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Store } from '../src/core/store.js';
 import type { SessionRuntime } from '../src/runtime/agent.js';
 import { ScheduledCleanup, type CleanupAction } from '../src/ops/scheduled-cleanup.js';
-import { cacheScheduleSchema, configSchema } from '../src/ops/config.js';
+import { cacheScheduleSchema, configSchema, saveConfig } from '../src/ops/config.js';
 import { InstructionSources } from '../src/ops/instruction-sources.js';
 import { approveCacheTarget, pruneCacheTarget } from '../src/ops/cache-targets.js';
 import { buildApp } from '../src/server/app.js';
@@ -36,6 +37,168 @@ vi.mock(import('../src/ops/host-cleanup.js'), async (importOriginal) => {
   return { hostCleanupActions: (units, run = runHostCommand) => hostCleanupActions(units, run) };
 });
 afterEach(() => vi.unstubAllEnvs());
+
+it.each([
+  ['/cleanup off', 'enabled', false, true],
+  ['/cleanup on', 'enabled', true, false],
+  ['cleanup:off', 'enabled', false, true],
+  ['cleanup:on', 'enabled', true, false],
+  ['/cleanup interval 60', 'intervalMinutes', 60, 90],
+  ['/cleanup threshold 83', 'diskPercent', 83, 78],
+  ['/cleanup skill', 'skill', 'telegram-cleanup', 'web-cleanup'],
+  ['/cleanup clear-skill', 'skill', undefined, 'web-cleanup'],
+] as const)(
+  'preserves later web changes after replaying %s across a restart',
+  async (input, field, first, later) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'daddyloop-cleanup-replay-')));
+    const skillFile = (name: string) => {
+      const file = join(dir, name + '.md');
+      writeFileSync(file, '---\nname: ' + name + '\n---\nPlan local cache cleanup.');
+      return file;
+    };
+    const originalSkill = skillFile('telegram-cleanup');
+    const webSkill = skillFile('web-cleanup');
+    const config = join(dir, 'config.json');
+    vi.stubEnv('DADDYLOOP_CONFIG', config);
+    saveConfig(
+      configSchema.parse({
+        telegram: { enabled: true, tokenFile: '/fixture' },
+        cache: {
+          auto: true,
+          maxAgeDays: 7,
+          keepReviewerCopies: 1,
+          schedule: { enabled: later === true, diskPercent: 78, intervalMinutes: 90 },
+        },
+      }),
+    );
+    const handle = (bot: Telegram, id: number) => {
+      const message = {
+        message_id: id,
+        chat: { id: 7, type: 'private' as const },
+        from: { id: 7 },
+      };
+      return bot.handle(
+        input.startsWith('cleanup:')
+          ? {
+              update_id: id,
+              callback_query: { id: 'toggle-' + id, from: message.from, data: input, message },
+            }
+          : {
+              update_id: id,
+              message: {
+                ...message,
+                text: input === '/cleanup skill' ? input + ' ' + originalSkill : input,
+              },
+            },
+      );
+    };
+    const start = async (store: Store) => {
+      store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+      const sent: string[] = [];
+      let bot!: Telegram;
+      const api = new TelegramApi(
+        '123456:abcdefghijklmnopqrstuvwxyz123456',
+        async (url, options) => {
+          if (String(url).endsWith('/getUpdates'))
+            return new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () => reject(options.signal!.reason), {
+                once: true,
+              });
+            });
+          if (String(url).endsWith('/sendMessage'))
+            sent.push(JSON.parse(String(options?.body)).text);
+          return Response.json({ ok: true, result: { message_id: sent.length } });
+        },
+      );
+      const { app } = await buildApp({
+        dataDir: dir,
+        store,
+        token: 'fixture',
+        startUpdateCheck: false,
+        telegramFactory: async (engine) => (bot = new Telegram(engine, api, 'fixture_bot')),
+        resourceCheck: healthy,
+      });
+      const request = (payload?: Record<string, unknown>) =>
+        app.inject({
+          method: payload ? 'POST' : 'GET',
+          url: '/api/cache/schedule',
+          headers: { authorization: 'Bearer fixture' },
+          payload,
+        });
+      await request();
+      await vi.waitFor(() => expect(bot).toBeDefined());
+      return { app, bot, sent, request };
+    };
+    try {
+      const original = new Store(join(dir, 'original.sqlite'));
+      const before = join(dir, 'before.sqlite');
+      const after = join(dir, 'after.sqlite');
+      const savedConfig = join(dir, 'saved.json');
+      try {
+        const initial = await start(original);
+        try {
+          if (input === '/cleanup clear-skill')
+            expect((await initial.request({ skillPath: originalSkill })).statusCode).toBe(200);
+          const record = original.recordEffect.bind(original);
+          vi.spyOn(original, 'recordEffect').mockImplementation((key, result) => {
+            if (!key?.endsWith(':cleanup')) return record(key, result);
+            copyFileSync(config, savedConfig);
+            original.db.prepare('VACUUM INTO ?').run(before);
+            const value = record(key, result);
+            original.db.prepare('VACUUM INTO ?').run(after);
+            return value;
+          });
+          await handle(initial.bot, 11);
+          expect((await initial.request()).json()[field]).toBe(first);
+        } finally {
+          await initial.app.close();
+        }
+      } finally {
+        original.close();
+      }
+      for (const [snapshot, unconfirmed] of [
+        [before, true],
+        [after, false],
+      ] as const) {
+        copyFileSync(savedConfig, config);
+        const restored = new Store(snapshot);
+        try {
+          expect(
+            restored.db.prepare('SELECT 1 FROM bot_receipts WHERE id=11').get(),
+          ).toBeUndefined();
+          const service = await start(restored);
+          try {
+            expect((await service.request()).json()[field]).toBe(first);
+            const updated = await service.request(
+              field === 'skill' ? { skillPath: webSkill } : { [field]: later },
+            );
+            expect(updated.statusCode).toBe(200);
+            expect(updated.json()[field]).toBe(later);
+            await handle(service.bot, 11);
+            expect(
+              (await service.request()).json()[field],
+              unconfirmed ? 'before effect result' : 'after effect result',
+            ).toBe(later);
+            await vi.waitFor(() => expect(service.sent).toHaveLength(1));
+            expect(
+              service.sent[0].includes('The previous cleanup change could not be confirmed.'),
+            ).toBe(unconfirmed);
+            await handle(service.bot, 11);
+            await handle(service.bot, 12);
+            expect((await service.request()).json()[field]).toBe(first);
+            await vi.waitFor(() => expect(service.sent).toHaveLength(2));
+          } finally {
+            await service.app.close();
+          }
+        } finally {
+          restored.close();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 const completed = { status: 'completed', summary: 'Ordered operations', checkedHead: '' } as const;
 

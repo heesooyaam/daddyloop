@@ -57,7 +57,7 @@ Send `/help` in the private chat or a group topic to see available commands and 
 | Private chat and connected session topics | `/new`, `/sessions`, `/workspaces`, `/task`, `/queue`, `/workers`, `/worker`, `/status`, `/pool`, `/models`, `/instructions`, `/skill`, `/presets`, `/preset`, `/repo`, `/limits`, `/pause`, `/resume`, `/notifications`, `/language en`, `/language ru`, `/help` |
 | Private chat                              | `/group`, `/updates`, `/web`, `/cleanup`                                                                                                                                                                                                                          |
 
-In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enable cleanup and check its threshold, skill and most recent result here. See [operations](../operations/en.md) for the settings.
+In the paired private bot chat, `/cleanup` opens the disk cleanup schedule. Enable cleanup and check its threshold, skill and most recent result here. If a restart interrupts an update to the schedule, the bot shows the current settings and flags an unconfirmed change. See [operations](../operations/en.md) for the settings.
 
 `/web` creates a browser login link after [permanent HTTPS access](../web/en.md) is configured. CLI updates and account confirmations stay in the private chat. Work continues when the phone and laptop are offline.
 
