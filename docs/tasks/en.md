@@ -29,8 +29,8 @@ When a solved failure teaches something its test alone cannot explain, the revie
 For example, the public review displays the paragraph, and the marker on the next line identifies its code and test.
 
 ```markdown
-After a restart, deliver the saved clarification to both the ordinary reviewer and the verifier of a merged PR.
-<!-- daddyloop:lesson {"key":"preserve-clarification","component":"src/core/engine.ts","test":"tests/review-recovery.test.ts"} -->
+After a pause, a late architect reply can target an older run. Match the run, revision and published review before handing a plan to the worker.
+<!-- daddyloop:lesson {"key":"architect-plan-at-reviewed-revision","component":"src/core/engine.ts","test":"tests/review-recovery.test.ts"} -->
 ```
 
 For new tasks in the same workspace, repository and source scope, the service searches SQLite by paths, criteria and symptoms. The architect, worker and reviewer receive up to three matches with the revision, test path and published review link. The entries use at most 2400 bytes of the space remaining after the task and its decision history. The agent verifies applicability on its current revision.
