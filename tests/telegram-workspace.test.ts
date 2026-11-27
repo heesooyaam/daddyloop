@@ -1637,6 +1637,10 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
           : 'update:91:0';
     let nextId = 50;
     let batchSent = false;
+    let observeNextPoll!: (offset: number) => void;
+    const nextPoll = new Promise<number>((resolve) => {
+      observeNextPoll = resolve;
+    });
     let markStarted!: () => void;
     let release!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -1657,6 +1661,7 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
             result: batch,
           });
         }
+        observeNextPoll(body.offset);
         return new Promise((_resolve, reject) => {
           init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
             once: true,
@@ -1682,15 +1687,16 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
     try {
       f.store.finishDaddyReply(a.id, 'Held reply', 'wait');
       bot.start();
-      await vi.waitFor(() => {
-        expect(f.store.tasks(b.id)).toEqual([
-          expect.objectContaining({ title: 'Persist this task' }),
-        ]);
-        expect(f.store.messages(a.id)).toContainEqual(
-          expect.objectContaining({ sender: 'user', text: 'Persist this owner text' }),
-        );
-        expect(f.store.setting('telegram.offset')).toBe(95);
-      });
+      // The second poll is the acknowledgement. Inspect durability at that boundary
+      // while the unrelated send is still held, independently of runner speed.
+      expect(await nextPoll).toBe(95);
+      expect(f.store.tasks(b.id)).toEqual([
+        expect.objectContaining({ title: 'Persist this task' }),
+      ]);
+      expect(f.store.messages(a.id)).toContainEqual(
+        expect.objectContaining({ sender: 'user', text: 'Persist this owner text' }),
+      );
+      expect(f.store.setting('telegram.offset')).toBe(95);
       expect(delivered.some((body) => body.text.includes('Held reply'))).toBe(false);
       const replies = () =>
         f.store.db
