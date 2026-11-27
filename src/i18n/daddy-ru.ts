@@ -500,6 +500,14 @@ export const daddyRu: Record<string, string> = {
   'This task is already complete': 'Эта задача уже завершена.',
   'Use /worker NUMBER MODEL [EFFORT] [--force] or /worker NUMBER --engine ENGINE.':
     'Используй /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force] или /worker НОМЕР --engine ДВИЖОК.',
+  'Paused after repeated planning': 'На паузе после повторного планирования',
+  'Repeated architecture planning stopped': 'Повторный запуск архитектора остановлен',
+  'Automatic planning repeated on the same published review without a recoverable plan':
+    'Сервис повторно запросил план по тем же замечаниям. Подтверждённый план восстановить не удалось. Задача на паузе.',
+  'Paused at the review round limit': 'На паузе по лимиту ревью',
+  'Review round limit reached': 'Достигнут лимит раундов ревью',
+  'Paused before review round {next}. Task limit: {limit}.':
+    'Следующий раунд — {next}. Задача остановлена на лимите {limit}.',
   'This task reached its review round limit': 'Задача достигла своего лимита раундов ревью',
   'Waiting for CI': 'Ожидает CI',
   'daddy is checking': 'daddy разбирается',

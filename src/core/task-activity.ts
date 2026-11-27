@@ -9,17 +9,27 @@ import {
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const repeatedArchitectureReason =
+  'Automatic planning repeated on the same published review without a recoverable plan';
+export const reviewLimitReason = 'This task reached its review round limit';
+export function heldAtReviewLimit(task: Task) {
+  return (
+    task.state === 'paused' &&
+    task.reason === reviewLimitReason &&
+    task.reviewRoundLimit !== undefined &&
+    task.round >= task.reviewRoundLimit
+  );
+}
+
 export const checkWaiverReasonLimit = 4000;
 export function canWaiveChecks(state: State) {
   return state === 'awaiting_checks' || state === 'awaiting_review_checks';
 }
 
-export const reviewRoundLimitPause = 'This task reached its review round limit';
-
 export function canResumeAfterReviewLimit(task: Task) {
   return (
     task.state === 'paused' &&
-    task.reason === reviewRoundLimitPause &&
+    task.reason === reviewLimitReason &&
     (task.reviewRoundLimit === undefined || task.round < task.reviewRoundLimit)
   );
 }
@@ -222,6 +232,9 @@ export function activityStatus({
   assignedWorker,
   waitingFor,
 }: TaskActivity) {
+  if (heldAtReviewLimit(task)) return 'Paused at the review round limit';
+  if (task.state === 'paused' && task.reason === repeatedArchitectureReason)
+    return 'Paused after repeated planning';
   if (waitingFor?.length) return 'Waiting for prerequisite tasks';
   if (waitingForDaddy(task)) return 'Waiting for daddy’s decision';
   if (

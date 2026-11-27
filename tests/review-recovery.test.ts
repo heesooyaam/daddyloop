@@ -47,16 +47,16 @@ async function scenario() {
   const finish = (job: Job) =>
     f.store.saveJob({ ...job, status: 'completed', finishedAt: new Date().toISOString() });
   const current = () => f.store.getTask(task.id);
-  const review = async (key: string | undefined, text = '') => {
+  const review = async (key: string | string[] | undefined, text = '') => {
     await f.engine.review(task.id);
     const t = current(),
       job = claimed();
     await f.engine.broker.call(job, 'set_summary', {
       body: 'Published evidence on the pinned revision. ' + text,
     });
-    if (key)
+    for (const finding of key === undefined ? [] : Array.isArray(key) ? key : [key])
       await f.engine.broker.call(job, 'add_comment', {
-        key,
+        key: finding,
         body: text,
         path: 'src/queue.ts',
         line: 10 + t.round,
@@ -379,3 +379,153 @@ it('rejects a plan after a native edit and never treats a stale or incomplete re
     await f.close();
   }
 });
+
+it('hands off one plan per publication when two sets of recurring criteria alternate on consecutive heads', async () => {
+  const { f, task, current, claimed, finish, review, fix } = await scenario();
+  async function accept(criteria: string[]) {
+    const planner = claimed();
+    expect(planner.kind).toBe('plan');
+    expect(current().reviewRecovery!.criteria).toEqual(criteria);
+    await f.engine.completeJob(planner, {
+      status: 'completed',
+      checkedHead: current().revision!.head,
+      summary: 'Implement the plan for ' + criteria.join(', '),
+    });
+    finish(planner);
+  }
+  try {
+    await review('delivery', 'First');
+    await fix('First change');
+    await review(['delivery', 'ordering'], 'Two findings');
+    await fix('Second change');
+    await review(['delivery', 'ordering'], 'Third revision');
+    await accept(['delivery']);
+    await fix('Apply first architecture plan');
+    await review(['delivery', 'ordering'], 'Fourth revision');
+    await accept(['ordering']);
+    await f.daddy.pause(current().groupId!);
+    await f.daddy.resume(current().groupId!);
+    f.engine.recoverInterruptedJobs();
+    await fix('Apply the second plan to all published feedback');
+    await review(undefined);
+    expect(current().state).toBe('complete');
+    const plans = f.store.events(task.id).filter((e) => e.type === 'review.architect_requested');
+    expect(plans).toHaveLength(2);
+    expect(new Set(plans.map((e) => (e.data as { reviewId: string }).reviewId)).size).toBe(2);
+  } finally {
+    await f.close();
+  }
+});
+
+it.each(['matching evidence', 'changed publication', 'later instruction'])(
+  'restores a legacy plan only with matching proof: %s',
+  async (variant) => {
+    const { f, group, task, current, claimed, finish, reachArchitect, fix } = await scenario();
+    try {
+      await reachArchitect();
+      const earlier = claimed();
+      const summary = 'Use the already verified plan at this consumer';
+      await f.engine.completeJob(earlier, {
+        status: 'completed',
+        checkedHead: current().revision!.head,
+        summary,
+      });
+      finish(earlier);
+      const old = current();
+      const issued = f.store.events(task.id).find((e) => e.type === 'review.architect_requested')!;
+      f.store.db
+        .prepare(
+          "UPDATE events SET data=json_remove(data,'$.fingerprint') WHERE task_id=? AND type='review.architect_planned'",
+        )
+        .run(task.id);
+      f.store.cancelJobs(task.id);
+      const loop = f.store.enqueue(
+        old,
+        'author',
+        'plan',
+        'Repeated automatic diagnosis from previous version',
+      );
+      old.reviewRecovery = { ...old.reviewRecovery!, runId: loop.id, plan: undefined };
+      f.store.saveTask(old);
+      f.store.event(old.id, 'review.architect_requested', issued.data, loop.id);
+      await f.daddy.pause(group.id);
+      await f.daddy.resume(group.id);
+      const restored = claimed();
+      expect(restored.kind).toBe('plan');
+      if (variant === 'changed publication')
+        f.store.db
+          .prepare(
+            "UPDATE events SET data=json_set(data,'$.snapshot.body','different') WHERE task_id=? AND type='review.published' AND json_extract(data,'$.reviewId')=?",
+          )
+          .run(task.id, old.review!.id);
+      if (variant === 'later instruction')
+        f.store.message(task.id, 'author', 'user', 'Follow the new user decision.');
+      if (variant !== 'matching evidence') {
+        expect(await f.engine.admitReviewWork(restored, current().snapshot!, current().pr!)).toBe(
+          true,
+        );
+        expect(current().reviewRecovery?.plan).toBeUndefined();
+        return;
+      }
+      expect(await f.engine.admitReviewWork(restored, current().snapshot!, current().pr!)).toBe(
+        false,
+      );
+      expect(current().reviewRecovery?.plan).toBe(summary);
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix' }]);
+      f.engine.recoverInterruptedJobs();
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix' }]);
+      await fix('Implement the saved plan');
+      expect(current().state).toBe('queued');
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+it.each([true, false])(
+  'the durable request journal protects a lost handoff, with completed receipt %s',
+  async (accepted) => {
+    const { f, group, task, peer, current, claimed, finish, reachArchitect } = await scenario();
+    try {
+      await reachArchitect();
+      const planner = claimed();
+      if (accepted) {
+        await f.engine.completeJob(planner, {
+          status: 'completed',
+          checkedHead: current().revision!.head,
+          summary: 'Confirmed handoff',
+        });
+        finish(planner);
+      }
+      // An old or incomplete task record has lost its mutable recovery pointer but retained its journal.
+      f.store.cancelJobs(task.id);
+      const inconsistent = current();
+      delete inconsistent.reviewRecovery;
+      f.store.saveTask(inconsistent);
+      const author = f.store.enqueue(
+        inconsistent,
+        'author',
+        'fix',
+        'Continue the published review',
+      );
+      expect(await f.engine.admitReviewWork(author, inconsistent.snapshot!, inconsistent.pr!)).toBe(
+        false,
+      );
+      expect(
+        f.store.events(task.id).filter((e) => e.type === 'review.architect_requested'),
+      ).toHaveLength(1);
+      if (accepted) {
+        expect(current().reviewRecovery?.plan).toBe('Confirmed handoff');
+        expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'fix' }]);
+      } else {
+        expect(current().state).toBe('paused');
+        expect(f.store.activeJobs(task.id)).toHaveLength(0);
+        expect(taskRequestKey(f.store, current())).toMatch(/^architecture-stop:/);
+        expect(f.store.getGroup(group.id).daddyState).toBe('active');
+        expect(f.store.getTask(peer.id).state).not.toBe('paused');
+      }
+    } finally {
+      await f.close();
+    }
+  },
+);

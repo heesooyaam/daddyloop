@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
+import { DemoProvider } from '../src/providers/demo.js';
 
 it('restores the session-owned tasks and their attempts once, including a running review', async () => {
   const f = daddyFixture();
@@ -97,6 +98,51 @@ it('recognizes an already resumed legacy session and preserves individual pauses
     expect(f.store.activeJobs(task.id)).toMatchObject([
       { firstAttemptId: original.id, input: original.input },
     ]);
+  } finally {
+    await f.close();
+  }
+});
+
+it('resumes a PR with known pending CI without putting its saved draft in the shared reviewer queue', async () => {
+  const f = daddyFixture();
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const ref = {
+      provider: 'demo',
+      host: 'demo.local',
+      repo: 'test/repo',
+      number: 12,
+      url: 'https://demo.local/pull/12',
+    };
+    const demo = new DemoProvider(f.store);
+    const pr = await demo.getPR(ref);
+    const task = await f.engine.create({
+      groupId: group.id,
+      repoPath: f.dir,
+      requirements: 'Review delivery',
+      ref,
+    });
+    await f.engine.review(task.id);
+    const reviewing = f.store.getTask(task.id);
+    const original = f.store.activeJobs(task.id)[0];
+    original.timeoutRetry = true;
+    f.store.saveJob(original);
+    f.store.setSetting('demo-pr:12', { ...pr, checks: 'pending' });
+    f.store.saveTask({ ...reviewing, pr: { ...pr, checks: 'pending' } });
+    await f.daddy.pause(group.id);
+    await f.daddy.resume(group.id);
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+    expect(f.store.getTask(task.id)).toMatchObject({
+      state: 'awaiting_review_checks',
+      round: 1,
+      review: reviewing.review,
+    });
+    f.store.setSetting('demo-pr:12', { ...pr, checks: 'passing' });
+    await f.engine.review(task.id);
+    expect(f.store.activeJobs(task.id)).toMatchObject([
+      { kind: 'review', input: original.input, timeoutRetry: true },
+    ]);
+    expect(f.store.getTask(task.id).round).toBe(1);
   } finally {
     await f.close();
   }

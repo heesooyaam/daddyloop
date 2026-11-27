@@ -1,11 +1,19 @@
 import type { Store } from '../core/store.js';
 import type { Task } from '../core/types.js';
-import { draftInspectionRequired } from '../core/task-activity.js';
+import {
+  draftInspectionRequired,
+  heldAtReviewLimit,
+  repeatedArchitectureReason,
+} from '../core/task-activity.js';
 import { notificationPreferences } from './notifications.js';
 
 export type OwnerQuestion =
   { groupId: string; taskId: string; request: string } | { groupId: string; messageId: string };
 export function taskRequestKey(store: Store, task: Task) {
+  if (task.state === 'paused' && task.reason === repeatedArchitectureReason && task.reviewRecovery)
+    return `architecture-stop:${task.reviewRecovery.reviewId}:${task.reviewRecovery.fingerprint}`;
+  if (heldAtReviewLimit(task))
+    return `review-limit:${task.reviewRoundLimit}:${task.round}:${task.revision?.head}`;
   const version = JSON.stringify([
     task.generation,
     task.revision?.head,
