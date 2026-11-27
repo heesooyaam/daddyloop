@@ -1,3 +1,4 @@
+import { githubReviewIdFromUrl } from '../providers/github.js';
 import { findingVersion } from './review-decisions.js';
 import { attestReviewLesson, savePublishedLesson } from './review-lessons.js';
 import { feedbackFingerprint, repeatedReviewFindings } from './review-recovery.js';
@@ -2240,9 +2241,11 @@ export class Engine {
           const snapshot = JSON.parse(String(row.data)) as ReviewSnapshot & { reviewId?: string };
           if (snapshot.status !== 'published' || !sameRevision(snapshot.revision, handle.revision))
             continue;
+          const linkedId = githubReviewIdFromUrl(prRef(task), snapshot.url);
+          if (snapshot.reviewId && linkedId && snapshot.reviewId !== linkedId) continue;
+          const reviewId = snapshot.reviewId ?? linkedId;
           for (const { id } of snapshot.comments) {
-            if (snapshot.reviewId === handle.id || (!snapshot.reviewId && receipts.has(id)))
-              known.add(id);
+            if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
           }
         }
       }
@@ -2484,7 +2487,12 @@ export class Engine {
     return true;
   }
   /** Also handles an ordinary fix that was already queued by an older installation. */
-  async admitReviewWork(job: Job, snapshot: ReviewSnapshot, pr: PullRequest) {
+  async admitReviewWork(
+    job: Job,
+    snapshot: ReviewSnapshot,
+    pr: PullRequest,
+    observedReview?: ReviewHandle,
+  ) {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state === 'paused') return false;
@@ -2540,7 +2548,7 @@ export class Engine {
         );
         return false;
       }
-      const handle = task.review ?? task.feedbackReview;
+      const handle = task.review ?? task.feedbackReview ?? observedReview;
       this.setFeedback(task, snapshot, handle);
       if (
         job.kind === 'fix' &&

@@ -1,3 +1,7 @@
+import { Store } from '../src/core/store.js';
+import { Engine } from '../src/core/engine.js';
+import { Worker } from '../src/runtime/worker.js';
+import { healthy } from './planning-fixture.js';
 import { buildContext } from '../src/runtime/context.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1673,19 +1677,50 @@ describe('opt-in GitHub merging', () => {
 
 it.each(
   ['manual', 'service'].flatMap((publication) =>
-    [false, true].flatMap((conflict) =>
-      [false, true].map((omit) => ({ publication, conflict, omit })),
-    ),
+    [false, true]
+      .flatMap((conflict) =>
+        (['before preparation', 'during preparation'] as const).flatMap((phase) =>
+          [false, true].map((omit) => ({
+            publication,
+            conflict,
+            omit,
+            phase,
+            legacy: undefined as string | undefined,
+          })),
+        ),
+      )
+      .concat(
+        ['linked', 'ambiguous'].map((legacy) => ({
+          publication,
+          conflict: true,
+          omit: false,
+          phase: 'before preparation' as const,
+          legacy,
+        })),
+      ),
   ),
 )(
-  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit)',
-  async ({ publication, conflict, omit }) => {
-    const f = await setup();
+  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit, $phase, legacy=$legacy)',
+  async ({ publication, conflict, omit, phase, legacy }) => {
+    const f = await setup(daddyFixture(!!legacy));
+    let reopened: Store | undefined;
+    let restartedWorker: Worker | undefined;
     try {
       if (conflict) await f.daddy.settings(f.group.id, { autoMerge: true });
       const id = f.task.id;
       await f.engine.review(id, true);
-      const review = f.store.getTask(id).review!;
+      const draft = f.store.getTask(id);
+      const review = { ...draft.review! };
+      if (legacy) {
+        const initial = await f.provider.getReview(prRef(draft), review);
+        review.id = '147';
+        draft.review = review;
+        f.store.saveTask(draft);
+        f.store.setSetting('demo-review:' + review.id, {
+          ...initial,
+          url: draft.ref.url + '#pullrequestreview-147',
+        });
+      }
       const job = f.store.claim()!;
       await f.engine.broker.call(job, 'set_summary', { body: 'Checked the change' });
       const { id: finding } = (await f.engine.broker.call(job, 'add_comment', {
@@ -1709,10 +1744,33 @@ it.each(
       expect(!!queued.fixingMergeConflict).toBe(conflict);
       expect(queued.feedbackReview?.id).toBe(review.id);
       const edited = 'Updated **Markdown** from the published review';
-      if (omit) await f.provider.deleteComment(ref, review, finding);
-      else await f.provider.updateComment(ref, review, finding, edited);
-      vi.spyOn(f.checkouts, 'prepare').mockResolvedValue(f.dir);
-      const prepareConflict = vi.spyOn(f.checkouts, 'prepareConflict').mockResolvedValue(undefined);
+      const update = async () => {
+        if (omit) await f.provider.deleteComment(ref, review, finding);
+        else await f.provider.updateComment(ref, review, finding, edited);
+      };
+      if (phase === 'before preparation') await update();
+      vi.spyOn(f.checkouts, 'prepare').mockImplementation(async () => {
+        if (!conflict && phase === 'during preparation') await update();
+        return f.dir;
+      });
+      const prepareConflict = vi
+        .spyOn(f.checkouts, 'prepareConflict')
+        .mockImplementation(async () => {
+          if (phase === 'during preparation') await update();
+          return undefined;
+        });
+      if (legacy) {
+        const old = f.store.getTask(id);
+        delete old.feedbackReview;
+        if (legacy === 'ambiguous') old.feedback!.url = old.ref.url + '#pullrequestreview-148';
+        f.store.saveTask(old);
+        reopened = new Store(join(f.dir, 'state.sqlite'));
+        const provider = new DemoProvider(reopened);
+        const engine = new Engine(reopened, () => provider);
+        engine.recoverInterruptedJobs();
+        restartedWorker = new Worker(engine, f.checkouts, f.agentRuntime, f.agentRuntime, healthy);
+      }
+      const store = reopened ?? f.store;
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.job.kind).toBe('fix');
         if (!omit) {
@@ -1729,18 +1787,22 @@ it.each(
           checkedHead: input.task.revision!.head,
         };
       });
-      await f.worker.tick();
-      await vi.waitFor(() => expect(f.store.getTask(id).state).toBe('needs_input'));
-      if (omit) {
+      await (restartedWorker ?? f.worker).tick();
+      await vi.waitFor(() => expect(store.getTask(id).state).toBe('needs_input'));
+      if (omit || legacy === 'ambiguous') {
         expect(f.agentRuntime.run).not.toHaveBeenCalled();
-        expect(prepareConflict).not.toHaveBeenCalled();
-        expect(f.store.getTask(id).feedback).toEqual(queued.feedback);
+        expect(prepareConflict).toHaveBeenCalledTimes(
+          conflict && phase === 'during preparation' ? 1 : 0,
+        );
+        expect(store.getTask(id).feedback?.comments).toEqual(queued.feedback?.comments);
       } else {
         expect(f.agentRuntime.run).toHaveBeenCalledOnce();
-        expect(f.store.getTask(id).reason).toBe('Author received the findings');
+        expect(store.getTask(id).reason).toBe('Author received the findings');
         expect(prepareConflict).toHaveBeenCalledTimes(conflict ? 1 : 0);
       }
     } finally {
+      await restartedWorker?.stop();
+      reopened?.close();
       await f.close();
     }
   },

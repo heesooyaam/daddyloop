@@ -1,3 +1,4 @@
+import { githubReviewIdFromUrl } from '../providers/github.js';
 import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -9,6 +10,8 @@ import {
   type PRRef,
   type ReviewSnapshot,
   type ReviewComment,
+  type ReviewHandle,
+  type Revision,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
@@ -279,7 +282,7 @@ export class Broker {
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
     if (tool === 'read_review' && job.role === 'author') {
       schemas.read_review.parse(input);
-      const snapshot = await this.readAuthorReview(task);
+      const { snapshot } = await this.readAuthorReview(task);
       if (snapshot.status !== 'published')
         throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;
@@ -484,21 +487,50 @@ export class Broker {
         .get(task.id, marker + ':*:set_summary:*', digest, task.id, id);
     });
   }
-  async readAuthorReview(task: Task): Promise<ReviewSnapshot> {
-    if (!task.fixingMergeConflict || task.review) return this.readCurrentReview(task);
+  private legacyConflictReview(task: Task, feedback: ReviewSnapshot): ReviewHandle | undefined {
+    const id = githubReviewIdFromUrl(prRef(task), feedback.url);
+    if (!id) return;
+    const events = this.store.db
+      .prepare(
+        `SELECT data FROM events WHERE task_id=?
+       AND type IN ('review.published','review.findings_published')
+       AND json_extract(data,'$.reviewId')=?`,
+      )
+      .all(task.id, id);
+    const recorded = events.some((row) => {
+      const publication = JSON.parse(String(row.data)) as {
+        snapshot?: ReviewSnapshot;
+        revision?: Revision;
+      };
+      if (publication.snapshot && publication.snapshot.status !== 'published') return false;
+      return sameRevision(
+        publication.snapshot?.revision ?? publication.revision,
+        feedback.revision,
+      );
+    });
+    if (recorded) return { id, marker: '', revision: feedback.revision };
+  }
+
+  async readAuthorReview(task: Task) {
+    if (!task.fixingMergeConflict || task.review)
+      return { snapshot: await this.readCurrentReview(task), handle: task.review };
     // Conflict repair clears the draft handle but retains the publication
     // that supplied its findings. Its pinned revision can have the old base.
-    const { feedback, feedbackReview } = task;
+    const feedback = task.feedback;
+    const handle =
+      task.feedbackReview ??
+      (feedback?.status === 'published' ? this.legacyConflictReview(task, feedback) : undefined);
     if (
-      !feedbackReview ||
+      !handle ||
       feedback?.status !== 'published' ||
-      !sameRevision(feedback.revision, feedbackReview.revision)
+      !sameRevision(feedback.revision, handle.revision)
     )
       throw new AppError(
         'feedback_unconfirmed',
         'Could not identify the published review for conflict repair. The author copy was preserved.',
       );
-    return this.readCurrentReview({ ...task, review: feedbackReview, snapshot: feedback });
+    const snapshot = await this.readCurrentReview({ ...task, review: handle, snapshot: feedback });
+    return { snapshot, handle };
   }
 
   async readCurrentReview(

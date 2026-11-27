@@ -752,27 +752,36 @@ export class Worker {
       const repairHasFeedback =
         task.feedback?.status === 'published' &&
         (!!task.feedbackReview || task.feedback.comments.length > 0);
-      if ((job.kind === 'fix' && (!repairingConflict || repairHasFeedback)) || revisingPlan) {
+      const readFeedback = async () => {
         const actual =
           job.kind === 'fix'
             ? await this.engine.broker.readAuthorReview(task)
-            : await this.engine.broker.readCurrentReview(task);
-        if (actual.status !== 'published')
+            : { snapshot: await this.engine.broker.readCurrentReview(task), handle: task.review };
+        if (actual.snapshot.status !== 'published')
           throw new Error(
             'The published review changed before the author started; feedback was not released.',
           );
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        if (!(await this.engine.admitReviewWork(job, actual, startingPR!))) {
+        return actual;
+      };
+      if (repairingConflict && repairHasFeedback) {
+        const { snapshot, handle } = await readFeedback();
+        this.engine.setFeedback(task, snapshot, handle);
+        store.saveTask(task);
+      }
+      const preservedCopy = repairingConflict
+        ? await this.workspaces.prepareConflict(task, abort.signal)
+        : undefined;
+      if ((job.kind === 'fix' && (!repairingConflict || repairHasFeedback)) || revisingPlan) {
+        const { snapshot, handle } = await readFeedback();
+        if (!(await this.engine.admitReviewWork(job, snapshot, startingPR!, handle))) {
           job.status = 'cancelled';
           return;
         }
         task = store.getTask(job.taskId);
       }
-      const preservedCopy = repairingConflict
-        ? await this.workspaces.prepareConflict(task, abort.signal)
-        : undefined;
       let agentCwd = cwd;
       if (task.scope && !demo) {
         agentCwd = realpathSync(join(cwd, workspaceScope(task.scope)));

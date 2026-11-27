@@ -13,6 +13,25 @@ import { AppError } from '../core/types.js';
 import { type ReviewProvider, tag } from './provider.js';
 import { ProviderHttp, type Fetch } from './http.js';
 
+export function githubReviewIdFromUrl(ref: PRRef, value: string | undefined) {
+  if (ref.provider !== 'github' || !value) return;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return;
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.host.toLowerCase() !== ref.host.toLowerCase() ||
+    url.pathname.toLowerCase() !== `/${ref.repo.toLowerCase()}/pull/${ref.number}`
+  )
+    return;
+  return /^#pullrequestreview-([1-9][0-9]*)$/.exec(url.hash)?.[1];
+}
+
 type GHReview = {
   id: number;
   node_id: string;
