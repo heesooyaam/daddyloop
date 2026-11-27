@@ -26,6 +26,7 @@ const activeStates = new Set<State>([
   'reviewing',
   'fixing',
   'awaiting_checks',
+  'awaiting_review_checks',
   'awaiting_merge',
   'ready_for_review',
   'awaiting_publication',
