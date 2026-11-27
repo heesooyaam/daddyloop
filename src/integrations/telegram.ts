@@ -1,3 +1,4 @@
+import { requestedMenu, handleMenuRequest, menuDelivery } from './telegram-menu-request.js';
 import { commandHelp, telegramCommands } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
@@ -348,7 +349,7 @@ export class TelegramApi {
       return this.delivery.send(
         target,
         { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-        { ...delivery, deletePrevious: cleanup },
+        { ...menuDelivery(this, target, delivery), deletePrevious: cleanup },
       );
     }
     let result: unknown;
@@ -491,8 +492,17 @@ export class Telegram {
   };
   async handle(update: Update) {
     const store = this.engine.store;
-    const message = update.message;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    const menu = requestedMenu(update, this.username);
+    if (!menu) return this.handleUpdate(update, false);
+    await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), () =>
+      this.handleUpdate(update, true),
+    );
+    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+  }
+  private async handleUpdate(update: Update, menu: boolean) {
+    const store = this.engine.store;
+    const message = update.message;
     const sender = update.callback_query?.from ?? message?.from;
     const ownerLabel = sender?.username ? '@' + sender.username : sender?.first_name;
     const paired = this.paired();
@@ -508,12 +518,14 @@ export class Telegram {
       // Persist voice, conversation input and task commands before acknowledging the update.
       const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
-      store.db
-        .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
-        .run(update.update_id, now());
+      if (!menu)
+        store.db
+          .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+          .run(update.update_id, now());
       return;
     }
-    store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    if (!menu)
+      store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
