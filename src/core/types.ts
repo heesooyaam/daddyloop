@@ -282,6 +282,7 @@ export interface Task {
   };
   draftRecheck?: { commentIds: string[]; retried?: boolean };
   reviewRecovery?: ReviewRecovery;
+  reviewLessonProof?: { digest: string; reviewId: string; revision: Revision; at: string };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;

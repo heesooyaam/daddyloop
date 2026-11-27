@@ -1,3 +1,4 @@
+import { attestReviewLesson, savePublishedLesson } from './review-lessons.js';
 import { feedbackFingerprint, repeatedReviewFindings } from './review-recovery.js';
 import { nativeReviewInstruction } from './instructions.js';
 import {
@@ -863,6 +864,7 @@ export class Engine {
     )
       delete task.reviewRecovery;
     task.review = undefined;
+    delete task.reviewLessonProof;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
@@ -1984,6 +1986,7 @@ export class Engine {
     if (task.pr?.state === 'open' && autoMergeRequested(this.store, task))
       this.state(task, 'awaiting_merge', 'Review complete. Waiting for GitHub to merge the PR.');
     else this.state(task, 'complete', reason);
+    if (task.state === 'complete') savePublishedLesson(this.store, task);
   }
 
   restoreMergeWaits() {
@@ -2934,6 +2937,7 @@ export class Engine {
           }
           task.draftRecheck = undefined;
         }
+        task.reviewLessonProof = await attestReviewLesson(this.store, task, job, snapshot);
         task.reviewFinished = true;
         delete task.openReviewQuestion;
         for (const id of verified)

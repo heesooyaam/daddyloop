@@ -22,6 +22,19 @@ The worker adds or extends a repository test for each behavior-changing issue an
 
 On the first review, the reviewer checks all promised outcomes and affected entry points and reports confirmed blockers together. On later reviews, the reviewer independently runs the relevant tests on the pinned revision and checks that they detect the pre-fix behavior. A missing or ineffective regression test is a blocking review finding for the worker. Plans, research reports and documentation use their own acceptance checks.
 
+## Lessons from verified fixes
+
+When a solved failure teaches something its test alone cannot explain, the reviewer can write a short cause and regression check in the final summary and annotate that paragraph with a daddyloop marker naming the criterion, source file and test file. The service validates the reviewer's confirmed write and the pinned checkout. A lesson becomes available after publication of the matching clean review, the required checks and completion of the source task.
+
+For example, the public review displays the paragraph, and the marker on the next line identifies its code and test.
+
+```markdown
+After a restart, deliver the saved clarification to both the ordinary reviewer and the verifier of a merged PR.
+<!-- daddyloop:lesson {"key":"preserve-clarification","component":"src/core/engine.ts","test":"tests/review-recovery.test.ts"} -->
+```
+
+For new tasks in the same workspace, repository and source scope, the service searches SQLite by paths, criteria and symptoms. The architect, worker and reviewer receive up to three matches with the revision, test path and published review link. The entries use at most 2400 bytes of the space remaining after the task and its decision history. The agent verifies applicability on its current revision.
+
 ## When a fix keeps missing the same criterion
 
 After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy.
