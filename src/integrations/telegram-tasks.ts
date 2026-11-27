@@ -306,8 +306,8 @@ export function taskCard(
       (queueDetail(task) !== undefined || activityStatus({ task }) !== 'Action needed')) ||
     (task.state === 'fixing' && task.fixingMergeConflict);
   const explanations = new Set(
-    [detail, showReason ? activityReason(task) : undefined].map((value) =>
-      value ? t(redact(value)).trim() : '',
+    [detail, showReason && !item.waitingFor?.length ? activityReason(task) : undefined].map(
+      (value) => (value ? t(redact(value)).trim() : ''),
     ),
   );
   for (const explanation of explanations)

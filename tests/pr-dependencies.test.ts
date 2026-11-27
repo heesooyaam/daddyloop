@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { daddyFixture } from './daddy-fixture.js';
 import { taskActivity, taskReference } from '../src/core/task-activity.js';
-import { queueCard } from '../src/integrations/telegram-tasks.js';
+import { queueCard, taskCard } from '../src/integrations/telegram-tasks.js';
 import { Store } from '../src/core/store.js';
 import { join } from 'node:path';
 
@@ -58,6 +58,12 @@ it.each(['plan', 'fix'] as const)(
       );
       expect(card.text).toContain('Ждёт завершения связанных задач');
       expect(card.text).toContain(taskReference(producer));
+      const activity = taskActivity(f.store.tasks(group.id), f.store.activeJobs()).find(
+        (item) => item.task.id === consumer.id,
+      )!;
+      expect(taskCard('ru', activity).text).toContain(taskReference(producer));
+      expect(taskCard('en', activity).text).not.toContain(consumer.reason);
+
       const db = new Store(join(f.dir, 'state.sqlite'));
       try {
         expect(db.claim()).toBeUndefined();
