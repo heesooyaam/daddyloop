@@ -22,6 +22,12 @@ The worker adds or extends a repository test for each behavior-changing issue an
 
 On the first review, the reviewer checks all promised outcomes and affected entry points and reports confirmed blockers together. On later reviews, the reviewer independently runs the relevant tests on the pinned revision and checks that they detect the pre-fix behavior. A missing or ineffective regression test is a blocking review finding for the worker. Plans, research reports and documentation use their own acceptance checks.
 
+## When a fix keeps missing the same criterion
+
+After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy.
+
+Rechecking the same commit, a new unrelated finding, and an unconfirmed local change do not count as failed corrections. The task keeps its worker slot during planning. A pause or restart preserves the pending step. The configured task architect applies to these turns even when initial planning was skipped.
+
 ## Architecture before implementation
 
 **Queue task** and Telegram `/task DESCRIPTION` start with a read-only planning turn. Send an issue URL to include its description and comments. The planner inspects the repository, validates an existing design or writes a concise one, identifies the acceptance checks, and hands the saved plan to implementation. A material open question waits for an answer. The implementation and independent reviewer receive the same plan.

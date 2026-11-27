@@ -1,3 +1,4 @@
+import { recoveryEvidence, relatedArchitecturePlans } from '../core/review-recovery.js';
 import { nativeReviewInstruction } from '../core/instructions.js';
 import { reviewDecisionContext } from '../core/review-decisions.js';
 import { codexInputLimit } from './agent.js';
@@ -10,6 +11,7 @@ export function buildContext(
   additions: (string | false | undefined)[] = [],
 ): string {
   const group = task.groupId ? store.getGroup(task.groupId) : undefined;
+  const siblings = group ? store.tasks(group.id) : [];
   const ticket = task.ref.kind === 'ticket';
   const reportReview = ticket && job.kind === 'review';
   const correction =
@@ -40,6 +42,14 @@ export function buildContext(
     : undefined;
   if (reportReview && !report)
     throw new AppError('report_missing', 'The saved worker report could not be loaded');
+  const recovery = task.reviewRecovery;
+  const revisingPlan = job.kind === 'plan' && !ticket && recovery;
+  const relevantPlan =
+    recovery?.plan &&
+    task.pr?.branch === recovery.branch &&
+    task.pr.targetBranch === recovery.targetBranch &&
+    (recovery.revision.head === task.revision?.head ||
+      recovery.revision.head === task.feedback?.revision.head);
   const material = {
     task: {
       title: task.title,
@@ -54,6 +64,12 @@ export function buildContext(
     },
     approvedPlan: task.approvedPlan,
     architecturePlan: task.planning?.result,
+    relatedPlans:
+      job.kind === 'plan' && group ? relatedArchitecturePlans(task, siblings) : undefined,
+    repeatedReviewCriteria: revisingPlan ? recoveryEvidence(store, task, recovery) : undefined,
+    revisedFixPlan: relevantPlan
+      ? { text: recovery.plan, revision: recovery.revision, criteria: recovery.criteria }
+      : undefined,
     pullRequest: task.pr
       ? {
           title: task.pr.title,
@@ -80,8 +96,7 @@ export function buildContext(
             title: group.title,
             requirements: group.requirements,
             source: group.source?.url !== task.source?.url ? group.source : undefined,
-            children: store
-              .tasks(group.id)
+            children: siblings
               .filter(
                 (child) =>
                   !correction ||
@@ -116,11 +131,12 @@ export function buildContext(
               : undefined,
         }),
   };
-  const role =
-    task.reportOnly && ticket && job.kind === 'implement'
+  const role = revisingPlan
+    ? 'You are this task’s read-only architect revising a failed correction strategy. Compare the two confirmed fix diffs at the supplied commit pairs, their worker reports and only published review evidence. Follow a passing and a failing path to the first divergent handoff. Identify what the previous fixes missed, give the assigned worker one concrete plan covering the cause, and name the regression test that distinguishes the paths at the final consumer. Preserve sound parts of the original plan. When the work belongs to this task, return the revised plan in summary with status completed and the pinned checkedHead. Only if ownership or ordering of work across tasks needs a session decision, or a product choice really remains, use needs_input with the exact question and affected task IDs. daddy coordinates that decision. Do not edit files, perform a review or dispatch work.'
+    : task.reportOnly && ticket && job.kind === 'implement'
       ? 'Produce the requested evidence or report for independent review. Inspect the source read-only. Do not change or submit repository files.'
       : job.kind === 'plan'
-        ? 'You are responsible for architecture and planning before implementation. Inspect the pinned repository, ticket body, discussion, supplied designs and latest clarification. Validate an existing plan against the code and correct concrete gaps; keep sound decisions. If none exists, design the smallest coherent solution. Return a concise Markdown handoff in summary: user outcome, affected components and interfaces, ordered steps, observable acceptance criteria and how to verify them. For a behavior change, identify its real entry points and the smallest discriminating test cases for the worker. For example, a setting that promises parity needs set, change and clear through each supported interface. Name the failure boundary and a neighboring control when recovery or concurrency matters. For a simple task keep this short. Ask a single specific question only if evidence cannot settle a material choice. Use needs_input for it; otherwise return completed with the inspected checkedHead. This step is read-only. Do not implement or publish changes.'
+        ? 'You are responsible for architecture and planning before implementation. Inspect the pinned repository, ticket body, discussion, supplied designs and latest clarification. Validate an existing plan against the code and correct concrete gaps; keep sound decisions. If none exists, design the smallest coherent solution. Return a concise Markdown handoff in summary: user outcome, affected components and interfaces, ordered steps, observable acceptance criteria and how to verify them. For a behavior change, identify its real entry points and the smallest discriminating test cases for the worker. For example, a setting that promises parity needs set, change and clear through each supported interface. Name the failure boundary and a neighboring control when recovery or concurrency matters. Where another active plan shares the data flow, state what its producer and consumers must preserve and identify the dependency. For a simple task keep this short. Ask a single specific question only if evidence cannot settle a material choice. Use needs_input for it; otherwise return completed with the inspected checkedHead. This step is read-only. Do not implement or publish changes.'
         : job.kind === 'fix' && task.fixingMergeConflict
           ? 'You are the worker resolving a GitHub PR conflict. The service prepared the pinned target merge in the managed PR working copy. An interrupted turn may already have saved the merge commit. Inspect git status and the conflicting files, edit them to preserve both branches’ intended behavior, remove conflict markers and test the combined result. If the intended behavior is ambiguous, report needs_input and explain the decision. When a previous fix turn changed files, its checkpoint is already part of the working copy. Preserve those fixes and their regression tests when checking the combined result. Address any published findings provided for this task. Leave staging, committing and pushing to the service. Do not rebase, reset or start another merge.'
           : job.kind === 'verify_merge'
@@ -133,7 +149,7 @@ export function buildContext(
                   : `You are the ${job.role} discussing a ticket before its PR exists. Read the ticket, its parent requirements and the repository. Explain your understanding, propose concrete next steps and ask only necessary questions. This turn is read-only: do not edit files, commit, push or call native review tools. There is no native PR to review yet.`
                 : job.role === 'reviewer'
                   ? `You are the independent reviewer of ${task.kind === 'plan' ? 'a Markdown plan PR. Check the original requirements, feasibility against the code, missing cases, tradeoffs and the proposed acceptance checks.' : 'a code PR. On the first pass inspect the complete pinned diff and its affected callers. Map each explicit user outcome to its real entry points, alternate states and expected results. For a setting shared by several interfaces, exercise setting, changing and clearing it on each. Check neighboring cases together. For UI shared by several states, include normal, loading, error, paused, deleting and empty where relevant, at affected sizes and locales. For recovery, interrupt on both sides of a changed persistence boundary. Keep the request fixed and check what the next consumer actually receives. Distinguish covered, broken and unverified outcomes. Collect all confirmed blockers in this pass.'}
-For each blocker identify the violated requirement or the regression introduced by this change. Give the actual input, observed and expected result, and a discriminating acceptance check. Group manifestations of one cause under a stable behavior-based key. Leave implementation to the worker. Keep unrelated pre-existing defects and optional improvements out of blocking feedback. Missing behavior explicitly required by the issue remains in scope even if it was also missing on the base.
+For each blocker identify the violated requirement or the regression introduced by this change. Give the actual input, observed and expected result, and a discriminating acceptance check. Before reporting a defect, search other entry points that implement the same contract and check the relevant ones. Group manifestations of one cause under a stable behavior-based key. Leave implementation to the worker. Keep unrelated pre-existing defects and optional improvements out of blocking feedback. Missing behavior explicitly required by the issue remains in scope even if it was also missing on the base.
 Read the native review before editing it. Use add_comment/edit_comment/remove_comment for native draft findings and set_summary for concise coverage, decisions and limitations. Preserve the native Markdown. The author’s report is evidence to check. Verify prior findings on the new revision and return their native IDs in verifiedCommentIds. Never restore a withdrawn finding without new evidence. If no approved plan is attached, use the original requirements. Record confirmed findings in the draft even if another check is blocked. Report incomplete when the full review could not be finished.`
                   : `You are the author. Preserve the original user outcome and approved plan. Published findings are counterexamples. Fix the shared cause and check the affected entry points or interruption orderings together. Report evidence per corrected criterion and preserve the existing tests for behavior that still applies. Explain any disputed comment IDs. Edit and test the managed working copy. The service commits and pushes completed fixes. For chat jobs, discuss the request; the service handles publication when a fix is complete.`;
   const instruction =

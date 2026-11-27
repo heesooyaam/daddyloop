@@ -95,7 +95,7 @@ export function executionInstructions(input: SessionInput) {
 function regressionTestInstructions({ task, job }: AgentInput) {
   if (task.kind !== 'code' || task.reportOnly) return '';
   if (job.role === 'author' && (job.kind === 'implement' || job.kind === 'fix'))
-    return ' For each behavior-changing issue and each behavioral review finding you fix, add or extend a permanent automated regression test in the repository. Exercise the real entry point, including the nearest contrasting case. Demonstrate the expected failure on the relevant pre-fix behavior and a pass on the fix, using an isolated copy or fixture as needed. Preserve the managed checkout and the reviewer’s independence. Lead your report with the test path, case, command and observed before/after result, mapped to the issue or published finding IDs. Reuse an existing case if it already distinguishes this failure and runs in the project suite. One parameterized test can cover related failures. For work with no behavior change, describe its appropriate verification.';
+    return ' For each behavior-changing issue and each behavioral review finding you fix, add or extend a permanent automated regression test in the repository. Exercise the real entry point, including the nearest contrasting case. Read your diff before handoff. When a criterion returns, compare working and failing paths with the same input and locate the first handoff where the observed states differ. Demonstrate the expected failure on the relevant pre-fix behavior and a pass on the fix, using an isolated copy or fixture as needed. Preserve the managed checkout and the reviewer’s independence. Lead your report with the test path, case, command and observed before/after result, mapped to the issue or published finding IDs. Reuse an existing case if it already distinguishes this failure and runs in the project suite. One parameterized test can cover related failures. For work with no behavior change, describe its appropriate verification.';
   if (job.role === 'reviewer' && job.kind === 'review' && task.ref.kind !== 'ticket')
     return ' Use a focused reproducer per distinct finding and cover every promised behavior in the requested scope. Before accepting a behavior change or marking a published behavioral finding verified, independently locate the permanent repository test, run it on the pinned revision, and check that it detects the relevant pre-fix behavior for the expected reason. Use isolated fixtures or temporary copies for comparisons. A test may cover multiple findings. If a required regression test is missing or would also pass on the broken code, leave one blocking native finding for that criterion with the failing input, expected observable result and a neighboring control. The worker owns the test and fix. Report unavailable verification honestly. For a documentation-only change, review the documentation and its relevant checks.';
   return '';
@@ -116,7 +116,10 @@ export function taskSession(input: AgentInput): SessionInput {
           ? input.task.authorThreadId
           : input.task.reviewerThreadId,
     profile: input.job.profile,
-    workspaceRoot: role === 'author' ? input.task.authorWorktree : input.task.reviewerWorktree,
+    workspaceRoot:
+      role === 'author' && !(input.job.kind === 'plan' && input.task.ref.kind !== 'ticket')
+        ? input.task.authorWorktree
+        : input.task.reviewerWorktree,
     readOnly:
       (input.task.reportOnly === true && input.job.kind === 'implement') ||
       input.job.kind === 'plan' ||

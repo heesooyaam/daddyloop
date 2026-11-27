@@ -120,6 +120,8 @@ export function waitingForMergeability(task: Task) {
 }
 
 export function activityReason(task: Task) {
+  if (waitingForDaddy(task) && task.reviewRecovery?.coordination)
+    return 'daddy is coordinating the architect’s question with the related tasks.';
   if (waitingForDaddy(task))
     return 'daddy is checking the worker’s objection to the published review.';
   return waitingForMergeability(task)
@@ -171,6 +173,10 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
     task.inputRequest.generation === task.generation
   )
     return 'Waiting for your answer';
+  if (job?.kind === 'plan' && task.ref.kind !== 'ticket' && task.reviewRecovery)
+    return job.status === 'running'
+      ? 'Task architect is revising the fix plan'
+      : 'Waiting for the task architect';
   if (job?.kind === 'plan' && job.status === 'running')
     return 'Checking architecture and implementation plan';
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';
