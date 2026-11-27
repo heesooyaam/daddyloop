@@ -319,19 +319,30 @@ export class Daddy {
     return id ? this.store.getTask(id) : undefined;
   }
 
-  legacyQueuedTask(requestId: string, groupId?: string) {
+  legacyQueuedTask(requestId: string, groupId?: string, notBefore?: string) {
     const rows = this.store.db
       .prepare(
         `SELECT tasks.id FROM tasks
        WHERE (? IS NULL OR json_extract(tasks.data, '$.groupId') = ?)
-         AND (json_extract(tasks.data, '$.createdByAction') = ? OR EXISTS (
+         AND ((json_extract(tasks.data, '$.createdByAction') = ?
+           AND (? IS NULL OR json_extract(tasks.data, '$.createdAt') >= ?)) OR EXISTS (
            SELECT 1 FROM jobs WHERE jobs.task_id = tasks.id
              AND json_extract(jobs.data, '$.actionId') = ?
              AND json_extract(jobs.data, '$.kind') IN ('plan', 'implement')
+             AND (? IS NULL OR json_extract(jobs.data, '$.createdAt') >= ?)
          ))
        LIMIT 2`,
       )
-      .all(groupId ?? null, groupId ?? null, requestId, requestId);
+      .all(
+        groupId ?? null,
+        groupId ?? null,
+        requestId,
+        notBefore ?? null,
+        notBefore ?? null,
+        requestId,
+        notBefore ?? null,
+        notBefore ?? null,
+      );
     if (rows.length > 1)
       throw new AppError(
         'ambiguous_queue_result',
@@ -391,7 +402,7 @@ export class Daddy {
           requirements,
           replyTo: input.replyTo,
           createdByAction: input.requestId,
-          workerRequest: input.workerRequest,
+          workerRequest: input.workerRequest ?? {},
           startImplementation: true,
           validatePlan: input.validatePlan ?? true,
           architectProfile: input.architectProfile,

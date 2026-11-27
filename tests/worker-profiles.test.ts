@@ -454,6 +454,90 @@ it.each([
   },
 );
 
+it.each([
+  { client: 'http', empty: false, suffix: '/', changed: false },
+  { client: 'http', empty: true, suffix: '', changed: true },
+  { client: 'http', empty: true, suffix: '/', changed: false },
+  { client: 'private', empty: false, suffix: '', changed: false },
+  { client: 'private', empty: true, suffix: '/', changed: false },
+  { client: 'topic', empty: false, suffix: '', changed: false },
+  { client: 'topic', empty: true, suffix: '', changed: false },
+])(
+  'dispatches an assigned issue via $client, empty=$empty, changed=$changed',
+  async ({ client, empty, suffix, changed }) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, 'en', client === 'topic');
+    const runs = holdWorker(f);
+    try {
+      const source = ticketInput(42);
+      const task = await f.engine.createTicket({
+        ...source,
+        groupId: group.id,
+        repoPath: f.dir,
+        scope: f.workspace.scope,
+        requirements: 'Keep the audited local constraint',
+      });
+      f.store.enqueue(task, 'author', 'chat', 'Discuss first');
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      runs[0]!.finish();
+      await vi.waitFor(() => expect(f.store.activeJobs(task.id)).toHaveLength(0));
+      await controls.command('--engine claude');
+      const current = f.store.getTask(task.id);
+      const keepPlan = client === 'http' && empty && !changed;
+      if (changed || keepPlan)
+        f.store.saveTask({
+          ...current,
+          planning: {
+            result: { text: 'Old plan for A', revision: current.revision!, runId: randomUUID() },
+          },
+        });
+      const requirements = changed
+        ? 'GitHub issue: ' + source.ref.url + '\nOnly change B'
+        : (client === 'topic' && empty ? 'GitHub issue: ' : '') + source.ref.url + suffix;
+      if (client === 'http') {
+        expect(
+          (
+            await controls.post('/tasks', {
+              requestId: randomUUID(),
+              requirements,
+              ...(empty ? { workerRequest: {} } : {}),
+            })
+          ).statusCode,
+        ).toBe(201);
+      } else await controls.send('/task ' + (empty ? '--plan -- ' : '') + requirements);
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(2));
+      if (!keepPlan) {
+        expect(runs[1]!.input.job.kind).toBe('plan');
+        expect(runs[1]!.input.job.profile).toEqual(profiles.daddy);
+        expect(runs[1]!.input.prompt).toContain(
+          changed ? 'Only change B' : 'Keep the audited local constraint',
+        );
+        runs[1]!.finish();
+        await vi.waitFor(async () => {
+          await f.worker.tick();
+          expect(runs).toHaveLength(3);
+        });
+      }
+      const implementation = runs[keepPlan ? 1 : 2]!;
+      if (keepPlan) expect(implementation.input.prompt).toContain('Old plan for A');
+      if (changed) expect(implementation.input.prompt).not.toContain('Old plan for A');
+      expect(implementation.input.job.kind).toBe('implement');
+      expect(implementation.input.job.profile).toEqual({ engine: 'claude' });
+      expect(implementation.input.prompt).toContain(
+        changed ? 'Only change B' : 'Keep the audited local constraint',
+      );
+      expect(f.daddy.board(group.id).workers.slots[0]?.taskId).toBe(task.id);
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
 it('returns a committed web queue result after the selected folder moves', async () => {
   const f = daddyFixture();
   const group = f.daddy.create({ workspaceId: f.workspace.id });

@@ -4084,8 +4084,10 @@ export class Engine {
               this.defaultAgents().worker,
           );
         }
-        if (commit?.requirements !== undefined) {
+        if (commit?.requirements !== undefined && commit.requirements !== task.requirements) {
           task.requirements = commit.requirements;
+          if (validatePlan === false) delete task.planning;
+          else if (task.planning) delete task.planning.result;
         }
         if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};

@@ -306,7 +306,8 @@ export class TicketWorkflow {
               onCommit: input.onCommit,
               workerRequest: input.workerRequest,
               requirements:
-                input.requirements.trim().replace(/^['"]|['"]$/g, '') === issue
+                !input.requirements.trim().includes('\n') &&
+                githubTaskIssue(input.requirements, workspace) === issue
                   ? undefined
                   : input.requirements,
             },

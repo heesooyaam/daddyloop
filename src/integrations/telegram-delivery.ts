@@ -210,6 +210,35 @@ export class TelegramDelivery {
       ),
     );
   }
+  queuedTaskReceipt(destination: TelegramDestination, requestId: string) {
+    const ownerId = this.store.setting<{ userId: number }>('telegram.pairing')?.userId;
+    if (ownerId === undefined) return;
+    const botId = this.store.setting<number>('telegram.botId');
+    const rows = this.store.db
+      .prepare(
+        `SELECT DISTINCT substr(button.value, 10) AS taskId
+       FROM settings, json_tree(settings.value, '$.content.buttons') AS button
+       WHERE settings.key GLOB 'telegram.delivery:*'
+         AND (json_extract(settings.value, '$.bot') = ?
+           OR json_extract(settings.value, '$.bot') LIKE '%:' || ?)
+         AND json_extract(settings.value, '$.ownerId') = ?
+         AND json_extract(settings.value, '$.destination.chatId') = ?
+         AND COALESCE(json_extract(settings.value, '$.destination.threadId'), 0) = ?
+         AND json_extract(settings.value, '$.options.key') = ?
+         AND button.key = 'callback_data' AND button.value GLOB 'dad:task:*'
+       LIMIT 2`,
+      )
+      .all(
+        this.bot,
+        botId ?? null,
+        ownerId,
+        destination.chatId,
+        destination.threadId ?? 0,
+        requestId,
+      );
+    if (rows.length === 1) return String(rows[0]!.taskId);
+  }
+
   async send(
     destination: TelegramDestination,
     content: TelegramCard | FormattedText,

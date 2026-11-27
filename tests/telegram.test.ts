@@ -83,60 +83,79 @@ it('resets polling receipts and chat binding when the configured bot changes', a
     rmSync(dir, { recursive: true });
   }
 });
-it('isolates queue requests across bot changes and replays messages within one bot', async () => {
-  const f = daddyFixture(true);
-  const file = join(f.dir, 'token');
-  writeFileSync(file, '123456:abcdefghijklmnopqrstuvwxyz123456', { mode: 0o600 });
-  let identity = 12121;
-  vi.stubGlobal(
-    'fetch',
-    async (url: string) =>
-      new Response(
-        JSON.stringify({
-          ok: true,
-          result: url.endsWith('getMe')
-            ? { id: identity, username: 'test_bot' }
-            : url.endsWith('getWebhookInfo')
-              ? { url: '' }
-              : { message_id: 99 },
-        }),
-      ),
-  );
-  let bot: Telegram | undefined;
-  try {
-    const first = f.daddy.create({ workspaceId: f.workspace.id });
-    const second = f.daddy.create({ workspaceId: f.workspace.id });
-    const connect = async (groupId: string) => {
-      bot = await Telegram.create(f.engine, file);
-      bot.configure({
-        daddy: f.daddy,
-        catalogue,
-        updates: new UpdateMonitor(f.store, { agents: [] }),
-      });
-      await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
-      f.store.setSetting('telegram.currentDaddy', groupId);
-      return bot;
-    };
-    const message = update(3, '/task --no-plan -- Queue once per bot');
-    message.message!.message_id = 3;
-    await (await connect(first.id)).handle(message);
-    f.store.setSetting('telegram.currentDaddy', second.id);
-    await bot!.handle({ ...message, update_id: 4 });
-    expect(f.store.tasks(second.id)).toHaveLength(0);
-    await bot!.stop();
-    identity++;
-    await (await connect(second.id)).handle(message);
-    expect(f.store.tasks(first.id)).toHaveLength(1);
-    expect(f.store.tasks(second.id)).toHaveLength(1);
-    expect(f.store.tasks(second.id)[0]!.createdByAction).not.toBe(
-      f.store.tasks(first.id)[0]!.createdByAction,
+it.each([false, true])(
+  'isolates queue requests across bot changes, legacy rotation before upgrade=%s',
+  async (rotatedBeforeUpgrade) => {
+    const f = daddyFixture(true);
+    const file = join(f.dir, 'token');
+    writeFileSync(file, '123456:abcdefghijklmnopqrstuvwxyz123456', { mode: 0o600 });
+    let identity = 12121;
+    vi.stubGlobal(
+      'fetch',
+      async (url: string) =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            result: url.endsWith('getMe')
+              ? { id: identity, username: 'test_bot' }
+              : url.endsWith('getWebhookInfo')
+                ? { url: '' }
+                : { message_id: 99 },
+          }),
+        ),
     );
-  } finally {
-    await bot?.stop();
-    vi.unstubAllGlobals();
-    await f.close();
-  }
-});
+    let bot: Telegram | undefined;
+    try {
+      const first = f.daddy.create({ workspaceId: f.workspace.id });
+      const second = f.daddy.create({ workspaceId: f.workspace.id });
+      const connect = async (groupId: string) => {
+        bot = await Telegram.create(f.engine, file);
+        bot.configure({
+          daddy: f.daddy,
+          catalogue,
+          updates: new UpdateMonitor(f.store, { agents: [] }),
+        });
+        await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+        f.store.setSetting('telegram.currentDaddy', groupId);
+        return bot;
+      };
+      const message = update(3, '/task --no-plan -- Queue once per bot');
+      message.message!.message_id = 3;
+      await (await connect(first.id)).handle(message);
+      const original = f.store.tasks(first.id)[0]!;
+      f.store.setSetting('task.queue:telegram:bot:12121:7:7:0:3', null);
+      f.store.setSetting('task.queue:telegram:7:7:0:3', original.id);
+      f.store.saveTask({ ...original, createdByAction: 'telegram:task:7:3' });
+      f.store.db
+        .prepare(
+          `UPDATE settings SET value=json_set(value, '$.options.key', 'telegram:task:7:3')
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key')='telegram:bot:12121:7:7:0:3'`,
+        )
+        .run();
+      f.store.setSetting('telegram.currentDaddy', second.id);
+      await bot!.handle({ ...message, update_id: 4 });
+      expect(f.store.tasks(second.id)).toHaveLength(0);
+      await bot!.stop();
+      identity++;
+      if (rotatedBeforeUpgrade) {
+        f.store.setSetting('telegram.botId', identity);
+        f.store.setSetting('telegram.pairing', null);
+        f.store.db.exec('DELETE FROM bot_receipts; DELETE FROM bot_actions');
+      }
+      f.store.db.prepare("DELETE FROM settings WHERE key='telegram.legacyTaskBotId'").run();
+      await (await connect(second.id)).handle(message);
+      expect(f.store.tasks(first.id)).toHaveLength(1);
+      expect(f.store.tasks(second.id)).toHaveLength(1);
+      expect(f.store.tasks(second.id)[0]!.createdByAction).not.toBe(
+        f.store.tasks(first.id)[0]!.createdByAction,
+      );
+    } finally {
+      await bot?.stop();
+      vi.unstubAllGlobals();
+      await f.close();
+    }
+  },
+);
 
 it('ignores unknown chats and binds a one-use pairing to one private user', async () => {
   const f = await fixture(),

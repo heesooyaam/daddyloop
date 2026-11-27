@@ -138,6 +138,8 @@ function telegramReply(message: Update['message']): TelegramReply | undefined {
     quote: quote || undefined,
   };
 }
+const taskChoiceLifetime = 600_000;
+
 type TaskChoice = {
   kind: string;
   groupId: string;
@@ -792,10 +794,19 @@ export class TelegramWorkspace {
         )
         .all(at)) {
         const choice = JSON.parse(String(row.data)) as TaskChoice &
-          Omit<TaskChoiceResult, 'taskId'>;
+          Omit<TaskChoiceResult, 'taskId'> & { expiresAt: number };
         const key = this.choiceResultKey(String(row.id));
         if (this.store.setting(key)) continue;
-        const task = this.findChoiceTask(choice);
+        let task: Task | undefined;
+        try {
+          task = this.findChoiceTask(choice, choice.expiresAt, true);
+        } catch (error) {
+          if (
+            !(error instanceof AppError) ||
+            !['wrong_session', 'ambiguous_queue_result'].includes(error.code)
+          )
+            throw error;
+        }
         if (task)
           this.store.setSetting(key, {
             ownerId: choice.ownerId,
@@ -829,7 +840,10 @@ export class TelegramWorkspace {
     const key = randomBytes(12).toString('base64url');
     this.store.db
       .prepare('INSERT INTO bot_actions(id,data) VALUES(?,?)')
-      .run(key, JSON.stringify({ ...data, fingerprint, expiresAt: Date.now() + 600_000 }));
+      .run(
+        key,
+        JSON.stringify({ ...data, fingerprint, expiresAt: Date.now() + taskChoiceLifetime }),
+      );
     return key;
   }
   private readAction<T>(key: string, destination: Destination, allowConsumed = false) {
@@ -1038,16 +1052,16 @@ export class TelegramWorkspace {
     return this.store.setting<number>('telegram.botId') ?? this.username;
   }
 
-  private get usesLegacyTaskKeys() {
-    const previous = this.store.setting<number>('telegram.legacyTaskBotId');
-    return previous === undefined || previous === this.botIdentity;
-  }
-
   private choiceResultKey(action: string) {
     return `telegram.taskChoiceResult:${this.botIdentity}:${action}`;
   }
 
-  private findChoiceTask(choice: TaskChoice) {
+  private legacyTaskRequestId(update: Update) {
+    const message = update.message!;
+    return `telegram:task:${message.chat.id}:${message.message_id ?? update.update_id}`;
+  }
+
+  private findChoiceTask(choice: TaskChoice, expiresAt: number, used: boolean) {
     const message = choice.update?.message;
     if (
       choice.kind !== 'choose-session' ||
@@ -1055,33 +1069,39 @@ export class TelegramWorkspace {
       taskCommands.exec(message.text?.trim() ?? '')?.[1] !== 'task'
     )
       return;
-    try {
-      const task = this.taskResult(choice.update, choice.groupId);
-      return task?.groupId === choice.groupId ? task : undefined;
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== 'ambiguous_queue_result') throw error;
-    }
+    const result =
+      this.daddy.queuedTask(this.taskQueueKey(choice.update)) ??
+      (used
+        ? this.daddy.legacyQueuedTask(
+            this.legacyTaskRequestId(choice.update),
+            choice.groupId,
+            new Date(expiresAt - taskChoiceLifetime).toISOString(),
+          )
+        : undefined);
+    if (result && result.groupId !== choice.groupId)
+      throw new AppError('wrong_session', 'This action expired. Open a fresh card.');
+    return result;
   }
 
   private taskResult(update: Update, groupId?: string) {
-    return (
-      this.daddy.queuedTask(this.taskQueueKey(update)) ??
-      (this.usesLegacyTaskKeys
-        ? (this.daddy.queuedTask(this.taskQueueKey(update, true)) ??
-          (groupId || update.message!.chat.type === 'private'
-            ? this.daddy.legacyQueuedTask(
-                `telegram:task:${update.message!.chat.id}:${update.message!.message_id ?? update.update_id}`,
-                groupId,
-              )
-            : undefined))
-        : undefined)
+    const existing = this.daddy.queuedTask(this.taskQueueKey(update));
+    if (existing) return existing;
+    const message = update.message!;
+    if (!groupId && message.chat.type !== 'private') return;
+    const id = this.api.delivery?.queuedTaskReceipt(
+      { chatId: message.chat.id, threadId: message.message_thread_id },
+      this.legacyTaskRequestId(update),
     );
+    if (id) {
+      const task = this.store.getTask(id);
+      if (!groupId || task.groupId === groupId) return task;
+    }
   }
 
-  private taskQueueKey(update: Update, legacy = false) {
+  private taskQueueKey(update: Update) {
     const message = update.message!;
     return [
-      legacy ? 'telegram' : `telegram:bot:${this.botIdentity}`,
+      `telegram:bot:${this.botIdentity}`,
       message.from?.id,
       message.chat.id,
       message.message_thread_id ?? 0,
@@ -1311,7 +1331,11 @@ export class TelegramWorkspace {
     const groups = this.daddy.sessions();
     const pendingKey = this.creationKey(destination) + ':command';
     const generations = Object.fromEntries(groups.map((group) => [group.id, group.generation]));
-    this.store.setSetting(pendingKey, { update, expiresAt: Date.now() + 600_000, generations });
+    this.store.setSetting(pendingKey, {
+      update,
+      expiresAt: Date.now() + taskChoiceLifetime,
+      generations,
+    });
     await this.api.send(destination, {
       ...new TelegramText().add(this.t('Choose a session')),
       buttons: groups.slice(0, 15).map((group) => [
@@ -1335,8 +1359,7 @@ export class TelegramWorkspace {
     update: Update,
     id: string,
     source: Destination,
-    shownGeneration?: number,
-    action?: string,
+    choice?: TaskChoice & { consumed: boolean; expiresAt: number; key: string },
   ) {
     const pendingKey = this.creationKey(source) + ':command';
     await this.daddy.engine.lock(pendingKey, async () => {
@@ -1346,7 +1369,38 @@ export class TelegramWorkspace {
         selected?: string;
         generations?: Record<string, number>;
       }>(pendingKey);
+      const used = pending?.update.update_id === update.update_id && pending.selected === id;
+      const completed = this.findChoiceTask(
+        {
+          kind: 'choose-session',
+          groupId: id,
+          update,
+          pendingKey,
+          generation: choice?.generation ?? 0,
+        },
+        choice?.expiresAt ?? pending?.expiresAt ?? Date.now(),
+        !!(used || choice?.consumed),
+      );
+      if (completed) {
+        this.mutate(() => {
+          this.store.setSetting('task.queue:' + this.taskQueueKey(update), completed.id);
+          if (pending?.update.update_id === update.update_id)
+            this.store.setSetting(pendingKey, null);
+          if (choice) {
+            this.finishAction(choice.key);
+            this.store.setSetting(this.choiceResultKey(choice.key), {
+              ownerId: this.pair()!.userId,
+              destination: source,
+              groupId: id,
+              taskId: completed.id,
+            });
+          }
+        });
+        await this.showQueuedResult(source, completed);
+        return;
+      }
       if (
+        choice?.consumed ||
         !pending ||
         pending.expiresAt <= Date.now() ||
         pending.update.update_id !== update.update_id ||
@@ -1354,7 +1408,7 @@ export class TelegramWorkspace {
       )
         throw new Error(this.t('This action expired. Open a fresh card.'));
       const group = this.daddy.group(id);
-      const expectedGeneration = shownGeneration ?? pending.generations?.[id];
+      const expectedGeneration = choice?.generation ?? pending.generations?.[id];
       if (
         expectedGeneration !== group.generation ||
         pending.generations?.[id] !== expectedGeneration
@@ -1387,7 +1441,7 @@ export class TelegramWorkspace {
           await this.update.run(
             {
               ...context,
-              action: action ?? context.action,
+              action: choice?.key ?? context.action,
               pendingKey,
               expectedGeneration,
               queueKey: this.taskQueueKey(update),
@@ -2680,27 +2734,12 @@ export class TelegramWorkspace {
               return;
             }
             const action = this.readAction<TaskChoice>(choice[1], destination, true);
-            if (action.consumed) {
-              const task = this.findChoiceTask(action);
-              if (task) {
-                await this.showQueuedResult(destination, task);
-                return;
-              }
-            }
-            if (
-              action.consumed ||
-              action.kind !== 'choose-session' ||
-              this.store.setting<{ update: Update }>(action.pendingKey)?.update.update_id !==
-                action.update.update_id
-            )
+            if (action.kind !== 'choose-session')
               throw new Error(this.t('This action expired. Open a fresh card.'));
-            await this.runSelected(
-              action.update,
-              action.groupId,
-              destination,
-              action.generation,
-              choice[1],
-            );
+            await this.runSelected(action.update, action.groupId, destination, {
+              ...action,
+              key: choice[1],
+            });
             this.finishAction(choice[1]);
           } else await this.callback(callback.data!, destination);
         });

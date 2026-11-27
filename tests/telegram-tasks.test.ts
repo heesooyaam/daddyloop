@@ -279,6 +279,24 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       if (!privateChoice)
         for (const job of f.store.jobs(savedTask.id))
           f.store.saveJob({ ...job, actionId: legacyKey });
+      const actionId = choice.callback_query!.data!.slice('dad:choose:'.length);
+      f.store.db.prepare('UPDATE bot_actions SET consumed=0 WHERE id=?').run(actionId);
+      f.store.setSetting(`telegram.newSession:7:${privateChoice ? '7:0' : '-10042:18'}:command`, {
+        update: original,
+        expiresAt: Date.now() + 600_000,
+        selected: choiceSession.id,
+        generations: { [choiceSession.id]: choiceSession.generation },
+      });
+      await bot.handle(choice);
+      expect(queued()).toHaveLength(1);
+      expect(lastText()).toContain(taskReference(savedTask));
+      // Keep checking the consumed legacy format after clearing the newly recovered result.
+      f.store.db
+        .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')
+        .run('task.queue:%', JSON.stringify(savedTask.id));
+      f.store.db.prepare('DELETE FROM bot_receipts WHERE id=?').run(update);
+      f.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(actionId);
+      f.store.setSetting('telegram.taskChoiceResult:fixture_bot:' + actionId, null);
       await bot.stop();
       ({ api, bot } = createBot());
       await bot.handle(choice);
@@ -359,6 +377,18 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         null,
       );
     }
+    f.store.setSetting('telegram.currentDaddy', null);
+    await bot.handle(privateMessage('/task --no-plan -- Resolve through slash session'));
+    const viaSession = click(buttonFor(choiceSession.title));
+    viaSession.callback_query!.message = { chat: { id: 7, type: 'private' } };
+    await bot.handle(privateMessage('/session ' + choiceSession.id));
+    const sessionTask = f.store
+      .tasks(choiceSession.id)
+      .find(({ title }) => title === 'Resolve through slash session')!;
+    expect(sessionTask).toBeDefined();
+    await bot.handle(viaSession);
+    expect(lastText()).toContain(taskReference(sessionTask));
+    expect(f.store.jobs(sessionTask.id)).toHaveLength(1);
     const replayTarget = f.daddy.create({
       workspaceId: f.workspace.id,
       requirements: 'Replay target',

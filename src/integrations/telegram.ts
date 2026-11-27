@@ -1054,8 +1054,6 @@ export class Telegram {
     if (!Number.isSafeInteger(me.id) || !me.username)
       throw new Error('Telegram returned an invalid bot identity');
     const previousBot = engine.store.setting<number>('telegram.botId');
-    if (engine.store.setting<number>('telegram.legacyTaskBotId') === undefined)
-      engine.store.setSetting('telegram.legacyTaskBotId', previousBot ?? me.id);
     if (previousBot !== me.id) {
       engine.store.transaction(() => {
         engine.store.setSetting('telegram.botId', me.id);
