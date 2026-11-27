@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { type Store } from './store.js';
+import { needsReviewChecks } from './pr-routing.js';
 import {
   now,
   type ReviewGroup,
@@ -154,6 +155,23 @@ export function restoreSessionWork(store: Store, group: ReviewGroup, legacyOnly 
     for (const id of item.jobs) {
       const job = history.get(id);
       if (!job || job.generation !== task.generation - 1) continue;
+      if (
+        job.kind === 'review' &&
+        !job.deferredResult &&
+        task.ref.kind !== 'ticket' &&
+        task.pr &&
+        needsReviewChecks(task, task.pr)
+      ) {
+        task.reviewAfterChecks = {
+          input: job.input,
+          freshContextRetry: job.freshContextRetry,
+          timeoutRetry: job.timeoutRetry,
+        };
+        task.state = 'awaiting_review_checks';
+        task.reason = 'Waiting for CI results before review';
+        store.saveTask(task);
+        continue;
+      }
       const retry: Job = {
         ...job,
         id: randomUUID(),
