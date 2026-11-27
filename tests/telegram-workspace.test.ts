@@ -2867,3 +2867,68 @@ it.each([
     }
   },
 );
+
+it('mentions the owner once for a task review budget stop, with its round and PR, including on replay', async () => {
+  const f = daddyFixture(true);
+  const send = vi.fn(async (_to: any, _card: any, _unused: unknown, _options: any) => ({
+    message_id: 30,
+  }));
+  const api = {
+    send,
+    call: vi.fn(async () => ({ message_thread_id: 31 })),
+  } as unknown as TelegramApi;
+  const bot = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+  const mentions = () =>
+    send.mock.calls.filter(([, card]) =>
+      card.entities?.some((e: { url?: string }) => e.url === 'tg://user?id=7'),
+    );
+  try {
+    f.store.setSetting('telegram.pairing', { userId: 7, chatId: 7, ownerLabel: 'Owner' });
+    f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const task = await f.engine.create({
+      ref: {
+        provider: 'demo',
+        host: 'demo.local',
+        repo: 'test/repo',
+        number: 161,
+        url: 'https://demo.local/pull/161',
+      },
+      requirements: 'Check recovery',
+      repoPath: f.dir,
+      groupId: group.id,
+    });
+    f.store.saveTask({ ...task, round: 15, reviewRoundLimit: 15 });
+    await f.engine.review(task.id);
+    // A session pause or a manual task pause is never an owner request.
+    await f.daddy.pause(group.id);
+    bot.replay();
+    await bot.stop();
+    expect(mentions()).toHaveLength(0);
+    await f.daddy.resume(group.id);
+    const restored = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'ru');
+    try {
+      restored.replay();
+      restored.remindOwners();
+      await vi.waitFor(() => expect(mentions()).toHaveLength(1));
+      const [destination, card, , opts] = mentions()[0];
+      expect(destination).toMatchObject({ chatId: -10042, threadId: 31 });
+      expect(card.text).toContain('Достигнут лимит раундов ревью');
+      expect(card.text).toContain('16');
+      expect(card.text).toContain('15');
+      expect(card.text).not.toContain('Нужен твой ответ');
+      expect(card.buttons.flat().some((b: { url?: string }) => b.url === task.ref.url)).toBe(true);
+      f.store.db
+        .prepare('UPDATE notifications SET at=? WHERE id=?')
+        .run(new Date(0).toISOString(), opts.notificationId);
+      restored.replay();
+      restored.remindOwners();
+    } finally {
+      await restored.stop();
+    }
+    expect(mentions()).toHaveLength(1);
+  } finally {
+    await bot.stop();
+    await f.close();
+  }
+});

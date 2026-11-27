@@ -56,7 +56,11 @@ import {
   groupSelectionKey as selectionKey,
 } from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
-import { taskReference } from '../core/task-activity.js';
+import {
+  heldAtReviewLimit,
+  repeatedArchitectureReason,
+  taskReference,
+} from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
@@ -2396,13 +2400,21 @@ export class TelegramWorkspace {
       ...event,
       taskId: task.groupId,
       type: 'daddy.task_question',
-      data: { ...(event.data as object), taskId: task.id, request },
+      // A budget stop is an operational notification, delivered once per head and limit.
+      data: {
+        ...(event.data as object),
+        ...(task.state === 'paused' && { reminder: false }),
+        taskId: task.id,
+        request,
+      },
     });
   }
   onEvent(event: Event): boolean {
     if (event.type === 'task.state') {
       if (
-        ['needs_input', 'awaiting_plan_approval'].includes((event.data as { state: string }).state)
+        ['needs_input', 'awaiting_plan_approval', 'paused'].includes(
+          (event.data as { state: string }).state,
+        )
       )
         this.queueTaskRequest(this.store.getTask(event.taskId), event);
       return false;
@@ -2580,6 +2592,12 @@ export class TelegramWorkspace {
             .some((entry) => entry.sender === 'user' && entry.at > message.at);
         const ping = prefs.enabled && (!!task || (!!message?.needsReply && !answered));
         if (task && !ping) return;
+        const budgetStop = !!task && heldAtReviewLimit(task);
+        const architectureStop =
+          task?.state === 'paused' && task.reason === repeatedArchitectureReason;
+        const stoppedTask = budgetStop || architectureStop;
+        if (stoppedTask && (group.daddyState === 'paused' || group.daddyState === 'archived'))
+          return;
         const question: OwnerQuestion | undefined =
           task && request
             ? { groupId: group.id, taskId: task.id, request }
@@ -2626,7 +2644,7 @@ export class TelegramWorkspace {
               .add(
                 ' · ' +
                   this.t(
-                    reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed',
+                    architectureStop ? 'Repeated architecture planning stopped' : budgetStop ? 'Review round limit reached' : reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed',
                   ) +
                   '\n\n',
               )
@@ -2657,7 +2675,14 @@ export class TelegramWorkspace {
             .add(' · ')
             .add(taskReference(task), 'code')
             .add('  ' + task.title + '\n\n')
-            .markdown(this.t(redact(task.reason)));
+            .markdown(
+              budgetStop
+                ? this.t('Paused before review round {next}. Task limit: {limit}.', {
+                    next: task.round + 1,
+                    limit: task.reviewRoundLimit!,
+                  })
+                : this.t(redact(task.reason)),
+            );
         } else if (message) {
           text.add(message.sender === 'user' ? '👤 [user]' : '👨‍💻 [daddy]', 'bold').add('\n\n');
           if (message.sender === 'user') text.add(message.text);
