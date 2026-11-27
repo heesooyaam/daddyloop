@@ -671,6 +671,7 @@ export const daddyRu: Record<string, string> = {
   'daddy is checking the worker’s objection to the published review.':
     'Воркер оспорил замечание ревью. daddy проверяет его аргументы.',
   'Task architect is revising the fix plan': 'Архитектор пересматривает план исправления',
+  'Waiting for prerequisite tasks': 'Ждёт завершения связанных задач',
   'Waiting for the task architect': 'Ждёт архитектора задачи',
   'The task architect is revising the fix plan after two unsuccessful corrections.':
     'После двух исправлений критерий всё ещё нарушен. План пересматривает архитектор задачи.',

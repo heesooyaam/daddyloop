@@ -42,8 +42,9 @@ import { daddySchemas, daddyTools } from './daddy-tools.js';
 import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
-import { saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
+import { canRunPrerequisites, saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
 import {
+  dependencyDetail,
   queueDetail,
   activityReason,
   activityStatus,
@@ -238,7 +239,7 @@ export class Daddy {
         .map(({ task }) => task.id),
       tasks: tasks.map((task) => {
         const item = activeByTask.get(task.id)!;
-        const detail = queueDetail(task);
+        const detail = dependencyDetail(item) ?? queueDetail(task);
         const autoMerge = autoMergeSettings(this.store, group, task);
         return {
           id: task.id,
@@ -254,7 +255,7 @@ export class Daddy {
             ),
           }),
           autoMerge,
-          reason: activityReason(task),
+          reason: dependencyDetail(item) ?? activityReason(task),
           queueDetail: detail && redact(detail).slice(0, 400),
           blocker: this.engine.coordinationBlocker(task),
           workspaceId: task.workspaceId,
@@ -1872,13 +1873,36 @@ export class Daddy {
           this.active(job, signal);
           await this.engine.setTaskAgent(task.id, 'author', options.profile!);
         } else if (name === 'set_dependencies') {
-          if (
-            this.store.busy(task.id) ||
-            !['discussing', 'needs_input', 'paused'].includes(task.state)
-          )
-            throw new AppError('task_started', 'Set dependencies before implementation starts');
-          task.dependsOn = this.dependencies(group.id, task.id, options.dependsOn!);
-          this.store.saveTask(task);
+          await this.engine.lock(task.id, async () => {
+            this.active(job, signal);
+            const current = this.task(group.id, task.id),
+              jobs = this.store.activeJobs(task.id);
+            const queuedCorrection =
+              !isTicket(current) &&
+              current.state === 'fixing' &&
+              jobs.length > 0 &&
+              jobs.every(
+                (j) =>
+                  j.status === 'queued' &&
+                  j.role === 'author' &&
+                  (j.kind === 'plan' || j.kind === 'fix'),
+              );
+            if (
+              !queuedCorrection &&
+              (jobs.length || !['discussing', 'needs_input', 'paused'].includes(current.state))
+            )
+              throw new AppError(
+                'task_started',
+                'Set dependencies before implementation or while the correction is waiting.',
+              );
+            current.dependsOn = this.dependencies(group.id, current.id, options.dependsOn!);
+            if (!canRunPrerequisites(this.store, this.group(group.id), current))
+              throw new AppError(
+                'dependency_capacity',
+                'The proposed order would leave a prerequisite without an eligible worker. Choose an owner or order that can run with the reserved slots.',
+              );
+            this.store.saveTask(current);
+          });
         }
         return { taskId: task.id, state: this.store.getTask(task.id).state };
       },

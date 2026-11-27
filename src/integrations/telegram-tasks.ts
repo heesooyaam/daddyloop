@@ -15,6 +15,7 @@ import {
   waitingForMergeability,
   outstandingActivity,
   profileText,
+  dependencyDetail,
   queueDetail,
   taskReference,
   type TaskActivity,
@@ -119,7 +120,8 @@ function queueStatus(item: TaskActivity) {
   const { task, job, assignedWorker, mergeStatus } = item;
   const label = activityStatus(item);
   if (label === 'Task discussion in progress') return { label };
-  const detail = queueDetail(task);
+  const detail = dependencyDetail(item) ?? queueDetail(task);
+  if (item.waitingFor?.length) return { label, detail };
   if (label === 'Waiting for daddy’s decision' || label === 'Waiting for your answer')
     return { label, detail };
   if (mergeStatus) {

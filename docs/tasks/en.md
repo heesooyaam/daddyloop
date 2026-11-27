@@ -39,6 +39,8 @@ For new tasks in the same workspace, repository and source scope, the service se
 
 After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy.
 
+When a dependent task already has a PR, its corrective architect and worker wait for the named prerequisites to finish. The queue shows their task IDs. The scheduler then resumes the saved work with the same slot. If the order would leave a prerequisite without an eligible slot, daddy gets the reason and can change ownership or order.
+
 Rechecking the same commit, a new unrelated finding, and an unconfirmed local change do not count as failed corrections. The task keeps its worker slot during planning. A pause or restart preserves the pending step. The configured task architect applies to these turns even when initial planning was skipped.
 
 ## Architecture before implementation
