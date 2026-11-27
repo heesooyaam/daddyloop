@@ -140,16 +140,16 @@ export class TelegramApi {
   private updateEffectPrefix(store: Store, id: number) {
     return `telegram.updateEffect:${store.setting<number>('telegram.botId') ?? 'local'}:${id}:`;
   }
-  applyUpdateEffect<T>(store: Store, name: string, apply: () => T): T {
+  updateEffectKey(store: Store, name: string) {
     const update = this.incoming.getStore();
-    if (!update) return apply();
-    const key = this.updateEffectPrefix(store, update.id) + name;
+    return update && this.updateEffectPrefix(store, update.id) + name;
+  }
+  applyUpdateEffect<T>(store: Store, name: string, apply: () => T): T {
+    const key = this.updateEffectKey(store, name);
+    if (!key) return apply();
     return store.transaction(() => {
-      const prior = store.setting<{ result: T }>(key);
-      if (prior) return prior.result;
-      const result = apply();
-      store.setSetting(key, { result });
-      return result;
+      const prior = store.effectResult<T>(key);
+      return prior ? prior.result : store.recordEffect(key, apply());
     });
   }
   acknowledgeUpdate(store: Store, id: number) {
@@ -737,9 +737,14 @@ export class Telegram {
     }
     const updates = data.match(/^updates:(show|check|on|off)$/);
     if (updates) {
-      if (['on', 'off'].includes(updates[1]))
-        this.engine.store.setSetting('updates.notifications', updates[1] === 'on');
-      await this.showUpdates(chatId, updates[1] === 'check');
+      const enabled = ['on', 'off'].includes(updates[1])
+        ? this.api.applyUpdateEffect(this.engine.store, 'update-notifications', () => {
+            const enabled = updates[1] === 'on';
+            this.engine.store.setSetting('updates.notifications', enabled);
+            return enabled;
+          })
+        : undefined;
+      await this.showUpdates(chatId, updates[1] === 'check', enabled);
       return true;
     }
 
@@ -771,14 +776,18 @@ export class Telegram {
       ),
     );
   }
-  private async showUpdates(chatId: number, refresh: boolean) {
+  private async showUpdates(chatId: number, refresh: boolean, enabled?: boolean) {
     if (!this.integrations) throw new Error('Update checks are unavailable');
     const status = refresh
       ? await this.integrations.updates.check(true)
       : this.integrations.updates.status();
     await this.api.send(
       chatId,
-      updatesCard(this.locale(), status, this.integrations.updaters?.status()),
+      updatesCard(
+        this.locale(),
+        { ...status, notifications: enabled ?? status.notifications },
+        this.integrations.updaters?.status(),
+      ),
     );
   }
   private currentUpdates() {

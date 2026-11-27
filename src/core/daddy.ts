@@ -337,8 +337,16 @@ export class Daddy {
     id: string,
     number: number,
     profile: AgentProfile,
-    { force = false, expectedTaskId }: { force?: boolean; expectedTaskId?: string } = {},
-  ) {
+    {
+      force = false,
+      expectedTaskId,
+      effectKey,
+    }: { force?: boolean; expectedTaskId?: string; effectKey?: string } = {},
+  ): Promise<{ restarted: boolean; profile?: AgentProfile }> {
+    const completed = () =>
+      this.store.effectResult<{ restarted: boolean; profile: AgentProfile }>(effectKey)?.result;
+    const prior = completed();
+    if (prior) return prior;
     await this.catalogue.validate(profile);
     const readSlot = () => {
       const group = this.group(id);
@@ -355,9 +363,11 @@ export class Daddy {
       return { group, slots, slot };
     };
     const update = (lockedTaskId?: string) => {
+      const prior = completed();
+      if (prior) return prior;
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
-      const restarted = this.store.transaction(() => {
+      const result = this.store.transaction(() => {
         slot.profile = profile;
         saveWorkerSlots(this.store, group, slots);
         const restarted = lockedTaskId
@@ -374,15 +384,15 @@ export class Daddy {
           taskId: lockedTaskId,
           restarted,
         });
-        return restarted;
+        return this.store.recordEffect(effectKey, { restarted, profile });
       });
-      if (restarted && lockedTaskId) this.engine.onCancel(lockedTaskId);
-      return { restarted };
+      if (result.restarted && lockedTaskId) this.engine.onCancel(lockedTaskId);
+      return result;
     };
     for (;;) {
       const taskId = force ? readSlot().slot.taskId : undefined;
       const result = taskId ? await this.engine.lock(taskId, async () => update(taskId)) : update();
-      if (result) return result;
+      if (result) return effectKey ? result : { restarted: result.restarted };
     }
   }
   chat(
@@ -533,8 +543,17 @@ export class Daddy {
     this.store.saveDaddyJob(job);
     this.store.event(group.id, 'daddy.queued', { trigger }, job.id);
   }
-  taskAutoMerge(groupId: string, taskId: string, mode: AutoMergeMode) {
-    return setTaskMergeMode(this.store, this.group(groupId), this.task(groupId, taskId), mode);
+  taskAutoMerge(groupId: string, taskId: string, mode: AutoMergeMode, effectKey?: string) {
+    const prior = this.store.effectResult<ReturnType<typeof setTaskMergeMode>>(effectKey);
+    return prior
+      ? prior.result
+      : setTaskMergeMode(
+          this.store,
+          this.group(groupId),
+          this.task(groupId, taskId),
+          mode,
+          effectKey,
+        );
   }
   async taskArchitect(
     groupId: string,
@@ -571,13 +590,19 @@ export class Daddy {
       instructions?: SessionInstructions;
       autoMerge?: boolean;
     },
+    effectKey?: string,
   ) {
+    const completed = () => this.store.effectResult<ReturnType<Daddy['board']>>(effectKey)?.result;
+    const prior = completed();
+    if (prior) return prior;
     if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
     for (const profile of Object.values(input.profiles ?? {}))
       await this.catalogue.validate(profile);
     if (input.instructions)
       input.instructions = sessionInstructionsSchema.parse(input.instructions);
-    await this.withSessionTasks(id, (group, tasks) => {
+    return this.withSessionTasks(id, (group, tasks) => {
+      const prior = completed();
+      if (prior) return prior;
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (input.autoMerge !== undefined && group.workspace?.provider !== 'github')
         throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
@@ -623,7 +648,7 @@ export class Daddy {
         );
       const restartReviews: string[] = [];
       let restartCoordinator = false;
-      this.store.transaction(() => {
+      const board = this.store.transaction(() => {
         if (input.instructions) group.instructions = input.instructions;
         if (changeWorkers) {
           group.worker = nextWorker;
@@ -699,12 +724,13 @@ export class Daddy {
           restartReviews,
           restartCoordinator,
         });
+        return this.store.recordEffect(effectKey, this.board(id));
       });
       if (changeDaddy) this.worker.updateAuthorGroupGeneration(id, group.generation);
       if (restartCoordinator) this.running.get(id)?.controller.abort();
       for (const taskId of restartReviews) this.engine.onCancel(taskId);
+      return board;
     });
-    return this.board(id);
   }
   private withSessionTasks<T>(
     id: string,
@@ -722,51 +748,61 @@ export class Daddy {
       return lock(0);
     });
   }
-  async pause(id: string) {
-    await this.withSessionTasks(id, (group, tasks) => {
+  async pause(id: string, effectKey?: string) {
+    return this.withSessionTasks(id, (group, tasks) => {
+      const prior = this.store.effectResult<ReturnType<Daddy['board']>>(effectKey);
+      if (prior) return prior.result;
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-      if (group.daddyState === 'paused') return;
-      const stopped = this.store.transaction(() => {
-        group.daddyState = 'paused';
-        delete group.resourceWait;
-        group.generation++;
-        if (group.workspacePreparation?.state === 'preparing')
-          group.workspacePreparation = { state: 'pending' };
-        this.store.saveGroup(group);
-        const stopped = pauseSessionWork(this.store, group, tasks);
-        this.store.event(id, 'daddy.paused', { snapshot: true });
-        return stopped;
+      const paused = group.daddyState === 'paused';
+      const { stopped, board } = this.store.transaction(() => {
+        let stopped: string[] = [];
+        if (!paused) {
+          group.daddyState = 'paused';
+          delete group.resourceWait;
+          group.generation++;
+          if (group.workspacePreparation?.state === 'preparing')
+            group.workspacePreparation = { state: 'pending' };
+          this.store.saveGroup(group);
+          stopped = pauseSessionWork(this.store, group, tasks);
+          this.store.event(id, 'daddy.paused', { snapshot: true });
+        }
+        return { stopped, board: this.store.recordEffect(effectKey, this.board(id)) };
       });
-      this.running.get(id)?.controller.abort();
-      this.maintenance.get(id)?.controller.abort();
-      for (const taskId of stopped) this.engine.onCancel(taskId);
+      if (!paused) {
+        this.running.get(id)?.controller.abort();
+        this.maintenance.get(id)?.controller.abort();
+        for (const taskId of stopped) this.engine.onCancel(taskId);
+      }
+      return board;
     });
-    return this.board(id);
   }
-  async resume(id: string) {
-    await this.withSessionTasks(id, (group) => {
+  async resume(id: string, effectKey?: string) {
+    return this.withSessionTasks(id, (group) => {
+      const prior = this.store.effectResult<ReturnType<Daddy['board']>>(effectKey);
+      if (prior) return prior.result;
       if (group.deletion)
         throw new AppError('session_deleting', 'Retry deletion before changing this session');
       if (this.running.has(id) && group.daddyState !== 'active' && group.daddyState !== 'paused')
         throw new AppError('daddy_stopping', 'Wait for the previous daddy turn to stop');
-      this.store.transaction(() => {
+      return this.store.transaction(() => {
         restoreSessionWork(this.store, group);
-        if (group.daddyState === 'active') return;
-        group.daddyState = 'active';
-        group.autoTurns = 0;
-        if (group.workspacePreparation?.state === 'error')
-          group.workspacePreparation = { state: 'pending' };
-        this.store.saveGroup(group);
-        this.enqueue(
-          group,
-          'recovery',
-          'The user resumed this session. Inspect preserved work and continue the original tasks.',
-        );
-        this.store.event(id, 'daddy.resumed');
+        if (group.daddyState !== 'active') {
+          group.daddyState = 'active';
+          group.autoTurns = 0;
+          if (group.workspacePreparation?.state === 'error')
+            group.workspacePreparation = { state: 'pending' };
+          this.store.saveGroup(group);
+          this.enqueue(
+            group,
+            'recovery',
+            'The user resumed this session. Inspect preserved work and continue the original tasks.',
+          );
+          this.store.event(id, 'daddy.resumed');
+        }
+        for (const task of this.store.tasks(id)) this.queueDispute(group, task);
+        return this.store.recordEffect(effectKey, this.board(id));
       });
-      for (const task of this.store.tasks(id)) this.queueDispute(group, task);
     });
-    return this.board(id);
   }
   async remove(id: string, expectedGeneration: number) {
     let group = this.store.getGroup(id);

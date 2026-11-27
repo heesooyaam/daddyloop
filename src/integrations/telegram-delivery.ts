@@ -4,9 +4,10 @@ import {
   type OwnerQuestion,
 } from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Message, ReviewGroup } from '../core/types.js';
+import type { AgentProfile, Message, ReviewGroup } from '../core/types.js';
 import type { Store } from '../core/store.js';
 import { redact } from '../core/security.js';
+import { profileText } from '../core/task-activity.js';
 import { clipTitle } from '../core/session-title.js';
 import { translator } from '../i18n/index.js';
 import { languageCard } from './telegram-meta.js';
@@ -18,7 +19,9 @@ import {
 } from './telegram-text.js';
 
 export type TelegramDestination = { chatId: number; threadId?: number };
+export const groupSelectionKey = 'telegram.pendingGroupSelection';
 export interface DeliveryOptions {
+  groupSelectionHold?: number;
   reminder?: OwnerQuestion;
   groupId?: string;
   operation?: 'renameTopic' | 'reaction' | 'pin';
@@ -409,7 +412,9 @@ export class TelegramDelivery {
     for (const row of tied) {
       const menu = JSON.parse(String(row.value)) as Delivery;
       const event =
-        replyEvent?.id != null ? this.legacyMenuEvent(menu, Number(row.position)) : undefined;
+        replyEvent?.id != null
+          ? this.legacyMenuEvent(menu, Number(row.position), message.taskId)
+          : undefined;
       const precedes =
         event !== undefined ? event < Number(replyEvent!.id) : !attempted || menu.attempts > 0;
       if (precedes) earlier = Math.max(earlier, Number(row.position));
@@ -418,7 +423,7 @@ export class TelegramDelivery {
     earlier = Math.min(earlier, later - 1);
     return { createdAt, queuePosition: earlier + index / (index + 1) };
   }
-  private legacyMenuEvent(menu: Delivery, position: number): number | undefined {
+  private legacyMenuEvent(menu: Delivery, position: number, groupId: string): number | undefined {
     if (menu.options.key?.startsWith('telegram:task:')) {
       const event = this.store.db
         .prepare(
@@ -428,6 +433,40 @@ export class TelegramDelivery {
         .get(menu.options.key);
       if (event?.id != null) return Number(event.id);
       return;
+    }
+    const time = new Date(menu.createdAt).toISOString();
+    const worker = menu.options.key?.startsWith('telegram:worker:');
+    if (worker || !menu.options.key) {
+      const events = this.store.db
+        .prepare('SELECT id,data FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
+        .all(groupId, time, worker ? 'daddy.worker_configured' : 'daddy.renamed');
+      const matches = events.filter((event) => {
+        const data = JSON.parse(String(event.data)) as {
+          title?: string;
+          worker?: number;
+          profile?: AgentProfile;
+          restarted?: boolean;
+        };
+        return (['ru', 'en'] as const).some((locale) => {
+          const t = translator(locale);
+          if (!worker)
+            return (
+              typeof data.title === 'string' &&
+              menu.content.text === t('Session renamed: {title}', { title: data.title })
+            );
+          if (!data.profile || typeof data.worker !== 'number') return false;
+          return (
+            menu.content.text ===
+            t(
+              data.restarted
+                ? 'Worker {number} will resume the task · {profile}'
+                : 'Worker {number} model saved · {profile}',
+              { number: data.worker, profile: profileText(data.profile) },
+            )
+          );
+        });
+      });
+      if (matches.length === 1) return Number(matches[0].id);
     }
     const localeOf = ({ content, options }: Delivery) =>
       (['ru', 'en'] as const).find(
@@ -638,6 +677,8 @@ export class TelegramDelivery {
     if (current?.id === requestId && current?.userId === value.ownerId) return current;
   }
   private valid(value: Delivery) {
+    // A superseded reservation is removed, never sent as an empty message.
+    if (value.options.groupSelectionHold !== undefined) return false;
     if ((value.content as TelegramCard).replyKeyboard && !this.pickerRequest(value)) return false;
     if (value.options.reminder && !reminderOpen(this.store, value.options.reminder)) return false;
     // Older queued first mentions have only their notification key. Check it again on delivery or replay.
@@ -792,7 +833,11 @@ export class TelegramDelivery {
           (options.order && value.options.order && options.order < value.options.order))
       )
         return { status: 'superseded', deliveryId: value.id };
-      if (!options.replace && value.status !== 'cancelled')
+      if (
+        !options.replace &&
+        value.status !== 'cancelled' &&
+        (value.options.groupSelectionHold === undefined || options.groupSelectionHold !== undefined)
+      )
         return { status: value.status === 'sent' ? 'sent' : 'queued', deliveryId: value.id };
       if (
         value.status !== 'cancelled' &&
@@ -870,6 +915,9 @@ export class TelegramDelivery {
       for (let i = 0; i < limit && !this.stopped; i++) {
         if (this.clock() < this.rateLimitUntil) break;
         const seen = new Set<string>();
+        const selection = this.store.setting<{ requestId: number; ownerId: number } | null>(
+          groupSelectionKey,
+        );
         const ready = [...this.pending.entries()]
           .sort(
             (a, b) =>
@@ -880,6 +928,12 @@ export class TelegramDelivery {
             const route = isIndependent(value) ? key : digest(value.destination);
             if (seen.has(route)) return false;
             seen.add(route);
+            if (
+              selection &&
+              value.options.groupSelectionHold === selection.requestId &&
+              value.ownerId === selection.ownerId
+            )
+              return false;
             return value.nextAttemptAt <= this.clock();
           })
           .find(([key]) => !attempted.has(key));

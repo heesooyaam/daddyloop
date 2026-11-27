@@ -12,24 +12,34 @@ import { fileURLToPath } from 'node:url';
 const release = '4a9d338a1d6f9a533e54063cdd10e5c195374f21';
 const root = new URL('../../', import.meta.url);
 const git = (...args) => execFileSync('git', args, { cwd: fileURLToPath(root), encoding: 'utf8' });
-const sources = new Set(git('ls-tree', '-r', '--name-only', release, 'src').trim().split('\n'));
-const suffix = '?telegram-released';
+const suffix = '?telegram-released=';
+const replayRevision = process.env.DADDYLOOP_LEGACY_REPLAY_HEAD;
+const revisions = [release, ...(replayRevision ? [replayRevision] : [])];
+const sources = new Map(
+  revisions.map((revision) => [
+    revision,
+    new Set(git('ls-tree', '-r', '--name-only', revision, 'src').trim().split('\n')),
+  ]),
+);
+const pinned = (path, revision = release) => new URL(path, root).href + suffix + revision;
 const hook = registerHooks({
   resolve(specifier, context, next) {
-    if (context.parentURL?.endsWith(suffix) && specifier.startsWith('.')) {
+    const revision = context.parentURL?.split(suffix)[1];
+    if (revision && specifier.startsWith('.')) {
       const url = new URL(specifier, context.parentURL);
       const path = url.href.slice(root.href.length);
       const source = [path, path.replace(/\.js$/, '.ts'), path.replace(/\.js$/, '.tsx')].find(
-        (candidate) => sources.has(candidate),
+        (candidate) => sources.get(revision)?.has(candidate),
       );
-      if (source) return { url: new URL(source, root).href + suffix, shortCircuit: true };
+      if (source) return { url: pinned(source, revision), shortCircuit: true };
     }
     return next(specifier, context);
   },
   load(url, context, next) {
-    if (!url.endsWith(suffix)) return next(url, context);
-    const path = url.slice(root.href.length, -suffix.length);
-    const source = git('show', release + ':' + path);
+    const [filename, revision] = url.split(suffix);
+    if (!sources.has(revision)) return next(url, context);
+    const path = filename.slice(root.href.length);
+    const source = git('show', revision + ':' + path);
     return {
       format: 'module',
       shortCircuit: true,
@@ -37,11 +47,10 @@ const hook = registerHooks({
     };
   },
 });
-const { Store } = await import(new URL('src/core/store.ts', root).href + suffix);
-const { Telegram, TelegramApi } = await import(
-  new URL('src/integrations/telegram.ts', root).href + suffix
-);
-const { Engine } = await import(new URL('src/core/engine.ts', root).href + suffix);
+const { Store } = await import(pinned('src/core/store.ts'));
+const { Telegram, TelegramApi } = await import(pinned('src/integrations/telegram.ts'));
+const { Engine } = await import(pinned('src/core/engine.ts'));
+const { Daddy } = await import(pinned('src/core/daddy.ts'));
 const group = '1b951e45-19d6-4890-93f7-7e5d90962624';
 const at = 1_750_000_000_000;
 const NativeDate = Date;
@@ -111,13 +120,12 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
     const bot = new Telegram({ store }, api, 'offline_fixture');
     // The task path writes through the released Engine without starting workers
     // or asking a repository provider to describe a working copy.
-    const engine =
-      scenario === 'task'
-        ? new Engine(store, () => {
-            throw new Error('Offline fixture');
-          })
-        : { store };
-    if (scenario === 'task')
+    const engine = ['task', 'worker'].includes(scenario)
+      ? new Engine(store, () => {
+          throw new Error('Offline fixture');
+        })
+      : { store };
+    if (['task', 'worker'].includes(scenario))
       store.saveGroup({
         ...store.getGroup(group),
         generation: 1,
@@ -147,7 +155,17 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
           url: 'https://github.com/fixture/offline',
         },
       });
-    bot.configure({ daddy: { engine, group: () => store.getGroup(group), createTask } });
+    const daddy = {
+      engine,
+      store,
+      group: () => store.getGroup(group),
+      createTask,
+      catalogue: { validate: async () => {} },
+      board: () => ({ group: store.getGroup(group) }),
+      rename: Daddy.prototype.rename,
+      configureWorker: Daddy.prototype.configureWorker,
+    };
+    bot.configure({ daddy });
     const reply = async (id, text, phase) => {
       store.db.prepare('INSERT INTO messages VALUES(?,?,?)').run(
         id,
@@ -177,7 +195,11 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
           ? '/language ru'
           : scenario === 'task'
             ? '/task Legacy task'
-            : '/status';
+            : scenario === 'rename'
+              ? '/rename Recovered title'
+              : scenario === 'worker'
+                ? '/worker 1 example max'
+                : '/status';
       await bot.handle(
         scenario === 'language' || scenario === 'two languages'
           ? {
@@ -229,8 +251,14 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
 }
 
 async function replay(path, acknowledgedReply) {
-  const { Store: CurrentStore } = await import('../../src/core/store.ts');
-  const { TelegramDelivery } = await import('../../src/integrations/telegram-delivery.ts');
+  const { Store: CurrentStore } = await import(
+    replayRevision ? pinned('src/core/store.ts', replayRevision) : '../../src/core/store.ts'
+  );
+  const { TelegramDelivery } = await import(
+    replayRevision
+      ? pinned('src/integrations/telegram-delivery.ts', replayRevision)
+      : '../../src/integrations/telegram-delivery.ts'
+  );
   const store = new CurrentStore(path);
   const actions = [];
   const delivery = new TelegramDelivery(
@@ -242,13 +270,17 @@ async function replay(path, acknowledgedReply) {
             /Reply ([ABC])$/.exec(body.text)?.[1] ??
               (body.text.includes('Legacy task')
                 ? '/task'
-                : body.text === 'Язык изменён.'
-                  ? '/language'
-                  : body.reply_markup?.inline_keyboard?.[0]?.some(({ callback_data }) =>
-                        callback_data?.startsWith('language:'),
-                      )
-                    ? 'language:ru'
-                    : '/status'),
+                : body.text.includes('Recovered title')
+                  ? '/rename'
+                  : body.text.includes('example')
+                    ? '/worker'
+                    : body.text === 'Язык изменён.'
+                      ? '/language'
+                      : body.reply_markup?.inline_keyboard?.[0]?.some(({ callback_data }) =>
+                            callback_data?.startsWith('language:'),
+                          )
+                        ? 'language:ru'
+                        : '/status'),
           );
         return { message_id: 102 + actions.length };
       },
@@ -334,16 +366,32 @@ try {
   for (const [scenario, label] of [
     ['text language', '/language'],
     ['task', '/task'],
+    ['rename', '/rename'],
+    ['worker', '/worker'],
   ]) {
+    if (
+      process.env.DADDYLOOP_LEGACY_ORDER_CASE &&
+      process.env.DADDYLOOP_LEGACY_ORDER_CASE !== scenario
+    )
+      continue;
     for (const menuFirst of [true, false]) {
       const path = join(directory, scenario + '-' + menuFirst + '.sqlite');
       const legacy = await run(path, menuFirst, 0, scenario);
-      const event = scenario === 'task' ? 'ticket.imported' : 'preferences.changed';
+      const event = {
+        task: 'ticket.imported',
+        'text language': 'preferences.changed',
+        rename: 'daddy.renamed',
+        worker: 'daddy.worker_configured',
+      }[scenario];
       const eventSlot = legacy.events.findIndex(({ type }) => type === event);
       const replySlot = legacy.events.findLastIndex(({ type }) => type === 'daddy.message');
       assert.ok(eventSlot >= 0 && replySlot >= 0);
       assert.equal(eventSlot < replySlot, menuFirst);
-      assert.deepEqual(await replay(path), menuFirst ? [label, 'B'] : ['B', label]);
+      assert.deepEqual(
+        await replay(path),
+        menuFirst ? [label, 'B'] : ['B', label],
+        `${label}, ${menuFirst ? 'command first' : 'reply first'}: respect the released event order`,
+      );
     }
   }
   const third = join(directory, 'c-then-menu.sqlite');
@@ -396,6 +444,14 @@ try {
         taskReplay: [
           ['/task', 'B'],
           ['B', '/task'],
+        ],
+        renameReplay: [
+          ['/rename', 'B'],
+          ['B', '/rename'],
+        ],
+        workerReplay: [
+          ['/worker', 'B'],
+          ['B', '/worker'],
         ],
         duplicateReplay: [
           ['A', 'C'],

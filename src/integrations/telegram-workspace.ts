@@ -49,7 +49,11 @@ import { findPreset, selectPreset, presetLines } from '../client/presets.js';
 import { isGitAddress, parseGitSource } from '../modules/repositories/git-source.js';
 import { clipTitle } from '../core/session-title.js';
 import { moduleCatalogue } from '../modules/catalogue.js';
-import { deliveryStatus, dialogKey } from './telegram-delivery.js';
+import {
+  deliveryStatus,
+  dialogKey,
+  groupSelectionKey as selectionKey,
+} from './telegram-delivery.js';
 import { autoMergeSettings, githubActivityStatus } from '../core/auto-merge.js';
 import { taskReference } from '../core/task-activity.js';
 import { workerSlots } from '../core/worker-pool.js';
@@ -74,7 +78,6 @@ type GroupSelection = {
   ownerChatId: number;
   result?: { room: Room } | { error: string };
 };
-const selectionKey = 'telegram.pendingGroupSelection';
 type Destination = { chatId: number; threadId?: number };
 type RepoChoice = {
   destination: Destination;
@@ -542,6 +545,19 @@ export class TelegramWorkspace {
       this.store.setSetting(selectionKey, null);
       return;
     }
+    const key = `group-selection:${selection.ownerId}:${selection.requestId}`;
+    if (this.api.delivery) {
+      // Reserve the private-chat slots before permission checks yield to the
+      // poller. The slots survive a restart and hold only this chat.
+      await Promise.all(
+        [':connected', ':home'].map((suffix) =>
+          this.api.delivery!.send({ chatId: selection.ownerChatId }, new TelegramText(), {
+            key: key + suffix,
+            groupSelectionHold: selection.requestId,
+          }),
+        ),
+      );
+    }
     let result = selection.result;
     if (!result) {
       try {
@@ -567,7 +583,6 @@ export class TelegramWorkspace {
         this.store.setSetting(selectionKey, { ...selection, result: validated });
       });
     }
-    const key = `group-selection:${selection.ownerId}:${selection.requestId}`;
     if ('room' in result) {
       if (this.room()?.chatId === result.room.chatId) {
         await this.api.send(
@@ -596,7 +611,7 @@ export class TelegramWorkspace {
           .add('⚠️ ' + this.t('Could not complete the action'), 'bold')
           .add('\n\n' + result.error),
         undefined,
-        { key: key + ':error' },
+        { key: key + ':connected' },
       );
     }
     if (this.currentSelection(selection)) this.store.setSetting(selectionKey, null);
@@ -607,10 +622,15 @@ export class TelegramWorkspace {
       throw new AppError('wrong_topic', 'Use the topic belonging to this daddy session', 403);
     return this.daddy.group(groupId);
   }
-  async show(groupId: string, destination: Destination) {
+  async show(
+    groupId: string,
+    destination: Destination,
+    board?: ReturnType<Daddy['board']>,
+    preserveSelection = false,
+  ) {
     const group = this.authorize(destination, groupId),
       topic = await this.ensureTopic(group);
-    if (destination.chatId === this.pair()?.chatId) {
+    if (!preserveSelection && destination.chatId === this.pair()?.chatId) {
       this.store.setSetting('telegram.currentDaddy', group.id);
       this.store.setSetting(this.creationKey(destination), null);
     }
@@ -618,7 +638,7 @@ export class TelegramWorkspace {
       destination,
       daddyBoard(
         this.locale(),
-        this.daddy.board(group.id),
+        board ?? this.daddy.board(group.id),
         destination.chatId === this.pair()?.chatId && topic ? this.link(topic) : undefined,
       ),
     );
@@ -667,7 +687,13 @@ export class TelegramWorkspace {
           ),
     );
   }
-  private async showTask(groupId: string, taskId: string, destination: Destination, queuePage = 0) {
+  private async showTask(
+    groupId: string,
+    taskId: string,
+    destination: Destination,
+    queuePage = 0,
+    mergeSnapshot?: ReturnType<Daddy['taskAutoMerge']>,
+  ) {
     const group = this.authorize(destination, groupId);
     const task = this.daddy.task(groupId, taskId);
     const slots = workerSlots(this.store, group);
@@ -685,9 +711,10 @@ export class TelegramWorkspace {
     );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
-      group.workspace?.provider === 'github' && task.ref.provider === 'github'
+      mergeSnapshot ??
+      (group.workspace?.provider === 'github' && task.ref.provider === 'github'
         ? autoMergeSettings(this.store, group, task)
-        : undefined;
+        : undefined);
     await this.api.send(destination, taskCard(this.locale(), activity!, slot, merge, queuePage));
   }
   private async orderedReply(action: () => Promise<void>) {
@@ -700,6 +727,16 @@ export class TelegramWorkspace {
       this.store.setSetting('telegram.error', redact(String(error)));
     });
     await reply;
+  }
+  private effectKey(name: string) {
+    return this.api.updateEffectKey?.(this.store, name);
+  }
+  private async changeRunState(action: 'pause' | 'resume', id: string, destination: Destination) {
+    this.authorize(destination, id);
+    const key = this.effectKey(action);
+    const replayed = !!this.store.effectResult(key);
+    const board = await this.daddy[action](id, key);
+    await this.show(board.group.id, destination, board, replayed);
   }
   private async taskCommand(
     command: string,
@@ -728,14 +765,14 @@ export class TelegramWorkspace {
         return;
       }
       const slot = workerSlots(this.store, group).find((item) => item.number === input.number);
-      if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       const profile = {
-        engine: input.engine ?? slot.profile?.engine ?? defaults.engine,
+        engine: input.engine ?? slot?.profile?.engine ?? defaults.engine,
         model: input.model,
         effort: input.effort,
       };
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
         force: input.force,
+        effectKey: this.effectKey('worker'),
       });
       await respond(() =>
         this.api.send(
@@ -744,7 +781,7 @@ export class TelegramWorkspace {
             result.restarted
               ? 'Worker {number} will resume the task · {profile}'
               : 'Worker {number} model saved · {profile}',
-            { number: input.number, profile: profileText(profile) },
+            { number: input.number, profile: profileText(result.profile ?? profile) },
           ),
           undefined,
           { key: receipt },
@@ -1315,7 +1352,11 @@ export class TelegramWorkspace {
     if (sessionMerge) {
       const id = sessionMerge[1]!;
       this.authorize(destination, id);
-      const board = await this.daddy.settings(id, { autoMerge: sessionMerge[2] === 'on' });
+      const board = await this.daddy.settings(
+        id,
+        { autoMerge: sessionMerge[2] === 'on' },
+        this.effectKey('session-automerge'),
+      );
       await this.api.send(destination, sessionSettings(this.locale(), board));
       return true;
     }
@@ -1324,8 +1365,13 @@ export class TelegramWorkspace {
       const task = this.store.getTask(taskMerge[1]!);
       if (!task.groupId) throw new AppError('wrong_session', 'Task not found in this session', 404);
       this.authorize(destination, task.groupId);
-      this.daddy.taskAutoMerge(task.groupId, task.id, taskMerge[2] as 'on' | 'off' | 'inherit');
-      await this.showTask(task.groupId, task.id, destination, Number(taskMerge[3] ?? 0));
+      const merge = this.daddy.taskAutoMerge(
+        task.groupId,
+        task.id,
+        taskMerge[2] as 'on' | 'off' | 'inherit',
+        this.effectKey('task-automerge'),
+      );
+      await this.showTask(task.groupId, task.id, destination, Number(taskMerge[3] ?? 0), merge);
       return true;
     }
     const mergeFromQueue = /^dad:vm:([a-f0-9-]{36}):([0-9a-z]{1,11}):([0-9a-z]{1,7})$/.exec(data);
@@ -1673,12 +1719,16 @@ export class TelegramWorkspace {
     }
     const group = this.authorize(destination, id);
     if (action === 'pool') {
-      if (limit) await this.daddy.settings(id, { workerLimit: Number(limit) });
-      await this.api.send(destination, poolCard(this.locale(), this.daddy.board(id)));
+      const board = limit
+        ? await this.daddy.settings(id, { workerLimit: Number(limit) }, this.effectKey('pool'))
+        : this.daddy.board(id);
+      await this.api.send(destination, poolCard(this.locale(), board));
       return true;
     }
-    if (action === 'pause') await this.daddy.pause(id);
-    if (action === 'resume') await this.daddy.resume(id);
+    if (action === 'pause' || action === 'resume') {
+      await this.changeRunState(action, id, destination);
+      return true;
+    }
     if (action === 'add') {
       if (destination.chatId === this.pair()?.chatId)
         this.store.setSetting('telegram.currentDaddy', id);
@@ -1996,7 +2046,8 @@ export class TelegramWorkspace {
           );
           return true;
         }
-        const board = this.daddy.rename(groupId, rename[1]);
+        const apply = () => this.daddy.rename(groupId, rename[1]);
+        const board = this.api.applyUpdateEffect?.(this.store, 'rename', apply) ?? apply();
         await this.api.send(
           destination,
           this.t('Session renamed: {title}', { title: board.group.title }),
@@ -2038,17 +2089,21 @@ export class TelegramWorkspace {
       if (/^\/(instructions|skill)(?:\s|$)/.test(text)) {
         if (!groupId) throw new Error(this.t('Start a daddy session first.'));
         this.authorize(destination, groupId);
-        const instructions = await instructionCommand(
-          text,
-          this.daddy.group(groupId).instructions,
-          (url) => new InstructionSources().import({ kind: 'github', url }),
-        );
-        if (instructions) await this.daddy.settings(groupId, { instructions });
+        const effectKey = this.effectKey('instructions');
+        const previous = this.store.effectResult<ReturnType<Daddy['board']>>(effectKey);
+        let snapshot = previous?.result.group.instructions;
+        if (!previous) {
+          snapshot = this.daddy.group(groupId).instructions;
+          const instructions = await instructionCommand(text, snapshot, (url) =>
+            new InstructionSources().import({ kind: 'github', url }),
+          );
+          if (instructions)
+            snapshot = (await this.daddy.settings(groupId, { instructions }, effectKey)).group
+              .instructions;
+        }
         await this.api.send(
           destination,
-          new TelegramText().add(
-            instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
-          ),
+          new TelegramText().add(instructionLines(snapshot, this.locale()).join('\n')),
         );
         return true;
       }
@@ -2072,17 +2127,18 @@ export class TelegramWorkspace {
         this.authorize(destination, groupId);
         const library = new InstructionPresets(this.store),
           preset = library.get(findPreset(library.list(), presetName).id);
-        await this.daddy.settings(groupId, {
-          instructions: selectPreset(this.daddy.group(groupId).instructions, preset),
-        });
+        const board = await this.daddy.settings(
+          groupId,
+          {
+            instructions: selectPreset(this.daddy.group(groupId).instructions, preset),
+          },
+          this.effectKey('preset'),
+        );
         await this.api.send(
           destination,
           new TelegramText()
             .add(this.t('Preset enabled for this session'), 'bold')
-            .add(
-              '\n\n' +
-                instructionLines(this.daddy.group(groupId).instructions, this.locale()).join('\n'),
-            ),
+            .add('\n\n' + instructionLines(board.group.instructions, this.locale()).join('\n')),
         );
         return true;
       }
@@ -2098,14 +2154,8 @@ export class TelegramWorkspace {
         });
         return true;
       }
-      if (text === '/pause' && groupId) {
-        await this.daddy.pause(groupId);
-        await this.show(groupId, destination);
-        return true;
-      }
-      if (text === '/resume' && groupId) {
-        await this.daddy.resume(groupId);
-        await this.show(groupId, destination);
+      if ((text === '/pause' || text === '/resume') && groupId) {
+        await this.changeRunState(text === '/pause' ? 'pause' : 'resume', groupId, destination);
         return true;
       }
       if (/^\/(author|reviewer)\b/.test(text)) {

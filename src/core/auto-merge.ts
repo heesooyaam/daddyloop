@@ -85,16 +85,17 @@ export function setTaskMergeMode(
   group: ReviewGroup,
   task: Task,
   mode: AutoMergeMode,
+  effectKey?: string,
 ) {
   if (group.workspace?.provider !== 'github' || task.ref.provider !== 'github')
     throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
   if (group.deletion || group.deletedAt)
     throw new AppError('session_deleting', 'This session is being deleted');
-  store.transaction(() => {
+  return store.transaction(() => {
     store.setSetting(`autoMerge.mode:${task.id}`, mode);
     store.event(task.id, 'automerge.setting', { mode });
+    return store.recordEffect(effectKey, autoMergeSettings(store, group, task));
   });
-  return autoMergeSettings(store, group, task);
 }
 
 function reviewed(task: Task) {

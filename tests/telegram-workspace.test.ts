@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { Store } from '../src/core/store.js';
 import { Engine } from '../src/core/engine.js';
+import { workerSlots } from '../src/core/worker-pool.js';
 import { taskCard } from '../src/integrations/telegram-tasks.js';
 import { reminderOpen } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -2070,139 +2071,199 @@ it.each(['/language ru', 'language:ru', '/notifications off', 'notifications:off
 );
 
 it.each([
-  ['command', 'rights'],
-  ['callback', 'confirmation'],
-] as const)('accepts chat_shared from a %s picker while %s waits', async (entry, pause) => {
-  const f = daddyFixture(true);
-  const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session' });
-  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
-  f.store.setSetting('telegram.currentDaddy', group.id);
-  f.store.setSetting('telegram.botId', 123);
-  const chat = { id: 7, type: 'private' },
-    from = { id: 7 };
-  let requestId!: number;
-  let releaseBatch!: () => void, markWaiting!: () => void, release!: () => void;
-  const batch = new Promise<void>((resolve) => {
-    releaseBatch = resolve;
-  });
-  const waiting = new Promise<void>((resolve) => {
-    markWaiting = resolve;
-  });
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let batchSent = false,
-    native = 100;
-  const completed: string[] = [];
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
-    const method = String(url).split('/').at(-1)!;
-    const body = JSON.parse(String(init?.body ?? '{}'));
-    if (method === 'getUpdates') {
-      if (!batchSent) {
-        batchSent = true;
-        await batch;
-        return Response.json({
-          ok: true,
-          result: [
-            {
-              update_id: 2,
-              message: {
-                message_id: 2,
-                chat,
-                from,
-                chat_shared: { request_id: requestId, chat_id: -10042 },
+  ['command', 'rights', '/status'],
+  ['callback', 'rights', '/language ru'],
+  ['callback', 'confirmation', '/status'],
+] as const)(
+  'accepts chat_shared from a %s picker while %s waits, before %s',
+  async (entry, pause, command) => {
+    const f = daddyFixture(true);
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session' });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.currentDaddy', group.id);
+    f.store.setSetting('telegram.botId', 123);
+    const chat = { id: 7, type: 'private' },
+      from = { id: 7 };
+    let requestId!: number;
+    let releaseBatch!: () => void, markWaiting!: () => void, release!: () => void;
+    const batch = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      markWaiting = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let batchSent = false,
+      native = 100;
+    const completed: string[] = [];
+    const cards: { text: string; remove: boolean; id: number }[] = [];
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+      const method = String(url).split('/').at(-1)!;
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (method === 'getUpdates') {
+        if (!batchSent) {
+          batchSent = true;
+          await batch;
+          return Response.json({
+            ok: true,
+            result: [
+              {
+                update_id: 2,
+                message: {
+                  message_id: 2,
+                  chat,
+                  from,
+                  chat_shared: { request_id: requestId, chat_id: -10042 },
+                },
               },
-            },
-            {
-              update_id: 3,
-              message: { message_id: 3, chat, from, text: 'Text while linking a group' },
-            },
-          ],
+              {
+                update_id: 3,
+                message: { message_id: 3, chat, from, text: command },
+              },
+              {
+                update_id: 4,
+                message: { message_id: 4, chat, from, text: 'Text while linking a group' },
+              },
+            ],
+          });
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          if (init?.signal?.aborted) reject(init.signal.reason);
+          else
+            init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
+              once: true,
+            });
         });
       }
-      return new Promise<Response>((_resolve, reject) => {
-        if (init?.signal?.aborted) reject(init.signal.reason);
-        else
-          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
-            once: true,
-          });
-      });
-    }
-    const member = method === 'getChatMember' && body.user_id === 7;
-    const confirmation = method === 'sendMessage' && body.reply_markup?.remove_keyboard === true;
-    if ((pause === 'rights' && member) || (pause === 'confirmation' && confirmation)) {
-      markWaiting();
-      await held;
-    }
-    if (member) completed.push('rights');
-    if (confirmation) completed.push('confirmation');
-    if (
-      method === 'sendMessage' &&
-      body.chat_id === 7 &&
-      body.reply_markup?.inline_keyboard?.length
-    )
-      completed.push('home');
-    if (method === 'sendMessage' && body.reply_markup?.keyboard)
-      requestId = body.reply_markup.keyboard[0][0].request_chat.request_id;
-    const result =
-      method === 'getChatMember'
-        ? { status: 'administrator', can_manage_topics: true }
-        : method === 'getChat'
-          ? { type: 'supergroup', is_forum: true, title: 'Work' }
-          : method === 'createForumTopic'
-            ? { message_thread_id: 17 }
-            : { message_id: ++native };
-    return Response.json({ ok: true, result });
-  });
-  const bot = new Telegram(f.engine, api, 'fixture_bot');
-  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
-  try {
-    bot.start();
-    await bot.handle(
-      entry === 'callback'
-        ? {
-            update_id: 1,
-            callback_query: {
-              id: 'group',
-              data: 'dad:group',
-              from,
-              message: { chat, message_id: 40 },
-            },
-          }
-        : { update_id: 1, message: { chat, from, message_id: 1, text: '/group' } },
-    );
-    await vi.waitFor(() => expect(requestId).toBeDefined());
-    releaseBatch();
-    await waiting;
-    await vi.waitFor(() => expect(f.store.setting('telegram.offset')).toBe(4));
-    const path = join(f.dir, 'during-group-selection.sqlite');
-    f.store.db.prepare('VACUUM INTO ?').run(path);
-    const recovered = new Store(path);
+      const member = method === 'getChatMember' && body.user_id === 7;
+      const confirmation = method === 'sendMessage' && body.reply_markup?.remove_keyboard === true;
+      if ((pause === 'rights' && member) || (pause === 'confirmation' && confirmation)) {
+        markWaiting();
+        await held;
+      }
+      if (member) completed.push('rights');
+      if (confirmation) completed.push('confirmation');
+      if (
+        method === 'sendMessage' &&
+        body.chat_id === 7 &&
+        body.reply_markup?.inline_keyboard?.length
+      )
+        completed.push('home');
+      if (method === 'sendMessage' && body.reply_markup?.keyboard)
+        requestId = body.reply_markup.keyboard[0][0].request_chat.request_id;
+      const result =
+        method === 'getChatMember'
+          ? { status: 'administrator', can_manage_topics: true }
+          : method === 'getChat'
+            ? { type: 'supergroup', is_forum: true, title: 'Work' }
+            : method === 'createForumTopic'
+              ? { message_thread_id: 17 }
+              : { message_id: ++native };
+      if (method === 'sendMessage' && body.chat_id === 7 && !body.reply_markup?.keyboard)
+        cards.push({ text: body.text, remove: confirmation, id: native });
+      return Response.json({ ok: true, result });
+    });
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
     try {
-      expect(recovered.messages(group.id)).toContainEqual(
-        expect.objectContaining({
-          sender: 'user',
-          text: 'Text while linking a group',
-        }),
+      bot.start();
+      await bot.handle(
+        entry === 'callback'
+          ? {
+              update_id: 1,
+              callback_query: {
+                id: 'group',
+                data: 'dad:group',
+                from,
+                message: { chat, message_id: 40 },
+              },
+            }
+          : { update_id: 1, message: { chat, from, message_id: 1, text: '/group' } },
       );
-      const work = recovered.setting<{ result?: { room?: { chatId: number } } }>(
-        'telegram.pendingGroupSelection',
-      );
-      if (pause === 'rights') expect(work).toMatchObject({ requestId, chatId: -10042 });
+      await vi.waitFor(() => expect(requestId).toBeDefined());
+      releaseBatch();
+      await waiting;
+      await vi.waitFor(() => expect(f.store.setting('telegram.offset')).toBe(5));
+      const queuedReply = (store: Store) =>
+        store.db
+          .prepare(
+            `SELECT json_extract(value,'$.content.text') AS text
+      FROM settings WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key')='update:3:0'`,
+          )
+          .get()?.text;
+      const commandText = queuedReply(f.store);
+      expect(commandText).toBeTruthy();
+      expect(cards.map(({ text }) => text)).not.toContain(commandText);
+      if (command === '/language ru')
+        expect(f.store.setting('preferences')).toMatchObject({ locale: 'ru' });
+      const path = join(f.dir, 'during-group-selection.sqlite');
+      f.store.db.prepare('VACUUM INTO ?').run(path);
+      const recovered = new Store(path);
+      try {
+        expect(recovered.messages(group.id)).toContainEqual(
+          expect.objectContaining({
+            sender: 'user',
+            text: 'Text while linking a group',
+          }),
+        );
+        const work = recovered.setting<{ result?: { room?: { chatId: number } } }>(
+          'telegram.pendingGroupSelection',
+        );
+        if (pause === 'rights') {
+          expect(work).toMatchObject({ requestId, chatId: -10042 });
+          const sends: string[] = [];
+          const restored = new TelegramDelivery(
+            recovered,
+            {
+              call: (async (method: string, body: { text: string }) => {
+                if (method === 'sendMessage') sends.push(body.text);
+                return { message_id: 201 + sends.length };
+              }) as TelegramApi['call'],
+            },
+            'fixture_bot:123',
+          );
+          try {
+            await restored.flush();
+            expect(sends).toEqual([]);
+            const prefix = `group-selection:7:${requestId}`;
+            await restored.send({ chatId: 7 }, new TelegramText().add('Connected after restart'), {
+              key: prefix + ':connected',
+            });
+            await restored.send({ chatId: 7 }, new TelegramText().add('Home after restart'), {
+              key: prefix + ':home',
+            });
+            await restored.flush();
+            expect(sends).toEqual(['Connected after restart', 'Home after restart', commandText]);
+          } finally {
+            await restored.stop();
+          }
+        }
+      } finally {
+        recovered.close();
+      }
+      release();
+      await vi.waitFor(() => expect(cards.map(({ text }) => text)).toContain(commandText));
+      expect(completed.slice(0, 3)).toEqual(['rights', 'confirmation', 'home']);
+      expect(cards).toHaveLength(3);
+      expect(cards[0].remove).toBe(true);
+      expect(cards[2].text).toBe(commandText);
+      expect(cards.map(({ id }) => id)).toEqual(cards.map(({ id }) => id).sort((a, b) => a - b));
+      expect(f.store.setting('telegram.group')).toMatchObject({ chatId: -10042, ownerId: 7 });
     } finally {
-      recovered.close();
+      releaseBatch();
+      markWaiting();
+      release();
+      await bot.stop();
+      await f.close();
     }
-    release();
-    await vi.waitFor(() => expect(completed).toEqual(['rights', 'confirmation', 'home']));
-    expect(f.store.setting('telegram.group')).toMatchObject({ chatId: -10042, ownerId: 7 });
-  } finally {
-    releaseBatch();
-    markWaiting();
-    release();
-    await bot.stop();
-    await f.close();
-  }
-});
+  },
+);
 
 it.each(
   ['/group', 'dad:group'].flatMap((action) =>
@@ -2299,6 +2360,179 @@ it.each(
       await bot.stop();
       await f.close();
       vi.useRealTimers();
+    }
+  },
+);
+
+it.each([
+  '/pause',
+  '/resume',
+  '/rename Older title',
+  '/worker 1 older max',
+  '/pool 2',
+  'pool button',
+  '/instructions worker Older instruction',
+  'session merge',
+  'task merge',
+  'updates:off',
+])(
+  'keeps the later owner choice when %s is replayed after an acknowledgement failure',
+  async (action) => {
+    const f = daddyFixture(true);
+    const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Session' });
+    f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+    f.store.setSetting('telegram.currentDaddy', group.id);
+    const task =
+      action === 'task merge'
+        ? await f.daddy.createTask(group.id, { requirements: 'A task', requestId: 'task' })
+        : undefined;
+    const reader = () => f.daddy.group(group.id);
+    const change =
+      action === '/pause'
+        ? {
+            read: () => reader().daddyState,
+            first: 'paused',
+            later: 'active',
+            edit: () => f.daddy.resume(group.id),
+          }
+        : action === '/resume'
+          ? {
+              read: () => reader().daddyState,
+              first: 'active',
+              later: 'paused',
+              edit: () => f.daddy.pause(group.id),
+            }
+          : action.startsWith('/rename')
+            ? {
+                read: () => reader().title,
+                first: 'Older title',
+                later: 'Newer title',
+                edit: () => f.daddy.rename(group.id, 'Newer title'),
+              }
+            : action.startsWith('/worker')
+              ? {
+                  read: () => workerSlots(f.store, reader())[0].profile?.model,
+                  first: 'older',
+                  later: 'newer',
+                  edit: () =>
+                    f.daddy.configureWorker(group.id, 1, {
+                      engine: 'codex',
+                      model: 'newer',
+                      effort: 'max',
+                    }),
+                }
+              : action === '/pool 2' || action === 'pool button'
+                ? {
+                    read: () => reader().requestedWorkerLimit,
+                    first: 2,
+                    later: 3,
+                    edit: () => f.daddy.settings(group.id, { workerLimit: 3 }),
+                  }
+                : action.startsWith('/instructions')
+                  ? {
+                      read: () => reader().instructions?.worker?.prompt,
+                      first: 'Older instruction',
+                      later: 'Newer instruction',
+                      edit: () =>
+                        f.daddy.settings(group.id, {
+                          instructions: { daddy: {}, worker: { prompt: 'Newer instruction' } },
+                        }),
+                    }
+                  : action === 'session merge'
+                    ? {
+                        read: () => f.store.setting('autoMerge.session:' + group.id),
+                        first: true,
+                        later: false,
+                        edit: () => f.daddy.settings(group.id, { autoMerge: false }),
+                      }
+                    : action === 'task merge'
+                      ? {
+                          read: () => f.store.setting('autoMerge.mode:' + task!.id),
+                          first: 'on',
+                          later: 'off',
+                          edit: () => f.daddy.taskAutoMerge(group.id, task!.id, 'off'),
+                        }
+                      : {
+                          read: () => f.store.setting('updates.notifications'),
+                          first: false,
+                          later: true,
+                          edit: () => f.store.setSetting('updates.notifications', true),
+                        };
+    const data =
+      action === 'pool button'
+        ? `dad:pool:${group.id}:2`
+        : action === 'session merge'
+          ? `dad:sm:${group.id}:on`
+          : action === 'task merge'
+            ? `dad:tm:${task!.id}:on`
+            : action;
+    const chat = { id: 7, type: 'private' },
+      from = { id: 7 };
+    const update: Update = action.startsWith('/')
+      ? { update_id: 80, message: { message_id: 80, chat, from, text: action } }
+      : {
+          update_id: 80,
+          callback_query: { id: 'change', data, from, message: { chat, message_id: 79 } },
+        };
+    const calls: { method: string; body: any }[] = [];
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+      const method = String(url).split('/').at(-1)!;
+      calls.push({ method, body: JSON.parse(String(init?.body ?? '{}')) });
+      if (method === 'sendMessage' && calls.filter((item) => item.method === method).length === 1)
+        return Response.json({
+          ok: false,
+          error_code: 429,
+          description: 'Flood wait',
+          parameters: { retry_after: 10 },
+        });
+      return Response.json({ ok: true, result: { message_id: 91 } });
+    });
+    const recreate = () => {
+      const bot = new Telegram(f.engine, api, 'fixture_bot');
+      bot.configure({
+        daddy: f.daddy,
+        catalogue,
+        updates: new UpdateMonitor(f.store, { agents: [] }),
+      });
+      return bot;
+    };
+    let bot = recreate();
+    try {
+      if (action === '/resume') await f.daddy.pause(group.id);
+      f.store.db.exec(
+        "CREATE TRIGGER break_ack BEFORE INSERT ON bot_receipts WHEN NEW.id=80 BEGIN SELECT RAISE(ABORT,'ack interrupted'); END",
+      );
+      await expect(bot.handle(update)).rejects.toThrow('ack interrupted');
+      expect(change.read()).toEqual(change.first);
+      expect(f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=80').get()).toBeUndefined();
+      await change.edit();
+      expect(change.read()).toEqual(change.later);
+      f.store.db.exec('DROP TRIGGER break_ack');
+      await bot.stop();
+      bot = recreate();
+      await bot.handle(update);
+      expect(change.read()).toEqual(change.later);
+      expect(f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=80').get()).toBeTruthy();
+      await api.delivery!.stop();
+      const recovered = new Store(join(f.dir, 'state.sqlite'));
+      try {
+        const delivery = new TelegramDelivery(
+          recovered,
+          api,
+          'fixture_bot:local',
+          () => Date.now() + 11000,
+        );
+        await delivery.flush();
+        const messages = calls.filter(({ method }) => method === 'sendMessage');
+        expect(messages).toHaveLength(2);
+        expect(messages[1].body).toEqual(messages[0].body);
+        await delivery.stop();
+      } finally {
+        recovered.close();
+      }
+    } finally {
+      await bot.stop();
+      await f.close();
     }
   },
 );
