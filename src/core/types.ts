@@ -149,6 +149,7 @@ export interface DaddyJob {
   generation: number;
   trigger: 'user' | 'worker' | 'recovery' | 'resources';
   waitingTaskId?: string;
+  disputeRunId?: string;
   input: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   profile: AgentProfile;
@@ -225,9 +226,33 @@ export interface FixSave {
   checkpointTarget?: Revision;
 }
 
+/** Confirmed worker commits and the published feedback they were meant to fix. */
+export interface ReviewFixAttempt {
+  runId: string;
+  before: Revision;
+  after: string;
+  reviewId?: string;
+}
+export interface ReviewRecovery {
+  reviewId: string;
+  revision: Revision;
+  branch: string;
+  targetBranch: string;
+  fingerprint: string;
+  criteria: string[];
+  attempts: ReviewFixAttempt[];
+  runId: string;
+  plan?: string;
+  coordination?: string;
+}
 export interface Task {
   replyTo?: TelegramReply;
-  inputRequest?: { runId: string; role: Role; generation: number };
+  inputRequest?: {
+    runId: string;
+    role: Role;
+    generation: number;
+    reviewDispute?: 'daddy' | 'owner';
+  };
   resourcePause?: { generation: number; at: string };
   id: string;
   title: string;
@@ -267,6 +292,8 @@ export interface Task {
     retryAt?: number;
   };
   draftRecheck?: { commentIds: string[]; retried?: boolean };
+  reviewRecovery?: ReviewRecovery;
+  reviewLessonProof?: { digest: string; reviewId: string; revision: Revision; at: string };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;

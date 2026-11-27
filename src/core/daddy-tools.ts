@@ -81,7 +81,7 @@ const descriptions: Record<keyof typeof daddySchemas, string> = {
   message_worker:
     'Send scoped instructions to the task worker. When an author asks a question and the answer is already in the session, send the decision here to resume that fix. Results return to daddy.',
   set_dependencies:
-    'Set same-session prerequisites before a task starts. This orders work; it does not merge branches. Keep interdependent edits in one implementation task unless their base already contains the prerequisites.',
+    'Set prerequisites before initial dispatch or while a native correction waits. The assigned worker and corrective architect start after the prerequisite tasks complete. Use message_worker to confirm who owns the shared edit. Completion orders the work; a dependency does not merge code into a branch.',
   pause_task:
     'Pause a task and preserve its current work. Use when the user changes direction or a dependent task must wait.',
   resume_task:

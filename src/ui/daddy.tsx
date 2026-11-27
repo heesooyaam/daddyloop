@@ -1996,9 +1996,11 @@ function TaskReport({
           </div>
           <p>{t(live?.reason ?? activityReason(value.task))}</p>
           {board &&
-            live?.ref.kind === 'ticket' &&
+            live &&
             live.state !== 'complete' &&
-            (value.task.planning || live.state === 'discussing') && (
+            (live.ref.kind === 'ticket'
+              ? value.task.planning || live.state === 'discussing'
+              : value.task.kind === 'code' && !value.task.reportOnly) && (
               <TaskArchitectSettings
                 key={id + JSON.stringify(live.architectProfile)}
                 api={api}

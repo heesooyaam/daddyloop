@@ -1223,3 +1223,140 @@ it.each(['manual publication', 'automatic publication', 'queued author'])(
     }
   },
 );
+
+it.each(['repeat review', 'external merge'] as const)(
+  'requires both findings from a legacy publication and its successor during %s',
+  async (entry) => {
+    const f = await fixture({ state: entry === 'external merge' ? 'needs_input' : 'queued' });
+    const task = f.store.getTask(f.task.id);
+    task.ref.provider = 'github';
+    const priorRevision = { ...task.revision!, head: 'e'.repeat(40) };
+    const old = { id: '10', marker: 'daddyloop:old', revision: priorRevision };
+    const latest = { ...old, id: '20', marker: 'daddyloop:latest' };
+    const revisedMarkdown = 'Current **Markdown** of the earlier finding';
+    let omit = true;
+    let verifyBoth = false;
+    let newReview: ReviewHandle | undefined;
+    let newReviewPublished = false;
+    const http = transport((path, method) => {
+      if (method === 'POST' && path.endsWith('/reviews/30/events')) {
+        newReviewPublished = true;
+        return {};
+      }
+      expect(method).toBe('GET');
+      const id = /\/reviews\/(\d+)/.exec(path)?.[1];
+      if (path.includes('/comments')) {
+        if (id === '30' || (id === '10' && omit)) return [];
+        return [
+          {
+            id: id === '10' ? 11 : 21,
+            body: id === '10' ? revisedMarkdown : 'Finding in the next review',
+            html_url: task.ref.url,
+          },
+        ];
+      }
+      const review = id === '10' ? old : id === '20' ? latest : newReview!;
+      return {
+        id: Number(review.id),
+        user: { id: 7 },
+        body: tag(review.marker),
+        commit_id: review.revision.head,
+        state: id === '30' && !newReviewPublished ? 'PENDING' : 'COMMENTED',
+      };
+    });
+    const github = new GitHubProvider('github.com', 'fake', http);
+    vi.spyOn(f.provider, 'getReview').mockImplementation(github.getReview.bind(github));
+    vi.spyOn(f.provider, 'publish').mockImplementation(github.publish.bind(github));
+    vi.spyOn(f.provider as ReviewProvider, 'createReview').mockImplementation(
+      async (_ref, revision, marker) => {
+        newReview = { id: '30', revision, marker };
+        return newReview;
+      },
+    );
+    const knownLatest = await github.getReview(prRef(task), latest);
+    f.engine.setFeedback(task, knownLatest, latest);
+    if (entry === 'external merge') {
+      task.review = latest;
+      task.snapshot = knownLatest;
+      f.store.setSetting('demo-pr:1', {
+        ...task.pr,
+        state: 'merged',
+        mergeCommit: 'external',
+        checks: 'passing',
+      });
+    }
+    f.store.saveTask(task);
+    f.store.event(task.id, 'review.findings_published', {
+      reviewId: old.id,
+      revision: old.revision,
+      comments: 1,
+    });
+    f.store.event(
+      task.id,
+      'author.feedback_snapshot',
+      {
+        status: 'published',
+        revision: old.revision,
+        comments: [{ id: '11', body: 'Old wording' }],
+      },
+      'old-author-run',
+    );
+    f.store.event(task.id, 'review.published', {
+      reviewId: latest.id,
+      handle: latest,
+      snapshot: knownLatest,
+    });
+    const workspaces = new Workspaces('/tmp');
+    vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
+    const seen: string[][] = [];
+    const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+      expect(input.task.feedback?.comments[0].id).toBe('21');
+      const draft = input.job.reviewFindingIds;
+      seen.push(Object.values(draft ?? {}).flat());
+      if (!omit) expect(input.prompt).toContain(revisedMarkdown);
+      return {
+        status: 'completed' as const,
+        summary: 'Verified published findings',
+        checkedHead: task.revision!.head,
+        verifiedCommentIds: verifyBoth ? ['11', '21'] : ['21'],
+      };
+    });
+    const worker = new Worker(f.engine, workspaces, { run }, new DemoRuntime(), () => ({
+      ok: true,
+      reasons: [],
+      diskAvailableGiB: 20,
+      diskUsedPercent: 20,
+      memoryAvailableGiB: 10,
+      memoryTotalGiB: 20,
+    }));
+    const queue = async (retry: boolean) => {
+      if (entry === 'external merge') await f.engine.action(task.id, 'verify-merge');
+      else await f.engine.review(task.id, retry);
+    };
+    const runQueued = async () => {
+      await worker.tick();
+      await vi.waitFor(() => expect(f.store.busy(task.id)).toBe(false));
+      await worker.tick();
+    };
+    try {
+      await queue(false);
+      await runQueued();
+      expect(f.store.getTask(task.id).state).toBe('needs_input');
+      expect(run).not.toHaveBeenCalled();
+      expect(f.store.getTask(task.id).feedback).toEqual(knownLatest);
+      omit = false;
+      await queue(true);
+      await runQueued();
+      expect(seen[0]).toEqual(expect.arrayContaining(['11', '21']));
+      expect(f.store.getTask(task.id).state).toBe('needs_input');
+      verifyBoth = true;
+      await queue(true);
+      await runQueued();
+      expect(seen[1]).toEqual(expect.arrayContaining(['11', '21']));
+      expect(f.store.getTask(task.id).state).toBe('complete');
+    } finally {
+      await worker.stop();
+      f.store.close();
+    }
+  },
+);
