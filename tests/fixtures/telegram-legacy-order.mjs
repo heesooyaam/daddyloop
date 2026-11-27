@@ -51,6 +51,7 @@ const { Store } = await import(pinned('src/core/store.ts'));
 const { Telegram, TelegramApi } = await import(pinned('src/integrations/telegram.ts'));
 const { Engine } = await import(pinned('src/core/engine.ts'));
 const { InstructionPresets } = await import(pinned('src/core/instruction-presets.ts'));
+const { setLocale } = await import(pinned('src/core/preferences.ts'));
 const { Daddy } = await import(pinned('src/core/daddy.ts'));
 const group = '1b951e45-19d6-4890-93f7-7e5d90962624';
 const taskId = '9f8677ba-776e-4a81-ba88-364099269ea4';
@@ -65,6 +66,33 @@ const sessionActions = {
   preset: ['/preset Legacy preset', 'daddy.settings'],
   'session merge': ['dad:sm:' + group + ':on', 'daddy.settings'],
   'task merge': ['dad:tm:' + taskId + ':on', 'automerge.setting'],
+};
+const views = {
+  pool: ['/pool', (daddy) => daddy.settings(group, { workerLimit: 2 })],
+  instructions: [
+    '/instructions',
+    (daddy) =>
+      daddy.settings(group, {
+        instructions: { daddy: {}, worker: { prompt: 'Recovered instructions' } },
+      }),
+  ],
+  'session merge': ['dad:settings:' + group, (daddy) => daddy.settings(group, { autoMerge: true })],
+  'task merge': ['dad:task:' + taskId, (daddy) => daddy.taskAutoMerge(group, taskId, 'on')],
+  pause: [
+    'dad:open:' + group,
+    async (daddy) => {
+      await daddy.resume(group);
+      await daddy.pause(group);
+    },
+  ],
+  resume: [
+    'dad:open:' + group,
+    async (daddy) => {
+      await daddy.pause(group);
+      await daddy.resume(group);
+    },
+  ],
+  language: ['language:show', (_daddy, store) => setLocale(store, 'ru')],
 };
 const at = 1_750_000_000_000;
 const NativeDate = Date;
@@ -99,7 +127,16 @@ function snapshot(path) {
   }
 }
 
-async function run(path, menuFirst, gap = 0, scenario = 'status') {
+async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) {
+  const {
+    privateChat = false,
+    extraSession = false,
+    browse,
+    web = false,
+    anchored = false,
+    attempted = false,
+    languageAlreadySelected = false,
+  } = options;
   const mixedSettings = scenario === 'mixed settings';
   const kind = mixedSettings
     ? 'instructions'
@@ -111,7 +148,15 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
     const topic = { chatId: -10042, threadId: 17, ownerId: 7, groupId: group, title: 'Session' };
     store.saveGroup({ id: group, title: topic.title, orchestrated: true });
     store.setSetting('telegram.pairing', { chatId: 7, userId: 7, ownerLabel: 'Owner' });
-    store.setSetting('telegram.group', { chatId: topic.chatId, ownerId: topic.ownerId });
+    if (!privateChat)
+      store.setSetting('telegram.group', { chatId: topic.chatId, ownerId: topic.ownerId });
+    if (privateChat) store.setSetting('telegram.currentDaddy', group);
+    if (extraSession)
+      store.saveGroup({
+        id: 'a6c192a2-19d6-4890-93f7-7e5d90962624',
+        title: 'Idle',
+        orchestrated: true,
+      });
     store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
     store.db
       .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
@@ -123,7 +168,8 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       assert.ok(['sendMessage', 'editMessageText'].includes(method));
       sent.push({ chat: body.chat_id, text: body.text });
       const limited =
-        body.chat_id === 7 ||
+        body.text === 'Other chat triggers 429' ||
+        (attempted && sent.length === 2) ||
         (scenario === 'third' && body.text.endsWith('Reply C')) ||
         (scenario.endsWith('delayed') && sent.length === 1);
       if (limited)
@@ -148,10 +194,11 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       store.saveGroup({
         ...store.getGroup(group),
         generation: 1,
-        daddyState: kind.startsWith('resume') ? 'paused' : 'active',
+        daddyState: (browse ? browse === 'pause' : kind.startsWith('resume')) ? 'paused' : 'active',
         workspace: { name: 'Fixture', provider: 'github' },
         workerLimit: 1,
         daddy: engine.defaultAgents().daddy,
+        ...(browse === 'pool' && { requestedWorkerLimit: 2 }),
       });
     const createTask = (_groupId, input) =>
       engine.createTicket({
@@ -192,6 +239,16 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       });
     if (kind === 'task merge')
       createTask(group, { requestId: 'fixture-task', requirements: 'Task to merge' });
+    if (browse === 'instructions') {
+      store.saveGroup({
+        ...store.getGroup(group),
+        instructions: { daddy: {}, worker: { prompt: 'Recovered instructions' } },
+      });
+    }
+    if (browse === 'session merge') store.setSetting('autoMerge.session:' + group, true);
+    if (browse === 'task merge') store.setSetting('autoMerge.mode:' + taskId, 'on');
+    if (browse === 'language' || languageAlreadySelected)
+      store.setSetting('preferences', { locale: 'ru', version: 0 });
     if (scenario.startsWith('mixed ')) store.setSetting('telegram.currentDaddy', group);
     bot.configure({ daddy });
     const reply = async (id, text, phase) => {
@@ -225,19 +282,23 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
         message_thread_id: privateChat ? undefined : topic.threadId,
       };
       const command =
-        scenario === 'text language'
-          ? '/language ru'
-          : scenario === 'task'
-            ? '/task Legacy task'
-            : kind === 'rename'
-              ? '/rename Recovered title'
-              : kind === 'worker'
-                ? '/worker 1 example max'
-                : (sessionActions[action]?.[0] ?? '/status');
+        action === 'rename'
+          ? '/rename Recovered title'
+          : action === 'browse'
+            ? views[browse][0]
+            : scenario === 'text language'
+              ? '/language ru'
+              : scenario === 'task'
+                ? '/task Legacy task'
+                : kind === 'rename'
+                  ? '/rename Recovered title'
+                  : kind === 'worker'
+                    ? '/worker 1 example max'
+                    : (sessionActions[action]?.[0] ?? '/status');
       const data =
-        scenario === 'language' || scenario === 'two languages'
+        action === kind && (scenario === 'language' || scenario === 'two languages')
           ? 'language:ru'
-          : command.startsWith('dad:')
+          : !command.startsWith('/')
             ? command
             : undefined;
       await bot.handle(
@@ -268,22 +329,39 @@ async function run(path, menuFirst, gap = 0, scenario = 'status') {
       if (!scenario.includes('tail')) await reply('C', 'Reply C', 'final');
       assert.equal(sent.length, scenario.endsWith('acknowledged') ? 2 : 1);
     } else {
-      await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
+      if (!attempted) await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
       const mixedRoutes = scenario.startsWith('mixed ') && !mixedSettings;
       const twoCards = mixedRoutes || mixedSettings || scenario.startsWith('two ');
-      if (menuFirst || twoCards) {
-        await menu(mixedRoutes && menuFirst, mixedSettings && !menuFirst ? 'pool' : kind);
-        clock += gap;
+      if (browse) {
+        if (menuFirst) await menu(privateChat, 'browse');
+        if (anchored) await menu(privateChat, 'rename');
+        await reply('B', 'Reply B', 'final');
+        if (!menuFirst) await menu(privateChat, 'browse');
+        if (web) await views[browse][1](daddy, store);
+      } else {
+        if (menuFirst || twoCards) {
+          await menu(
+            privateChat || (mixedRoutes && menuFirst),
+            mixedSettings && !menuFirst ? 'pool' : kind,
+          );
+          clock += gap;
+        }
+        await reply('B', 'Reply B', 'final');
+        if (twoCards || !menuFirst) {
+          clock += gap;
+          if (anchored) await menu(privateChat, 'rename');
+          await menu(
+            privateChat || (mixedRoutes && !menuFirst),
+            mixedSettings && menuFirst ? 'pool' : kind,
+          );
+        }
       }
-      await reply('B', 'Reply B', 'final');
-      if (twoCards || !menuFirst) {
-        clock += gap;
-        await menu(mixedRoutes && !menuFirst, mixedSettings && menuFirst ? 'pool' : kind);
-      }
-      assert.deepEqual(sent, [
-        { chat: topic.chatId, text: '👨‍💻 [daddy]\n\nReply A' },
-        { chat: 7, text: 'Other chat triggers 429' },
-      ]);
+      if (attempted) assert.equal(sent.length, 2);
+      else
+        assert.deepEqual(sent, [
+          { chat: privateChat ? 7 : topic.chatId, text: '👨‍💻 [daddy]\n\nReply A' },
+          { chat: 7, text: 'Other chat triggers 429' },
+        ]);
     }
     await bot.stop();
   } finally {
@@ -300,14 +378,15 @@ function sentLabel(body) {
   const reply = /Reply ([ABC])$/.exec(body.text)?.[1];
   if (reply) return reply;
   if (body.text.includes('Legacy task')) return '/task';
-  if (body.text.includes('Recovered title')) return '/rename';
+  if (/^(Session renamed|Сессия переименована):/.test(body.text)) return '/rename';
   if (body.text.includes('example')) return '/worker';
   if (body.text === 'Язык изменён.') return '/language';
   if (has('language:ru')) return 'language:ru';
   if (selected('dad:pool:' + group + ':2')) return 'pool';
   if (has('dad:resume:' + group)) return 'pause';
   if (has('dad:pause:' + group)) return 'resume';
-  if (body.text.includes('Recovered instructions')) return 'instructions';
+  if (/^(Instructions for this session|Инструкции этой сессии)/.test(body.text))
+    return 'instructions';
   if (body.text.includes('Recovered preset')) return 'preset';
   if (has('dad:sm:' + group + ':off')) return 'session merge';
   if (selected('dad:tm:' + taskId + ':on')) return 'task merge';
@@ -398,24 +477,27 @@ try {
   const laterMenu = join(directory, 'later-menu.sqlite');
   await run(laterMenu, false, 1);
   assert.deepEqual(await replay(laterMenu), ['B', '/status']);
-  const languageFirst = join(directory, 'language-then-b.sqlite');
-  const bFirst = join(directory, 'b-then-language.sqlite');
-  const languageThenB = await run(languageFirst, true, 0, 'language');
-  const bThenLanguage = await run(bFirst, false, 0, 'language');
-  assert.deepEqual(
-    languageThenB.events.map(({ type }) => type),
-    ['daddy.message', 'preferences.changed', 'daddy.message'],
-  );
-  assert.deepEqual(
-    bThenLanguage.events.map(({ type }) => type),
-    ['daddy.message', 'daddy.message', 'preferences.changed'],
-  );
-  assert.deepEqual(await replay(languageFirst), ['language:ru', 'B']);
-  clock = at + 1;
-  assert.deepEqual(await replay(bFirst), ['B', 'language:ru']);
-  const twoMenus = join(directory, 'two-languages.sqlite');
-  await run(twoMenus, true, 0, 'two languages');
-  assert.deepEqual(await replay(twoMenus), ['language:ru', 'B', 'language:ru']);
+  const wanted = process.env.DADDYLOOP_LEGACY_ORDER_CASE;
+  if (!wanted) {
+    const languageFirst = join(directory, 'language-then-b.sqlite');
+    const bFirst = join(directory, 'b-then-language.sqlite');
+    const languageThenB = await run(languageFirst, true, 0, 'language');
+    const bThenLanguage = await run(bFirst, false, 0, 'language');
+    assert.deepEqual(
+      languageThenB.events.map(({ type }) => type),
+      ['daddy.message', 'preferences.changed', 'daddy.message'],
+    );
+    assert.deepEqual(
+      bThenLanguage.events.map(({ type }) => type),
+      ['daddy.message', 'daddy.message', 'preferences.changed'],
+    );
+    assert.deepEqual(await replay(languageFirst), ['language:ru', 'B']);
+    clock = at + 1;
+    assert.deepEqual(await replay(bFirst), ['language:ru', 'B']);
+    const twoMenus = join(directory, 'two-languages.sqlite');
+    await run(twoMenus, true, 0, 'two languages', { anchored: true });
+    assert.deepEqual(await replay(twoMenus), ['language:ru', 'B', '/rename', 'language:ru']);
+  }
   for (const [scenario, label] of [
     ['text language', '/language'],
     ['task', '/task'],
@@ -477,19 +559,24 @@ try {
       process.env.DADDYLOOP_LEGACY_ORDER_CASE !== 'mixed ' + command
     )
       continue;
-    for (const privateFirst of [true, false]) {
-      const path = join(directory, 'mixed-' + command + '-' + privateFirst + '.sqlite');
-      const legacy = await run(path, privateFirst, 0, 'mixed ' + command);
-      assert.deepEqual(
-        legacy.events.map(({ type }) => type),
-        ['daddy.message', event, 'daddy.message', event],
-      );
-      const label = '/' + command;
-      assert.deepEqual(
-        await replay(path, undefined, true),
-        privateFirst ? ['private ' + label, 'B', label] : [label, 'B', 'private ' + label],
-        command + ': confirmations in different chats must surround the reply',
-      );
+    for (const extraSession of [false, true]) {
+      for (const privateFirst of [true, false]) {
+        const path = join(
+          directory,
+          'mixed-' + command + '-' + privateFirst + '-' + extraSession + '.sqlite',
+        );
+        const legacy = await run(path, privateFirst, 0, 'mixed ' + command, { extraSession });
+        assert.deepEqual(
+          legacy.events.map(({ type }) => type),
+          ['daddy.message', event, 'daddy.message', event],
+        );
+        const label = '/' + command;
+        assert.deepEqual(
+          await replay(path, undefined, true),
+          privateFirst ? ['private ' + label, 'B', label] : [label, 'B', 'private ' + label],
+          command + ': confirmations in different chats must surround the reply',
+        );
+      }
     }
   }
   for (const [scenario, [, event]] of Object.entries(sessionActions)) {
@@ -500,7 +587,8 @@ try {
       continue;
     for (const menuFirst of [true, false]) {
       const path = join(directory, scenario + '-' + menuFirst + '.sqlite');
-      const legacy = await run(path, menuFirst, 0, scenario);
+      const anchored = scenario !== 'preset' && !menuFirst;
+      const legacy = await run(path, menuFirst, 0, scenario, { anchored });
       const eventSlot = legacy.events.findIndex(({ type }) => type === event);
       const replySlot = legacy.events.findLastIndex(({ type }) => type === 'daddy.message');
       assert.ok(eventSlot >= 0 && replySlot >= 0, scenario + ': command did not record its effect');
@@ -509,9 +597,13 @@ try {
       const cards = legacy.settings.filter(
         ({ value }) => value.options && !value.options.key && value.destination.chatId === -10042,
       );
-      assert.equal(cards.length, 1);
+      assert.equal(cards.length, anchored ? 2 : 1);
       assert.equal(cards[0].value.attempts, 0);
-      assert.deepEqual(await replay(path), menuFirst ? [label, 'B'] : ['B', label], scenario);
+      assert.deepEqual(
+        await replay(path),
+        menuFirst ? [label, 'B'] : anchored ? ['B', '/rename', label] : ['B', label],
+        scenario,
+      );
     }
   }
   if (
@@ -520,15 +612,78 @@ try {
   ) {
     for (const instructionsFirst of [true, false]) {
       const path = join(directory, 'mixed-settings-' + instructionsFirst + '.sqlite');
-      const legacy = await run(path, instructionsFirst, 0, 'mixed settings');
+      const legacy = await run(path, instructionsFirst, 0, 'mixed settings', { anchored: true });
       assert.deepEqual(
         legacy.events.map(({ type }) => type),
-        ['daddy.message', 'daddy.settings', 'daddy.message', 'daddy.settings'],
+        ['daddy.message', 'daddy.settings', 'daddy.message', 'daddy.renamed', 'daddy.settings'],
       );
       assert.deepEqual(
         await replay(path),
-        instructionsFirst ? ['instructions', 'B', 'pool'] : ['pool', 'B', 'instructions'],
+        instructionsFirst
+          ? ['instructions', 'B', '/rename', 'pool']
+          : ['pool', 'B', '/rename', 'instructions'],
       );
+    }
+  }
+  if (!wanted || wanted === 'private sessions') {
+    for (const extraSession of [false, true]) {
+      for (const scenario of ['rename', 'worker', 'task', ...Object.keys(sessionActions)]) {
+        for (const menuFirst of [true, false]) {
+          const path = join(
+            directory,
+            'private-' + scenario + '-' + extraSession + '-' + menuFirst,
+          );
+          const anchored = !menuFirst && scenario in sessionActions && scenario !== 'preset';
+          await run(path, menuFirst, 0, scenario, { privateChat: true, extraSession, anchored });
+          const label =
+            'private ' +
+            (['rename', 'worker', 'task'].includes(scenario)
+              ? '/' + scenario
+              : scenario.replace(/ button$/, ''));
+          assert.deepEqual(
+            await replay(path, undefined, true),
+            menuFirst
+              ? [label, 'private B']
+              : anchored
+                ? ['private B', 'private /rename', label]
+                : ['private B', label],
+            scenario + ' extra session=' + extraSession,
+          );
+        }
+      }
+    }
+  }
+  if (!wanted || wanted === 'browse pool') {
+    for (const browse of Object.keys(views)) {
+      const scenario = browse === 'language' ? 'status' : browse;
+      const label = browse === 'language' ? 'language:ru' : browse;
+      const path = (name) => join(directory, browse + '-' + name + '.sqlite');
+      const view = { browse, web: true };
+      await run(path('anchored'), true, 0, scenario, { ...view, anchored: true });
+      assert.deepEqual(await replay(path('anchored')), [label, '/rename', 'B']);
+      if (['pause', 'resume', 'task merge'].includes(browse)) continue;
+      const viewFirst = await run(path('view-first'), true, 0, scenario, view);
+      const replyFirst = await run(path('view-last'), false, 0, scenario, view);
+      assert.deepEqual(viewFirst, replyFirst);
+      assert.equal(Object.keys(viewFirst).length, 18);
+      for (const name of ['view-first', 'view-last']) {
+        clock = at + 1;
+        assert.deepEqual(await replay(path(name)), [label, 'B']);
+      }
+      if (browse === 'pool') {
+        const change = await run(path('real-change'), false, 0, 'pool');
+        assert.deepEqual(change, replyFirst);
+        assert.deepEqual(await replay(path('real-change')), ['pool', 'B']);
+        await run(path('attempted'), true, 0, 'pool', { ...view, attempted: true });
+        assert.deepEqual(await replay(path('attempted')), ['pool', 'B']);
+      }
+      if (browse === 'language') {
+        const change = await run(path('real-change'), false, 0, 'language', {
+          languageAlreadySelected: true,
+        });
+        assert.deepEqual(change, replyFirst);
+        assert.deepEqual(await replay(path('real-change')), ['language:ru', 'B']);
+      }
     }
   }
   const third = join(directory, 'c-then-menu.sqlite');
@@ -570,10 +725,10 @@ try {
         tablesCompared: Object.keys(menuThenB),
         languageReplay: [
           ['language:ru', 'B'],
-          ['B', 'language:ru'],
+          ['language:ru', 'B'],
         ],
         attemptedThirdReplay: ['C', '/status'],
-        repeatedLanguageReplay: ['language:ru', 'B', 'language:ru'],
+        repeatedLanguageReplay: ['language:ru', 'B', '/rename', 'language:ru'],
         textLanguageReplay: [
           ['/language', 'B'],
           ['B', '/language'],

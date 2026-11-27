@@ -10,7 +10,6 @@ import { redact } from '../core/security.js';
 import { profileText } from '../core/task-activity.js';
 import { clipTitle } from '../core/session-title.js';
 import { translator } from '../i18n/index.js';
-import { languageCard } from './telegram-meta.js';
 import {
   TelegramText,
   splitTelegramText,
@@ -422,21 +421,25 @@ export class TelegramDelivery {
        AND json_extract(value,'$.options.operation') IS NULL ORDER BY rowid`,
       )
       .all(this.bot, value.ownerId ?? null, createdAt);
-    let earlier = position;
-    let later = Infinity;
-    for (const row of tied) {
+    let before = position;
+    let after = Infinity;
+    const cards = tied.map((row) => {
       const menu = JSON.parse(String(row.value)) as Delivery;
-      const event =
-        replyEvent?.id != null
-          ? this.legacyMenuEvent(menu, Number(row.position), message.taskId)
-          : undefined;
-      if (event === undefined && !sameDestination(menu.destination, value.destination)) continue;
-      const precedes =
-        event !== undefined ? event < Number(replyEvent!.id) : !attempted || menu.attempts > 0;
-      if (precedes) earlier = Math.max(earlier, Number(row.position));
-      else later = Math.min(later, Number(row.position));
-    }
-    earlier = Math.min(earlier, later - 1);
+      const slot = Number(row.position);
+      const evidence =
+        replyEvent?.id == null ? undefined : this.legacyMenuEvent(menu, slot, message.taskId);
+      const sameRoute = sameDestination(menu.destination, value.destination);
+      if (sameRoute && menu.attempts > 0) before = Math.max(before, slot);
+      else if (evidence !== undefined) {
+        if (evidence < Number(replyEvent?.id)) before = Math.max(before, slot);
+        else after = Math.min(after, slot);
+      }
+      return { slot, sameRoute };
+    });
+    if (!attempted)
+      for (const { slot, sameRoute } of cards)
+        if (sameRoute && slot < after) before = Math.max(before, slot);
+    const earlier = Math.min(before, after - 1);
     return { createdAt, queuePosition: earlier + index / (index + 1) };
   }
   private legacyMenuEvent(menu: Delivery, position: number, groupId: string): number | undefined {
@@ -453,11 +456,16 @@ export class TelegramDelivery {
     }
     const time = new Date(menu.createdAt).toISOString();
     const sameSession = this.legacySessionCards(groupId);
+    const otherEvents = (type: string) =>
+      this.store.db
+        .prepare('SELECT id,data FROM events WHERE task_id<>? AND at=? AND type=?')
+        .all(groupId, time, type);
     const worker = menu.options.key?.startsWith('telegram:worker:');
-    if ((worker || !menu.options.key) && sameSession(menu)) {
+    if (worker || !menu.options.key) {
+      const type = worker ? 'daddy.worker_configured' : 'daddy.renamed';
       const events = this.store.db
         .prepare('SELECT id,data FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
-        .all(groupId, time, worker ? 'daddy.worker_configured' : 'daddy.renamed');
+        .all(groupId, time, type);
       const matches = (candidate: Delivery, event: LegacyMenuEvent) => {
         const data = JSON.parse(String(event.data)) as {
           title?: string;
@@ -486,12 +494,16 @@ export class TelegramDelivery {
       };
       const matchingEvents = events.filter((event) => matches(menu, event));
       if (matchingEvents.length) {
+        const competing = otherEvents(type);
+        const eligible = (candidate: Delivery) =>
+          sameSession(candidate, !competing.some((event) => matches(candidate, event)));
+        if (!eligible(menu)) return;
         return this.pairLegacyMenuEvent(
           menu,
           position,
           matchingEvents,
           (candidate) =>
-            sameSession(candidate) &&
+            eligible(candidate) &&
             (worker
               ? !!candidate.options.key?.startsWith('telegram:worker:')
               : !candidate.options.key) &&
@@ -500,50 +512,39 @@ export class TelegramDelivery {
         );
       }
     }
-    const action = this.legacySessionCardAction(menu, groupId);
-    if (action && sameSession(menu)) {
+    // The old queue kept the rendered card, not the incoming update. View
+    // cards are also returned by mutations, so their matching journal events
+    // cannot prove when those cards were requested. A preset explicitly
+    // confirms a change when the journal identifies its event.
+    const presetConfirmation = (['ru', 'en'] as const).some((locale) =>
+      menu.content.text.startsWith(translator(locale)('Preset enabled for this session') + '\n'),
+    );
+    if (presetConfirmation) {
+      const type = 'daddy.settings';
       const events = this.store.db
-        .prepare('SELECT id,data FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
-        .all(action.subject, time, action.type);
-      const sameAction = (candidate: Delivery) => {
-        if (!sameSession(candidate)) return;
-        const other = this.legacySessionCardAction(candidate, groupId);
-        if (other?.type === action.type && other.subject === action.subject) return other;
-      };
-      const matches = (candidate: Delivery, event: LegacyMenuEvent) => {
-        const other = sameAction(candidate);
-        return (
-          !!other && (!other.field || JSON.parse(String(event.data))[other.field] === other.value)
-        );
-      };
-      // Pair together when multiple kinds of settings changed in the tick.
-      // For example an instructions update and a pool change both produce
-      // daddy.settings, which contains the pool size but no instructions.
-      return (
-        this.pairLegacyMenuEvent(
-          menu,
-          position,
-          events,
-          (candidate) => !!sameAction(candidate),
-          matches,
-        ) ??
-        this.pairLegacyMenuEvent(
-          menu,
-          position,
-          events.filter((event) => matches(menu, event)),
-          (candidate) => {
-            const other = sameAction(candidate);
-            return !!other && other.field === action.field && other.value === action.value;
-          },
-        )
+        .prepare('SELECT id FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
+        .all(groupId, time, type);
+      const unambiguousPrivate = otherEvents(type).length === 0;
+      if (!sameSession(menu, unambiguousPrivate)) return;
+      return this.pairLegacyMenuEvent(
+        menu,
+        position,
+        events,
+        (candidate) =>
+          sameSession(candidate, unambiguousPrivate) &&
+          (['ru', 'en'] as const).some((locale) =>
+            candidate.content.text.startsWith(
+              translator(locale)('Preset enabled for this session') + '\n',
+            ),
+          ),
       );
     }
     const localeOf = ({ content, options }: Delivery) =>
       (['ru', 'en'] as const).find(
         (locale) =>
           !options.key &&
-          ((options.deletePrevious && digest(content) === digest(languageCard(locale))) ||
-            (!options.deletePrevious && content.text === translator(locale)('Language updated.'))),
+          !options.deletePrevious &&
+          content.text === translator(locale)('Language updated.'),
       );
     const locale = localeOf(menu);
     if (!locale) return;
@@ -561,79 +562,15 @@ export class TelegramDelivery {
     );
   }
   private legacySessionCards(groupId: string) {
-    // Old private confirmations did not include the session ID. They can
-    // participate across routes when there is only one possible session.
-    const groups = this.store.groups().filter((group) => group.orchestrated);
-    const soleSession = groups.length === 1 && groups[0].id === groupId;
     const pair = this.store.setting<Pairing>('telegram.pairing');
     const topic =
       pair && this.sessionDestination(groupId, pair, this.store.setting<Room>('telegram.group'));
-    return (candidate: Delivery) =>
+    return (candidate: Delivery, privateMatch: boolean) =>
       candidate.options.groupId === groupId ||
       (topic && topic.threadId !== undefined && sameDestination(candidate.destination, topic)) ||
-      (soleSession &&
+      (privateMatch &&
         candidate.destination.chatId === pair?.chatId &&
         candidate.destination.threadId === undefined);
-  }
-  private legacySessionCardAction(
-    menu: Delivery,
-    groupId: string,
-  ):
-    | {
-        subject: string;
-        type: string;
-        field?: string;
-        value?: string | number | boolean;
-      }
-    | undefined {
-    const { content, options } = menu;
-    if (options.key) return;
-    const buttons = (content as TelegramCard).buttons?.flat() ?? [];
-    const callback = (prefix: string, selected = false) =>
-      buttons.find(
-        (button) =>
-          button.callback_data?.startsWith(prefix) && (!selected || button.text.startsWith('✓ ')),
-      )?.callback_data;
-    const pool = callback(`dad:pool:${groupId}:`, true);
-    if (pool)
-      return {
-        subject: groupId,
-        type: 'daddy.settings',
-        field: 'requestedWorkerLimit',
-        value: Number(pool.split(':')[3]),
-      };
-    const merge = callback(`dad:sm:${groupId}:`);
-    if (merge)
-      return {
-        subject: groupId,
-        type: 'daddy.settings',
-        field: 'autoMerge',
-        value: merge.endsWith(':off'),
-      };
-    const taskMerge = callback('dad:tm:', true)?.split(':');
-    if (
-      taskMerge &&
-      this.store.tasks().some((task) => task.id === taskMerge[2] && task.groupId === groupId)
-    )
-      return {
-        subject: taskMerge[2],
-        type: 'automerge.setting',
-        field: 'mode',
-        value: taskMerge[3],
-      };
-    const board = buttons.some((button) => button.callback_data === `dad:status:${groupId}`);
-    if (board && buttons.some((button) => button.callback_data === `dad:resume:${groupId}`))
-      return { subject: groupId, type: 'daddy.paused' };
-    if (board && buttons.some((button) => button.callback_data === `dad:pause:${groupId}`))
-      return { subject: groupId, type: 'daddy.resumed' };
-    if (
-      (['ru', 'en'] as const).some((locale) =>
-        ['Instructions for this session', 'Preset enabled for this session'].some((heading) =>
-          content.text.startsWith(translator(locale)(heading) + '\n'),
-        ),
-      )
-    )
-      return { subject: groupId, type: 'daddy.settings' };
   }
   private pairLegacyMenuEvent(
     menu: Delivery,
