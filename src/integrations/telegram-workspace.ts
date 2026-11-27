@@ -285,18 +285,15 @@ export class TelegramWorkspace {
         JSON.stringify(topic),
       );
   }
-  private groupAt(destination: Destination) {
+  groupAt(destination: Destination) {
     const room = this.room();
     if (!room || room.chatId !== destination.chatId || !destination.threadId) return;
-    const rows = this.store.db.prepare('SELECT data FROM telegram_topics').all();
-    return rows
-      .map((row) => JSON.parse(row.data as string) as Topic)
-      .find(
-        (topic) =>
-          topic.chatId === room.chatId &&
-          topic.threadId === destination.threadId &&
-          topic.ownerId === room.ownerId,
-      )?.groupId;
+    return this.store.db
+      .prepare(
+        `SELECT json_extract(data,'$.groupId') AS groupId FROM telegram_topics
+      WHERE json_extract(data,'$.chatId')=? AND json_extract(data,'$.threadId')=? AND json_extract(data,'$.ownerId')=? LIMIT 1`,
+      )
+      .get(room.chatId, destination.threadId, room.ownerId)?.groupId as string | undefined;
   }
   private link(topic: Topic) {
     return `https://t.me/c/${String(topic.chatId).replace(/^-100/, '')}/${topic.threadId}`;
@@ -727,6 +724,7 @@ export class TelegramWorkspace {
           job,
         ),
       slots,
+      (id) => this.store.prerequisiteState(groupId, id),
     );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =

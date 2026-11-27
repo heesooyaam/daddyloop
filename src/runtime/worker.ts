@@ -339,7 +339,11 @@ export class Worker {
           }
         }
       for (const task of store.tasks())
-        if (task.state === 'queued' && !store.busy(task.id) && !githubWait(store, task.ref)) {
+        if (
+          (task.state === 'queued' || (poll && task.state === 'awaiting_review_checks')) &&
+          !store.busy(task.id) &&
+          !githubWait(store, task.ref)
+        ) {
           try {
             await this.engine.review(task.id);
             if (this.stopped) return;
@@ -348,7 +352,7 @@ export class Worker {
             const current = store.getTask(task.id);
             if (
               current.generation === task.generation &&
-              current.state === 'queued' &&
+              current.state === task.state &&
               !store.busy(current.id)
             ) {
               current.state = 'needs_input';
@@ -570,6 +574,29 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const revisingPlan = job.kind === 'plan' && !isTicket(task);
+      if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR)) {
+        await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
+      if (
+        revisingPlan &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) || !sameRevision(startingPR, task.revision))
+      ) {
+        await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
+      if (
+        job.kind === 'review' &&
+        startingPR &&
+        (await this.engine.deferQueuedReview(job, startingPR))
+      ) {
+        job.status = 'cancelled';
+        return;
+      }
       if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
@@ -605,6 +632,11 @@ export class Worker {
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
+      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
+      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
+        job.status = 'cancelled';
+        return;
+      }
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
@@ -621,7 +653,7 @@ export class Worker {
         ? this.workspaces.dataDir
         : isTicket(task)
           ? await this.workspaces.prepareTicket(task, job.role, abort.signal)
-          : await this.workspaces.prepare(task, job.role, abort.signal);
+          : await this.workspaces.prepare(task, revisingPlan ? 'reviewer' : job.role, abort.signal);
       if (task.kind === 'plan' && (job.kind === 'review' || job.kind === 'verify_merge')) {
         if (demo)
           task.planDocuments = [
@@ -689,7 +721,7 @@ export class Worker {
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if (job.kind === 'fix') {
+      } else if ((job.kind === 'fix' && !repairingCI) || revisingPlan) {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
@@ -698,9 +730,11 @@ export class Worker {
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        task.feedback = actual;
-        store.saveTask(task);
-        store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+        if (!(await this.engine.admitReviewWork(job, actual, startingPR!))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {
@@ -859,7 +893,9 @@ export class Worker {
                   current,
                   repairingConflict
                     ? 'Resolve conflict with the target branch'
-                    : `Address review feedback (round ${current.round})`,
+                    : repairingCI
+                      ? 'Fix failing CI'
+                      : `Address review feedback (round ${current.round})`,
                   abort.signal,
                 )
             : undefined;
@@ -882,7 +918,10 @@ export class Worker {
       else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
-      if (job.role === 'reviewer') {
+      if (
+        job.role === 'reviewer' ||
+        (job.kind === 'plan' && !isTicket(store.getTask(job.taskId)))
+      ) {
         const task = store.getTask(job.taskId);
         if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
           try {

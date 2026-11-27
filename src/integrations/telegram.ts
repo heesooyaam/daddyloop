@@ -1,3 +1,4 @@
+import { requestedMenu, handleMenuRequest, menuDelivery } from './telegram-menu-request.js';
 import { commandHelp, telegramCommands } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
@@ -394,7 +395,8 @@ export class TelegramApi {
           ? { groupId: route.groupId, sessionRoute: true }
           : undefined;
       const update = this.incoming.getStore();
-      const key = delivery?.key ?? (update && `update:${update.id}:${update.replies++}`);
+      const policy = menuDelivery(this, target, { ...routeOptions, ...delivery });
+      const key = policy?.key ?? (update && `update:${update.id}:${update.replies++}`);
       const queue = this.delivery;
       // The queue owns cleanup for its writes. Only direct Bot API calls use
       // the callback's synchronous acknowledgement.
@@ -402,7 +404,7 @@ export class TelegramApi {
         queue.send(
           target,
           { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-          { ...routeOptions, ...delivery, key, deletePrevious: cleanup },
+          { ...policy, key, deletePrevious: cleanup },
         ),
       );
     }
@@ -551,7 +553,10 @@ export class Telegram {
   async handle(update: Update) {
     const store = this.engine.store;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
-    await this.api.fromUpdate(update.update_id, () => this.processUpdate(update));
+    const apply = () => this.api.fromUpdate(update.update_id, () => this.processUpdate(update));
+    const menu = requestedMenu(update, this.username);
+    if (menu) await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), apply);
+    else await apply();
     this.api.acknowledgeUpdate(store, update.update_id);
   }
   private async processUpdate(update: Update) {

@@ -51,13 +51,13 @@ const descriptions: Record<keyof typeof schemas, string> = {
   read_review:
     'Read this task’s current native review and exact Markdown comments. Author access is limited to published feedback.',
   add_comment:
-    'Create a native DRAFT comment. Reuse a descriptive acceptance-criterion key across rounds; preserve Markdown, code blocks, links and suggestions. Group related cases. State the expected user outcome, concrete failure and acceptance check. This does not publish anything.',
+    'Create a native DRAFT comment. Reuse a descriptive acceptance-criterion key across rounds; preserve Markdown, code blocks, links and suggestions. Group related cases. State the trigger, expected outcome, observed failure and acceptance check. For a behavioral defect, specify what the worker’s permanent regression test must distinguish. This does not publish anything.',
   edit_comment:
     'Edit a comment belonging to the current draft review after rechecking its evidence. Preserve the full explanation and links.',
   remove_comment:
     'Withdraw a draft comment with an explicit recorded reason. Distinguish disproven problems from issues deferred by the human.',
   set_summary:
-    'Update the current draft review summary: coverage, checks, limitations and decisions. Do not maintain a second list of requirements outside the actual comments.',
+    'Update the current draft summary with covered, broken and unverified outcomes. For verified behavior cite the repository tests, commands and observations. Keep actionable findings in their native comments.',
   record_decision:
     'Persist a decision about a finding across review rounds. The author cannot verify their own fixes. Do not invent human decisions.',
 };

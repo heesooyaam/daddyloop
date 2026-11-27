@@ -11,6 +11,7 @@ export type State =
   | 'fixing'
   | 'awaiting_push'
   | 'awaiting_merge'
+  | 'awaiting_review_checks'
   | 'awaiting_checks'
   | 'awaiting_plan_approval'
   | 'needs_input'
@@ -215,6 +216,25 @@ export interface ReviewSnapshot {
   url: string;
   revision: Revision;
 }
+/** Confirmed worker commits and the published feedback they were meant to fix. */
+export interface ReviewFixAttempt {
+  runId: string;
+  before: Revision;
+  after: string;
+  reviewId?: string;
+}
+export interface ReviewRecovery {
+  reviewId: string;
+  revision: Revision;
+  branch: string;
+  targetBranch: string;
+  fingerprint: string;
+  criteria: string[];
+  attempts: ReviewFixAttempt[];
+  runId: string;
+  plan?: string;
+  coordination?: string;
+}
 export interface Task {
   replyTo?: TelegramReply;
   inputRequest?: {
@@ -249,6 +269,9 @@ export interface Task {
   contextVersion: number;
   round: number;
   noProgress: number;
+  reviewRoundLimit?: number;
+  reviewChecksJob?: string;
+  ciRepairRevision?: Revision;
   revision?: Revision;
   pr?: PullRequest;
   review?: ReviewHandle;
@@ -262,6 +285,8 @@ export interface Task {
     retryAt?: number;
   };
   draftRecheck?: { commentIds: string[]; retried?: boolean };
+  reviewRecovery?: ReviewRecovery;
+  reviewLessonProof?: { digest: string; reviewId: string; revision: Revision; at: string };
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;

@@ -1627,6 +1627,14 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
       input(94, 17, 'Persist this owner text'),
     ];
     const delivered: Record<string, any>[] = [];
+    const deleted: number[] = [];
+    const readOnly = ['/status', '/start', 'home callback'].includes(command);
+    const menuKey =
+      command === 'home callback'
+        ? 'telegram:menu:7:callback:menu:0'
+        : readOnly
+          ? 'telegram:menu:7:message:91:0'
+          : 'update:91:0';
     let nextId = 50;
     let batchSent = false;
     let markStarted!: () => void;
@@ -1655,6 +1663,7 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
           });
         });
       }
+      if (method === 'deleteMessage') deleted.push(body.message_id);
       if (method === 'sendMessage') {
         if (body.text.includes('Held reply')) {
           markStarted();
@@ -1683,18 +1692,27 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
         expect(f.store.setting('telegram.offset')).toBe(95);
       });
       expect(delivered.some((body) => body.text.includes('Held reply'))).toBe(false);
-      const replyRows = f.store.db
-        .prepare(
-          `SELECT json_extract(value,'$.content.text') AS text
-      FROM settings WHERE key GLOB 'telegram.delivery:*'
-      AND json_extract(value,'$.options.key') IN ('update:91:0',?)
-      ORDER BY rowid`,
-        )
-        .all(`telegram:task:${chatId}:93`);
-      expect(replyRows).toHaveLength(2);
-
-      // Reopen a snapshot taken after offset advancement but before the first
-      // native receipt. It contains both outgoing cards and the accepted input.
+      const replies = () =>
+        f.store.db
+          .prepare(
+            `SELECT json_extract(value,'$.content.text') AS text,
+          json_extract(value,'$.status') AS status, json_extract(value,'$.options.requestedMenu') AS menu
+         FROM settings WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key') IN (?,?)
+         ORDER BY rowid`,
+          )
+          .all(menuKey, `telegram:task:${chatId}:93`);
+      await vi.waitFor(() => {
+        const rows = replies();
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({
+          status: readOnly ? 'sent' : 'queued',
+          menu: readOnly ? 1 : null,
+        });
+        expect(rows[1].status).toBe('queued');
+      });
+      const replyRows = replies();
+      // The held agent reply and ordered confirmation survive the snapshot.
+      // A read-only menu acknowledged before it is already delivered.
       const database = join(f.dir, 'restart.sqlite');
       f.store.db.prepare('VACUUM INTO ?').run(database);
       const recovered = new Store(database);
@@ -1724,14 +1742,13 @@ it.each(['/status', '/start', '/start daddy', '/language en', 'home callback'] a
           .map(({ body }) => body.text);
         const held = messages.findIndex((body) => body.includes('Held reply'));
         expect(held).toBeGreaterThanOrEqual(0);
-        expect(messages.slice(held + 1)).toEqual(replyRows.map(({ text }) => text));
+        expect(messages.slice(held + 1)).toEqual(
+          replyRows.filter(({ status }) => status !== 'sent').map(({ text }) => text),
+        );
         expect(recovered.tasks(b.id)).toHaveLength(1);
         expect(recovered.messages(a.id).filter(({ sender }) => sender === 'user')).toHaveLength(1);
-        expect(sent.filter(({ method }) => method === 'deleteMessage')).toEqual(
-          command === 'home callback'
-            ? [{ method: 'deleteMessage', body: { chat_id: chatId, message_id: 91 } }]
-            : [],
-        );
+        expect(deleted).toEqual(command === 'home callback' ? [91] : []);
+        expect(sent.filter(({ method }) => method === 'deleteMessage')).toEqual([]);
       } finally {
         await restoredApi.delivery!.stop();
         recovered.close();
@@ -2194,13 +2211,14 @@ it.each([
       releaseBatch();
       await waiting;
       await vi.waitFor(() => expect(f.store.setting('telegram.offset')).toBe(5));
+      const menuKey = command === '/status' ? 'telegram:menu:7:message:3:0' : 'update:3:0';
       const queuedReply = (store: Store) =>
         store.db
           .prepare(
             `SELECT json_extract(value,'$.content.text') AS text
-      FROM settings WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key')='update:3:0'`,
+      FROM settings WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key')=?`,
           )
-          .get()?.text;
+          .get(menuKey)?.text;
       const commandText = queuedReply(f.store);
       expect(commandText).toBeTruthy();
       expect(cards.map(({ text }) => text)).not.toContain(commandText);

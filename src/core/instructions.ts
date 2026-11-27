@@ -2,7 +2,19 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { presetParts } from './preset-parts.js';
 import { effectiveInstructions } from './instruction-compose.js';
+import type { Task } from './types.js';
 export { effectiveInstructions } from './instruction-compose.js';
+
+const legacyReviewInstruction =
+  'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.';
+
+export function nativeReviewInstruction(task: Pick<Task, 'feedback'>, saved?: string) {
+  // Restored jobs can still carry the old scheduler default. Preserve explicit retry and user instructions.
+  if (saved !== undefined && saved !== legacyReviewInstruction) return saved;
+  return task.feedback?.status === 'published'
+    ? 'Check the correction on the pinned revision. Compare the last reviewed head and published findings, test affected paths and new regressions, and expand to the entire change when prior coverage cannot be reused.'
+    : 'Review the entire pinned change. Check all explicit outcomes and affected entry points and report all confirmed blockers together in the native draft.';
+}
 
 const text = z
   .string()

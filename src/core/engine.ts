@@ -1,5 +1,9 @@
+import { attestReviewLesson, savePublishedLesson } from './review-lessons.js';
+import { feedbackFingerprint, repeatedReviewFindings } from './review-recovery.js';
+import { nativeReviewInstruction } from './instructions.js';
 import {
   nextPrAction,
+  needsReviewChecks,
   completionGate,
   hasReleasedReview,
   sameOpenTarget,
@@ -25,6 +29,7 @@ import {
   type Revision,
   type ReviewGroup,
   type ReviewHandle,
+  type ReviewRecovery,
   type ReviewSnapshot,
   type TicketSource,
   type TicketRef,
@@ -280,6 +285,8 @@ export class Engine {
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
         );
       const provider = this.provider(prRef(task));
+      const waitingForCI = task.state === 'awaiting_review_checks';
+      if (waitingForCI && task.review) retry = true;
       if (task.draftStart?.retryAt && task.draftStart.retryAt > Date.now()) return task;
       const pr = await provider.getPR(prRef(task));
       if (task.draftStart) {
@@ -289,6 +296,7 @@ export class Engine {
           !sameRevision(task.draftStart.revision, pr) ||
           !sameOpenTarget(task.pr, pr) ||
           pr.draft ||
+          (pr.checks === 'failing' && needsReviewChecks(task, pr)) ||
           this.prAction(task, pr).kind === 'repair'
         ) {
           return this.settleMovedDraftStart(task, pr, provider);
@@ -365,9 +373,31 @@ export class Engine {
           'review_exists',
           'This revision already has a review. Discuss it or use retry to continue an interrupted run.',
         );
-      if (!task.review && !task.draftStart) task.round++;
       task.pr = pr;
       task.revision = revisionOf(pr);
+      if (needsReviewChecks(task, pr)) {
+        if (clarification?.trim()) this.rememberClarification(task, clarification);
+        await this.holdReviewForChecks(task, pr);
+        return task;
+      }
+      if (!task.review && !task.draftStart) {
+        if (task.reviewRoundLimit !== undefined && task.round >= task.reviewRoundLimit) {
+          task.resumeState = 'queued';
+          this.store.transaction(() => {
+            this.state(task, 'paused', 'This task reached its review round limit');
+            this.store.event(task.id, 'review.limit_reached', {
+              limit: task.reviewRoundLimit,
+              round: task.round,
+            });
+          });
+          return task;
+        }
+        task.round++;
+      }
+      const parked =
+        task.reviewChecksJob && this.store.jobs(id).find((j) => j.id === task.reviewChecksJob);
+      delete task.reviewChecksJob;
+      delete task.ciRepairRevision;
       if (!task.review && task.ref.provider === 'github') {
         if (!task.draftStart) {
           const latest = this.store.getTask(id);
@@ -427,19 +457,139 @@ export class Engine {
         task.pendingFix = undefined;
         if (clarification?.trim()) this.rememberClarification(task, clarification);
         this.state(task, 'reviewing', `Independent review, round ${task.round}`);
-        this.store.enqueue(
+        const job = this.store.enqueue(
           task,
           'reviewer',
           'review',
-          retry
-            ? clarification?.trim()
-              ? clarifiedReviewPrefix + clarification.trim()
-              : reviewRetryInstruction
-            : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
+          parked && !clarification?.trim()
+            ? parked.input
+            : retry
+              ? clarification?.trim()
+                ? clarifiedReviewPrefix + clarification.trim()
+                : reviewRetryInstruction
+              : nativeReviewInstruction(task),
         );
+        if (parked) {
+          job.freshContextRetry = parked.freshContextRetry;
+          job.timeoutRetry = parked.timeoutRetry;
+          this.store.saveJob(job);
+        }
       });
       return task;
     });
+  }
+  // Admission runs again for review jobs restored from a pause or queued before CI changed.
+  async deferQueuedReview(job: Job, pr: PullRequest) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state === 'paused') return true;
+      if (!sameOpenTarget(task.pr, pr) || task.revision?.head !== pr.head) return false;
+      if (
+        autoMergeEnabled(this.store, task) &&
+        pr.draft === false &&
+        pr.mergeConflict &&
+        (await this.stageReviewFindings(
+          task,
+          job,
+          {
+            status: 'incomplete',
+            checkedHead: pr.head,
+            summary: 'GitHub reported a merge conflict before independent review could start.',
+          },
+          pr,
+        ))
+      ) {
+        job.errorCode = 'review_admission_changed';
+        return true;
+      }
+      if (!needsReviewChecks(task, pr)) return false;
+      this.store.transaction(() => {
+        if (sameRevision(task.revision, pr)) task.pr = pr;
+        task.reviewChecksJob = job.id;
+        this.parkForCI(task, job);
+      });
+      return true;
+    });
+  }
+  async skipObsoleteCIFix(job: Job, pr: PullRequest) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state === 'paused') return true;
+      if (
+        !sameRevision(task.ciRepairRevision, pr) ||
+        !sameOpenTarget(task.pr, pr) ||
+        pr.checks === 'failing' ||
+        job.firstAttemptId
+      )
+        return false;
+      this.store.transaction(() => {
+        delete task.ciRepairRevision;
+        this.parkForCI(task, job);
+      });
+      return true;
+    });
+  }
+  private parkForCI(task: Task, job: Job) {
+    job.status = 'cancelled';
+    job.finishedAt = now();
+    job.errorCode = 'review_admission_changed';
+    this.store.saveJob(job);
+    this.state(task, 'awaiting_review_checks', 'Waiting for CI results before review');
+  }
+  private async holdReviewForChecks(task: Task, pr: PullRequest) {
+    task.pr = pr;
+    if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
+    if (pr.checks === 'failing' && !sameRevision(task.ciRepairRevision, pr)) {
+      // Release recorded findings through the normal publication path before changing their head.
+      if (task.review && task.ref.provider === 'github') {
+        const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+        const reviewer = this.store
+          .jobs(task.id)
+          .filter((j) => j.kind === 'review')
+          .at(-1);
+        if (
+          reviewer &&
+          (snapshot.comments.length ||
+            (pr.mergeConflict && !this.draftHasWork(task.review, snapshot))) &&
+          (await this.stageReviewFindings(
+            task,
+            reviewer,
+            {
+              checkedHead: pr.head,
+              status: 'incomplete',
+              summary: 'CI failed before independent review could continue.',
+            },
+            pr,
+          ))
+        )
+          return;
+        if (!(await this.retireSupersededDraft(task, this.provider(prRef(task))))) return;
+        task.review = undefined;
+        task.snapshot = undefined;
+        task.draftRecheck = undefined;
+      }
+      this.store.transaction(() => {
+        task.ciRepairRevision = revisionOf(pr);
+        task.resumeState = 'fixing';
+        this.state(task, 'fixing', 'Worker assigned to fix failing CI');
+        this.store.enqueue(
+          task,
+          'author',
+          'fix',
+          'Inspect the failing CI checks on the pinned commit, fix the underlying cause and run the affected tests. The service will submit the fix and wait for CI before independent review.',
+        );
+      });
+      return;
+    }
+    const reason =
+      pr.checks === 'missing'
+        ? 'Waiting for CI results before review'
+        : pr.checks === 'failing'
+          ? 'Waiting for CI to pass after the worker investigated'
+          : 'Waiting for CI to finish before review';
+    if (task.state !== 'awaiting_review_checks' || task.reason !== reason)
+      this.state(task, 'awaiting_review_checks', reason);
+    else this.store.saveTask(task);
   }
   private async settleMovedDraftStart(task: Task, pr: PullRequest, provider: ReviewProvider) {
     // Settle the old intent before routing the new revision. Never replay an old POST.
@@ -761,6 +911,15 @@ export class Engine {
   }
 
   coordinationBlocker(task: Task) {
+    if (
+      task.state === 'needs_input' &&
+      task.reviewRecovery?.coordination &&
+      !task.reviewRecovery.plan
+    )
+      return {
+        question: task.reviewRecovery.coordination,
+        head: task.reviewRecovery.revision.head,
+      };
     if (task.draftStart && task.state === 'queued') return;
     if (
       task.partialReview?.question &&
@@ -844,13 +1003,22 @@ export class Engine {
     task.generation++;
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
+    if (
+      !task.reviewRecovery?.plan ||
+      pr?.branch !== task.reviewRecovery.branch ||
+      pr.targetBranch !== task.reviewRecovery.targetBranch
+    )
+      delete task.reviewRecovery;
     task.review = undefined;
+    delete task.reviewLessonProof;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
     task.snapshot = undefined;
     task.approvedAt = undefined;
     task.checksWaivedAt = undefined;
+    delete task.reviewChecksJob;
+    delete task.ciRepairRevision;
     task.reviewFinished = false;
     task.pr = pr;
     task.revision = pr ? revisionOf(pr) : undefined;
@@ -1444,10 +1612,11 @@ export class Engine {
       if (!resumeConflict || !autoMergeEnabled(this.store, task) || !task.authorWorktree)
         return false;
     } else if (
-      !hasReleasedReview(task) ||
-      task.snapshot?.status !== 'published' ||
-      !sameRevision(task.snapshot.revision, pinned) ||
-      !sameRevision(task.review?.revision, pinned)
+      !sameRevision(task.ciRepairRevision, pinned) &&
+      (!hasReleasedReview(task) ||
+        task.snapshot?.status !== 'published' ||
+        !sameRevision(task.snapshot.revision, pinned) ||
+        !sameRevision(task.review?.revision, pinned))
     )
       return false;
     return (
@@ -1620,7 +1789,7 @@ export class Engine {
       task.ref.provider === 'github' &&
       handle &&
       !task.pendingFix &&
-      ['reviewing', 'awaiting_publication'].includes(task.state) &&
+      ['reviewing', 'awaiting_review_checks', 'awaiting_publication'].includes(task.state) &&
       sameOpenTarget(task.pr, pr) &&
       pr.draft === false &&
       sameRevision(handle.revision, task.revision) &&
@@ -1966,6 +2135,7 @@ export class Engine {
     if (task.pr?.state === 'open' && autoMergeRequested(this.store, task))
       this.state(task, 'awaiting_merge', 'Review complete. Waiting for GitHub to merge the PR.');
     else this.state(task, 'complete', reason);
+    if (task.state === 'complete') savePublishedLesson(this.store, task);
   }
 
   restoreMergeWaits() {
@@ -1989,6 +2159,206 @@ export class Engine {
       );
     }
   }
+  private enqueueArchitect(
+    task: Task,
+    recovery: ReviewRecovery,
+    clarification?: string,
+    actionId?: string,
+  ) {
+    task.planning ??= {};
+    task.reviewRecovery = recovery;
+    delete recovery.coordination;
+    this.state(
+      task,
+      'fixing',
+      'The task architect is revising the fix plan after two unsuccessful corrections.',
+    );
+    const job = this.store.enqueue(
+      task,
+      'author',
+      'plan',
+      clarification ??
+        'Diagnose the recurring published criteria and give the assigned worker a revised, testable fix plan.',
+      actionId,
+    );
+    recovery.runId = job.id;
+    this.store.saveTask(task);
+  }
+  private scheduleReviewRecovery(task: Task, snapshot: ReviewSnapshot) {
+    const evidence = repeatedReviewFindings(this.store, task, snapshot);
+    if (!evidence) return false;
+    this.store.transaction(() => {
+      task.noProgress = 0;
+      this.enqueueArchitect(task, { ...evidence, runId: '' });
+      this.store.event(
+        task.id,
+        'review.architect_requested',
+        {
+          reviewId: evidence.reviewId,
+          revision: evidence.revision,
+          criteria: evidence.criteria,
+          attempts: evidence.attempts,
+        },
+        task.reviewRecovery!.runId,
+      );
+    });
+    return true;
+  }
+  /** Also handles an ordinary fix that was already queued by an older installation. */
+  async admitReviewWork(job: Job, snapshot: ReviewSnapshot, pr: PullRequest) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state === 'paused') return false;
+      const recovery = task.reviewRecovery;
+      if (
+        job.kind === 'plan' &&
+        (!recovery ||
+          recovery.plan ||
+          recovery.runId !== (job.firstAttemptId ?? job.id) ||
+          task.state !== 'fixing')
+      )
+        return false;
+      if (snapshot.status !== 'published')
+        throw new AppError(
+          'unpublished_feedback',
+          'The published review changed before work started.',
+        );
+      if (
+        job.kind === 'fix' &&
+        recovery &&
+        !recovery.plan &&
+        recovery.reviewId === task.review?.id &&
+        sameRevision(recovery.revision, task.revision)
+      )
+        return false;
+      if (
+        job.kind === 'plan' &&
+        (!sameOpenTarget(task.pr, pr) || !sameRevision(task.revision, pr))
+      ) {
+        await this.reconcileLocked(task.id);
+        return false;
+      }
+      if (job.kind === 'plan' && !sameRevision(task.revision, snapshot.revision)) {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+        return false;
+      }
+      if (
+        recovery &&
+        task.review?.id === recovery.reviewId &&
+        sameRevision(task.revision, recovery.revision) &&
+        feedbackFingerprint(snapshot) !== recovery.fingerprint
+      ) {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+        return false;
+      }
+      task.feedback = snapshot;
+      if (
+        job.kind === 'fix' &&
+        task.state === 'fixing' &&
+        sameOpenTarget(task.pr, pr) &&
+        sameRevision(pr, task.revision) &&
+        this.scheduleReviewRecovery(task, snapshot)
+      )
+        return false;
+      this.store.saveTask(task);
+      if (job.kind === 'fix')
+        this.store.event(task.id, 'author.feedback_snapshot', snapshot, job.id);
+      return true;
+    });
+  }
+  private async finishReviewRecovery(task: Task, job: Job, result: AgentResult, pr: PullRequest) {
+    const recovery = task.reviewRecovery;
+    if (
+      !recovery ||
+      recovery.runId !== (job.firstAttemptId ?? job.id) ||
+      recovery.plan ||
+      task.state !== 'fixing' ||
+      task.review?.id !== recovery.reviewId ||
+      !sameRevision(task.revision, recovery.revision)
+    )
+      return;
+    if (!sameOpenTarget(task.pr, pr) || !sameRevision(recovery.revision, pr)) {
+      await this.reconcileLocked(task.id);
+      return;
+    }
+    const native = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+    const confirmed = await this.provider(prRef(task)).getPR(prRef(task));
+    if (!sameOpenTarget(task.pr, confirmed) || !sameRevision(recovery.revision, confirmed)) {
+      await this.reconcileLocked(task.id);
+      return;
+    }
+    if (
+      native.status !== 'published' ||
+      !sameRevision(native.revision, recovery.revision) ||
+      feedbackFingerprint(native) !== recovery.fingerprint
+    ) {
+      if (native.status === 'published') {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+      } else {
+        task.resumeState = 'fixing';
+        this.state(task, 'needs_input', 'The architect could not confirm the published review.');
+      }
+      return;
+    }
+    this.store.transaction(() => {
+      this.store.message(task.id, 'author', 'agent', result.summary, job.id, job.id);
+      const text = redact(result.summary.trim());
+      if (result.checkedHead !== recovery.revision.head || !text || result.status !== 'completed') {
+        task.resumeState = 'fixing';
+        const question =
+          result.checkedHead === recovery.revision.head &&
+          requestsHumanInput(result) &&
+          (result.question?.trim() || text);
+        if (question) {
+          recovery.coordination = redact(question);
+          this.state(
+            task,
+            'needs_input',
+            recovery.coordination,
+            job,
+            task.groupId && this.store.getGroup(task.groupId).orchestrated ? 'daddy' : undefined,
+          );
+        } else
+          this.state(
+            task,
+            'needs_input',
+            'The architect did not finish a plan for the pinned revision.',
+          );
+        return;
+      }
+      recovery.plan = text;
+      delete recovery.coordination;
+      task.noProgress = 0;
+      this.state(task, 'fixing', 'The worker is applying the revised architecture plan.');
+      this.store.enqueue(
+        task,
+        'author',
+        'fix',
+        'Apply the task architect’s revised plan to the published findings. Test the recorded failing and passing paths through their final consumer.',
+      );
+      this.store.event(
+        task.id,
+        'review.architect_planned',
+        { reviewId: recovery.reviewId, revision: recovery.revision, criteria: recovery.criteria },
+        job.id,
+      );
+    });
+  }
   private assignPublishedFindings(task: Task, snapshot: ReviewSnapshot) {
     const fingerprint = createHash('sha256')
       .update(
@@ -2003,6 +2373,7 @@ export class Engine {
     task.noProgress = fingerprint === task.lastFeedbackHash ? task.noProgress + 1 : 0;
     task.lastFeedbackHash = fingerprint;
     task.feedback = snapshot;
+    if (this.scheduleReviewRecovery(task, snapshot)) return;
     if (task.noProgress >= task.policy.maxNoProgress)
       this.state(
         task,
@@ -2101,6 +2472,18 @@ export class Engine {
 
   recoverLostFixes() {
     for (const task of this.store.tasks()) {
+      if (
+        task.state === 'needs_input' &&
+        task.reason === 'The same findings keep returning; human decision is required' &&
+        task.snapshot?.status === 'published' &&
+        !this.store.busy(task.id) &&
+        (!task.groupId ||
+          !['paused', 'archived'].includes(
+            this.store.getGroup(task.groupId).daddyState ?? 'active',
+          )) &&
+        this.scheduleReviewRecovery(task, task.snapshot)
+      )
+        continue;
       if (
         isTicket(task) ||
         !['queued', 'needs_input'].includes(task.state) ||
@@ -2358,6 +2741,17 @@ export class Engine {
         this.store.message(id, role, 'user', text);
         if (
           role === 'author' &&
+          task.state === 'needs_input' &&
+          task.reviewRecovery?.coordination &&
+          !task.reviewRecovery.plan &&
+          task.reviewRecovery.reviewId === task.review?.id &&
+          sameRevision(task.reviewRecovery.revision, task.revision)
+        ) {
+          this.enqueueArchitect(task, task.reviewRecovery, text, actionId);
+          return;
+        }
+        if (
+          role === 'author' &&
           isTicket(task) &&
           task.state === 'needs_input' &&
           task.resumeState === 'implementing' &&
@@ -2432,7 +2826,14 @@ export class Engine {
           this.store.event(
             task.id,
             'author.fixes_saved',
-            { head, revision: task.revision },
+            {
+              head,
+              revision: task.revision,
+              reviewId: task.review?.id,
+              branch: task.pr?.branch,
+              targetBranch: task.pr?.targetBranch,
+              conflict: task.fixingMergeConflict,
+            },
             job.id,
           );
         });
@@ -2530,6 +2931,10 @@ export class Engine {
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (job.kind === 'plan') {
+        await this.finishReviewRecovery(task, job, result, pr);
+        return;
+      }
       if (job.kind === 'fix' && task.pendingFix) {
         this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (await this.checkSavedFix(task, pr)) {
@@ -2681,6 +3086,7 @@ export class Engine {
           }
           task.draftRecheck = undefined;
         }
+        task.reviewLessonProof = await attestReviewLesson(this.store, task, job, snapshot);
         task.reviewFinished = true;
         delete task.openReviewQuestion;
         for (const id of verified)
@@ -2711,6 +3117,17 @@ export class Engine {
             disputedFindings,
             job,
             task.groupId && this.store.getGroup(task.groupId).orchestrated ? 'daddy' : undefined,
+          );
+          return;
+        }
+        if (
+          sameRevision(task.ciRepairRevision, pr) &&
+          (!task.pendingAuthorHead || task.pendingAuthorHead === pr.head)
+        ) {
+          this.state(
+            task,
+            'awaiting_review_checks',
+            'Waiting for CI to pass after the worker investigated',
           );
           return;
         }
@@ -2802,6 +3219,25 @@ export class Engine {
             );
           return task;
         }
+        if (
+          task.reviewRecovery &&
+          !task.reviewRecovery.plan &&
+          task.reviewRecovery.reviewId === task.review?.id &&
+          sameRevision(task.reviewRecovery.revision, task.revision)
+        ) {
+          this.store.transaction(() =>
+            this.enqueueArchitect(task, task.reviewRecovery!, reason || undefined),
+          );
+          return task;
+        }
+        if (
+          task.resumeState === 'awaiting_review_checks' ||
+          (task.resumeState === 'fixing' && task.ciRepairRevision && !task.fixingMergeConflict)
+        ) {
+          if (task.resumeState === 'fixing') delete task.ciRepairRevision;
+          this.state(task, 'awaiting_review_checks', 'Waiting for CI results before review');
+          return task;
+        }
         if (task.resumeState === 'awaiting_merge') {
           this.state(
             task,
@@ -2870,7 +3306,7 @@ export class Engine {
         task.pr = current;
         this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
       } else if (action === 'waive-checks') {
-        if (task.state !== 'awaiting_checks' || !reason.trim())
+        if (!['awaiting_checks', 'awaiting_review_checks'].includes(task.state) || !reason.trim())
           throw new AppError(
             'waiver_invalid',
             'A waiver requires a reason and a task waiting for CI checks',
@@ -2887,7 +3323,8 @@ export class Engine {
           reason,
           head: task.revision?.head,
         });
-        await this.finish(task);
+        if (task.state === 'awaiting_review_checks') this.store.saveTask(task);
+        else await this.finish(task);
       } else {
         if (task.state !== 'complete')
           throw new AppError('not_complete', 'Only completed tasks can be reopened');
@@ -3017,9 +3454,31 @@ export class Engine {
       if (
         job.status === 'running' ||
         (job.status === 'cancelled' &&
+          job.errorCode !== 'review_admission_changed' &&
           job.generation === this.store.getTask(job.taskId).generation &&
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
+        const pending = this.store.getTask(job.taskId);
+        if (
+          job.kind === 'plan' &&
+          !isTicket(pending) &&
+          pending.state === 'fixing' &&
+          pending.generation === job.generation &&
+          pending.reviewRecovery?.runId === (job.firstAttemptId ?? job.id) &&
+          !pending.reviewRecovery.plan
+        ) {
+          job.status = 'queued';
+          delete job.finishedAt;
+          delete job.startedAt;
+          this.store.saveJob(job);
+          this.store.event(
+            pending.id,
+            'review.architect_resumed',
+            { reviewId: pending.reviewRecovery.reviewId },
+            job.id,
+          );
+          continue;
+        }
         job.status = 'failed';
         job.error = interruptedByRestart;
         job.errorCode = 'server_restarted';
