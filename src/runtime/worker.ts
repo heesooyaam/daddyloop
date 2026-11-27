@@ -787,6 +787,19 @@ export class Worker {
           // The stored feedback can belong to an earlier PR head.
           task.feedback = undefined;
         }
+      } else if (repairingCI) {
+        // CI-only work must not inherit findings from a different head.
+        if (task.reviewAdmission && task.snapshot?.status === 'published' && startingPR) {
+          const publication = await this.engine.readHeldPublication(task, startingPR);
+          const current = store.getTask(job.taskId);
+          if (current.generation !== job.generation || abort.signal.aborted)
+            throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+          task = current;
+          task.feedback = publication.snapshot;
+          store.saveTask(task);
+        } else {
+          task.feedback = undefined;
+        }
       } else if (revisingPlan) {
         const ref = prRef(task);
         const provider = this.engine.provider(ref);

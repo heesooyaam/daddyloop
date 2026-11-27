@@ -298,7 +298,8 @@ export class Engine {
           `Resume submission of saved fix ${task.pendingAuthorHead} before review.`,
         );
       const provider = this.provider(prRef(task));
-      if (task.state === 'awaiting_review_checks' && task.review) retry = true;
+      if (task.state === 'awaiting_review_checks' && task.review && !task.reviewAdmission)
+        retry = true;
       const pendingVerification = task.mergeVerificationRequest;
       if (
         !retry &&
@@ -312,7 +313,13 @@ export class Engine {
         if (clarification !== undefined) task.draftStart.clarification = clarification;
         return this.startGitHubDraft(task, provider, retry);
       }
-      if (task.reviewAdmission && !retry && !pendingVerification && !this.heldMergeReviewId(task)) {
+      if (
+        task.reviewAdmission &&
+        !retry &&
+        !pendingVerification &&
+        task.state !== 'awaiting_review_checks' &&
+        !this.heldMergeReviewId(task)
+      ) {
         if (task.state !== 'queued')
           throw new AppError('review_exists', 'Retry the original GitHub review.');
         return this.enqueueReview(task, retry, clarification);
@@ -366,10 +373,11 @@ export class Engine {
               'draft_lookup_pending',
               'Waiting for the original GitHub review to become visible.',
             );
-          if (native.status === 'published')
+          if (native.status === 'published' && retry)
             publication = await this.readHeldPublication(task, pr, native);
         } catch (error) {
-          if (!retry || !isDraftStartRetry(error)) throw error;
+          if (!isDraftStartRetry(error)) throw error;
+          if (!retry) return this.store.getTask(id);
           if (
             !this.currentReviewStart(task) ||
             (task.groupId && this.store.getGroup(task.groupId).generation !== entryGroupGeneration)
@@ -385,6 +393,11 @@ export class Engine {
         )
           return latest;
         if (!publication) {
+          if (!this.initialDraftMatches(task, native, handle.authorId)) {
+            task.snapshot = native;
+            this.state(task, 'needs_input', draftInspectionRequired);
+            return task;
+          }
           if (!sameOpenTarget(task.pr, pr) || !sameReviewTarget(task.pr, pr))
             throw new AppError('draft_changed', draftInspectionRequired);
           if (needsReviewChecks(task, pr)) {
@@ -404,7 +417,18 @@ export class Engine {
           return task;
         }
         if (this.prAction(task, latestPR).kind === 'confirm-merge') return task;
-        if (this.pauseAtReviewRoundLimit(task)) return task;
+        const blockedByCI = needsReviewChecks(task, latestPR);
+        if (
+          blockedByCI ||
+          (task.reviewRoundLimit !== undefined && task.round >= task.reviewRoundLimit)
+        ) {
+          task.mergeVerificationRequest = { kind: 'retry', clarification, retryAt: 0, delay: 7500 };
+          task.snapshot = native;
+          if (this.pauseAtReviewRoundLimit(task)) return task;
+          task.revision = revisionOf(latestPR);
+          await this.holdReviewForChecks(task, latestPR);
+          return task;
+        }
         this.store.transaction(() => {
           this.store.setSetting('review.archive:' + task.id + ':' + handle.id, native);
           this.invalidate(task, latestPR);
@@ -637,14 +661,17 @@ export class Engine {
   private async holdReviewForChecks(task: Task, pr: PullRequest) {
     task.pr = pr;
     if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
-    if (
-      pr.checks === 'failing' &&
-      !task.draftStart &&
-      !task.reviewAdmission &&
-      !sameRevision(task.ciRepairRevision, pr)
-    ) {
+    if (pr.checks === 'failing' && task.reviewAdmission && task.snapshot?.status !== 'published') {
+      this.state(
+        task,
+        'needs_input',
+        'CI failed while the original GitHub draft was being recovered. The draft is preserved. Resolve the failing checks before retrying review.',
+      );
+      return;
+    }
+    if (pr.checks === 'failing' && !task.draftStart && !sameRevision(task.ciRepairRevision, pr)) {
       // Release recorded findings through the normal publication path before changing their head.
-      if (task.review && task.ref.provider === 'github') {
+      if (task.review && !task.reviewAdmission && task.ref.provider === 'github') {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
         const reviewer = this.store
           .jobs(task.id)
@@ -717,7 +744,11 @@ export class Engine {
     try {
       return await provider.getPR(prRef(task));
     } catch (error) {
-      if (!request || !isDraftStartRetry(error)) throw error;
+      if (!isDraftStartRetry(error)) throw error;
+      if (!request) {
+        if (task.state === 'awaiting_review_checks' && task.reviewAdmission) return;
+        throw error;
+      }
       if (
         this.currentReviewStart(task) &&
         (!task.groupId || this.store.getGroup(task.groupId).generation === group?.generation)
@@ -872,8 +903,14 @@ export class Engine {
           return task;
         }
         if (needsReviewChecks(task, pr)) {
-          task.review = undefined;
-          delete task.reviewAdmission;
+          if (pr.checks === 'failing' && task.reviewAdmission) {
+            if (intent.clarification?.trim())
+              this.rememberClarification(task, intent.clarification);
+            delete task.draftStart;
+          } else {
+            task.review = undefined;
+            delete task.reviewAdmission;
+          }
           await this.holdReviewForChecks(task, pr);
           return task;
         }
