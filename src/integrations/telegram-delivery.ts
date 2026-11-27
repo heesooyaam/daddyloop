@@ -282,8 +282,19 @@ export class TelegramDelivery {
     const notified = this.store.db.prepare('SELECT at FROM notifications WHERE id=?');
     for (const row of rows) {
       const value = JSON.parse(String(row.value)) as Delivery;
-      if (!value.options.key?.startsWith('turn:') || !value.options.groupId) continue;
       const groupId = value.options.groupId;
+      if (!groupId) continue;
+      if (!value.options.key?.startsWith('turn:')) {
+        // Standalone replies, including questions, had their own stable queue row.
+        const messageId = value.options.notificationId?.match(legacyDialog)?.[1];
+        const message = messageId && this.store.messageById(groupId, messageId);
+        if (message && message.sender === 'agent') {
+          const event = firstEvent.get(groupId, message.id)?.id;
+          if (event != null)
+            slots.push({ slot: Number(row.position), event: Number(event), value });
+        }
+        continue;
+      }
       const runId = value.options.key.slice('turn:'.length);
       // The original row belongs to the first queued reply, even if its
       // notificationId now points to another reply in this run.
@@ -563,8 +574,20 @@ export class TelegramDelivery {
       return null;
     };
 
+    const confirmations = new Map(
+      recorded.map(({ slot, menu }) => [
+        slot,
+        this.legacyConfirmationEvents(menu, events, subjectOf),
+      ]),
+    );
+    const anchors = [...slots];
+    for (const { slot, menu } of recorded) {
+      const choices = confirmations.get(slot)!;
+      if (choices.length === 1 && menu.options.key?.startsWith('telegram:task:'))
+        anchors.push({ slot, event: choices[0].earliest, value: menu });
+    }
     const evidence = recorded.flatMap((card): LegacyCardEvidence[] => {
-      const choices = this.legacyConfirmationEvents(card.menu, events, subjectOf);
+      const choices = confirmations.get(card.slot)!;
       if (choices.length)
         return [
           {
@@ -585,10 +608,32 @@ export class TelegramDelivery {
             time,
             message.taskId,
             subjectOf,
+            anchors,
           ),
         }))
         .filter(({ intervals }) => intervals.length);
-      if (!observations.length) return [];
+      const subject = (card.menu.content as TelegramCard).buttons
+        ?.flat()
+        .map((button) => /^dad:(?:open|status):([^:]+)$/.exec(button.callback_data ?? '')?.[1])
+        .find(Boolean);
+      let floor = -Infinity;
+      if (!card.menu.options.key && subject) {
+        for (const entity of card.menu.content.entities) {
+          if (entity.type !== 'code') continue;
+          const id = /^DADDY-([0-9a-f]{8})$/i.exec(
+            card.menu.content.text.slice(entity.offset, entity.offset + entity.length),
+          )?.[1];
+          if (!id) continue;
+          const imported = events.filter(
+            (event) =>
+              event.type === 'ticket.imported' &&
+              event.data.groupId === subject &&
+              event.subject.startsWith(id),
+          );
+          if (imported.length === 1) floor = Math.max(floor, imported[0].id);
+        }
+      }
+      if (!observations.length && floor === -Infinity) return [];
       const intervals = observations.reduce(
         (left, { intervals }) =>
           left.flatMap((a) =>
@@ -598,10 +643,25 @@ export class TelegramDelivery {
               return earliest <= latest ? [{ earliest, latest }] : [];
             }),
           ),
-        [{ earliest: -Infinity, latest: Infinity }],
+        [{ earliest: floor, latest: Infinity }],
       );
       return intervals.length ? [{ card, choices: intervals, observations }] : [];
     });
+    // A command queued after a known reply cannot use a web mutation from before it.
+    for (const anchor of slots) {
+      if (
+        anchor.value.ownerId === value.ownerId &&
+        sameDestination(anchor.value.destination, value.destination) &&
+        anchor.value.createdAt <= createdAt
+      ) {
+        evidence.push({
+          card: { slot: anchor.slot, menu: anchor.value },
+          choices: [{ earliest: anchor.event, latest: anchor.event }],
+          fixed: true,
+        });
+      }
+    }
+    evidence.sort((a, b) => a.card.slot - b.card.slot);
     const viable = this.legacyBoundedEvidence(evidence);
     const earliest = this.legacyCardBounds(viable, 1);
     const latest = this.legacyCardBounds(viable, -1);
@@ -651,7 +711,7 @@ export class TelegramDelivery {
       .prepare(
         `SELECT id,at,task_id,type,data FROM events WHERE at<=? AND type IN (
         'daddy.renamed','daddy.worker_configured','daddy.settings','preferences.changed',
-        'automerge.setting','daddy.paused','daddy.resumed','daddy.created'
+        'automerge.setting','daddy.paused','daddy.resumed','daddy.created','ticket.imported'
       ) ORDER BY id`,
       )
       .all(time)
@@ -746,9 +806,45 @@ export class TelegramDelivery {
       locales.some((locale) => heading === translator(locale)('Settings for this session'));
     const board = has(`dad:status:${group}`);
     const status =
+      ['/task', '/queue', '/workers'].every((command) =>
+        entities.some(
+          (entity) =>
+            entity.type === 'bot_command' &&
+            text.slice(entity.offset, entity.offset + entity.length) === command,
+        ),
+      ) &&
       buttons.length === 1 &&
       has(`dad:open:${group}`) &&
       locales.some((locale) => buttons[0].text === translator(locale)('Back'));
+    const language = locales.find((locale) =>
+      buttons.some(
+        (button) =>
+          button.callback_data === `dad:open:${group}` &&
+          button.text === translator(locale)('Back'),
+      ),
+    );
+    if (language) {
+      observations.push({ subject: '_system', field: 'locale', value: language });
+      const t = translator(language);
+      if (
+        heading === t('Workers') &&
+        body.endsWith(t('Change a model with /worker NUMBER MODEL [EFFORT].'))
+      ) {
+        for (const entity of entities) {
+          if (entity.type !== 'bold') continue;
+          const label = text.slice(entity.offset, entity.offset + entity.length);
+          const number = Number(label.match(/\d+$/)?.[0]);
+          if (!number || label !== t('Worker {number}', { number })) continue;
+          const [profile, state] = text.slice(entity.offset + entity.length).split('\n', 2);
+          if (profile.startsWith(' · ') && state === t('Free'))
+            observations.push({
+              subject: group,
+              field: `worker:${number}`,
+              value: profile.slice(3),
+            });
+        }
+      }
+    }
     if (!pool && !settings && !board && !status) return observations;
     const title = pool ? body.split('\n\n')[1] : settings ? body.split('\n')[1] : heading;
     if (title) observations.push({ subject: group, field: 'title', value: title });
@@ -805,33 +901,49 @@ export class TelegramDelivery {
     time: string,
     groupId: string,
     subjectOf: (menu: Delivery) => string | null | undefined,
+    anchors: LegacyReplySlot[],
   ): LegacyOrder[] {
     const { field, subject } = observation;
+    const worker = field.startsWith('worker:') ? Number(field.slice('worker:'.length)) : null;
     const types =
-      field === 'title'
-        ? ['daddy.renamed']
-        : field === 'locale'
-          ? ['preferences.changed']
-          : field === 'mode'
-            ? ['automerge.setting']
-            : field === 'paused'
-              ? ['daddy.created', 'daddy.paused', 'daddy.resumed']
-              : ['daddy.settings'];
+      worker !== null
+        ? ['daddy.worker_configured', 'daddy.settings']
+        : field === 'title'
+          ? ['daddy.renamed']
+          : field === 'locale'
+            ? ['preferences.changed']
+            : field === 'mode'
+              ? ['automerge.setting']
+              : field === 'paused'
+                ? ['daddy.created', 'daddy.paused', 'daddy.resumed']
+                : ['daddy.settings'];
     const valueOf = (type: string, data: Record<string, unknown>) => {
+      if (worker !== null)
+        return type === 'daddy.worker_configured' && data.profile
+          ? profileText(data.profile as AgentProfile)
+          : undefined;
       if (field === 'paused') return type === 'daddy.paused';
       if (field === 'pool') return data.requestedWorkerLimit ?? data.workerLimit;
       return data[field];
     };
     const changes = events.filter(
-      (event) => event.at === time && event.subject === subject && types.includes(event.type),
+      (event) =>
+        event.at === time &&
+        event.subject === subject &&
+        types.includes(event.type) &&
+        (worker === null ||
+          event.type !== 'daddy.worker_configured' ||
+          event.data.worker === worker),
     );
     if (!changes.length) return [];
     const prior = this.store.db
       .prepare(
-        `SELECT type,data,at FROM events WHERE task_id=?
-       AND type IN (SELECT value FROM json_each(?)) AND at<? ORDER BY at DESC,id DESC LIMIT 1`,
+        `SELECT id,type,data,at FROM events WHERE task_id=?
+       AND type IN (SELECT value FROM json_each(?)) AND at<?
+       AND (? IS NULL OR type!='daddy.worker_configured' OR json_extract(data,'$.worker')=?)
+       ORDER BY at DESC,id DESC LIMIT 1`,
       )
-      .get(subject, JSON.stringify(types), time);
+      .get(subject, JSON.stringify(types), time, worker, worker);
     let initial = prior && valueOf(String(prior.type), JSON.parse(String(prior.data)) ?? {});
     // The most recent earlier card is another snapshot. Later journal
     // entries supersede it, including entries without a recorded value.
@@ -846,7 +958,18 @@ export class TelegramDelivery {
       if (!seen) continue;
       // A card at this timestamp may have been formed before any of its
       // events. Carry the final journal value (including unknown) forward.
-      if (!prior || earlier.createdAt > Date.parse(String(prior.at))) initial = seen.value;
+      if (
+        !prior ||
+        earlier.createdAt > Date.parse(String(prior.at)) ||
+        anchors.some(
+          (anchor) =>
+            anchor.slot < cards[i].slot &&
+            anchor.event >= Number(prior.id) &&
+            anchor.value.ownerId === earlier.ownerId &&
+            sameDestination(anchor.value.destination, earlier.destination),
+        )
+      )
+        initial = seen.value;
       break;
     }
     const values = [initial, ...changes.map(({ type, data }) => valueOf(type, data))];

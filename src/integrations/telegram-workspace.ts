@@ -2644,7 +2644,13 @@ export class TelegramWorkspace {
               .add(
                 ' · ' +
                   this.t(
-                    architectureStop ? 'Repeated architecture planning stopped' : budgetStop ? 'Review round limit reached' : reminder ? 'Reminder: your reply is still needed' : 'Your reply is needed',
+                    architectureStop
+                      ? 'Repeated architecture planning stopped'
+                      : budgetStop
+                        ? 'Review round limit reached'
+                        : reminder
+                          ? 'Reminder: your reply is still needed'
+                          : 'Your reply is needed',
                   ) +
                   '\n\n',
               )

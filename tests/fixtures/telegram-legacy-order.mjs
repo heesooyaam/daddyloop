@@ -214,6 +214,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     // The task path writes through the released Engine without starting workers
     // or asking a repository provider to describe a working copy.
     const needsEngine =
+      !!options.history ||
       !!crossCommand ||
       !!beforeFirstReply ||
       !!renamedView ||
@@ -300,7 +301,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
       bot.workspace.onEvent(event);
       await bot.workspace.pending;
     };
-    const reply = async (id, text, phase, runId = 'turn') => {
+    const reply = async (id, text, phase, runId = 'turn', needsReply = false) => {
       store.db.prepare('INSERT INTO messages VALUES(?,?,?)').run(
         id,
         group,
@@ -310,11 +311,12 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
           text,
           phase,
           sender: 'agent',
-          runId,
+          runId: runId ?? undefined,
+          ...(needsReply && { needsReply }),
           at: new Date().toISOString(),
         }),
       );
-      await notify(store.event(group, 'daddy.message', { messageId: id }, runId));
+      await notify(store.event(group, 'daddy.message', { messageId: id }, runId ?? undefined));
     };
     let nextUpdate = 17;
     const menu = async (privateChat = false, action = kind, thread = topic.threadId) => {
@@ -334,6 +336,9 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
         task: '/task Legacy task',
         'text language': '/language ru',
         pool: '/pool ' + poolSize,
+        queueList: '/queue',
+        workerList: '/workers',
+        instructionList: '/instructions',
         board: 'dad:open:' + group,
         settings: 'dad:settings:' + group,
       };
@@ -361,6 +366,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
         store.setSetting('telegram.offsetAt', Date.now());
       });
     };
+    if (options.prepare) await options.prepare(daddy, store);
     if (renamedView) daddy.rename(group, 'Old name');
     if (beforeFirstReply) {
       // Pause between applying the command and enqueueing the confirmation.
@@ -401,7 +407,18 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
         await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
       const mixedRoutes = scenario.startsWith('mixed ') && !mixedSettings;
       const twoCards = mixedRoutes || mixedSettings || scenario.startsWith('two ');
-      if (middleMenu) {
+      if (options.history) {
+        await options.history({
+          daddy,
+          store,
+          createTask,
+          reply,
+          menu: (action) => menu(privateChat, action),
+          advance: () => {
+            clock++;
+          },
+        });
+      } else if (middleMenu) {
         await reply('B', 'Reply B', 'final');
         if (middleMenu === 'before C') await menu(privateChat);
         await reply('C', 'Reply C', 'progress', 'next');
@@ -661,6 +678,142 @@ try {
       return clock;
     }
   };
+  // Rebuild using the released writers, then assert the observable delivery after restart.
+  for (const privateChat of [false, true]) {
+    const history = async (name, setup, expected, prepare) => {
+      const path = join(directory, name + '-' + (privateChat ? 'dm' : 'topic') + '.sqlite');
+      const state = await run(path, false, 0, 'recorded history', {
+        privateChat,
+        history: setup,
+        prepare,
+      });
+      assert.deepEqual(
+        await replay(path, 'A', true),
+        expected.map((value) => (privateChat ? 'private ' + value : value)),
+        name,
+      );
+      return state;
+    };
+    for (const menuFirst of [true, false]) {
+      const expected = menuFirst ? ['/status', 'B'] : ['B', '/status'];
+      await history(
+        'visible-import-' + menuFirst,
+        async ({ reply, menu, createTask }) => {
+          if (!menuFirst) await reply('B', 'Reply B', 'final');
+          await createTask(group, {
+            requirements: 'Visible imported task',
+            requestId: 'web-import',
+          });
+          await menu('queueList');
+          if (menuFirst) await reply('B', 'Reply B', 'final');
+        },
+        expected,
+      );
+      await history(
+        'visible-worker-' + menuFirst,
+        async ({ reply, menu, daddy, advance }) => {
+          await daddy.configureWorker(group, 1, {
+            engine: 'codex',
+            model: 'first-selection',
+            effort: 'medium',
+          });
+          advance();
+          if (!menuFirst) await reply('B', 'Reply B', 'final');
+          await daddy.configureWorker(group, 1, {
+            engine: 'codex',
+            model: 'next-selection',
+            effort: 'max',
+          });
+          await menu('workerList');
+          if (menuFirst) await reply('B', 'Reply B', 'final');
+        },
+        expected,
+      );
+      await history(
+        'visible-language-' + menuFirst,
+        async ({ reply, menu, store, advance }) => {
+          setLocale(store, 'en');
+          advance();
+          if (!menuFirst) await reply('B', 'Reply B', 'final');
+          setLocale(store, 'ru');
+          await menu('status');
+          if (menuFirst) await reply('B', 'Reply B', 'final');
+        },
+        expected,
+      );
+      await history(
+        'instruction-anchor-' + menuFirst,
+        async ({ reply, menu, daddy, advance }) => {
+          await daddy.settings(group, {
+            instructions: { daddy: {}, worker: { prompt: 'Earlier value' } },
+          });
+          await menu('task');
+          await menu('instructionList');
+          advance();
+          if (!menuFirst) await reply('B', 'Reply B', 'final');
+          await menu('instructions');
+          if (menuFirst) await reply('B', 'Reply B', 'final');
+        },
+        [
+          '/task',
+          'instructions:old',
+          ...(menuFirst ? ['instructions', 'B'] : ['B', 'instructions']),
+        ],
+      );
+      await history(
+        'prior-web-rename-' + menuFirst,
+        async ({ reply, menu, advance }) => {
+          await menu('status');
+          advance();
+          if (!menuFirst) await reply('B', 'Reply B', 'final');
+          await menu('rename');
+          if (menuFirst) await reply('B', 'Reply B', 'final');
+        },
+        ['/status', ...(menuFirst ? ['/rename', 'B'] : ['B', '/rename'])],
+        (daddy) => {
+          daddy.rename(group, 'Recovered title');
+          daddy.rename(group, 'Session');
+        },
+      );
+    }
+    for (const [menuKind, title] of [
+      ['workerList', 'Workers'],
+      ['queueList', 'Task queue'],
+    ]) {
+      const pair = [];
+      for (const menuFirst of [true, false])
+        pair.push(
+          await history(
+            'heading-' + menuKind + '-' + menuFirst,
+            async ({ reply, menu, daddy, store, advance }) => {
+              setLocale(store, 'en');
+              daddy.rename(group, 'Session');
+              advance();
+              if (!menuFirst) await reply('B', 'Reply B', 'final');
+              await menu(menuKind);
+              if (menuFirst) await reply('B', 'Reply B', 'final');
+              daddy.rename(group, title);
+            },
+            ['/status', 'B'],
+          ),
+        );
+      assert.deepEqual(pair[0], pair[1]);
+    }
+    for (const [name, runId, question] of [
+      ['owner question', 'next', true],
+      ['standalone', null, false],
+    ]) {
+      await history(
+        name,
+        async ({ reply, menu }) => {
+          await reply('B', 'Reply B', 'final');
+          await reply('C', 'Reply C', 'final', runId, question);
+          await menu('status');
+        },
+        ['B', 'C', '/status'],
+      );
+    }
+  }
   const menuFirst = join(directory, 'menu-then-b.sqlite');
   const replyFirst = join(directory, 'b-then-menu.sqlite');
   const menuThenB = await run(menuFirst, true);
