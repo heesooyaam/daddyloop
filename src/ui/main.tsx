@@ -13,6 +13,7 @@ class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public code?: string,
   ) {
     super(message);
   }
@@ -28,7 +29,8 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
     signal,
   });
   const data = await result.json();
-  if (!result.ok) throw new ApiError(data.error?.message ?? 'Request failed', result.status);
+  if (!result.ok)
+    throw new ApiError(data.error?.message ?? 'Request failed', result.status, data.error?.code);
   return data as T;
 }
 function Brand() {

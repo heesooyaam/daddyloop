@@ -314,6 +314,11 @@ export class Daddy {
       throw new AppError('wrong_session', 'This task belongs to another daddy session', 403);
     return task;
   }
+  queuedTask(queueKey: string) {
+    const id = this.store.setting<string>('task.queue:' + queueKey);
+    return id ? this.store.getTask(id) : undefined;
+  }
+
   async createTask(
     id: string,
     input: {
@@ -323,45 +328,59 @@ export class Daddy {
       architectProfile?: AgentProfile;
       replyTo?: TelegramReply;
       requestId: string;
+      queueKey?: string;
       workspace?: Workspace;
       workerRequest?: WorkerRequest;
     },
-    onCommit?: () => void,
+    onCommit?: (queued: boolean) => void,
   ) {
-    return this.engine.lock(`create-task:${id}`, async () => {
-      const group = this.group(id);
-      const tasks = this.store.tasks(id);
-      const existing = tasks.find((task) => task.createdByAction === input.requestId);
-      if (existing) {
-        if (onCommit) this.store.transaction(onCommit);
-        return existing;
-      }
-      this.checkSessionGeneration(group, input.expectedGeneration);
-      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-      if (group.daddyState === 'paused' || group.daddyState === 'archived')
-        throw new AppError('daddy_paused', 'Resume daddy before sending another message');
-      if (tasks.length >= 100)
-        throw new AppError('session_full', 'Start another daddy session after 100 tasks');
-      const requirements = input.requirements.trim();
-      if (!requirements || requirements.length > 20000)
-        throw new AppError('invalid_message', 'Send a message between 1 and 20000 characters', 400);
-      if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
-      if (input.workerRequest?.profile) await this.catalogue.validate(input.workerRequest.profile);
-      return this.tickets.local({
-        workspace: input.workspace ?? group.workspace!,
-        groupId: id,
-        groupGeneration: group.generation,
-        title: titleFromGoal(requirements),
-        requirements,
-        replyTo: input.replyTo,
-        createdByAction: input.requestId,
-        workerRequest: input.workerRequest,
-        startImplementation: true,
-        validatePlan: input.validatePlan ?? true,
-        architectProfile: input.architectProfile,
-        onCommit,
+    const queueKey = input.queueKey ?? `${id}:${input.requestId}`;
+    const create = () =>
+      this.engine.lock(`create-task:${id}`, async () => {
+        const group = this.group(id);
+        const tasks = this.store.tasks(id);
+        const existing =
+          this.queuedTask(queueKey) ??
+          tasks.find((task) => task.createdByAction === input.requestId);
+        if (existing) {
+          if (onCommit) this.store.transaction(() => onCommit(false));
+          return existing;
+        }
+        this.checkSessionGeneration(group, input.expectedGeneration);
+        if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+        if (group.daddyState === 'paused' || group.daddyState === 'archived')
+          throw new AppError('daddy_paused', 'Resume daddy before sending another message');
+        if (tasks.length >= 100)
+          throw new AppError('session_full', 'Start another daddy session after 100 tasks');
+        const requirements = input.requirements.trim();
+        if (!requirements || requirements.length > 20000)
+          throw new AppError(
+            'invalid_message',
+            'Send a message between 1 and 20000 characters',
+            400,
+          );
+        if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
+        if (input.workerRequest?.profile)
+          await this.catalogue.validate(input.workerRequest.profile);
+        return this.tickets.local({
+          workspace: input.workspace ?? group.workspace!,
+          groupId: id,
+          groupGeneration: group.generation,
+          title: titleFromGoal(requirements),
+          requirements,
+          replyTo: input.replyTo,
+          createdByAction: input.requestId,
+          workerRequest: input.workerRequest,
+          startImplementation: true,
+          validatePlan: input.validatePlan ?? true,
+          architectProfile: input.architectProfile,
+          onCommit: (task, queued = true) => {
+            this.store.setSetting('task.queue:' + queueKey, task.id);
+            onCommit?.(queued);
+          },
+        });
       });
-    });
+    return input.queueKey ? this.engine.lock('task.queue:' + queueKey, create) : create();
   }
 
   async prepareWorkerProfile(

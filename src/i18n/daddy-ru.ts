@@ -756,6 +756,8 @@ export const daddyRu: Record<string, string> = {
   'Author worker {number}': 'Авторский воркер {number}',
   'Requested author worker {number}': 'Запрошен авторский воркер {number}',
   'No unfinished tasks.': 'Открытых задач нет.',
+  'This action has already completed': 'Действие уже выполнено.',
+  'Use the current session': 'Использовать текущую сессию',
   'Task queued': 'Задача в очереди',
   'Waiting for review': 'Ждёт ревью',
   'Unfinished tasks · {count}': 'Открытые задачи · {count}',

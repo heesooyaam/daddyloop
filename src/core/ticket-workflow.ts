@@ -187,7 +187,7 @@ export class TicketWorkflow {
     scope?: string;
     workspaceIsolation?: Workspace['copyMode'];
     createdByAction?: string;
-    onCommit?: () => void;
+    onCommit?: (task: Task, queued?: boolean) => void;
   }) {
     const parent = input.parentTaskId ? this.engine.store.getTask(input.parentTaskId) : undefined;
     const path = input.repoPath ?? parent?.repoPath;
@@ -248,7 +248,7 @@ export class TicketWorkflow {
     reportOnly?: boolean;
     validatePlan?: boolean;
     discussedBrief?: boolean;
-    onCommit?: () => void;
+    onCommit?: (task: Task, queued?: boolean) => void;
   }) {
     const id = randomUUID(),
       workspace = input.workspace;
@@ -294,16 +294,21 @@ export class TicketWorkflow {
             this.engine.store.saveTask(current);
           });
         }
-        if (input.startImplementation && existing.state === 'discussing')
+        if (input.startImplementation)
           await this.engine.implement(
             existing.id,
             input.createdByAction,
             undefined,
             input.validatePlan,
             input.architectProfile,
-            { groupGeneration: input.groupGeneration, onCommit: input.onCommit },
+            {
+              groupGeneration: input.groupGeneration,
+              onCommit: input.onCommit,
+              workerRequest: input.workerRequest,
+            },
           );
-        else if (input.onCommit) this.engine.store.transaction(input.onCommit);
+        else if (input.onCommit)
+          this.engine.store.transaction(() => input.onCommit!(existing, false));
         return this.engine.store.getTask(existing.id);
       }
       return this.start({

@@ -10,7 +10,7 @@ import { expect, it, vi } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { daddyFixture } from './daddy-fixture.js';
-import { profiles } from './planning-fixture.js';
+import { profiles, ticketInput } from './planning-fixture.js';
 import type { AgentInput } from '../src/runtime/agent.js';
 
 function holdWorker(f: ReturnType<typeof daddyFixture>) {
@@ -338,6 +338,84 @@ it.each([
       });
       expect(runs[1]!.input.job.profile).toEqual(late);
     } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each(['http', 'private', 'topic'] as const)(
+  'queues the chosen worker for an imported or fresh issue via %s',
+  async (client) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
+    const controls = confirmWorker(f, group.id, 'en', client === 'topic');
+    const runs = holdWorker(f);
+    const imported = ticketInput(42);
+    const fresh = ticketInput(43);
+    const read = vi
+      .spyOn(f.daddy.tickets.reader, 'read')
+      .mockImplementation(async (url) => (url === imported.ref.url ? imported : fresh));
+    const requestId = randomUUID();
+    const workerRequest = { slot: 2, profile: { engine: 'claude' } };
+    const post = (id: string, url: string) =>
+      controls.post('/tasks', {
+        requestId: id,
+        requirements: url,
+        validatePlan: false,
+        workerRequest,
+      });
+    try {
+      const existing = await f.engine.createTicket({
+        ...imported,
+        groupId: group.id,
+        repoPath: f.dir,
+        scope: f.workspace.scope,
+      });
+      for (const state of ['paused', 'needs_input'] as const) {
+        f.store.saveTask({ ...existing, state });
+        if (client === 'http') {
+          const response = await post(randomUUID(), imported.ref.url);
+          expect(response.statusCode).toBe(409);
+          expect(response.json().message).toContain(existing.id.slice(0, 8));
+          expect(response.json().message).toContain(state);
+        } else {
+          await controls.send('/task --no-plan --worker 2 --engine claude -- ' + imported.ref.url);
+          expect(controls.cards.at(-1)?.text).toContain(existing.id.slice(0, 8));
+          expect(controls.cards.at(-1)?.text).not.toContain('Task queued');
+        }
+        expect(f.store.activeJobs(existing.id)).toHaveLength(0);
+      }
+      f.store.saveTask(existing);
+      const send = async (url: string) => {
+        if (client === 'http') expect((await post(requestId, url)).statusCode).toBe(201);
+        else await controls.send('/task --no-plan --worker 2 --engine claude -- ' + url);
+      };
+      await send(imported.ref.url);
+      const queued = f.store.getTask(existing.id);
+      expect(queued.workerRequest).toEqual(workerRequest);
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      expect(runs[0]!.input.job.profile).toEqual(workerRequest.profile);
+      expect(f.daddy.board(group.id).workers.slots[1]?.taskId).toBe(existing.id);
+      runs[0]!.finish();
+      await vi.waitFor(() => expect(f.store.activeJobs(existing.id)).toHaveLength(0));
+      f.store.saveTask({ ...f.store.getTask(existing.id), state: 'complete' });
+      if (client === 'http') {
+        const replay = await post(requestId, imported.ref.url);
+        expect(replay.json()).toEqual({ id: existing.id });
+        expect(f.store.tasks(group.id)).toHaveLength(1);
+      }
+      const created = await post(randomUUID(), fresh.ref.url);
+      expect(created.statusCode).toBe(201);
+      expect(f.store.getTask(created.json().id).workerRequest).toEqual(workerRequest);
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(2));
+      expect(runs[1]!.input.job.profile).toEqual(workerRequest.profile);
+      expect(f.daddy.board(group.id).workers.slots[1]?.taskId).toBe(created.json().id);
+    } finally {
+      read.mockRestore();
       runs.forEach(({ finish }) => finish());
       await controls.close();
       await f.close();

@@ -25,7 +25,7 @@ export function QueueTaskForm({
   const { t } = useLocale();
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [requirements, setRequirements] = useState('');
-  const [shownGeneration] = useState(board.group.generation);
+  const [shownGeneration, setShownGeneration] = useState(board.group.generation);
   const [slot, setSlot] = useState('');
   const [profile, setProfile] = useState<AgentProfile>();
   const [repository, setRepository] = useState<RepositorySelection>();
@@ -34,10 +34,11 @@ export function QueueTaskForm({
   const [architect, setArchitect] = useState<AgentProfile>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [stale, setStale] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api, false);
   const last = useRef<{ key: string; id: string } | undefined>(undefined);
   const submit = async () => {
-    if (busy || voiceBusy || editingRepository || !requirements.trim()) return;
+    if (busy || stale || voiceBusy || editingRepository || !requirements.trim()) return;
     const input = {
       requirements: requirements.trim(),
       expectedGeneration: shownGeneration,
@@ -59,6 +60,22 @@ export function QueueTaskForm({
         requestId: last.current.id,
       });
       onQueued(task.id);
+    } catch (error) {
+      setError((error as Error).message);
+      if (error instanceof Error && 'code' in error && error.code === 'stale_session')
+        setStale(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const useCurrentSession = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const current = await api<DaddyBoard>(`/daddy/sessions/${board.group.id}`);
+      setShownGeneration(current.group.generation);
+      setStale(false);
+      setError('');
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -160,9 +177,19 @@ export function QueueTaskForm({
           {t(error)}
         </p>
       )}
+      {stale && (
+        <button
+          type="button"
+          className="daddy-button outline"
+          disabled={busy}
+          onClick={() => void useCurrentSession()}
+        >
+          {t('Use the current session')}
+        </button>
+      )}
       <button
         className="daddy-button primary"
-        disabled={busy || voiceBusy || editingRepository || !requirements.trim()}
+        disabled={busy || stale || voiceBusy || editingRepository || !requirements.trim()}
       >
         {t('Queue task')}
       </button>

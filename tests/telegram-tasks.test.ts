@@ -255,8 +255,98 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       await bot.handle(choice);
       expect(lastText()).toContain('This action has already completed');
       expect(queued()).toHaveLength(1);
+      // Same action, different callback/update, plus the pre-atomic layout without a receipt.
+      const repeat = structuredClone(choice);
+      repeat.update_id = ++updateId;
+      repeat.callback_query!.id = String(updateId);
+      await bot.handle(repeat);
+      expect(lastText()).toContain(taskReference(queued()[0]!));
+      f.store.db.prepare('DELETE FROM bot_receipts WHERE id=?').run(update);
+      f.store.db
+        .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')
+        .run('task.queue:%', JSON.stringify(queued()[0]!.id));
+      await bot.stop();
+      ({ api, bot } = createBot());
+      await bot.handle(choice);
+      expect(lastText()).toContain(taskReference(queued()[0]!));
+      expect(queued()).toHaveLength(1);
+
+      f.store.setSetting('telegram.currentDaddy', null);
+      const unused = '/task --no-plan -- Never queue an expired choice';
+      await bot.handle(privateChoice ? privateMessage(unused) : message(unused, 7, 18));
+      const expired = click(buttonFor(choiceSession.title), 7, 18);
+      if (privateChoice) expired.callback_query!.message = { chat: { id: 7, type: 'private' } };
+      f.store.db
+        .prepare("UPDATE bot_actions SET data=json_set(data,'$.expiresAt',0) WHERE id=?")
+        .run(expired.callback_query!.data!.slice('dad:choose:'.length));
+      await bot.handle(expired);
+      expect(lastText()).toContain('This action expired');
+      expect(
+        f.store
+          .tasks(choiceSession.id)
+          .some((task) => task.requirements === 'Never queue an expired choice'),
+      ).toBe(false);
+      f.store.setSetting(
+        `telegram.newSession:7:${privateChoice ? 7 : -10042}:${privateChoice ? 0 : 18}:command`,
+        null,
+      );
+    }
+    const replayTarget = f.daddy.create({
+      workspaceId: f.workspace.id,
+      requirements: 'Replay target',
+    });
+    await bot.handle(message('/attach ' + replayTarget.id.slice(0, 8), 7, 20));
+    for (const inPrivate of [true, false]) {
+      const firstGroup = inPrivate ? choiceSession : replayTarget;
+      if (inPrivate) await bot.handle(privateMessage('/session ' + firstGroup.id));
+      const send = (text: string) => (inPrivate ? privateMessage(text) : message(text, 7, 20));
+      const first = send('/task --no-plan -- First replay route ' + inPrivate);
+      await bot.handle(first);
+      const next = { ...f.workspace, repoPath: f.workspace.repoPath + '/next' };
+      const selected = vi.spyOn(f.daddy.workspaces, 'selection').mockResolvedValueOnce(next);
+      try {
+        await bot.handle(send('/repo ' + next.repoPath));
+        const confirmRepo = click(buttonFor('Use this folder once'), 7, 20);
+        if (inPrivate) confirmRepo.callback_query!.message = { chat: { id: 7, type: 'private' } };
+        await bot.handle(confirmRepo);
+        expect(lastText()).toContain('Repository for next task');
+      } finally {
+        selected.mockRestore();
+      }
+      if (inPrivate) await bot.handle(privateMessage('/session ' + replayTarget.id));
+      await bot.handle(first);
+      await bot.handle({ ...first, update_id: ++updateId });
+      const matches = () =>
+        f.store.tasks().filter((task) => task.requirements === 'First replay route ' + inPrivate);
+      expect(matches()).toHaveLength(1);
+      expect(matches()[0]).toMatchObject({
+        groupId: firstGroup.id,
+        repoPath: f.workspace.repoPath,
+      });
+      if (inPrivate) {
+        await bot.handle(privateMessage('/task --no-plan -- A truly new message'));
+        expect(
+          f.store.tasks(replayTarget.id).find((task) => task.title === 'A truly new message'),
+        ).toBeDefined();
+        await bot.handle(privateMessage('/session ' + firstGroup.id));
+        await bot.handle({ ...first, update_id: ++updateId });
+      }
+      await bot.handle(send('/task --no-plan -- Use the next repository ' + inPrivate));
+      expect(
+        f.store
+          .tasks(firstGroup.id)
+          .find((task) => task.title === 'Use the next repository ' + inPrivate)?.repoPath,
+      ).toBe(next.repoPath);
     }
     f.store.setSetting('telegram.currentDaddy', group.id);
+    for (const task of f.store
+      .tasks()
+      .filter(({ title }) =>
+        /^(First replay route|Use the next repository|A truly new message)/.test(title),
+      )) {
+      f.store.cancelJobs(task.id);
+      f.store.saveTask({ ...task, state: 'complete' });
+    }
     const limitUrl = session + '/tasks/' + task!.id + '/review-limit';
     const setLimit = (limit: number | null, previous: number | null) =>
       app.inject({

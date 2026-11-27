@@ -13,6 +13,7 @@ import {
 } from './pr-routing.js';
 import {
   canWaiveChecks,
+  taskReference,
   canResumeAfterReviewLimit,
   reviewRoundLimitPause,
   disputedFindings,
@@ -3851,7 +3852,7 @@ export class Engine {
     reportOnly?: boolean;
     validatePlan?: boolean;
     id?: string;
-    onCommit?: () => void;
+    onCommit?: (task: Task) => void;
   }) {
     if (
       this.store
@@ -4002,7 +4003,7 @@ export class Engine {
             'chat',
             'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
           );
-        input.onCommit?.();
+        input.onCommit?.(task);
       });
       return task;
     };
@@ -4014,16 +4015,32 @@ export class Engine {
     instruction?: string,
     validatePlan?: boolean,
     architectProfile?: AgentProfile,
-    commit?: { groupGeneration: number; onCommit?: () => void },
+    commit?: {
+      groupGeneration: number;
+      workerRequest?: WorkerRequest;
+      onCommit?: (task: Task, queued?: boolean) => void;
+    },
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
-      if (
-        commit &&
-        task.groupId &&
-        this.store.getGroup(task.groupId).generation !== commit.groupGeneration
-      )
-        throw new AppError('stale_session', 'This session changed. Open its settings again.');
+      if (commit && task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (group.generation !== commit.groupGeneration)
+          throw new AppError('stale_session', 'This session changed. Open its settings again.');
+        if (isTicket(task) && task.state === 'implementing') {
+          if (commit.onCommit) this.store.transaction(() => commit.onCommit!(task, false));
+          return task;
+        }
+        if (!isTicket(task) || task.state !== 'discussing' || this.store.busy(id))
+          throw new AppError(
+            'ticket_already_active',
+            `Task ${taskReference(task)} is ${task.state}. Open the existing task to continue.`,
+          );
+        const slot = commit.workerRequest?.slot;
+        const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
+        if (slot !== undefined && (!Number.isInteger(slot) || slot < 1 || slot > capacity))
+          throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      }
       if (!isTicket(task))
         throw new AppError(
           'already_in_review',
@@ -4040,12 +4057,17 @@ export class Engine {
           'Resume or wait for the current discussion before implementing',
         );
       this.store.transaction(() => {
+        if (commit?.workerRequest) {
+          task.workerRequest = commit.workerRequest;
+          if (commit.workerRequest.profile)
+            this.applyAuthorProfile(task, commit.workerRequest.profile);
+        }
         if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};
         if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))
           delete task.planning;
         this.queueImplementation(task, actionId, instruction);
-        commit?.onCommit?.();
+        commit?.onCommit?.(task);
       });
       return task;
     });

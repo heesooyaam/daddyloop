@@ -1990,11 +1990,18 @@ test('the phone task form sends an explicit engine without a named worker model'
   await expect(queue.getByLabel('Task description')).toHaveValue('Use the Claude configuration');
   await expect(queue.getByLabel('Agent module', { exact: true })).toHaveValue('claude');
   expect((await board()).tasks).toHaveLength(0);
-  await page.reload();
-  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
-  await open();
+  await queue
+    .getByRole('button', { name: 'Use the current session', exact: true })
+    .click({ timeout: 3000 });
+  await expect(queue.getByLabel('Task description')).toHaveValue('Use the Claude configuration');
+  await expect(queue.getByLabel('Agent module', { exact: true })).toHaveValue('claude');
+  await expect(
+    queue.getByLabel('Check architecture and plan before implementation'),
+  ).not.toBeChecked();
   const response = await submit();
   expect(response.status()).toBe(201);
+  expect(response.request().postDataJSON().expectedGeneration).toBe(paused);
+  expect((await board()).tasks).toHaveLength(1);
   expect(response.request().postDataJSON().workerRequest.profile).toEqual({ engine: 'claude' });
   const { id } = await response.json();
   const { jobs } = await (await page.request.get('/api/tasks/' + id)).json();
