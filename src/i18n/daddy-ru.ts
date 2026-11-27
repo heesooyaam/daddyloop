@@ -488,6 +488,22 @@ export const daddyRu: Record<string, string> = {
   'Waiting for CI to finish before review': 'Ждёт завершения CI перед ревью',
   'Waiting for CI to pass after the worker investigated':
     'Воркер проверил сбой. Задача ждёт зелёного CI',
+  'The original Telegram request cannot be linked to this bot and owner.':
+    'Не удалось подтвердить, какой бот и владелец поставили задачу. Проверь исходную команду в истории.',
+  'Telegram receipts identify multiple tasks for the same command.':
+    'Для одной команды Telegram сохранилось несколько разных задач. Проверь их в очереди.',
+  'Review round limit': 'Лимит раундов ревью',
+  'No limit': 'Без лимита',
+  'Resume task': 'Продолжить задачу',
+  'Send the command with a positive number or off.':
+    'Отправь команду с положительным числом или off.',
+  'Settings changed. Reload before editing reviewRoundLimit':
+    'Лимит раундов уже изменился. Открой настройку заново.',
+  'This task is not ready to resume after reaching its review round limit':
+    'Задача пока не готова продолжиться после достижения лимита раундов.',
+  'This task is already complete': 'Эта задача уже завершена.',
+  'Use /worker NUMBER MODEL [EFFORT] [--force] or /worker NUMBER --engine ENGINE.':
+    'Используй /worker НОМЕР МОДЕЛЬ [УРОВЕНЬ] [--force] или /worker НОМЕР --engine ДВИЖОК.',
   'Paused after repeated planning': 'На паузе после повторного планирования',
   'Repeated architecture planning stopped': 'Повторный запуск архитектора остановлен',
   'Automatic planning repeated on the same published review without a recoverable plan':
@@ -752,6 +768,10 @@ export const daddyRu: Record<string, string> = {
   'Author worker {number}': 'Авторский воркер {number}',
   'Requested author worker {number}': 'Запрошен авторский воркер {number}',
   'No unfinished tasks.': 'Открытых задач нет.',
+  'This action has already completed': 'Действие уже выполнено.',
+  'Use the current session': 'Использовать текущую сессию',
+  'Task {id} is {state}. Open the existing task to continue.':
+    'Задача {id}. Состояние — {state}. Откройте эту задачу, чтобы продолжить.',
   'Task queued': 'Задача в очереди',
   'Waiting for review': 'Ждёт ревью',
   'Unfinished tasks · {count}': 'Открытые задачи · {count}',
@@ -771,6 +791,7 @@ export const daddyRu: Record<string, string> = {
   'Task description': 'Описание задачи',
   'Assign to worker': 'Назначить воркеру',
   'Any free worker': 'Любой свободный воркер',
+  'Inherit worker profile': 'Наследовать профиль воркера',
   'Use the worker model': 'Модель воркера',
   'Configure worker {number}': 'Настроить воркера {number}',
   'Save model': 'Сохранить модель',
@@ -933,6 +954,11 @@ export const daddyRu: Record<string, string> = {
   Guides: 'Инструкции',
   'Open the site from your computer or phone': 'Как подключить компьютер или телефон',
   'Agent module': 'Модуль агента',
+  'The model list could not be loaded.': 'Не удалось загрузить список моделей.',
+  'Settings changed. Reload before editing workerTaskProfiles':
+    'Профили задач изменились. Открой настройки заново.',
+  'Settings changed. Reload before editing workerSlotProfiles':
+    'Профили отдельных воркеров изменились. Открой настройки заново.',
   'Engine configuration': 'Настройки движка',
   Repositories: 'Репозитории',
   Agent: 'Агент',

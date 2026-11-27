@@ -1,3 +1,6 @@
+import { daddyFixture } from './daddy-fixture.js';
+import { catalogue } from './planning-fixture.js';
+import { UpdateMonitor } from '../src/core/updates.js';
 import { it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -80,6 +83,80 @@ it('resets polling receipts and chat binding when the configured bot changes', a
     rmSync(dir, { recursive: true });
   }
 });
+it.each([false, true])(
+  'isolates queue requests across bot changes, legacy rotation before upgrade=%s',
+  async (rotatedBeforeUpgrade) => {
+    const f = daddyFixture(true);
+    const file = join(f.dir, 'token');
+    writeFileSync(file, '123456:abcdefghijklmnopqrstuvwxyz123456', { mode: 0o600 });
+    let identity = 12121;
+    vi.stubGlobal(
+      'fetch',
+      async (url: string) =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            result: url.endsWith('getMe')
+              ? { id: identity, username: 'test_bot' }
+              : url.endsWith('getWebhookInfo')
+                ? { url: '' }
+                : { message_id: 99 },
+          }),
+        ),
+    );
+    let bot: Telegram | undefined;
+    try {
+      const first = f.daddy.create({ workspaceId: f.workspace.id });
+      const second = f.daddy.create({ workspaceId: f.workspace.id });
+      const connect = async (groupId: string) => {
+        bot = await Telegram.create(f.engine, file);
+        bot.configure({
+          daddy: f.daddy,
+          catalogue,
+          updates: new UpdateMonitor(f.store, { agents: [] }),
+        });
+        await bot.handle(update(1, '/start ' + new URL(bot.pair().url).searchParams.get('start')));
+        f.store.setSetting('telegram.currentDaddy', groupId);
+        return bot;
+      };
+      const message = update(3, '/task --no-plan -- Queue once per bot');
+      message.message!.message_id = 3;
+      await (await connect(first.id)).handle(message);
+      const original = f.store.tasks(first.id)[0]!;
+      f.store.setSetting('task.queue:telegram:bot:12121:7:7:0:3', null);
+      f.store.setSetting('task.queue:telegram:7:7:0:3', original.id);
+      f.store.saveTask({ ...original, createdByAction: 'telegram:task:7:3' });
+      f.store.db
+        .prepare(
+          `UPDATE settings SET value=json_set(value, '$.options.key', 'telegram:task:7:3')
+      WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.options.key')='telegram:bot:12121:7:7:0:3'`,
+        )
+        .run();
+      f.store.setSetting('telegram.currentDaddy', second.id);
+      await bot!.handle({ ...message, update_id: 4 });
+      expect(f.store.tasks(second.id)).toHaveLength(0);
+      await bot!.stop();
+      identity++;
+      if (rotatedBeforeUpgrade) {
+        f.store.setSetting('telegram.botId', identity);
+        f.store.setSetting('telegram.pairing', null);
+        f.store.db.exec('DELETE FROM bot_receipts; DELETE FROM bot_actions');
+      }
+      f.store.db.prepare("DELETE FROM settings WHERE key='telegram.legacyTaskBotId'").run();
+      await (await connect(second.id)).handle(message);
+      expect(f.store.tasks(first.id)).toHaveLength(1);
+      expect(f.store.tasks(second.id)).toHaveLength(1);
+      expect(f.store.tasks(second.id)[0]!.createdByAction).not.toBe(
+        f.store.tasks(first.id)[0]!.createdByAction,
+      );
+    } finally {
+      await bot?.stop();
+      vi.unstubAllGlobals();
+      await f.close();
+    }
+  },
+);
+
 it('ignores unknown chats and binds a one-use pairing to one private user', async () => {
   const f = await fixture(),
     t = transport(),
@@ -233,3 +310,55 @@ it('sends one CLI update notice per version and respects notification opt-out', 
     f.store.close();
   }
 });
+
+it.each([false, true])(
+  'reconciles a pre-receipt task from a legacy Telegram update, in topic=%s',
+  async (topic) => {
+    const f = daddyFixture(true);
+    const transportFixture = transport();
+    const api = transportFixture.api;
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    try {
+      f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+      f.store.setSetting('telegram.currentDaddy', group.id);
+      const destination = topic ? { chatId: -10042, threadId: 17 } : { chatId: 7 };
+      if (topic) {
+        f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+        f.store.db
+          .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+          .run(
+            '7:-10042:' + group.id,
+            group.id,
+            JSON.stringify({ ...destination, groupId: group.id, ownerId: 7 }),
+          );
+      }
+      await api.send(destination, 'Earlier menu');
+      const request = update(37, '/task --no-plan -- Keep this exact job');
+      request.message!.chat = { id: destination.chatId, type: topic ? 'supergroup' : 'private' };
+      request.message!.message_thread_id = destination.threadId;
+      const old = 'telegram:task:' + destination.chatId + ':37';
+      const task = await f.daddy.createTask(group.id, {
+        requirements: 'Keep this exact job',
+        requestId: old,
+        validatePlan: false,
+      });
+      // The old job commit survived a crash before the outbound card and update receipt.
+      f.store.db.prepare("DELETE FROM settings WHERE key LIKE 'task.queue:%'").run();
+      const jobIds = f.store.jobs(task.id).map((j) => j.id);
+      await bot.handle(request);
+      await api.delivery!.flush();
+      expect(f.store.tasks(group.id)).toHaveLength(1);
+      expect(f.store.jobs(task.id).map((j) => j.id)).toEqual(jobIds);
+      expect(transportFixture.sent.at(-1)!.body.text).toContain(task.id.slice(0, 8));
+    } finally {
+      await bot.stop();
+      await f.close();
+    }
+  },
+);

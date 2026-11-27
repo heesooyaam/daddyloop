@@ -33,7 +33,7 @@ function opensMenu(text: string, username: string) {
 }
 function opensMenuButton(data: string) {
   return (
-    /^(?:dad:(?:queue|workers|task|status|settings|instructions|models|arch-task)(?::|$)|dad:pool:[a-f0-9-]{36}$)/.test(
+    /^(?:dad:(?:queue|workers|task|status|settings|instructions|models|arch-task|rl)(?::|$)|dad:pool:[a-f0-9-]{36}$)/.test(
       data,
     ) ||
     /^(?:dad:(?:home|sessions|workspaces|limits(?::refresh)?)|(?:notifications|language|cleanup|updates):show|models:(?:show|refresh)|tasks:\d+|task:[a-f0-9-]{36})$/.test(

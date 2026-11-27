@@ -520,6 +520,94 @@ test('supports the phone task board, pool controls and workspace directory choos
   const limit = workers.getByLabel('Maximum workers');
   await limit.selectOption('3');
   await expect(limit).toHaveValue('3');
+  const slot = workers.getByRole('button', { name: 'Configure worker 3' });
+  const session = '/api/daddy/sessions/' + new URL(page.url()).hash.slice('#session/'.length);
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  const before = await board();
+  const choose = async () => {
+    await slot.click();
+    await workers.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra');
+    await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('medium');
+  };
+  await choose();
+  const changeState = (action: string, expectedGeneration: number) =>
+    page.request.post(session + '/' + action, {
+      headers: { 'X-daddyloop-Request': '1' },
+      data: { expectedGeneration },
+    });
+  expect((await changeState('pause', before.group.generation)).status()).toBe(200);
+  await expect(page.locator('button[aria-label="Resume"]')).toBeAttached();
+  const resumed = (await board()).group.generation;
+  expect((await changeState('resume', resumed)).status()).toBe(200);
+  const save = async () => {
+    const result = page.waitForResponse(
+      (response) => response.url().endsWith('/workers/3') && response.request().method() === 'POST',
+    );
+    await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+    return result;
+  };
+  const stale = await save();
+  expect(stale.status()).toBe(409);
+  expect(stale.request().postDataJSON().expectedGeneration).toBe(before.group.generation);
+  expect((await board()).workers.slots[2]?.profile).toBeUndefined();
+  await workers.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.locator('button[aria-label="Pause"]')).toBeAttached();
+  await choose();
+  const fresh = await save();
+  expect(fresh.request().postDataJSON().expectedGeneration).toBe(resumed);
+  expect(fresh.status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra · medium');
+  await slot.click();
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption({ label: 'Default' });
+  expect((await save()).status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra');
+  expect((await board()).workers.slots[2]?.profile).toEqual({
+    engine: 'codex',
+    model: 'gpt-6-astra',
+  });
+  let releaseCatalogue!: () => void;
+  const pendingCatalogue = new Promise<void>((resolve) => {
+    releaseCatalogue = resolve;
+  });
+  const agentsRoute = '**/api/agents';
+  await page.route(agentsRoute, async (route) => {
+    await pendingCatalogue;
+    await route.continue();
+  });
+  const requestedCatalogue = page.waitForRequest(agentsRoute);
+  const model = workers.getByLabel('Model', { exact: true });
+  const effort = workers.getByLabel('Reasoning effort', { exact: true });
+  try {
+    await slot.click();
+    await requestedCatalogue;
+    await expect(model).toHaveValue('gpt-6-astra');
+    await model.selectOption('gpt-6-astra');
+    await expect(model).toHaveValue('gpt-6-astra');
+    await expect(effort).toBeEnabled();
+    await model.selectOption('');
+    await expect(model).toHaveValue('');
+    await expect(effort).toBeDisabled();
+  } finally {
+    releaseCatalogue();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
+  await model.selectOption('gpt-6-astra');
+  await effort.selectOption('medium');
+  expect((await save()).status()).toBe(200);
+  await expect(slot).toContainText('gpt-6-astra · medium');
+  await slot.click();
+  await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
+  await workers.getByLabel('Reasoning effort', { exact: true }).selectOption({ label: 'Default' });
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workers.slots[2]?.profile).toEqual({
+    engine: 'codex',
+    model: 'gpt-5.6-sol',
+  });
+  await slot.click();
+  await model.selectOption({ label: 'Engine configuration' });
+  await expect(workers.getByRole('button', { name: 'Save model', exact: true })).toBeEnabled();
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workers.slots[2]?.profile).toEqual({ engine: 'codex' });
   await workers.getByRole('button', { name: 'Close', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Sessions', exact: true }).click();
@@ -566,11 +654,30 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
   await report.getByRole('button', { name: 'Close', exact: true }).click();
 
+  await expect(
+    page.locator('.daddy-work-item').filter({ hasText: 'Repair the filter cache' }),
+  ).toContainText('Ready for review');
   await openWorkers(page);
   const worker = workers.getByRole('button', { name: 'Configure worker 2' });
   await expect(worker).toContainText('Repair the filter cache');
   await expect(worker).toContainText('gpt-6-astra · medium');
   await worker.click();
+  await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
+  const session = '/api/daddy/sessions/' + new URL(page.url()).hash.slice('#session/'.length);
+  expect(
+    (
+      await page.request.post(session + '/workers/2', {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
+      })
+    ).status(),
+  ).toBe(200);
+  const conflict = page.waitForResponse(
+    (res) => res.url().endsWith('/workers/2') && res.request().method() === 'POST',
+  );
+  await workers.getByRole('button', { name: 'Save model', exact: true }).click();
+  expect((await conflict).status()).toBe(409);
+  await expect(workers.getByRole('alert')).toContainText('worker.profile.model');
   await workers.getByLabel('Model', { exact: true }).selectOption('gpt-5.6-sol');
   await workers.getByLabel('Reasoning effort', { exact: true }).selectOption('max');
   await workers.getByRole('checkbox', { name: /Apply to current task/ }).check();
@@ -1578,6 +1685,9 @@ test('shows quota remaining on a phone and requires confirmation before spending
 test('persists GitHub auto-merge for a session and a single task override', async ({ page }) => {
   await login(page);
   await create(page, 'GitHub auto-merge settings', Date.now());
+  // This case verifies persistence on a stable revision. The stale revision path
+  // is covered by the task report's confirmation tests.
+  await expect(page.locator('.daddy-work-item').first()).toContainText('Ready for review');
   await page.getByRole('button', { name: 'Session settings' }).click();
   const dialog = page.getByRole('dialog');
   const sessionSwitch = dialog.getByRole('checkbox', { name: /Auto-merge GitHub PRs/ });
@@ -1726,4 +1836,436 @@ test('sets the session architect and overrides it when queueing a task', async (
     architectProfile: { model: 'gpt-6-astra' },
     validatePlan: true,
   });
+});
+
+test('bulk worker settings preserve a slot edited after the form opened', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Bulk worker settings');
+  const session = '/api/daddy/sessions/' + group.id;
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  await page.goto('/#session/' + group.id);
+  const open = () => page.getByRole('button', { name: 'Session settings' }).click();
+  const dialog = page.getByRole('dialog');
+  const model = dialog.getByLabel('All workers Model', { exact: true });
+  const save = async () => {
+    const response = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(session + '/settings') && response.request().method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save settings' }).click();
+    return response;
+  };
+  await open();
+  await model.selectOption({ label: 'Engine configuration' });
+  const slot = { engine: 'codex', model: 'gpt-6-astra', effort: 'medium' };
+  expect(
+    (
+      await page.request.post(session + '/workers/1', {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { profile: slot, expectedGeneration: group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await save()).status()).toBe(409);
+  await expect(dialog.getByRole('alert')).toContainText('workerSlotProfiles');
+  expect((await board()).workers.slots[0]?.profile).toEqual(slot);
+  await page.keyboard.press('Escape');
+  await open();
+  await expect(dialog.getByText('Worker 1 · codex · gpt-6-astra · medium')).toBeVisible();
+  await model.selectOption({ label: 'Engine configuration' });
+  expect((await save()).status()).toBe(200);
+  const saved = await board();
+  expect(saved.workerDefault).toEqual({ engine: 'codex' });
+  expect(saved.workers.slots[0]?.profile).toBeUndefined();
+});
+
+test('session settings save belongs to the generation shown on open', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Stale form generation');
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  await page.goto('/#session/' + group.id);
+  const dialog = page.getByRole('dialog', { name: 'Session settings' });
+  const open = async () => {
+    await page.getByRole('button', { name: 'Session settings' }).click();
+    await dialog
+      .getByLabel('All workers Model', { exact: true })
+      .selectOption({ label: 'Engine configuration' });
+  };
+  const save = async () => {
+    const response = page.waitForResponse(
+      (res) => res.url().endsWith(session + '/settings') && res.request().method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save settings' }).click();
+    return response;
+  };
+  await open();
+  const original = await board();
+  expect(
+    (
+      await page.request.post(session + '/pause', {
+        headers,
+        data: { expectedGeneration: original.group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  const paused = await board();
+  expect(
+    (
+      await page.request.post(session + '/resume', {
+        headers,
+        data: { expectedGeneration: paused.group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await board()).workerDefault).toEqual(original.workerDefault);
+  expect((await save()).status()).toBe(409);
+  await expect(dialog.getByRole('alert')).toContainText('session changed');
+  expect((await board()).workerDefault).toEqual(original.workerDefault);
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await open();
+  expect((await save()).status()).toBe(200);
+  expect((await board()).workerDefault).toEqual({ engine: 'codex' });
+});
+
+test('the phone task form sends an explicit engine without a named worker model', async ({
+  page,
+}) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Engine-only worker');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/agents', async (route) => {
+    const response = await route.fetch();
+    const catalogue = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...catalogue,
+        engines: [
+          ...catalogue.engines.filter(({ id }: { id: string }) => id !== 'claude'),
+          { id: 'claude', name: 'Claude' },
+        ],
+      },
+    });
+  });
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  const queue = page.getByRole('dialog', { name: 'Queue task' });
+  const open = async () => {
+    await page.getByRole('button', { name: 'Queue a task', exact: true }).click();
+    await queue.getByLabel('Task description').fill('Use the Claude configuration');
+    await queue.getByLabel('Check architecture and plan before implementation').uncheck();
+    await queue.getByText('Choose a model', { exact: true }).click();
+    await queue.getByLabel('Agent module', { exact: true }).selectOption('claude');
+  };
+  const submit = async () => {
+    const submitted = page.waitForResponse(
+      (res) => res.url().endsWith('/tasks') && res.request().method() === 'POST',
+    );
+    await queue.getByRole('button', { name: 'Queue task', exact: true }).click();
+    return submitted;
+  };
+  await open();
+  const shown = (await board()).group.generation;
+  expect(
+    (
+      await page.request.post(session + '/pause', { headers, data: { expectedGeneration: shown } })
+    ).status(),
+  ).toBe(200);
+  const paused = (await board()).group.generation;
+  expect(
+    (
+      await page.request.post(session + '/resume', {
+        headers,
+        data: { expectedGeneration: paused },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await submit()).status()).toBe(409);
+  await expect(queue.getByRole('alert')).toContainText('session changed');
+  await expect(queue.getByLabel('Task description')).toHaveValue('Use the Claude configuration');
+  await expect(queue.getByLabel('Agent module', { exact: true })).toHaveValue('claude');
+  expect((await board()).tasks).toHaveLength(0);
+  await queue
+    .getByRole('button', { name: 'Use the current session', exact: true })
+    .click({ timeout: 3000 });
+  await expect(queue.getByLabel('Task description')).toHaveValue('Use the Claude configuration');
+  await expect(queue.getByLabel('Agent module', { exact: true })).toHaveValue('claude');
+  await expect(
+    queue.getByLabel('Check architecture and plan before implementation'),
+  ).not.toBeChecked();
+  const response = await submit();
+  expect(response.status()).toBe(201);
+  expect(response.request().postDataJSON().expectedGeneration).toBe(paused);
+  expect((await board()).tasks).toHaveLength(1);
+  expect(response.request().postDataJSON().workerRequest.profile).toEqual({ engine: 'claude' });
+  const { id } = await response.json();
+  const { jobs } = await (await page.request.get('/api/tasks/' + id)).json();
+  expect(jobs.find(({ kind }: { kind: string }) => kind === 'implement').profile).toEqual({
+    engine: 'claude',
+  });
+});
+
+for (const [locale, state, label] of [
+  ['en', 'paused', 'Paused'],
+  ['ru', 'needs_input', 'Требуется внимание'],
+] as const) {
+  test(`localizes the existing task conflict in the queue form (${locale})`, async ({ page }) => {
+    await login(page);
+    const group = await sessionFixture(page, 'Imported issue conflict');
+    await page.goto('/#session/' + group.id);
+    const taskId = randomUUID();
+    await page.route('**/api/daddy/sessions/' + group.id + '/tasks', (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: 'ticket_already_active',
+            message: `Task DADDY-${taskId.slice(0, 8)} is ${state}. Open the existing task to continue.`,
+            taskConflict: { id: taskId, state },
+          },
+        },
+      }),
+    );
+    await page.getByLabel('Language', { exact: true }).selectOption(locale);
+    const t = translator(locale);
+    await page.getByRole('button', { name: t('Queue a task'), exact: true }).click();
+    const form = page.getByRole('dialog', { name: t('Queue task') });
+    await form
+      .getByLabel(t('Task description'))
+      .fill('https://github.com/fixture/planning/issues/42');
+    await form.getByRole('button', { name: t('Queue task'), exact: true }).click();
+    await expect(form.getByRole('alert')).toContainText(label);
+    await expect(form.getByRole('alert')).toContainText('DADDY-' + taskId.slice(0, 8));
+    await expect(form.getByRole('alert')).toContainText(
+      locale === 'ru'
+        ? 'Откройте эту задачу, чтобы продолжить'
+        : 'Open the existing task to continue.',
+    );
+    if (locale === 'ru') {
+      await form.getByRole('button', { name: t('Close'), exact: true }).click();
+      await page.getByLabel(t('Language'), { exact: true }).selectOption('en');
+      await expect(page.getByLabel('Language', { exact: true })).toHaveValue('en');
+    }
+  });
+}
+
+test('edits the review round limit and rejects a stale task card', async ({ page }) => {
+  await login(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const group = await sessionFixture(page, 'Task review limit');
+  const session = '/api/daddy/sessions/' + group.id;
+  const headers = { 'X-daddyloop-Request': '1' };
+  const created = await page.request.post(session + '/tasks', {
+    headers,
+    data: { requirements: 'Inspect the round limit', requestId: randomUUID() },
+  });
+  expect(created.status()).toBe(201);
+  const { id } = await created.json();
+  const path = session + '/tasks/' + id + '/review-limit';
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  const task = async () => (await board()).tasks.find((task) => task.id === id)!;
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-mobile-tabs').getByRole('button', { name: /Tasks/ }).click();
+  const item = page.locator('.daddy-work-item').first();
+  await expect(item).toContainText('Ready for review');
+  await item.click();
+  const report = page.getByRole('dialog');
+  const edit = (label: string) =>
+    report.getByRole('button', { name: 'Review round limit · ' + label });
+  const input = report.getByLabel('Review round limit', { exact: true });
+  const submit = async () => {
+    const response = page.waitForResponse(
+      (response) => response.url().endsWith(path) && response.request().method() === 'POST',
+    );
+    await report.getByRole('button', { name: 'Save', exact: true }).click();
+    return response;
+  };
+  await expect(edit('No limit')).toBeEnabled();
+  await edit('No limit').click();
+  await input.fill('15');
+  expect((await submit()).status()).toBe(200);
+  await edit('15').click();
+  const snapshot = await task();
+  const latest = await page.request.post(path, {
+    headers,
+    data: {
+      limit: 16,
+      expected: {
+        limit: 15,
+        groupGeneration: group.generation,
+        task: {
+          generation: snapshot.generation,
+          head: snapshot.revision?.head ?? '',
+          revision: snapshot.revision,
+        },
+      },
+    },
+  });
+  expect(latest.status()).toBe(200);
+  await input.fill('');
+  expect((await submit()).status()).toBe(409);
+  await expect(report.getByRole('alert')).toContainText('Settings changed');
+  expect((await task()).reviewRoundLimit).toBe(16);
+  await report.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await edit('16').click();
+  await input.fill('');
+  expect((await submit()).status()).toBe(200);
+  expect((await task()).reviewRoundLimit).toBeNull();
+  await expect(edit('No limit')).toBeVisible();
+});
+
+test('an open task report follows live confirmation stages', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Live task report');
+  const session = '/api/daddy/sessions/' + group.id;
+  const response = await page.request.post(session + '/tasks', {
+    headers: { 'X-daddyloop-Request': '1' },
+    data: { requirements: 'Inspect changing task', requestId: randomUUID() },
+  });
+  expect(response.status()).toBe(201);
+  const { id } = await response.json();
+  const latest = (await (await page.request.get(session)).json()) as DaddyBoard;
+  const task = latest.tasks.find((task) => task.id === id)!;
+  const revision = { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) };
+  let state = task.state;
+  let deleting = false;
+  let unavailable = false;
+  let stage = 0;
+  await page.route('**' + session, (route) =>
+    unavailable
+      ? route.fulfill({ status: 503, json: { error: 'Snapshot unavailable' } })
+      : route.fulfill({
+          json: {
+            ...latest,
+            group: { ...latest.group, deletion: deleting ? { state: 'pending' } : undefined },
+            tasks: latest.tasks.map((entry) =>
+              entry.id === id
+                ? {
+                    ...task,
+                    state,
+                    generation: task.generation + stage,
+                    statusLabel: 'Test stage ' + stage,
+                    revision,
+                    ref: {
+                      ...task.ref,
+                      kind: 'pull_request',
+                      number: 3,
+                      url: 'https://github.com/fixture/planning/pull/3',
+                    },
+                  }
+                : entry,
+            ),
+          },
+        }),
+  );
+  let detailUnavailable = true;
+  let intermediate = false;
+  let delayDetails: Promise<void> | undefined;
+  let detailsWaiting: (() => void) | undefined;
+  await page.route('**/api/tasks/' + id, async (route) => {
+    if (detailUnavailable)
+      return route.fulfill({
+        status: 503,
+        json: { error: { message: 'Task details unavailable' } },
+      });
+    const response = await route.fetch();
+    const detail = await response.json();
+    const snapshot = {
+      ...detail,
+      task: {
+        ...detail.task,
+        kind: 'code',
+        reportOnly: false,
+        generation: task.generation + stage,
+        title: intermediate ? 'Intermediate CI snapshot' : 'Report snapshot ' + stage,
+        state: intermediate ? 'awaiting_checks' : state,
+        revision,
+      },
+    };
+    const pending = delayDetails;
+    if (pending) {
+      detailsWaiting?.();
+      await pending;
+    }
+    await route.fulfill({ response, json: snapshot });
+  });
+  await page.route('**' + session + '/task-action', (route) =>
+    route.fulfill({ status: 409, json: { error: { message: 'Confirmation became stale' } } }),
+  );
+  await page.goto('/#session/' + group.id);
+  await page.locator('.daddy-work-item').first().click();
+  const report = page.getByRole('dialog');
+  const architect = report.locator('summary').filter({ hasText: /^Architect ·/ });
+  await expect(report.getByRole('alert')).toContainText('Task details unavailable');
+  expect(await report.getByRole('button', { name: 'Waive CI checks' }).count()).toBe(0);
+  detailUnavailable = false;
+  await report.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(report.getByText('Read-only worker reports')).toBeVisible();
+  let triedWaiver = false;
+  const actions = ['Verify merge', 'Waive CI checks', 'Approve plan'];
+  for (const [next, action] of [
+    ['needs_input', actions[0]],
+    ['awaiting_checks', actions[1]],
+    ['awaiting_review_checks', actions[1]],
+    ['awaiting_plan_approval', actions[2]],
+    ['paused', undefined],
+    ['complete', undefined],
+    ['awaiting_checks', actions[1]],
+  ] as const) {
+    let release!: () => void;
+    delayDetails = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      detailsWaiting = resolve;
+    });
+    state = next;
+    intermediate = next === 'awaiting_plan_approval';
+    stage++;
+    try {
+      await expect(report.getByText('Test stage ' + stage)).toBeVisible();
+      await waiting;
+      await expect(
+        report.getByRole('heading', { name: 'Report snapshot ' + (stage - 1) }),
+      ).toBeVisible();
+      await expect(architect).toHaveCount(0);
+      if (action)
+        await expect(report.getByRole('button', { name: action, exact: true })).toHaveCount(0);
+    } finally {
+      detailsWaiting = undefined;
+      delayDetails = undefined;
+      release();
+    }
+    if (intermediate) {
+      await expect(report.getByRole('heading', { name: 'Intermediate CI snapshot' })).toBeVisible();
+      for (const label of actions)
+        await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(0);
+      intermediate = false;
+    }
+    await expect(report.getByRole('heading', { name: 'Report snapshot ' + stage })).toBeVisible();
+    await expect(architect).toHaveCount(next === 'complete' ? 0 : 1);
+    for (const label of actions)
+      await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(
+        label === action ? 1 : 0,
+      );
+    if (action === 'Waive CI checks' && !triedWaiver) {
+      triedWaiver = true;
+      await report.getByLabel('Reason for waiving CI checks').fill('Reviewed separately');
+      await report.getByRole('button', { name: action, exact: true }).click();
+      await expect(report.getByRole('alert')).toContainText('Confirmation became stale');
+      await expect(report.getByRole('button', { name: action, exact: true })).toHaveCount(0);
+    }
+  }
+  unavailable = true;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(0);
+  unavailable = false;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(1);
+  deleting = true;
+  stage++;
+  await expect(report.getByRole('button', { name: 'Waive CI checks' })).toHaveCount(0);
 });

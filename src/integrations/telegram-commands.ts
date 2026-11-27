@@ -28,8 +28,8 @@ const commands: Command[] = [
     en: 'Queue work or open an existing task',
     ru: 'Поставить работу в очередь или открыть задачу',
     detail: {
-      en: 'Send /task Fix search or /task DADDY-12ab34cd. Plan checking is on by default. Use --no-plan -- to skip it. Before -- you can set --worker 1..8, --model MODEL, --engine ENGINE and --effort LEVEL. To select the architect, use --architect-model MODEL, optionally with --architect-engine and --architect-effort. Engine and effort require a model. Example: /task --worker 2 -- Fix search.',
-      ru: 'Напиши /task Почини поиск или /task DADDY-12ab34cd. Проверка плана включена. Для пропуска используй --no-plan --. Перед -- доступны --worker 1..8, --model МОДЕЛЬ, --engine ДВИЖОК и --effort УРОВЕНЬ. Для архитектора укажи --architect-model МОДЕЛЬ, при необходимости --architect-engine и --architect-effort. Для движка и уровня нужна модель. Пример: /task --worker 2 -- Почини поиск.',
+      en: 'Send /task Fix search or /task DADDY-12ab34cd. Plan checking is on by default. Use --no-plan -- to skip it. Before -- you can set --worker 1..8, --model MODEL, --engine ENGINE and --effort LEVEL. To select the architect, use --architect-model MODEL, optionally with --architect-engine and --architect-effort. Use --architect-engine ENGINE alone for its configured profile. Effort requires a model. Use --engine ENGINE alone for the worker’s configured profile. Example: /task --worker 2 -- Fix search.',
+      ru: 'Напиши /task Почини поиск или /task DADDY-12ab34cd. Проверка плана включена. Для пропуска используй --no-plan --. Перед -- доступны --worker 1..8, --model МОДЕЛЬ, --engine ДВИЖОК и --effort УРОВЕНЬ. Для архитектора укажи --architect-model МОДЕЛЬ, при необходимости --architect-engine и --architect-effort. Для штатного профиля архитектора достаточно --architect-engine ДВИЖОК. Для уровня нужна модель. Для штатного профиля воркера достаточно --engine ДВИЖОК. Пример: /task --worker 2 -- Почини поиск.',
     },
   },
   {
@@ -44,12 +44,12 @@ const commands: Command[] = [
   },
   {
     name: 'worker',
-    args: 'N MODEL [EFFORT] [--engine ENGINE] [--force]',
+    args: 'N MODEL [EFFORT|default] [--engine ENGINE] [--force] | N --engine ENGINE [--force]',
     en: 'Change the profile of a numbered worker',
     ru: 'Изменить профиль воркера по номеру',
     detail: {
-      en: 'Without --force the profile applies to the next task. --force interrupts the current author turn and restarts it in the same working copy. Use /models for available profiles.',
-      ru: 'Обычно смена применяется к следующей задаче. --force прерывает текущий ход автора и запускает его заново в той же копии. Доступные модели показывает /models.',
+      en: 'Without --force the profile applies to the next task. --force asks you to confirm a specific active task before restarting its author turn in the same copy. Use default to clear the reasoning effort. Use /worker N --engine ENGINE for the engine configuration. Use /models for available profiles.',
+      ru: 'Обычно смена применяется к следующей задаче. --force запрашивает подтверждение для конкретной задачи перед перезапуском её хода в той же копии. Укажи default, чтобы вернуться к штатному уровню. /worker N --engine ENGINE возвращает настройки движка. Доступные модели показывает /models.',
     },
   },
   { name: 'status', en: 'Show the latest session progress', ru: 'Показать текущий этап сессии' },
@@ -63,6 +63,53 @@ const commands: Command[] = [
     name: 'sessions',
     en: 'Choose a session or open its topic',
     ru: 'Выбрать сессию или открыть её тему',
+  },
+  {
+    name: 'session',
+    args: '[SESSION_ID]',
+    en: 'Choose a session explicitly',
+    ru: 'Выбрать сессию явно',
+  },
+  {
+    name: 'agents',
+    args: '[daddy|worker ENGINE [MODEL [EFFORT]]]',
+    scope: 'private',
+    en: 'Inspect or change the default agent profiles',
+    ru: 'Посмотреть или сменить общие профили агентов',
+  },
+  {
+    name: 'concurrency',
+    args: '1..8',
+    scope: 'private',
+    en: 'Set the total number of concurrent agents',
+    ru: 'Задать общий предел параллельных агентов',
+  },
+  {
+    name: 'export',
+    args: 'SESSION_ID',
+    scope: 'private',
+    en: 'Download session instructions as JSON',
+    ru: 'Скачать инструкции сессии в JSON',
+  },
+  {
+    name: 'preset_parts',
+    args: 'ID [1,2,...|all|off]',
+    en: 'Choose components of an applied preset',
+    ru: 'Выбрать компоненты подключённого пресета',
+  },
+  {
+    name: 'preset_export',
+    args: 'ID',
+    scope: 'private',
+    en: 'Download a preset as JSON',
+    ru: 'Скачать пресет в JSON',
+  },
+  {
+    name: 'preset_remove',
+    args: 'ID REVISION',
+    scope: 'private',
+    en: 'Delete a specific preset revision',
+    ru: 'Удалить указанную версию пресета',
   },
   {
     name: 'new',
@@ -82,8 +129,15 @@ const commands: Command[] = [
     ru: 'Выбрать или подключить репозиторий',
   },
   {
+    name: 'workspace_defaults',
+    args: '[ID UPDATED_AT JSON]',
+    scope: 'private',
+    en: 'Read or edit the defaults of a saved repository',
+    ru: 'Посмотреть или изменить настройки сохранённого репозитория',
+  },
+  {
     name: 'repo',
-    args: '[default | path]',
+    args: '[default | path | JSON]',
     en: 'Choose the repository for one request',
     ru: 'Выбрать репозиторий для одного запроса',
     detail: {
@@ -114,9 +168,24 @@ const commands: Command[] = [
     ru: 'Подключить скилл с GitHub к выбранной роли',
   },
   {
+    name: 'skill_source',
+    args: 'SESSION_ID daddy|worker JSON',
+    scope: 'private',
+    en: 'Import a skill using the same sources as the web',
+    ru: 'Импортировать навык из источников веб-интерфейса',
+    detail: {
+      en: 'For a Markdown attachment use the caption /skill_file SESSION_ID ROLE [RELATIVE_PATH]. Use /skill_source with a JSON source, for example {"kind":"text","name":"Style","text":"Use short paragraphs."}.',
+      ru: 'Приложи Markdown с подписью /skill_file ID_СЕССИИ РОЛЬ [ПУТЬ]. Для /skill_source укажи источник в JSON, например {"kind":"text","name":"Style","text":"Пиши короткими абзацами."}.',
+    },
+  },
+  {
     name: 'presets',
     en: 'List saved instruction presets',
     ru: 'Посмотреть готовые наборы инструкций',
+    detail: {
+      en: 'In private chat attach a JSON document with caption /preset_create NAME or /preset_edit ID REVISION NAME. /preset_export ID downloads it. /export SESSION_ID downloads session instructions and a document captioned /import SESSION_ID loads them.',
+      ru: 'В личке приложи JSON с подписью /preset_create НАЗВАНИЕ или /preset_edit ID ВЕРСИЯ НАЗВАНИЕ. /preset_export ID скачивает пресет. /export ID_СЕССИИ скачивает инструкции, а документ с подписью /import ID_СЕССИИ загружает их обратно.',
+    },
   },
   {
     name: 'preset',
@@ -189,7 +258,6 @@ const commands: Command[] = [
   },
   {
     name: 'cancel',
-    scope: 'private',
     en: 'Cancel a pending workspace registration step',
     ru: 'Отменить текущий шаг регистрации репозитория',
   },
@@ -253,4 +321,12 @@ export function commandHelp(locale: Locale, scope: Scope, argument = '') {
       .add('/' + cmd.name, 'bot_command')
       .add((cmd.args ? ' ' + cmd.args : '') + ' — ' + cmd[locale]);
   return out;
+}
+
+export function normalizeTelegramText(value: string | undefined, username: string) {
+  const text = value?.trim();
+  const command = text && /^\/([a-z0-9_]+)(?:@([a-z0-9_]+))?(?=\s|$)/i.exec(text);
+  if (!command) return text;
+  if (command[2] && command[2].toLowerCase() !== username.toLowerCase()) return;
+  return '/' + command[1].toLowerCase() + text.slice(command[0].length);
 }

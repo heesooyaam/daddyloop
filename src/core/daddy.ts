@@ -1,3 +1,5 @@
+import type { WorkerSlot } from './types.js';
+import { assertSetting, mergeSetting } from './settings-edit.js';
 import { pauseSessionWork, restoreSessionWork } from './session-pause.js';
 import { githubBackoff } from '../providers/github-quota.js';
 import type { ResourceRecovery } from './resource-recovery.js';
@@ -14,6 +16,8 @@ import { translator } from '../i18n/index.js';
 import { preferences } from './preferences.js';
 import {
   AppError,
+  assertTaskVersion,
+  type ExpectedTask,
   now,
   prRef,
   isTicket,
@@ -42,7 +46,14 @@ import { daddySchemas, daddyTools } from './daddy-tools.js';
 import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
-import { canRunPrerequisites, saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
+import {
+  canRunPrerequisites,
+  saveWorkerSlots,
+  workerPool,
+  workerSlots,
+  workerSlotProfiles,
+  workerTaskProfiles,
+} from './worker-pool.js';
 import {
   dependencyDetail,
   queueDetail,
@@ -59,6 +70,12 @@ import {
   withInstructions,
   type SessionInstructions,
 } from './instructions.js';
+
+export type ExpectedReviewLimit = {
+  task: ExpectedTask;
+  groupGeneration: number;
+  limit: number | null;
+};
 
 export class Daddy {
   private running = new Map<
@@ -187,9 +204,12 @@ export class Daddy {
     });
     return group;
   }
+  maxConcurrentAgents() {
+    return this.worker.effectiveAgentLimit();
+  }
   private raiseCapacity(workers: number) {
     // An explicit pool-size selection also grants the slots needed for that pool.
-    const current = this.store.setting<number>('worker.maxAgents') ?? 1;
+    const current = this.maxConcurrentAgents();
     if (workers > current) this.store.setSetting('worker.maxAgents', workers);
   }
   private availableWorkspaces(group: ReviewGroup, selected?: Workspace) {
@@ -204,7 +224,7 @@ export class Daddy {
   }
   private sessionActivity(group: ReviewGroup, jobs: Job[]) {
     return {
-      workers: workerPool(this.store, group, jobs),
+      workers: workerPool(this.store, group, jobs, this.maxConcurrentAgents()),
       daddyBusy:
         this.store.hasRunningDaddyJob(group.id) ||
         jobs.some(
@@ -267,11 +287,14 @@ export class Daddy {
           summary: task.summary,
           policy: task.policy,
           head: task.revision?.head,
+          revision: task.revision,
+          generation: task.generation,
           worker:
             (item.job?.role === 'author' && item.job.kind !== 'plan'
               ? item.job.profile
               : undefined) ?? this.engine.effectiveAgents(task).worker,
           architectProfile: task.architectProfile,
+          reviewRoundLimit: task.reviewRoundLimit ?? null,
           workerRequest: task.workerRequest,
           running: item.job?.status === 'running',
           queued: jobs.some((job) => job.taskId === task.id && job.status === 'queued'),
@@ -291,58 +314,169 @@ export class Daddy {
       throw new AppError('wrong_session', 'This task belongs to another daddy session', 403);
     return task;
   }
+  queuedTask(queueKey: string) {
+    const id = this.store.setting<string>('task.queue:' + queueKey);
+    return id ? this.store.getTask(id) : undefined;
+  }
+
+  legacyQueuedTask(requestId: string, groupId?: string, notBefore?: string) {
+    const rows = this.store.db
+      .prepare(
+        `SELECT tasks.id FROM tasks
+       WHERE (? IS NULL OR json_extract(tasks.data, '$.groupId') = ?)
+         AND ((json_extract(tasks.data, '$.createdByAction') = ?
+           AND (? IS NULL OR json_extract(tasks.data, '$.createdAt') >= ?)) OR EXISTS (
+           SELECT 1 FROM jobs WHERE jobs.task_id = tasks.id
+             AND json_extract(jobs.data, '$.actionId') = ?
+             AND json_extract(jobs.data, '$.kind') IN ('plan', 'implement')
+             AND (? IS NULL OR json_extract(jobs.data, '$.createdAt') >= ?)
+         ))
+       LIMIT 2`,
+      )
+      .all(
+        groupId ?? null,
+        groupId ?? null,
+        requestId,
+        notBefore ?? null,
+        notBefore ?? null,
+        requestId,
+        notBefore ?? null,
+        notBefore ?? null,
+      );
+    if (rows.length > 1)
+      throw new AppError(
+        'ambiguous_queue_result',
+        'More than one task matches the original request.',
+      );
+    return rows[0] ? this.store.getTask(String(rows[0].id)) : undefined;
+  }
+
   async createTask(
     id: string,
     input: {
       requirements: string;
       validatePlan?: boolean;
+      expectedGeneration?: number;
       architectProfile?: AgentProfile;
       replyTo?: TelegramReply;
       requestId: string;
+      queueKey?: string;
+      resolveWorkspace?: (workspace: Workspace) => Promise<Workspace>;
       workspace?: Workspace;
       workerRequest?: WorkerRequest;
     },
+    onCommit?: (queued: boolean, task: Task) => void,
   ) {
-    return this.engine.lock(`create-task:${id}`, async () => {
-      const group = this.group(id);
-      const tasks = this.store.tasks(id);
-      const existing = tasks.find((task) => task.createdByAction === input.requestId);
-      if (existing) return existing;
-      if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-      if (group.daddyState === 'paused' || group.daddyState === 'archived')
-        throw new AppError('daddy_paused', 'Resume daddy before sending another message');
-      if (tasks.length >= 100)
-        throw new AppError('session_full', 'Start another daddy session after 100 tasks');
-      const requirements = input.requirements.trim();
-      if (!requirements || requirements.length > 20000)
-        throw new AppError('invalid_message', 'Send a message between 1 and 20000 characters', 400);
-      if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
-      if (input.workerRequest?.profile) await this.catalogue.validate(input.workerRequest.profile);
-      return this.tickets.local({
-        workspace: input.workspace ?? group.workspace!,
-        groupId: id,
-        groupGeneration: group.generation,
-        title: titleFromGoal(requirements),
-        requirements,
-        replyTo: input.replyTo,
-        createdByAction: input.requestId,
-        workerRequest: input.workerRequest,
-        startImplementation: true,
-        validatePlan: input.validatePlan ?? true,
-        architectProfile: input.architectProfile,
+    const queueKey = input.queueKey ?? `${id}:${input.requestId}`;
+    const create = () =>
+      this.engine.lock(`create-task:${id}`, async () => {
+        const group = this.group(id);
+        const tasks = this.store.tasks(id);
+        const existing = this.queuedTask(queueKey) ?? this.legacyQueuedTask(input.requestId, id);
+        if (existing) {
+          if (onCommit) this.store.transaction(() => onCommit(false, existing));
+          return existing;
+        }
+        this.checkSessionGeneration(group, input.expectedGeneration);
+        if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
+        if (group.daddyState === 'paused' || group.daddyState === 'archived')
+          throw new AppError('daddy_paused', 'Resume daddy before sending another message');
+        if (tasks.length >= 100)
+          throw new AppError('session_full', 'Start another daddy session after 100 tasks');
+        const requirements = input.requirements.trim();
+        if (!requirements || requirements.length > 20000)
+          throw new AppError(
+            'invalid_message',
+            'Send a message between 1 and 20000 characters',
+            400,
+          );
+        if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
+        if (input.workerRequest?.profile)
+          await this.catalogue.validate(input.workerRequest.profile);
+        const workspace = input.workspace ?? group.workspace!;
+        return this.tickets.local({
+          workspace: input.resolveWorkspace ? await input.resolveWorkspace(workspace) : workspace,
+          groupId: id,
+          groupGeneration: group.generation,
+          title: titleFromGoal(requirements),
+          requirements,
+          replyTo: input.replyTo,
+          createdByAction: input.requestId,
+          workerRequest: input.workerRequest ?? {},
+          startImplementation: true,
+          validatePlan: input.validatePlan ?? true,
+          architectProfile: input.architectProfile,
+          onCommit: (task, queued = true) => {
+            this.store.setSetting('task.queue:' + queueKey, task.id);
+            onCommit?.(queued, task);
+          },
+        });
       });
-    });
+    return input.queueKey ? this.engine.lock('task.queue:' + queueKey, create) : create();
+  }
+
+  async prepareWorkerProfile(
+    profile: AgentProfile,
+    inheritedFrom?: AgentProfile,
+  ): Promise<AgentProfile> {
+    try {
+      await this.catalogue.validate(profile);
+      return profile;
+    } catch (error) {
+      if (
+        !inheritedFrom ||
+        !profile.effort ||
+        !(error instanceof AppError) ||
+        error.code !== 'effort_unavailable'
+      )
+        throw error;
+      if (profile.effort !== inheritedFrom.effort)
+        throw new AppError(
+          'settings_conflict',
+          'The reasoning effort changed and the selected model does not support it. Open the worker settings again.',
+          409,
+        );
+      const next = { engine: profile.engine, model: profile.model };
+      await this.catalogue.validate(next);
+      return next;
+    }
   }
 
   async configureWorker(
     id: string,
     number: number,
-    profile: AgentProfile,
-    { force = false, expectedTaskId }: { force?: boolean; expectedTaskId?: string } = {},
+    requested: AgentProfile,
+    {
+      force = false,
+      expectedTaskId,
+      expectedGeneration,
+      baseline,
+      inheritedEffort = false,
+      explicitEffort = false,
+      explicitEngine = false,
+      explicitModel = false,
+      confirmedProfile,
+      check,
+      expected,
+      onCommit,
+    }: {
+      force?: boolean;
+      expectedTaskId?: string;
+      expectedGeneration?: number;
+      baseline?: AgentProfile;
+      inheritedEffort?: boolean;
+      explicitEffort?: boolean;
+      explicitEngine?: boolean;
+      explicitModel?: boolean;
+      confirmedProfile?: AgentProfile;
+      expected?: { groupGeneration: number; task: ExpectedTask };
+      check?: () => void;
+      onCommit?: () => void;
+    } = {},
   ) {
-    await this.catalogue.validate(profile);
     const readSlot = () => {
       const group = this.group(id);
+      this.checkSessionGeneration(group, expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       const slots = workerSlots(this.store, group);
       const slot = slots.find((item) => item.number === number);
@@ -355,9 +489,37 @@ export class Daddy {
         );
       return { group, slots, slot };
     };
-    const update = (lockedTaskId?: string) => {
+    const completeProfile = ({ engine, model, effort }: AgentProfile) => ({
+      engine,
+      model,
+      effort,
+    });
+    const resolve = (group: ReviewGroup, slot: WorkerSlot) => {
+      if (!baseline) return requested;
+      const current = slot.profile ?? group.worker ?? this.engine.defaultAgents().worker;
+      if (explicitEngine)
+        assertSetting('worker.profile.engine', baseline.engine, requested.engine, current.engine);
+      if (explicitModel)
+        assertSetting('worker.profile.model', baseline.model, requested.model, current.model);
+      // A profile without a model cannot keep an independently added effort.
+      if (explicitEffort || (!requested.model && baseline.model))
+        assertSetting('worker.profile.effort', baseline.effort, requested.effort, current.effort);
+      return mergeSetting(
+        'worker.profile',
+        completeProfile(baseline),
+        completeProfile(requested),
+        completeProfile(current),
+      );
+    };
+    const update = (profile: AgentProfile, resolved: AgentProfile, lockedTaskId?: string) => {
       const { group, slots, slot } = readSlot();
       if (force && slot.taskId !== lockedTaskId) return;
+      if (expected && lockedTaskId) {
+        this.checkSessionGeneration(group, expected.groupGeneration);
+        assertTaskVersion(this.task(id, lockedTaskId), expected.task);
+      }
+      if (!sameAgentProfile(resolved, resolve(group, slot))) return;
+      check?.();
       const restarted = this.store.transaction(() => {
         slot.profile = profile;
         saveWorkerSlots(this.store, group, slots);
@@ -375,14 +537,23 @@ export class Daddy {
           taskId: lockedTaskId,
           restarted,
         });
+        onCommit?.();
         return restarted;
       });
       if (restarted && lockedTaskId) this.engine.onCancel(lockedTaskId);
-      return { restarted };
+      return { restarted, profile };
     };
     for (;;) {
-      const taskId = force ? readSlot().slot.taskId : undefined;
-      const result = taskId ? await this.engine.lock(taskId, async () => update(taskId)) : update();
+      const { group, slot } = readSlot();
+      const resolved = resolve(group, slot);
+      const confirmed = confirmedProfile && sameAgentProfile(resolved, requested);
+      const profile = confirmed
+        ? await this.prepareWorkerProfile(confirmedProfile)
+        : await this.prepareWorkerProfile(resolved, inheritedEffort ? baseline : undefined);
+      const taskId = force ? slot.taskId : undefined;
+      const result = taskId
+        ? await this.engine.lock(taskId, async () => update(profile, resolved, taskId))
+        : update(profile, resolved);
       if (result) return result;
     }
   }
@@ -537,29 +708,94 @@ export class Daddy {
     this.store.saveDaddyJob(job);
     this.store.event(group.id, 'daddy.queued', { trigger }, job.id);
   }
-  taskAutoMerge(groupId: string, taskId: string, mode: AutoMergeMode) {
-    return setTaskMergeMode(this.store, this.group(groupId), this.task(groupId, taskId), mode);
+  taskAutoMerge(
+    groupId: string,
+    taskId: string,
+    mode: AutoMergeMode,
+    expected?: { task: ExpectedTask; groupGeneration: number; mode: AutoMergeMode },
+  ) {
+    const group = this.group(groupId);
+    const task = this.task(groupId, taskId);
+    if (expected) {
+      this.checkSessionGeneration(group, expected.groupGeneration);
+      assertTaskVersion(task, expected.task);
+      assertSetting(
+        'autoMerge',
+        expected.mode,
+        mode,
+        autoMergeSettings(this.store, group, task).mode,
+      );
+    }
+    return setTaskMergeMode(this.store, group, task, mode);
   }
-  async taskReviewLimit(groupId: string, taskId: string, limit: number | null) {
+  async taskReviewLimit(
+    groupId: string,
+    taskId: string,
+    limit: number | null,
+    expected: ExpectedReviewLimit,
+    onCommit?: () => void,
+  ) {
     return this.engine.lock(taskId, async () => {
       const task = this.task(groupId, taskId);
       const group = this.group(groupId);
       if (group.deletedAt || group.deletion)
         throw new AppError('session_deleting', 'This session is being deleted');
-      if (task.reviewRoundLimit !== (limit ?? undefined))
-        this.store.transaction(() => {
+      this.checkSessionGeneration(group, expected.groupGeneration);
+      assertTaskVersion(task, expected.task);
+      if (task.state === 'complete')
+        throw new AppError('task_complete', 'This task is already complete', 409);
+      const current = task.reviewRoundLimit ?? null;
+      assertSetting('reviewRoundLimit', expected.limit, limit, current);
+      this.store.transaction(() => {
+        if (current !== limit) {
           task.reviewRoundLimit = limit ?? undefined;
           this.store.saveTask(task);
           this.store.event(task.id, 'review.limit_changed', { limit });
-        });
+        }
+        onCommit?.();
+      });
       return { limit: task.reviewRoundLimit ?? null };
     });
   }
+
+  async resumeAfterReviewLimit(
+    groupId: string,
+    taskId: string,
+    expected: ExpectedReviewLimit,
+    check?: () => void,
+    onCommit?: () => void,
+  ) {
+    return this.engine.action(
+      taskId,
+      'resume-review-limit',
+      '',
+      expected.task,
+      () => {
+        check?.();
+        this.checkSessionGeneration(this.group(groupId), expected.groupGeneration);
+        const task = this.task(groupId, taskId);
+        assertSetting(
+          'reviewRoundLimit',
+          expected.limit,
+          expected.limit,
+          task.reviewRoundLimit ?? null,
+        );
+      },
+      onCommit,
+    );
+  }
+
   async taskArchitect(
     groupId: string,
     taskId: string,
     profile: AgentProfile | null,
     actionId?: string,
+    expected?: {
+      task: ExpectedTask;
+      groupGeneration: number;
+      architectProfile: AgentProfile | null;
+    },
+    onCommit?: () => void,
   ) {
     if (profile) await this.catalogue.validate(profile);
     return this.engine.lock(taskId, async () => {
@@ -567,6 +803,17 @@ export class Daddy {
       const task = this.task(groupId, taskId);
       if (group.deletion || group.deletedAt)
         throw new AppError('session_deleting', 'This session is being deleted');
+      if (expected) {
+        assertTaskVersion(task, expected.task);
+        if (expected.groupGeneration !== group.generation)
+          throw new AppError('stale_session', 'This session changed. Open its settings again.');
+        assertSetting(
+          'architectProfile',
+          expected.architectProfile,
+          profile,
+          task.architectProfile ?? null,
+        );
+      }
       if (
         task.state === 'complete' ||
         (!isTicket(task) && (task.kind !== 'code' || task.reportOnly))
@@ -577,6 +824,7 @@ export class Daddy {
         this.store.saveTask(task);
         this.store.refreshQueuedPlans(task, group);
         this.store.event(task.id, 'architect.configured', { profile }, actionId);
+        onCommit?.();
       });
       return { taskId, architectProfile: task.architectProfile };
     });
@@ -585,6 +833,16 @@ export class Daddy {
   async settings(
     id: string,
     input: {
+      expectedGeneration?: number;
+      baseline?: {
+        profiles?: Partial<AgentProfiles>;
+        workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
+        workerTaskProfiles?: ReturnType<typeof workerTaskProfiles>;
+        workerLimit?: number;
+        instructions?: SessionInstructions | null;
+        architectProfile?: AgentProfile | null;
+        autoMerge?: boolean;
+      };
       workerLimit?: number;
       profiles?: Partial<AgentProfiles>;
       architectProfile?: AgentProfile | null;
@@ -593,6 +851,7 @@ export class Daddy {
       instructions?: SessionInstructions;
       autoMerge?: boolean;
     },
+    onCommit?: () => void,
   ) {
     if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
     for (const profile of Object.values(input.profiles ?? {}))
@@ -603,8 +862,57 @@ export class Daddy {
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
       if (input.autoMerge !== undefined && group.workspace?.provider !== 'github')
         throw new AppError('merge_unsupported', 'Auto-merge is available for GitHub sessions', 400);
+      if (input.expectedGeneration !== undefined && input.expectedGeneration !== group.generation)
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
+      const base = input.baseline;
+      if (base) {
+        for (const role of ['daddy', 'worker'] as const) {
+          const edit = input.profiles?.[role];
+          if (edit && base.profiles?.[role]) {
+            assertSetting(
+              role,
+              base.profiles[role],
+              edit,
+              group[role] ?? this.engine.defaultAgents()[role],
+            );
+          }
+        }
+        if (input.instructions && base.instructions !== undefined) {
+          const empty = { daddy: {}, worker: {} };
+          input.instructions = sessionInstructionsSchema.parse(
+            mergeSetting(
+              'instructions',
+              base.instructions ?? empty,
+              input.instructions,
+              group.instructions ?? empty,
+            ),
+          );
+        }
+        if (input.architectProfile !== undefined && base.architectProfile !== undefined) {
+          assertSetting(
+            'architectProfile',
+            base.architectProfile,
+            input.architectProfile,
+            group.architectProfile ?? null,
+          );
+        }
+        if (input.autoMerge !== undefined && base.autoMerge !== undefined)
+          input.autoMerge = mergeSetting(
+            'autoMerge',
+            base.autoMerge,
+            input.autoMerge,
+            sessionAutoMerge(this.store, id),
+          );
+      }
       const limit = input.workerLimit;
       if (limit !== undefined) {
+        if (base?.workerLimit !== undefined)
+          assertSetting(
+            'workerLimit',
+            base.workerLimit,
+            limit,
+            workerPool(this.store, group).target,
+          );
         if (!Number.isInteger(limit) || limit < 1 || limit > 8)
           throw new AppError('invalid_pool', 'Choose between 1 and 8 workers', 400);
         if (
@@ -621,7 +929,18 @@ export class Daddy {
       const changeWorkers =
         nextWorker &&
         (input.applyWorkers ||
-          !sameAgentProfile(group.worker ?? this.engine.defaultAgents().worker, nextWorker));
+          !sameAgentProfile(
+            base?.profiles?.worker ?? group.worker ?? this.engine.defaultAgents().worker,
+            nextWorker,
+          ));
+      if (changeWorkers && base?.profiles?.worker) {
+        const shown = base.workerSlotProfiles ?? [];
+        assertSetting('workerSlotProfiles', shown, shown, workerSlotProfiles(group));
+        for (const [taskId, profile] of Object.entries(workerTaskProfiles(tasks))) {
+          const shownProfile = base.workerTaskProfiles?.[taskId];
+          assertSetting('workerTaskProfiles', shownProfile, shownProfile, profile);
+        }
+      }
       const turns = this.store
         .daddyJobs(id)
         .filter((j) => j.status === 'queued' || j.status === 'running');
@@ -712,6 +1031,7 @@ export class Daddy {
         if (input.architectProfile !== undefined || changeDaddy)
           for (const task of tasks) this.store.refreshQueuedPlans(task, group);
         this.store.saveGroup(group);
+        onCommit?.();
         if (input.autoMerge !== undefined)
           this.store.setSetting('autoMerge.session:' + id, input.autoMerge);
         this.store.event(id, 'daddy.settings', {
@@ -744,35 +1064,53 @@ export class Daddy {
       return lock(0);
     });
   }
-  async pause(id: string) {
+  async pause(id: string, expectedGeneration?: number, onCommit?: () => void) {
     await this.withSessionTasks(id, (group, tasks) => {
+      this.checkSessionGeneration(group, expectedGeneration);
       if (group.deletion) throw new AppError('session_deleting', 'This session is being deleted');
-      if (group.daddyState === 'paused') return;
       const stopped = this.store.transaction(() => {
-        group.daddyState = 'paused';
-        delete group.resourceWait;
-        group.generation++;
-        if (group.workspacePreparation?.state === 'preparing')
-          group.workspacePreparation = { state: 'pending' };
-        this.store.saveGroup(group);
-        const stopped = pauseSessionWork(this.store, group, tasks);
-        this.store.event(id, 'daddy.paused', { snapshot: true });
+        const stopped = this.pauseLocked(group, tasks);
+        onCommit?.();
         return stopped;
       });
-      this.running.get(id)?.controller.abort();
-      this.maintenance.get(id)?.controller.abort();
-      for (const taskId of stopped) this.engine.onCancel(taskId);
+      this.cancelPaused(id, stopped);
     });
     return this.board(id);
   }
-  async resume(id: string) {
+  private checkSessionGeneration(group: ReviewGroup, expected?: number) {
+    if (expected !== undefined && expected !== group.generation)
+      throw new AppError('stale_session', 'This session changed. Open its settings again.');
+  }
+  private pauseLocked(group: ReviewGroup, tasks: Task[]) {
+    if (group.daddyState === 'paused') return;
+    const id = group.id;
+    group.daddyState = 'paused';
+    delete group.resourceWait;
+    group.generation++;
+    if (group.workspacePreparation?.state === 'preparing')
+      group.workspacePreparation = { state: 'pending' };
+    this.store.saveGroup(group);
+    const stopped = pauseSessionWork(this.store, group, tasks);
+    this.store.event(id, 'daddy.paused', { snapshot: true });
+    return stopped;
+  }
+  private cancelPaused(id: string, stopped?: string[]) {
+    if (!stopped) return;
+    this.running.get(id)?.controller.abort();
+    this.maintenance.get(id)?.controller.abort();
+    for (const taskId of stopped) this.engine.onCancel(taskId);
+  }
+  async resume(id: string, expectedGeneration?: number, onCommit?: () => void) {
     await this.withSessionTasks(id, (group) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== group.generation)
+        throw new AppError('stale_session', 'This session changed. Open its settings again.');
       if (group.deletion)
         throw new AppError('session_deleting', 'Retry deletion before changing this session');
       if (this.running.has(id) && group.daddyState !== 'active' && group.daddyState !== 'paused')
         throw new AppError('daddy_stopping', 'Wait for the previous daddy turn to stop');
       this.store.transaction(() => {
         restoreSessionWork(this.store, group);
+        onCommit?.();
         if (group.daddyState === 'active') return;
         group.daddyState = 'active';
         group.autoTurns = 0;
@@ -790,26 +1128,34 @@ export class Daddy {
     });
     return this.board(id);
   }
-  async remove(id: string, expectedGeneration: number) {
-    let group = this.store.getGroup(id);
-    if (group.deletedAt) return { deleted: true, archivePath: group.deletion?.archivePath };
-    if (!group.orchestrated || !this.sessionWorkspaces?.supports(group))
-      throw new AppError(
-        'session_deletion_unavailable',
-        'This repository module does not support managed session deletion',
-        422,
-      );
-    if (group.deletion && group.deletion.state !== 'error') return this.board(id);
-    if (group.generation !== expectedGeneration)
-      throw new AppError(
-        'stale_session',
-        'The session changed. Open its current deletion confirmation.',
-      );
-    if (!group.deletion) await this.pause(id);
-    group = this.store.getGroup(id);
-    group.deletion = { ...group.deletion, state: 'pending', error: undefined };
-    this.store.saveGroup(group);
-    this.store.event(id, 'daddy.deletion_queued');
+  async remove(
+    id: string,
+    expectedGeneration: number,
+    authorize?: () => void,
+    onCommit?: () => void,
+  ) {
+    const deleted = this.store.getGroup(id);
+    if (deleted.deletedAt) return { deleted: true, archivePath: deleted.deletion?.archivePath };
+    await this.withSessionTasks(id, (group, tasks) => {
+      authorize?.();
+      if (group.deletion && group.deletion.state !== 'error') return;
+      this.checkSessionGeneration(group, expectedGeneration);
+      if (!group.orchestrated || !this.sessionWorkspaces?.supports(group))
+        throw new AppError(
+          'session_deletion_unavailable',
+          'This repository module does not support managed session deletion',
+          422,
+        );
+      const stopped = this.store.transaction(() => {
+        const stopped = !group.deletion ? this.pauseLocked(group, tasks) : undefined;
+        group.deletion = { ...group.deletion, state: 'pending', error: undefined };
+        this.store.saveGroup(group);
+        this.store.event(id, 'daddy.deletion_queued');
+        onCommit?.();
+        return stopped;
+      });
+      this.cancelPaused(id, stopped);
+    });
     this.tick();
     return this.board(id);
   }

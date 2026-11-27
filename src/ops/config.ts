@@ -20,6 +20,10 @@ export const cacheScheduleSchema = z
     intervalMinutes: z.number().int().min(30).default(30),
     diskPercent: z.number().min(1).lt(100).default(80),
     skill: skillSnapshotSchema.optional(),
+    lastTelegramUpdate: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
     targets: z
       .array(cacheTargetSchema)
       .refine(

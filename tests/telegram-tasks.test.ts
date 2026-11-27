@@ -1,3 +1,7 @@
+import { Store } from '../src/core/store.js';
+import { join } from 'node:path';
+import { InstructionPresets } from '../src/core/instruction-presets.js';
+import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import Fastify from 'fastify';
@@ -11,19 +15,55 @@ import { draftSyncPending, taskReference } from '../src/core/task-activity.js';
 import { githubActivityStatus } from '../src/core/auto-merge.js';
 import { queueCard } from '../src/integrations/telegram-tasks.js';
 import { translate } from '../src/i18n/index.js';
-import type { Job, Task } from '../src/core/types.js';
+import { AppError, prRef as taskPrRef, type Job, type Task } from '../src/core/types.js';
+import { DemoProvider } from '../src/providers/demo.js';
 
 it('shares task IDs, the queue and worker profiles between Telegram and the web API', async () => {
-  const f = daddyFixture();
+  const f = daddyFixture(true);
   const app = Fastify();
   registerDaddy(app, f.daddy);
   const sent: { method: string; body: Record<string, unknown> }[] = [];
-  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, request) => {
-    sent.push({ method: String(url).split('/').at(-1)!, body: JSON.parse(String(request?.body)) });
-    return Response.json({ ok: true, result: { message_id: sent.length } });
-  });
-  const bot = new Telegram(f.engine, api, 'fixture_bot');
-  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
+  const localBotApi = Fastify();
+  const imported = { daddy: { prompt: 'From Telegram' }, worker: {} };
+  const documents: string[] = [];
+  localBotApi.addContentTypeParser(
+    /^multipart\/form-data/,
+    { parseAs: 'string' },
+    (_request, body, done) => {
+      documents.push(String(body));
+      done(null, {});
+    },
+  );
+  localBotApi.get('/instructions.json', async () => imported);
+  localBotApi.post<{ Params: { method: string }; Body: Record<string, unknown> }>(
+    '/:method',
+    async (request) => {
+      sent.push({ method: request.params.method, body: request.body });
+      if (request.params.method === 'getFile')
+        return { ok: true, result: { file_path: 'instructions.json' } };
+      return { ok: true, result: { message_id: sent.length } };
+    },
+  );
+  const origin = await localBotApi.listen({ host: '127.0.0.1', port: 0 });
+  const createBot = () => {
+    const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', (url, request) =>
+      fetch(origin + '/' + String(url).split('/').at(-1), request),
+    );
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
+    const receive = bot.handle.bind(bot);
+    vi.spyOn(bot, 'handle').mockImplementation(async (update) => {
+      await receive(update);
+      await api.delivery!.flush();
+    });
+    return { api, bot };
+  };
+  let { api, bot } = createBot();
+
   setLocale(f.store, 'en');
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
@@ -89,6 +129,68 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     await bot.handle(message('/workers'));
     expect(lastText()).toContain('Worker 1 · codex · gpt-6-astra · max\nFree');
 
+    const settings = session + '/settings';
+    const instructions = { daddy: {}, worker: {} };
+    const edit = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: settings, payload });
+    expect(
+      (await edit({ instructions: { daddy: { prompt: 'Web draft' }, worker: {} } })).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await edit({
+          baseline: { instructions },
+          instructions: { daddy: {}, worker: { prompt: 'Bot draft' } },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await edit({
+          baseline: { instructions },
+          instructions: { daddy: { prompt: 'Stale draft' }, worker: {} },
+          workerLimit: 3,
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(f.daddy.group(group.id).instructions).toMatchObject({
+      daddy: { prompt: 'Web draft' },
+      worker: { prompt: 'Bot draft' },
+    });
+    expect(f.daddy.board(group.id).workers.target).toBe(2);
+
+    const privateMessage = (text?: string): Update => {
+      const update = message(text ?? '');
+      return {
+        ...update,
+        message: {
+          ...update.message!,
+          chat: { id: 7, type: 'private' },
+          message_thread_id: undefined,
+        },
+      };
+    };
+    const other = f.daddy.create({ workspaceId: f.workspace.id, requirements: 'Other session' });
+    await bot.handle(privateMessage('/session@fixture_bot ' + group.id.slice(0, 8)));
+    expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
+    const upload = privateMessage();
+    await bot.handle({
+      ...upload,
+      message: {
+        ...upload.message!,
+        text: undefined,
+        caption: '/import@fixture_bot ' + other.id,
+        document: { file_id: 'instruction-test' },
+      },
+    });
+    expect((await app.inject('/api/daddy/sessions/' + other.id)).json().group.instructions).toEqual(
+      imported,
+    );
+    expect(f.daddy.group(group.id).instructions?.daddy.prompt).toBe('Web draft');
+    await bot.handle(privateMessage('/export@fixture_bot ' + other.id));
+    expect(documents).toHaveLength(1);
+    expect(documents[0]).toContain(JSON.stringify(imported, null, 2));
+
     const web = (await app.inject(session)).json();
     expect(web.taskQueue).toEqual([task!.id]);
     expect(web.tasks[0]).toMatchObject({ id: task!.id, statusLabel: 'Waiting for a worker' });
@@ -108,6 +210,295 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         },
       },
     });
+    const keyboard = () =>
+      (
+        sent.filter((x) => x.method === 'sendMessage').at(-1)?.body.reply_markup as {
+          inline_keyboard: { text: string; callback_data: string; url?: string }[][];
+        }
+      ).inline_keyboard.flat();
+    const buttonFor = (label: string) =>
+      keyboard().find((button) => button.text.replace(/^✓ /, '') === label)!.callback_data;
+    const choiceSession = f.daddy.create({
+      workspaceId: f.workspace.id,
+      requirements: 'Durable selection',
+    });
+    await bot.handle(message('/attach ' + choiceSession.id.slice(0, 8), 7, 19));
+    for (const privateChoice of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      const text = '/task --no-plan --engine claude -- Durable choice ' + privateChoice;
+      const original = privateChoice ? privateMessage(text) : message(text, 7, 18);
+      await bot.handle(original);
+      const choice = click(buttonFor(choiceSession.title), 7, 18);
+      if (privateChoice) {
+        choice.callback_query!.message!.chat = { id: 7, type: 'private' };
+        delete choice.callback_query!.message!.message_thread_id;
+      }
+      const update = choice.update_id;
+      const queued = () =>
+        f.store
+          .tasks(choiceSession.id)
+          .filter((task) => task.requirements.endsWith(String(privateChoice)));
+      f.store.db
+        .exec(`CREATE TRIGGER stop_choice_write BEFORE INSERT ON bot_receipts WHEN NEW.id=${update}
+        BEGIN SELECT RAISE(ABORT, 'interrupted before choice receipt'); END`);
+      await expect(bot.handle(choice)).rejects.toThrow('interrupted before choice receipt');
+      expect(queued()).toHaveLength(0);
+      f.store.db.exec('DROP TRIGGER stop_choice_write');
+      await bot.stop();
+      ({ api, bot } = createBot());
+      f.store.db.exec(`CREATE TRIGGER stop_choice_reply BEFORE DELETE ON settings
+        WHEN OLD.key='telegram.operationResult:${update}'
+        BEGIN SELECT RAISE(ABORT, 'interrupted before choice acknowledgement'); END`);
+      await expect(bot.handle(choice)).rejects.toThrow('interrupted before choice acknowledgement');
+      expect(queued()).toHaveLength(1);
+      expect(f.store.jobs(queued()[0]!.id)).toMatchObject([{ profile: { engine: 'claude' } }]);
+      f.store.db.exec('DROP TRIGGER stop_choice_reply');
+      await bot.stop();
+      ({ api, bot } = createBot());
+      await bot.handle(choice);
+      expect(lastText()).toContain('This action has already completed');
+      expect(queued()).toHaveLength(1);
+      // Same action, different callback/update, plus the pre-atomic layout without a receipt.
+      const repeat = structuredClone(choice);
+      repeat.update_id = ++updateId;
+      repeat.callback_query!.id = String(updateId);
+      await bot.handle(repeat);
+      expect(lastText()).toContain(taskReference(queued()[0]!));
+      f.store.db.prepare('DELETE FROM bot_receipts WHERE id=?').run(update);
+      f.store.db
+        .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')
+        .run('task.queue:%', JSON.stringify(queued()[0]!.id));
+      f.store.setSetting(
+        'telegram.taskChoiceResult:fixture_bot:' +
+          choice.callback_query!.data!.slice('dad:choose:'.length),
+        null,
+      );
+      const savedTask = queued()[0]!;
+      const legacyKey = `telegram:task:${privateChoice ? 7 : -10042}:${original.message!.message_id}`;
+      f.store.saveTask({ ...savedTask, createdByAction: privateChoice ? legacyKey : undefined });
+      if (!privateChoice)
+        for (const job of f.store.jobs(savedTask.id))
+          f.store.saveJob({ ...job, actionId: legacyKey });
+      const actionId = choice.callback_query!.data!.slice('dad:choose:'.length);
+      f.store.db.prepare('UPDATE bot_actions SET consumed=0 WHERE id=?').run(actionId);
+      f.store.setSetting(`telegram.newSession:7:${privateChoice ? '7:0' : '-10042:18'}:command`, {
+        update: original,
+        expiresAt: Date.now() + 600_000,
+        selected: choiceSession.id,
+        generations: { [choiceSession.id]: choiceSession.generation },
+      });
+      // The legacy writer committed the task before consuming the button. Expiry may
+      // prevent a new dispatch, but cannot hide this already committed result.
+      const expiredAt = Date.now() + 660000;
+      const expiredClock = vi.spyOn(Date, 'now').mockReturnValue(expiredAt);
+      try {
+        await bot.handle(choice);
+        expect(queued()).toHaveLength(1);
+        expect(lastText()).toContain(taskReference(savedTask));
+      } finally {
+        expiredClock.mockRestore();
+      }
+      // Keep checking the consumed legacy format after clearing the newly recovered result.
+      f.store.db
+        .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')
+        .run('task.queue:%', JSON.stringify(savedTask.id));
+      f.store.db.prepare('DELETE FROM bot_receipts WHERE id=?').run(update);
+      f.store.db.prepare('UPDATE bot_actions SET consumed=1 WHERE id=?').run(actionId);
+      f.store.setSetting('telegram.taskChoiceResult:fixture_bot:' + actionId, null);
+      await bot.stop();
+      ({ api, bot } = createBot());
+      await bot.handle(choice);
+      expect(lastText()).toContain(taskReference(queued()[0]!));
+      expect(queued()).toHaveLength(1);
+
+      const originalNow = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(originalNow + 660_000);
+      try {
+        const resend = () => {
+          const next = structuredClone(choice);
+          next.update_id = ++updateId;
+          next.callback_query!.id = String(updateId);
+          return bot.handle(next);
+        };
+        await resend();
+        expect(lastText()).toContain(taskReference(queued()[0]!));
+        f.store.setSetting('telegram.currentDaddy', null);
+        const pending = '/task --no-plan -- Fresh choice after cleanup';
+        await bot.handle(privateChoice ? privateMessage(pending) : message(pending, 7, 18));
+        expect(
+          f.store.db
+            .prepare('SELECT 1 FROM bot_actions WHERE id=?')
+            .get(choice.callback_query!.data!.slice('dad:choose:'.length)),
+        ).toBeUndefined();
+        await resend();
+        expect(lastText()).toContain(taskReference(queued()[0]!));
+        const reopened = new Store(join(f.dir, 'state.sqlite'));
+        try {
+          expect(
+            reopened.setting(
+              'telegram.taskChoiceResult:fixture_bot:' +
+                choice.callback_query!.data!.slice('dad:choose:'.length),
+            ),
+          ).toMatchObject({ taskId: queued()[0]!.id });
+        } finally {
+          reopened.close();
+        }
+        const wrongOwner = structuredClone(choice);
+        wrongOwner.update_id = ++updateId;
+        wrongOwner.callback_query!.id = String(updateId);
+        wrongOwner.callback_query!.from.id = 99;
+        const beforeUnauthorized = sent.length;
+        await bot.handle(wrongOwner);
+        expect(
+          sent
+            .slice(beforeUnauthorized)
+            .some(({ body }) => String(body.text).includes(taskReference(queued()[0]!))),
+        ).toBe(false);
+        if (!privateChoice) {
+          await bot.handle(click(choice.callback_query!.data!, 7, 17));
+          expect(lastText()).toContain('This action expired');
+        }
+        expect(f.store.jobs(queued()[0]!.id)).toHaveLength(1);
+        expect(
+          f.store.setting(`telegram.newSession:7:${privateChoice ? '7:0' : '-10042:18'}:command`),
+        ).toBeDefined();
+      } finally {
+        clock.mockRestore();
+      }
+      f.store.setSetting('telegram.currentDaddy', null);
+      const unused = '/task --no-plan -- Never queue an expired choice';
+      await bot.handle(privateChoice ? privateMessage(unused) : message(unused, 7, 18));
+      const expired = click(buttonFor(choiceSession.title), 7, 18);
+      if (privateChoice) expired.callback_query!.message = { chat: { id: 7, type: 'private' } };
+      f.store.db
+        .prepare("UPDATE bot_actions SET data=json_set(data,'$.expiresAt',0) WHERE id=?")
+        .run(expired.callback_query!.data!.slice('dad:choose:'.length));
+      await bot.handle(expired);
+      expect(lastText()).toContain('This action expired');
+      expect(
+        f.store
+          .tasks(choiceSession.id)
+          .some((task) => task.requirements === 'Never queue an expired choice'),
+      ).toBe(false);
+      f.store.setSetting(
+        `telegram.newSession:7:${privateChoice ? 7 : -10042}:${privateChoice ? 0 : 18}:command`,
+        null,
+      );
+    }
+    f.store.setSetting('telegram.currentDaddy', null);
+    await bot.handle(privateMessage('/task --no-plan -- Resolve through slash session'));
+    const viaSession = click(buttonFor(choiceSession.title));
+    viaSession.callback_query!.message = { chat: { id: 7, type: 'private' } };
+    await bot.handle(privateMessage('/session ' + choiceSession.id));
+    const sessionTask = f.store
+      .tasks(choiceSession.id)
+      .find(({ title }) => title === 'Resolve through slash session')!;
+    expect(sessionTask).toBeDefined();
+    await bot.handle(viaSession);
+    expect(lastText()).toContain(taskReference(sessionTask));
+    expect(f.store.jobs(sessionTask.id)).toHaveLength(1);
+    const replayTarget = f.daddy.create({
+      workspaceId: f.workspace.id,
+      requirements: 'Replay target',
+    });
+    await bot.handle(message('/attach ' + replayTarget.id.slice(0, 8), 7, 20));
+    for (const inPrivate of [true, false]) {
+      const firstGroup = inPrivate ? choiceSession : replayTarget;
+      if (inPrivate) await bot.handle(privateMessage('/session ' + firstGroup.id));
+      const send = (text: string) => (inPrivate ? privateMessage(text) : message(text, 7, 20));
+      const first = send('/task --no-plan -- First replay route ' + inPrivate);
+      await bot.handle(first);
+      const next = { ...f.workspace, repoPath: f.workspace.repoPath + '/next' };
+      const selected = vi.spyOn(f.daddy.workspaces, 'selection').mockResolvedValueOnce(next);
+      try {
+        await bot.handle(send('/repo ' + next.repoPath));
+        const confirmRepo = click(buttonFor('Use this folder once'), 7, 20);
+        if (inPrivate) confirmRepo.callback_query!.message = { chat: { id: 7, type: 'private' } };
+        await bot.handle(confirmRepo);
+        expect(lastText()).toContain('Repository for next task');
+      } finally {
+        selected.mockRestore();
+      }
+      if (inPrivate) await bot.handle(privateMessage('/session ' + replayTarget.id));
+      await bot.handle(first);
+      await bot.handle({ ...first, update_id: ++updateId });
+      const matches = () =>
+        f.store.tasks().filter((task) => task.requirements === 'First replay route ' + inPrivate);
+      expect(matches()).toHaveLength(1);
+      expect(matches()[0]).toMatchObject({
+        groupId: firstGroup.id,
+        repoPath: f.workspace.repoPath,
+      });
+      if (inPrivate) {
+        await bot.handle(privateMessage('/task --no-plan -- A truly new message'));
+        expect(
+          f.store.tasks(replayTarget.id).find((task) => task.title === 'A truly new message'),
+        ).toBeDefined();
+        await bot.handle(privateMessage('/session ' + firstGroup.id));
+        await bot.handle({ ...first, update_id: ++updateId });
+      }
+      await bot.handle(send('/task --no-plan -- Use the next repository ' + inPrivate));
+      expect(
+        f.store
+          .tasks(firstGroup.id)
+          .find((task) => task.title === 'Use the next repository ' + inPrivate)?.repoPath,
+      ).toBe(next.repoPath);
+    }
+    f.store.setSetting('telegram.currentDaddy', group.id);
+    for (const task of f.store
+      .tasks()
+      .filter(({ title }) =>
+        /^(First replay route|Use the next repository|A truly new message)/.test(title),
+      )) {
+      f.store.cancelJobs(task.id);
+      f.store.saveTask({ ...task, state: 'complete' });
+    }
+    const limitUrl = session + '/tasks/' + task!.id + '/review-limit';
+    const setLimit = (limit: number | null, previous: number | null) =>
+      app.inject({
+        method: 'POST',
+        url: limitUrl,
+        payload: {
+          limit,
+          expected: {
+            task: {
+              head: task!.revision?.head ?? '',
+              revision: task!.revision,
+              generation: task!.generation,
+            },
+            groupGeneration: group.generation,
+            limit: previous,
+          },
+        },
+      });
+    const openLimit = async (inPrivate: boolean) => {
+      await bot.handle((inPrivate ? privateMessage : message)(`/task ${id}`));
+      const update = click(buttonFor('Review round limit'));
+      if (inPrivate) {
+        update.callback_query!.message!.chat = { id: 7, type: 'private' };
+        delete update.callback_query!.message!.message_thread_id;
+      }
+      await bot.handle(update);
+      const command = /\/review_limit [A-Za-z0-9_-]{16}/.exec(String(lastText()))?.[0];
+      expect(command).toBeDefined();
+      return command;
+    };
+    expect((await setLimit(15, null)).statusCode).toBe(200);
+    const staleLimit = await openLimit(false);
+    expect((await setLimit(16, 15)).statusCode).toBe(200);
+    expect((await setLimit(null, 15)).statusCode).toBe(409);
+    await bot.handle(message(staleLimit + ' off'));
+    expect(lastText()).toContain('Settings changed');
+    const freshLimit = await openLimit(false);
+    await bot.handle(message(freshLimit + ' off', 7, 18));
+    expect(f.store.getTask(task!.id).reviewRoundLimit).toBe(16);
+    await bot.handle(message(freshLimit + ' off'));
+    expect((await app.inject(session)).json().tasks[0].reviewRoundLimit).toBeNull();
+    const privateLimit = await openLimit(true);
+    await bot.handle(privateMessage(privateLimit + ' 18'));
+    expect((await app.inject(session)).json().tasks[0].reviewRoundLimit).toBe(18);
+    expect((await setLimit(null, 18)).statusCode).toBe(200);
+
     const queuedPlan = () => f.store.activeJobs(task!.id).find((job) => job.kind === 'plan')!;
     expect(queuedPlan().profile).toMatchObject({ model: 'gpt-6-astra', effort: 'max' });
     const architectUrl = session + '/tasks/' + task!.id + '/architect';
@@ -117,18 +508,14 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       payload: { profile: { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' } },
     });
     expect(updated.statusCode).toBe(200);
-    await bot.handle(click(`dad:arch-reset:t:${task!.id}`, 7, 18));
+    await bot.handle(click(`dad:arch-task:${task!.id}`));
+    const resetTaskArchitect = buttonFor('Use the session architect profile');
+    await bot.handle(click(resetTaskArchitect, 7, 18));
     expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
-    await bot.handle(click(`dad:arch-reset:t:${task!.id}`));
+    await bot.handle(click(resetTaskArchitect));
     expect((await app.inject(session)).json().tasks[0].architectProfile).toBeUndefined();
     expect(queuedPlan().profile).toEqual(group.daddy);
     await bot.handle(click(`dad:arch-task:${task!.id}`));
-    const keyboard = () =>
-      (
-        sent.filter((x) => x.method === 'sendMessage').at(-1)?.body.reply_markup as {
-          inline_keyboard: { text: string; callback_data: string }[][];
-        }
-      ).inline_keyboard.flat();
     await bot.handle(click(keyboard().find((b) => b.text.includes('gpt-5.6-sol'))!.callback_data));
     await bot.handle(click(keyboard().find((b) => b.text === 'max')!.callback_data));
     expect((await app.inject(session)).json().tasks[0].architectProfile).toMatchObject({
@@ -159,21 +546,26 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         model: 'architect-30',
       });
       expect(queuedPlan().profile?.model).toBe('gpt-5.6-sol');
-      await bot.handle(click(`dad:arch-reset:g:${group.id}`));
+      await bot.handle(click(`dad:models:${group.id}:architect`));
+      await bot.handle(click(buttonFor('Use the shared reviewer profile')));
       expect(f.store.getGroup(group.id).architectProfile).toBeUndefined();
     } finally {
       list.mockRestore();
     }
-    await bot.handle(click(`dad:sm:${group.id}:on`, 99));
+    await bot.handle(click(`dad:settings:${group.id}`));
+    const enableMerge = buttonFor('Enable auto-merge for session');
+    await bot.handle(click(enableMerge, 99));
     expect((await app.inject(session)).json().group.autoMerge).toBe(false);
-    await bot.handle(click(`dad:sm:${group.id}:on`));
+    await bot.handle(click(enableMerge));
     expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
       mode: 'inherit',
       enabled: true,
     });
-    await bot.handle(click(`dad:tm:${task!.id}:off`, 7, 18));
+    await bot.handle(click(`dad:task:${task!.id}`));
+    const disableMerge = buttonFor('Off');
+    await bot.handle(click(disableMerge, 7, 18));
     expect((await app.inject(session)).json().tasks[0].autoMerge.mode).toBe('inherit');
-    await bot.handle(click(`dad:tm:${task!.id}:off`));
+    await bot.handle(click(disableMerge));
     expect((await app.inject(session)).json().tasks[0].autoMerge).toMatchObject({
       mode: 'off',
       enabled: false,
@@ -248,21 +640,187 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         .flat()
         .map(({ callback_data }) => callback_data);
     };
-    for (const mode of ['on', 'off', 'inherit']) {
-      const button = callbacks().find((data) => data.startsWith(`dad:tm:${tenth.id}:${mode}`))!;
-      await bot.handle(click(button));
+    for (const mode of ['On', 'Off', 'Session default']) {
+      await bot.handle(click(buttonFor(mode)));
       expect(callbacks()).toContain(backToQueue);
     }
     const verifyButton = callbacks().find((data) => data.startsWith('dad:vm:'))!;
     expect(Buffer.byteLength(verifyButton)).toBeLessThanOrEqual(64);
+    await bot.handle(click(verifyButton, 99));
+    await bot.handle(click(verifyButton, 7, 18));
+    expect(action).not.toHaveBeenCalled();
     await bot.handle(click(verifyButton));
-    expect(action).toHaveBeenCalledWith(withPr.id, 'verify-merge', '', {
-      groupId: group.id,
-      head: withPr.revision!.head,
-      generation: withPr.generation,
-    });
+    expect(action).toHaveBeenCalledWith(
+      withPr.id,
+      'verify-merge',
+      '',
+      {
+        groupId: group.id,
+        head: withPr.revision!.head,
+        revision: withPr.revision,
+        generation: withPr.generation,
+      },
+      expect.any(Function),
+    );
     expect(callbacks()).toContain(backToQueue);
+    await bot.handle(click(verifyButton));
+    expect(action).toHaveBeenCalledTimes(1);
     action.mockRestore();
+    await bot.handle(click(openTenth));
+    const stale = buttonFor('Verify merge');
+    f.store.saveTask({ ...withPr, revision: { ...withPr.revision!, head: 'c'.repeat(40) } });
+    await bot.handle(click(stale));
+    expect(lastText()).toContain('The task changed');
+    const pr = {
+      ...(await new DemoProvider(f.store).getPR(taskPrRef(withPr))),
+      ...withPr.revision!,
+      checks: 'missing' as const,
+    };
+    f.store.setSetting('demo-pr:10', pr);
+    f.store.saveTask({ ...withPr, pr, state: 'awaiting_checks' });
+    const currentWaiver = {
+      action: 'waive-checks',
+      taskId: tenth.id,
+      expectedGeneration: withPr.generation,
+      expectedHead: withPr.revision!.head,
+      expectedRevision: withPr.revision,
+    };
+    const noReason = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: currentWaiver,
+    });
+    expect(noReason.statusCode).toBe(400);
+    const wrongBase = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: {
+        ...currentWaiver,
+        reason: 'Reviewed locally',
+        expectedRevision: { ...withPr.revision!, base: 'd'.repeat(40) },
+      },
+    });
+    expect(wrongBase.statusCode).toBe(409);
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+
+    await bot.handle(click(openTenth));
+    const handoff = keyboard().find((button) => button.text.startsWith('Waive CI checks'));
+    const start = new URL(handoff!.url!).searchParams.get('start')!;
+    const key = start.slice('waive_'.length);
+    await bot.handle(message('/waive ' + key + ' Reviewed locally'));
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+    await bot.handle(privateMessage('/start@fixture_bot ' + start));
+    expect(lastText()).toContain('Reason for waiving CI checks');
+    const originalRoom = f.store.setting('telegram.group');
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const blocker = f.engine.lock(tenth.id, () => waiting);
+    const actionCall = vi.spyOn(f.engine, 'action');
+    const staleWaiver = bot.handle(privateMessage('/waive ' + key + ' Interrupted route'));
+    try {
+      await vi.waitFor(() => expect(actionCall).toHaveBeenCalledOnce());
+      f.store.setSetting('telegram.group', null);
+    } finally {
+      release();
+      await Promise.all([blocker, staleWaiver]);
+      actionCall.mockRestore();
+      f.store.setSetting('telegram.group', originalRoom);
+    }
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+    const confirmWaiver = privateMessage('/waive ' + key + ' Reviewed locally');
+    await bot.handle(confirmWaiver);
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(confirmWaiver);
+    await bot.handle(privateMessage('/waive ' + key + ' Reviewed locally again'));
+    expect(f.store.events(tenth.id).filter(({ type }) => type === 'checks.waived')).toMatchObject([
+      { data: { reason: 'Reviewed locally', head: withPr.revision!.head } },
+    ]);
+
+    const beforeReview = { ...withPr, pr, state: 'awaiting_review_checks' as const };
+    f.store.saveTask(beforeReview);
+    const offlineReason = 'Verified on the offline build. '.repeat(140).slice(0, 4000);
+    const webWaiver = await app.inject({
+      method: 'POST',
+      url: session + '/task-action',
+      payload: { ...currentWaiver, reason: offlineReason },
+    });
+    expect(webWaiver.statusCode).toBe(200);
+    expect(f.store.getTask(tenth.id).state).toBe('awaiting_review_checks');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeDefined();
+
+    f.store.saveTask(beforeReview);
+    await bot.handle(click(openTenth));
+    const preReview = keyboard().find((button) => button.text.startsWith('Waive CI checks'));
+    expect(preReview?.url).toBeDefined();
+    const preReviewStart = new URL(preReview!.url!).searchParams.get('start')!;
+    await bot.handle(privateMessage('/start ' + preReviewStart));
+    expect(lastText()).toContain('Reason for waiving CI checks');
+    const preReviewKey = preReviewStart.slice('waive_'.length);
+    await bot.handle(privateMessage('/waive ' + preReviewKey + ' ' + offlineReason + 'x'));
+    expect(lastText()).toContain('at most 4000 characters');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeUndefined();
+    await bot.handle(privateMessage('/waive ' + preReviewKey + ' ' + offlineReason));
+    expect(f.store.getTask(tenth.id).state).toBe('awaiting_review_checks');
+    expect(f.store.getTask(tenth.id).checksWaivedAt).toBeDefined();
+    expect(
+      f.store
+        .events(tenth.id)
+        .filter(({ type }) => type === 'checks.waived')
+        .at(-1)?.data,
+    ).toMatchObject({ reason: offlineReason, head: withPr.revision!.head });
+
+    const reviewPr = { ...pr, checks: 'passing' as const };
+    f.store.setSetting('demo-pr:10', reviewPr);
+    f.store.cancelJobs(tenth.id);
+    f.store.saveTask({
+      ...beforeReview,
+      pr: reviewPr,
+      state: 'queued',
+      round: 15,
+      reviewRoundLimit: 15,
+    });
+    await f.engine.review(tenth.id);
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'paused', round: 15 });
+    await bot.handle(click(openTenth));
+    expect(lastText()).toContain('Review round limit · 15');
+    expect(keyboard().some(({ text }) => text === 'Resume task')).toBe(false);
+    await bot.handle(click(buttonFor('Review round limit')));
+    const enterLimit = /\/review_limit [A-Za-z0-9_-]{16}/.exec(String(lastText()))?.[0];
+    await bot.handle(message(enterLimit + ' 16'));
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'paused', reviewRoundLimit: 16 });
+    const resumeButton = buttonFor('Resume task');
+    await bot.handle(click(resumeButton, 7, 18));
+    expect(f.store.getTask(tenth.id).state).toBe('paused');
+    const resumeUpdate = click(resumeButton);
+    const resumeId = resumeUpdate.update_id;
+    f.store.db
+      .exec(`CREATE TRIGGER interrupt_resume BEFORE INSERT ON bot_receipts WHEN NEW.id=${resumeId}
+      BEGIN SELECT RAISE(ABORT, 'interrupted before receipt'); END`);
+    await expect(bot.handle(resumeUpdate)).rejects.toThrow('interrupted before receipt');
+    expect(f.store.getTask(tenth.id).state).toBe('paused');
+    f.store.db.exec('DROP TRIGGER interrupt_resume');
+    await bot.stop();
+    ({ api, bot } = createBot());
+    f.store.db.exec(`CREATE TRIGGER interrupt_resume_reply BEFORE DELETE ON settings
+      WHEN OLD.key='telegram.operationResult:${resumeId}'
+      BEGIN SELECT RAISE(ABORT, 'interrupted before acknowledgement'); END`);
+    await expect(bot.handle(resumeUpdate)).rejects.toThrow('interrupted before acknowledgement');
+    expect(f.store.getTask(tenth.id).state).toBe('queued');
+    f.store.db.exec('DROP TRIGGER interrupt_resume_reply');
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(resumeUpdate);
+    expect(lastText()).toContain('This action has already completed');
+    await bot.handle(resumeUpdate);
+    expect(f.store.events(tenth.id).filter(({ type }) => type === 'human.resume')).toHaveLength(1);
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'queued', round: 15 });
+    await f.engine.review(tenth.id);
+    expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'reviewing', round: 16 });
+    f.store.cancelJobs(tenth.id);
+
     f.store.saveTask({ ...tenth, state: 'complete' });
     await bot.handle(click(backToQueue));
     expect(lastText()).toContain('Task queue\n\nFix search');
@@ -589,7 +1147,629 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       expect(lastText()).toContain('\n\n' + publicQuestion);
       f.store.setSetting('github.quota:' + task!.ref.host, null);
     }
+
+    // Both command spellings acknowledge the update and leave the next command usable.
+    const poolUpdate = message('/pool 4');
+    await bot.handle(poolUpdate);
+    expect(f.daddy.board(group.id).workers.target).toBe(4);
+    expect(
+      f.store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(poolUpdate.update_id),
+    ).toBeDefined();
+    await bot.handle(message('/pool@fixture_bot 5'));
+    await bot.handle(message('/status'));
+    expect(f.daddy.board(group.id).workers.target).toBe(5);
+    await bot.handle(click(`dad:pool:${group.id}:8`));
+    expect(f.daddy.board(group.id).workers.target).toBe(5);
+
+    // A success followed by an interrupted acknowledgement cannot overwrite a subsequent web edit.
+    const oldInstructions = message('/instructions worker old');
+    const prepare = f.store.db.prepare.bind(f.store.db);
+    let receipts = 0;
+    const fault = vi.spyOn(f.store.db, 'prepare').mockImplementation((sql) => {
+      if (sql === 'INSERT OR IGNORE INTO bot_receipts VALUES(?,?)' && ++receipts === 2)
+        throw new Error('Interrupted acknowledgement');
+      return prepare(sql);
+    });
+    try {
+      await expect(bot.handle(oldInstructions)).rejects.toThrow('Interrupted acknowledgement');
+    } finally {
+      fault.mockRestore();
+    }
+    const savedInstructions = f.daddy.group(group.id).instructions!;
+    expect(savedInstructions.worker.prompt).toBe('old');
+    expect(
+      (await edit({ instructions: { ...savedInstructions, worker: { prompt: 'newer from web' } } }))
+        .statusCode,
+    ).toBe(200);
+    await bot.handle(oldInstructions);
+    expect(lastText()).toMatch(/already completed|уже выполнено/);
+    expect(f.daddy.group(group.id).instructions?.worker.prompt).toBe('newer from web');
+
+    const stopBeforeReply = privateMessage('/notifications off');
+    const failedReply = vi
+      .spyOn(api, 'send')
+      .mockRejectedValueOnce(new Error('Stopped before sending confirmation'));
+    try {
+      await expect(bot.handle(stopBeforeReply)).rejects.toThrow(
+        'Stopped before sending confirmation',
+      );
+    } finally {
+      failedReply.mockRestore();
+    }
+    expect(f.store.setting('notifications.telegram')).toMatchObject({ enabled: false });
+    f.store.setSetting('notifications.telegram', { enabled: true, mode: 'all' });
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(stopBeforeReply);
+    expect(lastText()).toMatch(/already completed|уже выполнено/);
+    expect(f.store.setting('notifications.telegram')).toMatchObject({ enabled: true, mode: 'all' });
+
+    const crew = f.daddy.group(group.id);
+    crew.workerSlots = [{ number: 1, taskId: task!.id }];
+    f.store.saveGroup(crew);
+    await bot.handle(message('/worker 1 gpt-5.6-sol medium --force'));
+    const force = keyboard().find((button) =>
+      button.callback_data?.startsWith('dad:force:'),
+    )!.callback_data;
+    const reassigned = f.daddy.group(group.id);
+    reassigned.workerSlots = [{ number: 1, taskId: withPr.id }];
+    f.store.saveTask(withPr);
+    f.store.saveGroup(reassigned);
+    const configure = vi.spyOn(f.daddy, 'configureWorker');
+    await bot.handle(click(force));
+    expect(f.store.getTask(withPr.id).generation).toBe(withPr.generation);
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile).toBeUndefined();
+    await bot.handle(message('/worker 1 gpt-5.6-sol medium --force'));
+    expect(lastText()).toContain(withPr.title);
+    await bot.handle(
+      click(
+        keyboard().find((button) => button.callback_data?.startsWith('dad:force:'))!.callback_data,
+      ),
+    );
+    expect(configure).toHaveBeenLastCalledWith(
+      group.id,
+      1,
+      expect.objectContaining({ model: 'gpt-5.6-sol' }),
+      expect.objectContaining({ expectedTaskId: withPr.id }),
+    );
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile?.model).toBe('gpt-5.6-sol');
+    configure.mockRestore();
+
+    await bot.handle(privateMessage('/agents daddy codex'));
+    expect(f.engine.defaultAgents().daddy).toEqual({ engine: 'codex' });
+    await bot.handle(privateMessage('/agents worker codex'));
+    expect(f.engine.defaultAgents().worker).toEqual({ engine: 'codex' });
+    f.store.setSetting('telegram.currentDaddy', null);
+    await bot.handle(privateMessage('/task --no-plan -- Keep this queued request'));
+    await bot.handle(privateMessage('/session ' + other.id));
+    expect(
+      f.store
+        .tasks(other.id)
+        .filter(({ requirements }) => requirements === 'Keep this queued request'),
+    ).toHaveLength(1);
+
+    await bot.handle(message('/attach ' + other.id, 7, 18));
+    for (const viaButton of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      await bot.handle(privateMessage('/pause'));
+      const choice = () =>
+        keyboard().find((button) => button.text === f.daddy.group(other.id).title)!.callback_data;
+      const pick = async () => {
+        if (viaButton) {
+          const update = click(choice());
+          update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+          await bot.handle(update);
+        } else await bot.handle(privateMessage('/session ' + other.id));
+      };
+      await f.daddy.pause(other.id);
+      await f.daddy.resume(other.id);
+      await pick();
+      expect(f.daddy.group(other.id).daddyState).toBe('active');
+      await pick();
+      expect(f.daddy.group(other.id).daddyState).toBe('paused');
+      await f.daddy.resume(other.id);
+    }
+
+    for (const viaButton of [true, false]) {
+      f.store.setSetting('telegram.currentDaddy', null);
+      await bot.handle(privateMessage('/worker 1 gpt-5.6-sol medium'));
+      const pick = () => {
+        if (!viaButton) return bot.handle(privateMessage('/session ' + other.id));
+        const data = keyboard().find(
+          (button) => button.text === f.daddy.group(other.id).title,
+        )!.callback_data;
+        const update = click(data);
+        update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+        return bot.handle(update);
+      };
+      const before = f.daddy.board(other.id).workers.slots[0]?.profile;
+      await f.daddy.pause(other.id);
+      await f.daddy.resume(other.id);
+      await pick();
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const validation = vi
+        .spyOn(f.daddy.catalogue, 'validate')
+        .mockImplementationOnce(() => blocked);
+      const delayed = pick();
+      try {
+        await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+        await f.daddy.pause(other.id);
+        await f.daddy.resume(other.id);
+      } finally {
+        release();
+        await delayed;
+        validation.mockRestore();
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+      await pick();
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toMatchObject({
+        model: 'gpt-5.6-sol',
+        effort: 'medium',
+      });
+      const next = f.daddy.group(other.id);
+      next.workerSlots = [];
+      f.store.saveGroup(next);
+    }
+
+    const workerOrigin = f.store.setting('telegram.group');
+    for (const interrupt of ['generation', 'topic'] as const) {
+      const before = f.daddy.board(other.id).workers.slots[0]?.profile;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const validation = vi
+        .spyOn(f.daddy.catalogue, 'validate')
+        .mockImplementationOnce(() => blocked);
+      const delayed = bot.handle(message('/worker 1 gpt-6-astra medium', 7, 18));
+      try {
+        await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+        if (interrupt === 'generation') {
+          await f.daddy.pause(other.id);
+          await f.daddy.resume(other.id);
+        } else f.store.setSetting('telegram.group', null);
+      } finally {
+        release();
+        await delayed;
+        validation.mockRestore();
+        f.store.setSetting('telegram.group', workerOrigin);
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(before);
+    }
+    await bot.handle(message('/worker 1 gpt-6-astra medium', 7, 18));
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile).toMatchObject({
+      model: 'gpt-6-astra',
+      effort: 'medium',
+    });
+
+    const oldBoard = f.daddy.board(other.id);
+    const oldSlot = oldBoard.workers.slots[0]!.profile!;
+    await f.daddy.pause(other.id);
+    await f.daddy.resume(other.id);
+    const updateSlot = (generation: number) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/daddy/sessions/' + other.id + '/workers/1',
+        payload: {
+          profile: { ...oldSlot, effort: 'max' },
+          baseline: oldSlot,
+          expectedGeneration: generation,
+        },
+      });
+    expect((await updateSlot(oldBoard.group.generation)).statusCode).toBe(409);
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(oldSlot);
+    expect((await updateSlot(f.daddy.group(other.id).generation)).statusCode).toBe(200);
+    expect(f.daddy.board(other.id).workers.slots[0]?.profile?.effort).toBe('max');
+
+    const catalogueEfforts = vi
+      .spyOn(f.daddy.catalogue, 'validate')
+      .mockImplementation(async (profile) => {
+        if (
+          (profile.model === 'standard' ||
+            profile.model === 'limited' ||
+            profile.model === 'high-only') &&
+          profile.effort &&
+          !(profile.model === 'limited' && profile.effort === 'medium') &&
+          !(profile.model === 'high-only' && profile.effort === 'high')
+        )
+          throw new AppError('effort_unavailable', 'The model does not support that effort', 422);
+      });
+    try {
+      const url = '/api/daddy/sessions/' + other.id + '/workers/1';
+      const set = (profile: { engine: string; model: string; effort?: string }) =>
+        app.inject({
+          method: 'POST',
+          url,
+          payload: { profile, expectedGeneration: f.daddy.group(other.id).generation },
+        });
+      const initial = { engine: 'claude', model: 'sonnet', effort: 'high' };
+      for (const model of ['standard', 'limited']) {
+        const target = { engine: 'claude', model };
+        expect((await set(initial)).statusCode).toBe(200);
+        await bot.handle(message('/worker 1 ' + model + ' high', 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(initial);
+        await bot.handle(message('/worker 1 ' + model, 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+        expect((await set(initial)).statusCode).toBe(200);
+        expect((await set(target)).statusCode).toBe(200);
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+      }
+      for (const model of ['sonnet', 'high-only']) {
+        const target = { engine: 'claude', model };
+        expect((await set(initial)).statusCode).toBe(200);
+        await bot.handle(message('/worker 1 ' + model + ' default', 7, 18));
+        expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(target);
+      }
+
+      expect((await set(initial)).statusCode).toBe(200);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      catalogueEfforts.mockImplementationOnce(() => blocked);
+      catalogueEfforts.mockClear();
+      const delayed = bot.handle(message('/worker 1 high-only', 7, 18));
+      const later = { ...initial, effort: 'medium' };
+      try {
+        await vi.waitFor(() => expect(catalogueEfforts).toHaveBeenCalledOnce());
+        expect((await set(later)).statusCode).toBe(200);
+      } finally {
+        release();
+        await delayed;
+      }
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual(later);
+      await bot.handle(message('/worker 1 high-only', 7, 18));
+      expect(f.daddy.board(other.id).workers.slots[0]?.profile).toEqual({
+        engine: 'claude',
+        model: 'high-only',
+      });
+    } finally {
+      catalogueEfforts.mockRestore();
+    }
+
+    const profileUrl = session + '/workers/2';
+    const workerBaseline = { engine: 'codex', model: 'gpt-5.6-sol', effort: 'max' };
+    const saveWorker = (profile: typeof workerBaseline, baseline?: typeof workerBaseline) =>
+      app.inject({ method: 'POST', url: profileUrl, payload: { profile, baseline } });
+    expect((await saveWorker(workerBaseline)).statusCode).toBe(200);
+    await bot.handle(message('/worker 2 gpt-6-astra'));
+    expect(
+      (await saveWorker({ ...workerBaseline, effort: 'medium' }, workerBaseline)).statusCode,
+    ).toBe(200);
+    const combined = { engine: 'codex', model: 'gpt-6-astra', effort: 'medium' };
+    expect(f.daddy.board(group.id).workers.slots[1]?.profile).toEqual(combined);
+    expect(
+      (await saveWorker({ ...workerBaseline, model: 'other-model' }, workerBaseline)).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[1]?.profile).toEqual(combined);
+
+    await bot.handle(privateMessage('/session ' + group.id));
+    await bot.handle(message('/export ' + other.id));
+    const exportLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    const exportStart = new URL(exportLink!.url!).searchParams.get('start');
+    const exportedBefore = documents.length;
+    await bot.handle(privateMessage('/start ' + exportStart));
+    expect(documents).toHaveLength(exportedBefore + 1);
+    expect(documents.at(-1)).toContain('From Telegram');
+    expect(f.store.setting('telegram.currentDaddy')).toBe(group.id);
+
+    await bot.handle(message('/concurrency@fixture_bot 3'));
+    const changeLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    const changeStart = new URL(changeLink!.url!).searchParams.get('start');
+    const limitBefore = f.daddy.maxConcurrentAgents();
+    await bot.handle(privateMessage('/start ' + changeStart));
+    expect(f.daddy.maxConcurrentAgents()).toBe(limitBefore);
+    const privateClick = click(
+      keyboard().find((button) => button.callback_data?.startsWith('dad:private:'))!.callback_data,
+    );
+    privateClick.callback_query!.message = { chat: { id: 7, type: 'private' } };
+    f.store.setSetting('worker.maxAgents', 5);
+    await bot.handle(privateClick);
+    expect(f.daddy.maxConcurrentAgents()).toBe(5);
+    await bot.handle(message('/concurrency 3'));
+    const freshLink = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    await bot.handle(
+      privateMessage('/start ' + new URL(freshLink!.url!).searchParams.get('start')),
+    );
+    const confirm = () => {
+      const update = click(
+        keyboard().find((button) => button.callback_data?.startsWith('dad:private:'))!
+          .callback_data,
+      );
+      update.callback_query!.message = { chat: { id: 7, type: 'private' } };
+      return bot.handle(update);
+    };
+    await confirm();
+    expect(f.daddy.maxConcurrentAgents()).toBe(3);
+
+    const openPrivate = async () => {
+      const link = keyboard().find((button) => button.url?.includes('?start=operation_'));
+      await bot.handle(privateMessage('/start ' + new URL(link!.url!).searchParams.get('start')));
+    };
+    for (const role of ['daddy', 'worker'] as const) {
+      const peer = role === 'daddy' ? 'worker' : 'daddy';
+      const configured = { engine: 'codex', model: 'gpt-6-astra', effort: 'max' };
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [role]: { engine: 'codex' } });
+      await bot.handle(message('/agents ' + role + ' codex'));
+      await openPrivate();
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [role]: configured });
+      await confirm();
+      expect(f.engine.defaultAgents()[role]).toEqual(configured);
+      await bot.handle(message('/agents ' + role + ' codex'));
+      await openPrivate();
+      const unrelated = { engine: 'codex', model: 'gpt-5.6-sol', effort: 'medium' };
+      f.engine.setDefaultAgents({ ...f.engine.defaultAgents(), [peer]: unrelated });
+      await confirm();
+      expect(f.engine.defaultAgents()[role]).toEqual({ engine: 'codex' });
+      expect(f.engine.defaultAgents()[peer]).toEqual(unrelated);
+    }
+
+    const attachDocument = async (caption: string, update = privateMessage()) => {
+      await bot.handle({
+        ...update,
+        message: {
+          ...update.message!,
+          text: undefined,
+          caption,
+          document: { file_id: 'instruction-test', file_name: 'Skill.md' },
+        },
+      });
+    };
+    const downloadsBefore = sent.filter(({ method }) => method === 'getFile').length;
+    await attachDocument('/import@another_bot ' + other.id, message(''));
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore);
+    await attachDocument('/import@fixture_bot ' + other.id, message(''));
+    const attachment = keyboard().find((button) => button.url?.includes('?start=operation_'));
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore);
+    await bot.handle(
+      privateMessage('/start ' + new URL(attachment!.url!).searchParams.get('start')),
+    );
+    await confirm();
+    expect(sent.filter(({ method }) => method === 'getFile')).toHaveLength(downloadsBefore + 1);
+    expect(f.daddy.group(other.id).instructions?.daddy.prompt).toBe(imported.daddy.prompt);
+    await attachDocument('/import@fixture_bot ' + other.id, message(''));
+    await openPrivate();
+    const retained = f.daddy.group(other.id).instructions;
+    const room = f.store.setting('telegram.group');
+    let sendFile!: (bytes: Uint8Array) => void;
+    const getFile = vi.spyOn(api, 'downloadFile').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          sendFile = resolve;
+        }),
+    );
+    const late = confirm();
+    try {
+      await vi.waitFor(() => expect(getFile).toHaveBeenCalledOnce());
+      f.store.setSetting('telegram.group', null);
+    } finally {
+      sendFile?.(Buffer.from(JSON.stringify({ daddy: { prompt: 'Stale late file' }, worker: {} })));
+      await late;
+      getFile.mockRestore();
+      f.store.setSetting('telegram.group', room);
+    }
+    expect(f.daddy.group(other.id).instructions).toEqual(retained);
+    await attachDocument('/skill_file@fixture_bot ' + other.id + ' worker');
+    expect(f.daddy.group(other.id).instructions?.worker.skills).toHaveLength(1);
+    await attachDocument('/preset_create@fixture_bot From attachment');
+    const library = new InstructionPresets(f.store);
+    const preset = library.list().find((item) => item.name === 'From attachment')!;
+    await attachDocument('/preset_edit@fixture_bot ' + preset.id + ' 1 Renamed attachment');
+    expect(library.get(preset.id)).toMatchObject({ name: 'Renamed attachment', revision: 2 });
+
+    const selective = library.save({
+      name: 'Selective',
+      instructions: { daddy: { prompt: 'Keep this' }, worker: { prompt: 'Skip this' } },
+    });
+    await bot.handle(message('/preset Selective'));
+    await bot.handle(message('/preset_parts ' + selective.id + ' 1'));
+    const omitted = f.daddy
+      .group(group.id)
+      .instructions?.presets?.find((value) => value.preset.id === selective.id)?.omit;
+    expect(omitted).toHaveLength(1);
+    await bot.handle(message('/preset_parts ' + selective.id + ' off'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id),
+    ).toMatchObject({ enabled: false, omit: omitted });
+    await bot.handle(message('/preset Selective'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id),
+    ).toMatchObject({ enabled: true, omit: omitted });
+    await bot.handle(message('/preset_parts ' + selective.id + ' all'));
+    expect(
+      f.daddy
+        .group(group.id)
+        .instructions?.presets?.find((value) => value.preset.id === selective.id)?.omit,
+    ).toEqual([]);
+
+    const beforePause = f.daddy.group(group.id).generation;
+    const shownLimit = f.daddy.board(group.id).workers.target;
+    const shownWorker = f.daddy.board(group.id).workers.slots.find(({ number }) => number === 1)!;
+    const shownTask = f.store.getTask(shownWorker.taskId!);
+    const workerUrl = session + '/workers/1';
+    const workerChange = {
+      profile: { engine: 'codex', model: 'gpt-6-astra', effort: 'max' },
+      forceTaskId: shownTask.id,
+      expected: {
+        groupGeneration: beforePause,
+        task: {
+          generation: shownTask.generation,
+          head: shownTask.revision?.head ?? '',
+          revision: shownTask.revision,
+        },
+      },
+    };
+    const lifecycle = (action: string, expectedGeneration: number) =>
+      app.inject({
+        method: 'POST',
+        url: session + '/' + action,
+        payload: { expectedGeneration },
+      });
+    expect((await lifecycle('pause', beforePause)).statusCode).toBe(200);
+    const resumed = f.daddy.group(group.id).generation;
+    expect((await lifecycle('resume', resumed)).statusCode).toBe(200);
+    expect((await lifecycle('pause', beforePause)).statusCode).toBe(409);
+    expect(f.daddy.group(group.id).daddyState).toBe('active');
+    expect(
+      (
+        await edit({
+          workerLimit: 6,
+          expectedGeneration: beforePause,
+          baseline: { workerLimit: shownLimit },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const workerBefore = f.daddy.board(group.id).workers.slots[0];
+    expect(
+      (await app.inject({ method: 'POST', url: workerUrl, payload: workerChange })).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[0]).toEqual(workerBefore);
+    const currentTask = f.store.getTask(shownTask.id);
+    const staleRevision = { ...currentTask.revision!, head: 'd'.repeat(40) };
+    f.store.saveTask({ ...currentTask, revision: staleRevision });
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: workerUrl,
+          payload: {
+            ...workerChange,
+            expected: {
+              groupGeneration: resumed,
+              task: {
+                generation: currentTask.generation,
+                head: currentTask.revision!.head,
+                revision: currentTask.revision,
+              },
+            },
+          },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(f.daddy.board(group.id).workers.slots[0]).toEqual(workerBefore);
+    const target = f.daddy.board(group.id).workers.target;
+    expect((await edit({ workerLimit: 6, baseline: { workerLimit: target } })).statusCode).toBe(
+      200,
+    );
+    expect((await edit({ workerLimit: 4, baseline: { workerLimit: target } })).statusCode).toBe(
+      409,
+    );
+    expect(f.daddy.board(group.id).workers.target).toBe(6);
+
+    const requestTask = {
+      ...withPr,
+      state: 'needs_input' as const,
+      inputRequest: {
+        runId: 'task-question',
+        role: 'author' as const,
+        generation: withPr.generation,
+      },
+    };
+    f.store.saveTask(requestTask);
+    const question = 'Choose the next step for task ten.';
+    const destination = { chatId: -10042, threadId: 17 };
+    await api.send(destination, question, undefined, {
+      key: `telegram:question:7:${withPr.id}:${taskRequestKey(f.store, requestTask)}`,
+      groupId: group.id,
+    });
+    await api.delivery!.flush();
+    const messageId = sent.findIndex((item) => item.body.text === question) + 1;
+    expect(messageId).toBeGreaterThan(0);
+    const reply = message('Continue the task', 7, 18);
+    const external = { chat: reply.message!.chat, message_id: messageId };
+    await bot.handle(message('/attach ' + other.id, 7, 18));
+    await bot.handle({ ...reply, message: { ...reply.message!, external_reply: external } });
+    expect(f.store.messages(other.id).every((item) => item.text !== 'Continue the task')).toBe(
+      true,
+    );
+
+    const reminderText = 'Reminder for task ten';
+    await api.send(destination, reminderText, undefined, {
+      key: `telegram:question:7:${withPr.id}:${taskRequestKey(f.store, requestTask)}:reminder:1`,
+      groupId: group.id,
+    });
+    await api.delivery!.flush();
+    const reminderId = sent.findIndex((item) => item.body.text === reminderText) + 1;
+    expect(reminderId).toBeGreaterThan(0);
+    const parent = { ...external, message_id: reminderId, message_thread_id: 17 };
+    const answered = message('Continue task ten');
+    await bot.handle({ ...answered, message: { ...answered.message!, reply_to_message: parent } });
+    expect(
+      f.store.messages(group.id).find((item) => item.text === 'Continue task ten')?.origin?.replyTo
+        ?.taskId,
+    ).toBe(withPr.id);
+    const duplicate = message('Second answer for the same question');
+    await bot.handle({
+      ...duplicate,
+      message: { ...duplicate.message!, reply_to_message: { ...parent, message_id: messageId } },
+    });
+    expect(f.store.messages(group.id).some((item) => item.text === duplicate.message!.text)).toBe(
+      false,
+    );
+    f.store.saveTask({ ...requestTask, revision: { ...withPr.revision!, head: 'c'.repeat(40) } });
+    const staleReply = message('Answer to an old question');
+    await bot.handle({
+      ...staleReply,
+      message: { ...staleReply.message!, reply_to_message: parent },
+    });
+    expect(
+      f.store.messages(group.id).every((item) => item.text !== 'Answer to an old question'),
+    ).toBe(true);
+    const coordinator = f.daddy.group(group.id);
+    coordinator.daddyState = 'needs_input';
+    f.store.saveGroup(coordinator);
+    const followUp = f.store.daddyMessage(
+      group.id,
+      'agent',
+      'Coordinator question',
+      undefined,
+      undefined,
+      { phase: 'final', needsReply: true },
+    );
+    await api.send(destination, followUp.text, undefined, {
+      key: 'turn:older-coordinator-run',
+      notificationId: `telegram:dialog:-10042:17:${followUp.id}:final`,
+      groupId: group.id,
+    });
+    await api.delivery!.flush();
+    const followUpId = sent.findIndex((item) => item.body.text === followUp.text) + 1;
+    expect(followUpId).toBeGreaterThan(0);
+    const wrong = message('Wrong coordinator topic', 7, 18);
+    await bot.handle({
+      ...wrong,
+      message: {
+        ...wrong.message!,
+        external_reply: { chat: wrong.message!.chat, message_id: followUpId },
+      },
+    });
+    expect(f.store.messages(other.id).some((item) => item.text === 'Wrong coordinator topic')).toBe(
+      false,
+    );
+    const right = message('Answer the coordinator');
+    await bot.handle({
+      ...right,
+      message: {
+        ...right.message!,
+        reply_to_message: {
+          chat: right.message!.chat,
+          message_id: followUpId,
+          message_thread_id: 17,
+        },
+      },
+    });
+    expect(f.store.messages(group.id).some((item) => item.text === 'Answer the coordinator')).toBe(
+      true,
+    );
   } finally {
+    await localBotApi.close();
     await app.close();
     await bot.stop();
     await f.close();

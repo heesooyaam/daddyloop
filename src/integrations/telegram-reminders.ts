@@ -14,26 +14,35 @@ export function taskRequestKey(store: Store, task: Task) {
     return `architecture-stop:${task.reviewRecovery.reviewId}:${task.reviewRecovery.fingerprint}`;
   if (heldAtReviewLimit(task))
     return `review-limit:${task.reviewRoundLimit}:${task.round}:${task.revision?.head}`;
+  const version = JSON.stringify([
+    task.generation,
+    task.revision?.head,
+    task.revision?.base,
+    task.revision?.start,
+    task.revision?.revisionId,
+  ]);
   if (task.state === 'awaiting_plan_approval')
-    return `plan:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.review?.id ?? ''}`;
+    return `plan:${task.generation}:${task.contextVersion}:${task.revision?.head}:${task.revision?.base}:${task.revision?.start}:${task.revision?.revisionId ?? ''}:${task.review?.id ?? ''}`;
   if (
     task.state === 'needs_input' &&
     task.reason === draftInspectionRequired &&
     task.review &&
     !store.pendingReviewWrites(task.id, task.review.marker).length
   )
-    return 'inspect-draft:' + task.review.id;
+    return 'inspect-draft:' + task.review.id + ':' + version;
   const request = task.inputRequest;
   if (
     task.state === 'needs_input' &&
     request?.generation === task.generation &&
     request.reviewDispute !== 'daddy'
-  )
-    return request.reviewDispute === 'owner' ? 'dispute:' + request.runId : request.runId;
+  ) {
+    const kind = request.reviewDispute === 'owner' ? 'dispute:' : '';
+    return kind + request.runId + ':' + version;
+  }
 }
 
-export function reminderOpen(store: Store, question: OwnerQuestion) {
-  if (!notificationPreferences(store).enabled) return false;
+export function reminderOpen(store: Store, question: OwnerQuestion, requireNotifications = true) {
+  if (requireNotifications && !notificationPreferences(store).enabled) return false;
   const group = store.groups().find((g) => g.id === question.groupId);
   if (!group) return false;
   if (
@@ -56,12 +65,13 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
         `SELECT 1 FROM messages m WHERE m.task_id=?
       AND json_extract(m.data,'$.sender')='user' AND json_extract(m.data,'$.origin.replyTo.messageId') IS NOT NULL
       AND EXISTS (SELECT 1 FROM settings s WHERE s.key GLOB 'telegram.delivery:*'
-        AND (json_extract(s.value,'$.options.key')=? OR json_extract(s.value,'$.options.key') GLOB ?)
+        AND (json_extract(s.value,'$.options.key')=? OR instr(json_extract(s.value,'$.options.key'), ?) = 1)
         AND json_extract(s.value,'$.destination.chatId')=json_extract(m.data,'$.origin.chatId')
+        AND json_extract(s.value,'$.destination.threadId') IS json_extract(m.data,'$.origin.threadId')
         AND EXISTS(SELECT 1 FROM json_each(s.value,'$.messages') delivered
           WHERE json_extract(delivered.value,'$.id')=json_extract(m.data,'$.origin.replyTo.messageId'))) LIMIT 1`,
       )
-      .get(group.id, original, original + ':reminder:*');
+      .get(group.id, original, original + ':reminder:');
   }
   const message = store.messageById(group.id, question.messageId);
   if (!message?.needsReply || message.phase !== 'final' || message.sender !== 'agent') return false;
@@ -82,9 +92,9 @@ export function reminderOpen(store: Store, question: OwnerQuestion) {
 export function nextReminderId(store: Store, originalId: string, time: number) {
   const prior = store.db
     .prepare(
-      'SELECT id,status,at FROM notifications WHERE id=? OR id GLOB ? ORDER BY rowid DESC LIMIT 1',
+      'SELECT id,status,at FROM notifications WHERE id=? OR instr(id, ?) = 1 ORDER BY rowid DESC LIMIT 1',
     )
-    .get(originalId, originalId + ':reminder:*');
+    .get(originalId, originalId + ':reminder:');
   if (!prior) return;
   if (prior.status === 'pending' && prior.id !== originalId) return String(prior.id);
   if (prior.status !== 'sent' && !(prior.status === 'superseded' && prior.id !== originalId))

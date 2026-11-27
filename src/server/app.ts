@@ -420,6 +420,7 @@ export async function buildApp(options: ServerOptions) {
     return reply.code(known ? error.statusCode : 500).send({
       error: {
         code: known ? error.code : 'internal_error',
+        taskConflict: known ? error.taskConflict : undefined,
         message: redact(known ? error.message : String(error)),
       },
     });

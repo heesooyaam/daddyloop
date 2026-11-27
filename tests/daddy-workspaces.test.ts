@@ -143,3 +143,23 @@ it('recovers occupied workers and pending retirements from durable state', async
     await f.close();
   }
 });
+
+it('keeps the configured installation capacity when applying a smaller pool after restart', async () => {
+  const f = daddyFixture(true, 6);
+  try {
+    const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
+    await f.worker.tick();
+    expect(f.daddy.maxConcurrentAgents()).toBe(6);
+    expect(f.daddy.board(group.id).workers.slots).toHaveLength(2);
+    const restarted = new Store(join(f.dir, 'state.sqlite'));
+    try {
+      reconcileWorkerPools(restarted, 6);
+      expect(restarted.setting('worker.maxAgents')).toBeUndefined();
+      expect(workerPool(restarted, restarted.getGroup(group.id)).slots).toHaveLength(2);
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    await f.close();
+  }
+});

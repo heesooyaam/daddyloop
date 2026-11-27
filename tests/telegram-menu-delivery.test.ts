@@ -96,7 +96,7 @@ it.each(['topic', 'private'] as const)(
     try {
       await started.promise;
       await api.delivery!.send(dest, text('Agent B'), { key: 'second', groupId: group.id });
-      const command = msg(2, kind === 'topic' ? '/queue@fixture_bot' : '/queue');
+      const command = msg(2, kind === 'topic' ? '/QUEUE@fixture_bot' : '/queue');
       await bot.handle(command);
       await bot.handle(cb);
       await vi.waitFor(() =>

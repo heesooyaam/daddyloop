@@ -374,6 +374,7 @@ export interface Event {
 }
 export interface TelegramReply {
   messageId?: number;
+  taskId?: string;
   author?: string;
   text?: string;
   quote?: string;
@@ -462,6 +463,7 @@ export class AppError extends Error {
     public code: string,
     message: string,
     public statusCode = 409,
+    public taskConflict?: Pick<Task, 'id' | 'state'>,
   ) {
     super(message);
     this.name = 'AppError';
@@ -472,12 +474,14 @@ export interface ExpectedTask {
   head: string;
   generation: number;
   groupId?: string;
+  revision?: Revision;
 }
 export function assertTaskVersion(task: Task, expected?: ExpectedTask) {
   if (
     expected &&
-    (task.revision?.head !== expected.head ||
+    ((task.revision?.head ?? '') !== expected.head ||
       task.generation !== expected.generation ||
+      (expected.revision !== undefined && !sameRevision(task.revision, expected.revision)) ||
       (expected.groupId !== undefined && task.groupId !== expected.groupId))
   )
     throw new AppError('stale_task', 'The task changed. Refresh it before confirming this action.');

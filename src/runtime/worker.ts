@@ -95,6 +95,10 @@ export class Worker {
   autoCleanup?: () => Promise<unknown>;
   refreshIssueSource?: (id: string) => Promise<void>;
   autoSubmit?: (id: string) => Promise<unknown>;
+  effectiveAgentLimit() {
+    return this.engine.store.setting<number>('worker.maxAgents') ?? this.maxAgents;
+  }
+
   constructor(
     readonly engine: Engine,
     private workspaces: Workspaces,
@@ -416,7 +420,7 @@ export class Worker {
         if (task.deferredWorkerInstructions?.length && !store.busy(task.id))
           await this.engine.deliverWorkerInstruction(task.id);
       // Authors may be independent; each shared reviewer thread has one worker.
-      reconcileWorkerPools(store);
+      reconcileWorkerPools(store, this.maxAgents);
       const limit = Math.max(
         1,
         Math.min(8, store.setting<number>('worker.maxAgents') ?? this.maxAgents),
@@ -479,7 +483,7 @@ export class Worker {
                 const requestedSlot = task.workerRequest.slot;
                 task.workerRequest.slot = undefined;
                 if (task.workerRequest.profile) slot.profile = task.workerRequest.profile;
-                const profile = slot.profile;
+                const profile = slot.profile ?? group.worker ?? this.engine.defaultAgents().worker;
                 if (
                   profile &&
                   (!sameAgentProfile(task.agents?.worker, profile) ||

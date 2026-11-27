@@ -24,7 +24,10 @@ export class CleanupControls {
   status() {
     return { ...this.scheduler.status(), pausePercent: this.pausePercent };
   }
-  async update(raw: unknown) {
+  hasTelegramUpdate(id: string) {
+    return this.readConfig().cache.schedule?.lastTelegramUpdate === id;
+  }
+  async update(raw: unknown, telegramUpdate?: string) {
     const { skillPath, ...changes } = inputSchema.parse(raw);
     const skill = skillPath
       ? await new InstructionSources().import({ kind: 'local', path: skillPath })
@@ -36,7 +39,13 @@ export class CleanupControls {
       ...(skillPath !== undefined ? { skill } : {}),
     };
     const previous = cacheScheduleSchema.parse(config.cache.schedule ?? {});
-    const next = cacheScheduleSchema.parse({ ...previous, ...patch });
+    if (telegramUpdate && previous.lastTelegramUpdate === telegramUpdate) return this.status();
+    // The marker and schedule live in the same atomic config write.
+    const next = cacheScheduleSchema.parse({
+      ...previous,
+      ...patch,
+      ...(telegramUpdate ? { lastTelegramUpdate: telegramUpdate } : {}),
+    });
     if (next.enabled && (!config.cache.auto || !this.scheduler.status().automaticCleanup))
       throw new AppError('cache_disabled', 'Enable automatic cache cleanup on the host first', 422);
     if (

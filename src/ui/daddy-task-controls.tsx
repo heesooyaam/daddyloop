@@ -2,9 +2,14 @@ import { VoiceInput, appendDictation } from './voice-input.js';
 import { useRef, useState } from 'react';
 import { ChevronDown, RefreshCw, Settings2 } from 'lucide-react';
 import type { DaddyApi, DaddyBoard } from '../client/daddy.js';
-import { sameAgentProfile, type AgentProfile, type WorkerSlot } from '../core/types.js';
+import { sameAgentProfile, type AgentProfile, type Task, type WorkerSlot } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
-import { profileText, taskReference } from '../core/task-activity.js';
+import {
+  canResumeAfterReviewLimit,
+  profileText,
+  taskReference,
+  taskStatus,
+} from '../core/task-activity.js';
 import {
   AgentProfileFields,
   ArchitectProfileFields,
@@ -25,38 +30,61 @@ export function QueueTaskForm({
   const { t } = useLocale();
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [requirements, setRequirements] = useState('');
+  const [shownGeneration, setShownGeneration] = useState(board.group.generation);
   const [slot, setSlot] = useState('');
-  const [profile, setProfile] = useState<AgentProfile>({ engine: board.workerDefault.engine });
+  const [profile, setProfile] = useState<AgentProfile>();
   const [repository, setRepository] = useState<RepositorySelection>();
   const [editingRepository, setEditingRepository] = useState(false);
   const [validatePlan, setValidatePlan] = useState(true);
   const [architect, setArchitect] = useState<AgentProfile>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [taskConflict, setTaskConflict] = useState<Pick<Task, 'id' | 'state'>>();
+  const [stale, setStale] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api, false);
   const last = useRef<{ key: string; id: string } | undefined>(undefined);
   const submit = async () => {
-    if (busy || voiceBusy || editingRepository || !requirements.trim()) return;
+    if (busy || stale || voiceBusy || editingRepository || !requirements.trim()) return;
     const input = {
       requirements: requirements.trim(),
+      expectedGeneration: shownGeneration,
       validatePlan,
       architectProfile: validatePlan ? architect : undefined,
       repository,
       workerRequest: {
         slot: slot ? Number(slot) : undefined,
-        profile: profile.model ? profile : undefined,
+        profile,
       },
     };
     const key = JSON.stringify(input);
     if (last.current?.key !== key) last.current = { key, id: crypto.randomUUID() };
     setBusy(true);
     setError('');
+    setTaskConflict(undefined);
     try {
       const task = await api<{ id: string }>(`/daddy/sessions/${board.group.id}/tasks`, {
         ...input,
         requestId: last.current.id,
       });
       onQueued(task.id);
+    } catch (error) {
+      setError((error as Error).message);
+      if (error instanceof Error && 'taskConflict' in error)
+        setTaskConflict(error.taskConflict as Pick<Task, 'id' | 'state'> | undefined);
+      if (error instanceof Error && 'code' in error && error.code === 'stale_session')
+        setStale(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const useCurrentSession = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const current = await api<DaddyBoard>(`/daddy/sessions/${board.group.id}`);
+      setShownGeneration(current.group.generation);
+      setStale(false);
+      setError('');
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -120,10 +148,11 @@ export function QueueTaskForm({
           {t('Choose a model')}
         </summary>
         <AgentProfileFields
-          profile={profile}
+          profile={profile ?? { engine: board.workerDefault.engine }}
           catalogue={catalogue}
           onChange={setProfile}
-          modelPlaceholder="Use the worker model"
+          modelPlaceholder={profile ? 'Engine configuration' : 'Use the worker model'}
+          inheritEngine={{ active: !profile, onSelect: () => setProfile(undefined) }}
         />
         {validatePlan && (
           <ArchitectProfileFields
@@ -154,12 +183,27 @@ export function QueueTaskForm({
       />
       {error && (
         <p className="daddy-field-error" role="alert">
-          {t(error)}
+          {taskConflict
+            ? t('Task {id} is {state}. Open the existing task to continue.', {
+                id: taskReference(taskConflict),
+                state: t(taskStatus(taskConflict.state)),
+              })
+            : t(error)}
         </p>
+      )}
+      {stale && (
+        <button
+          type="button"
+          className="daddy-button outline"
+          disabled={busy}
+          onClick={() => void useCurrentSession()}
+        >
+          {t('Use the current session')}
+        </button>
       )}
       <button
         className="daddy-button primary"
-        disabled={busy || voiceBusy || editingRepository || !requirements.trim()}
+        disabled={busy || stale || voiceBusy || editingRepository || !requirements.trim()}
       >
         {t('Queue task')}
       </button>
@@ -271,19 +315,37 @@ function WorkerProfileForm({
 }) {
   const { t } = useLocale();
   const { catalogue, load } = useAgentCatalogue(api);
-  const [profile, setProfile] = useState(slot.profile ?? board.workerDefault);
+  const [baseline] = useState(slot.profile ?? board.workerDefault);
+  const [profile, setProfile] = useState(baseline);
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const task = board.tasks.find(({ id }) => id === slot.taskId);
+  const [shown] = useState(() => ({
+    task: board.tasks.find(({ id }) => id === slot.taskId),
+    groupGeneration: board.group.generation,
+  }));
+  const task = shown.task;
   const submit = async () => {
-    if (busy || !profile.model) return;
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
       await api(`/daddy/sessions/${board.group.id}/workers/${slot.number}`, {
         profile,
-        forceTaskId: force ? slot.taskId : undefined,
+        baseline,
+        expectedGeneration: shown.groupGeneration,
+        forceTaskId: force ? task?.id : undefined,
+        expected:
+          force && task
+            ? {
+                groupGeneration: shown.groupGeneration,
+                task: {
+                  head: task.revision?.head ?? '',
+                  revision: task.revision,
+                  generation: task.generation,
+                },
+              }
+            : undefined,
       });
       await onSaved();
     } catch (error) {
@@ -334,11 +396,130 @@ function WorkerProfileForm({
         <button type="button" className="daddy-button quiet" onClick={onCancel}>
           {t('Back')}
         </button>
-        <button className="daddy-button primary" disabled={busy || !profile.model}>
+        <button className="daddy-button primary" disabled={busy}>
           {t('Save model')}
         </button>
       </div>
     </form>
+  );
+}
+
+export function TaskReviewLimitSettings({
+  api,
+  board,
+  task,
+  disabled,
+  onSaved,
+}: {
+  api: DaddyApi;
+  board: DaddyBoard;
+  task: Task;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+}) {
+  const { t } = useLocale();
+  const expected = {
+    task: {
+      generation: task.generation,
+      head: task.revision?.head ?? '',
+      revision: task.revision,
+    },
+    groupGeneration: board.group.generation,
+    limit: task.reviewRoundLimit ?? null,
+  };
+  const [draft, setDraft] = useState<{ expected: typeof expected; value: string }>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const path = `/daddy/sessions/${board.group.id}/tasks/${task.id}/review-limit`;
+  const save = async (resume: boolean) => {
+    if (disabled || busy) return;
+    const limit = draft?.value === '' ? null : Number(draft?.value);
+    if (!resume && (!draft || (limit !== null && (!Number.isSafeInteger(limit) || limit < 1))))
+      return;
+    setBusy(true);
+    setError('');
+    try {
+      if (resume) await api(path + '/resume', expected);
+      else {
+        await api(path, { expected: draft!.expected, limit });
+        setDraft(undefined);
+      }
+      await onSaved();
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      {draft ? (
+        <form
+          className="daddy-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save(false);
+          }}
+        >
+          <label>
+            {t('Review round limit')}
+            <input
+              type="number"
+              min={1}
+              step={1}
+              placeholder={t('No limit')}
+              value={draft.value}
+              disabled={disabled || busy}
+              onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+            />
+          </label>
+          <div className="daddy-actions">
+            <button
+              type="button"
+              className="daddy-button quiet"
+              onClick={() => {
+                setDraft(undefined);
+                setError('');
+              }}
+            >
+              {t('Cancel')}
+            </button>
+            <button className="daddy-button primary" disabled={disabled || busy}>
+              {t('Save')}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="daddy-actions">
+          <button
+            type="button"
+            className="daddy-button outline"
+            disabled={disabled || busy}
+            onClick={() => {
+              setError('');
+              setDraft({ expected, value: expected.limit?.toString() ?? '' });
+            }}
+          >
+            {t('Review round limit')} · {expected.limit ?? t('No limit')}
+          </button>
+          {canResumeAfterReviewLimit(task) && (
+            <button
+              type="button"
+              className="daddy-button primary"
+              disabled={disabled || busy}
+              onClick={() => void save(true)}
+            >
+              {t('Resume task')}
+            </button>
+          )}
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="daddy-field-error">
+          {t(error)}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -357,6 +538,18 @@ export function TaskArchitectSettings({
 }) {
   const { t } = useLocale();
   const [profile, setProfile] = useState(initial);
+  const [expected, setExpected] = useState(() => {
+    const task = board.tasks.find(({ id }) => id === taskId)!;
+    return {
+      task: {
+        generation: task.generation,
+        head: task.revision?.head ?? '',
+        revision: task.revision,
+      },
+      groupGeneration: board.group.generation,
+      architectProfile: initial ?? null,
+    };
+  });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api, false);
@@ -367,7 +560,9 @@ export function TaskArchitectSettings({
     try {
       await api(`/daddy/sessions/${board.group.id}/tasks/${taskId}/architect`, {
         profile: profile ?? null,
+        expected,
       });
+      setExpected({ ...expected, architectProfile: profile ?? null });
       await onSaved();
     } catch (e) {
       setError((e as Error).message);
@@ -378,6 +573,19 @@ export function TaskArchitectSettings({
   return (
     <details
       onToggle={(event) => {
+        if (event.currentTarget.open) {
+          const task = board.tasks.find(({ id }) => id === taskId)!;
+          setProfile(initial);
+          setExpected({
+            task: {
+              generation: task.generation,
+              head: task.revision?.head ?? '',
+              revision: task.revision,
+            },
+            groupGeneration: board.group.generation,
+            architectProfile: initial ?? null,
+          });
+        }
         if (event.currentTarget.open && !catalogue.models.length) void load();
       }}
     >

@@ -1,3 +1,4 @@
+import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -133,6 +134,69 @@ it('keeps the selected workspace and does not dispatch an old recording after a 
     await f.close();
   }
 });
+it('rejects delayed voice input when the question head changes', async () => {
+  const f = fixture();
+  let finish!: (text: string) => void;
+  f.botWorkspace.configureVoice(
+    f.dir,
+    {
+      transcribe: async () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    },
+    healthy,
+  );
+  try {
+    const task = await f.daddy.createTask(f.group.id, {
+      requirements: 'Revision-bound question',
+      requestId: 'voice-context',
+    });
+    const asked = {
+      ...task,
+      state: 'needs_input' as const,
+      revision: { head: 'a'.repeat(40), base: 'b'.repeat(40), start: 'b'.repeat(40) },
+      inputRequest: {
+        role: 'author' as const,
+        generation: task.generation,
+        runId: 'voice-request',
+      },
+    };
+    f.store.saveTask(asked);
+    const receipt = {
+      groupId: f.group.id,
+      deliveryKey: `telegram:question:7:${task.id}:${taskRequestKey(f.store, asked)}`,
+    };
+    Object.assign(f.api, {
+      delivery: { replyReceipt: () => receipt, replySession: () => f.group.id },
+    });
+    const other = f.daddy.create({ workspaceId: f.workspace.id });
+    f.store.setSetting('telegram.currentDaddy', other.id);
+    const update = f.voice();
+    update.message!.reply_to_message = {
+      message_id: 302,
+      chat: { id: 7, type: 'private' },
+      text: 'Choose the next step',
+    };
+    f.botWorkspace.start();
+    await f.botWorkspace.handle(update);
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    const job = JSON.parse(String(f.store.db.prepare('SELECT data FROM voice_jobs').get()!.data));
+    expect(job.route.groupId).toBe(f.group.id);
+    f.store.saveTask({ ...asked, revision: { ...asked.revision, head: 'c'.repeat(40) } });
+    finish('Answer for the old head');
+    await vi.waitFor(() =>
+      expect(f.store.db.prepare('SELECT status FROM voice_jobs').get()!.status).toBe('failed'),
+    );
+    expect(f.store.messages(f.group.id)).toHaveLength(0);
+    expect(f.store.messages(other.id)).toHaveLength(0);
+  } finally {
+    finish?.('Done');
+    await f.botWorkspace.stop();
+    await f.close();
+  }
+});
+
 it('replays preserved voice input after interruption and honors the memory guard', async () => {
   const f = fixture();
   let available = false,

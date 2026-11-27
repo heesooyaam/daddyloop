@@ -318,7 +318,38 @@ it('cleans under pressure without a session and reports the measured result to T
       diskPercent: 89,
       skill: 'cleanup-fixture',
     });
-    await sendCommand(13, 7, '/cleanup interval 60');
+    for (const asButton of [false, true]) {
+      const id = asButton ? 22 : 21;
+      const send = () =>
+        asButton
+          ? bot.handle({
+              update_id: id,
+              callback_query: {
+                id: 'replay-toggle',
+                from: { id: 7 },
+                data: 'cleanup:off',
+                message: { message_id: 99, chat: { type: 'private', id: 7 } },
+              },
+            })
+          : sendCommand(id, 7, '/cleanup off');
+      const prepare = f.store.db.prepare.bind(f.store.db);
+      const broken = vi.spyOn(f.store.db, 'prepare').mockImplementation((sql) => {
+        if (sql === 'INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
+          throw new Error('Receipt lost');
+        return prepare(sql);
+      });
+      try {
+        await expect(send()).rejects.toThrow('Receipt lost');
+      } finally {
+        broken.mockRestore();
+      }
+      expect((await status()).json().enabled).toBe(false);
+      expect((await update({ enabled: true })).statusCode).toBe(200);
+      await send();
+      expect((await status()).json().enabled).toBe(true);
+      expect(sent.at(-1)).toMatch(/already completed|уже выполнено/);
+    }
+    await sendCommand(23, 7, '/cleanup interval 60');
     expect((await status()).json().intervalMinutes).toBe(60);
     expect(() => cacheScheduleSchema.parse({ intervalMinutes: 29 })).toThrow();
     expect(() =>

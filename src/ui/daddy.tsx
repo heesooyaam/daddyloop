@@ -1,5 +1,6 @@
+import { workerSlotProfiles, workerTaskProfiles } from '../core/worker-pool.js';
 import { VoiceInput, appendDictation } from './voice-input.js';
-import { sameAgentProfile } from '../core/types.js';
+import { sameAgentProfile, sameRevision } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
 import {
   useCallback,
@@ -65,10 +66,17 @@ import {
   ArchitectProfileFields,
   useAgentCatalogue,
 } from './agent-profile-fields.js';
-import { QueueTaskForm, WorkerControls, TaskArchitectSettings } from './daddy-task-controls.js';
+import {
+  QueueTaskForm,
+  WorkerControls,
+  TaskArchitectSettings,
+  TaskReviewLimitSettings,
+} from './daddy-task-controls.js';
 import {
   activityReason,
   activityStatus,
+  canWaiveChecks,
+  checkWaiverReasonLimit,
   profileText,
   taskReference,
 } from '../core/task-activity.js';
@@ -605,7 +613,11 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                 className="daddy-button quiet"
                 aria-label={t(paused ? 'Resume' : 'Pause')}
                 title={t(paused ? 'Resume' : 'Pause')}
-                onClick={() => void model.action(paused ? 'resume' : 'pause')}
+                onClick={() =>
+                  void model.action(paused ? 'resume' : 'pause', {
+                    expectedGeneration: board?.group.generation,
+                  })
+                }
                 disabled={state.busy || !!board.group.deletion}
               >
                 {paused ? <Play size={15} /> : <Pause size={15} />}
@@ -693,7 +705,9 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               reason={preparation.error}
               retryLabel="Retry"
               onDetails={showNoticeDetails}
-              onRetry={() => void model.action('resume')}
+              onRetry={() =>
+                void model.action('resume', { expectedGeneration: board?.group.generation })
+              }
             />
           )}
           {deletion?.state === 'error' && (
@@ -1123,6 +1137,8 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
               forceDaddy,
               applyWorkers,
               architectProfile,
+              baseline,
+              expectedGeneration,
             ) => {
               await model.action(
                 'settings',
@@ -1133,10 +1149,15 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
                   forceDaddy,
                   applyWorkers,
                   architectProfile,
+                  baseline,
+                  expectedGeneration,
                 },
                 board.group.id,
               );
-              if (isCurrentForm() && !model.snapshot().error) setModal(null);
+              if (!isCurrentForm()) return;
+              const error = model.snapshot().error;
+              if (error) throw new Error(error);
+              setModal(null);
             }}
           />
         </Dialog>
@@ -1174,7 +1195,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
             api={api}
             board={board}
             busy={state.busy}
-            onLimitChange={(workerLimit) => void model.action('settings', { workerLimit })}
+            onLimitChange={(workerLimit) =>
+              void model.action('settings', {
+                workerLimit,
+                expectedGeneration: board.group.generation,
+                baseline: { workerLimit: board.workers.target },
+              })
+            }
             onChange={() => model.refresh()}
           />
         </Dialog>
@@ -1252,7 +1279,13 @@ export function DaddyWorkspace({ api }: { api: DaddyApi }) {
       )}
       {inspect && (
         <Dialog title={t('Work item')} onClose={() => setInspect(undefined)} wide>
-          <TaskReport api={api} id={inspect} board={board} onChange={() => model.refresh()} />
+          <TaskReport
+            api={api}
+            id={inspect}
+            board={board}
+            connected={state.connected}
+            onChange={() => model.refresh()}
+          />
         </Dialog>
       )}
     </div>
@@ -1421,9 +1454,11 @@ function WorkspaceManager({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const editorVersion = useRef(0);
+  const original = useRef<Workspace>(undefined);
   const create = (path = '') => {
     editorVersion.current++;
     setEditing(undefined);
+    original.current = undefined;
     setName(path.split('/').at(-1) ?? '');
     setPath(path);
     setBase('');
@@ -1461,6 +1496,18 @@ function WorkspaceManager({
           provider,
           copyMode: provider === 'arcadia' ? copyMode : undefined,
           ...(base ? { base } : {}),
+          ...(original.current
+            ? {
+                baseline: {
+                  name: original.current.name,
+                  path: original.current.repoPath,
+                  scope: original.current.scope,
+                  base: original.current.base,
+                  copyMode: original.current.copyMode,
+                  provider: original.current.provider,
+                },
+              }
+            : {}),
         },
       );
       await onSaved(saved, isCurrentEditor);
@@ -1492,6 +1539,7 @@ function WorkspaceManager({
               onClick={() => {
                 editorVersion.current++;
                 setEditing(workspace.id);
+                original.current = workspace;
                 setName(workspace.name);
                 setPath(workspace.repoPath);
                 setScope(workspace.scope);
@@ -1754,6 +1802,15 @@ function SessionSettings({
     forceDaddy?: boolean,
     applyWorkers?: boolean,
     architectProfile?: AgentProfile | null,
+    baseline?: {
+      profiles?: Partial<AgentProfiles>;
+      workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
+      workerTaskProfiles?: ReturnType<typeof workerTaskProfiles>;
+      instructions?: SessionInstructions | null;
+      autoMerge?: boolean;
+      architectProfile?: AgentProfile | null;
+    },
+    expectedGeneration?: number,
   ) => Promise<void>;
 }) {
   const { t } = useLocale(),
@@ -1770,13 +1827,17 @@ function SessionSettings({
     [busy, setBusy] = useState(false);
   const [autoMerge, setAutoMerge] = useState(board.group.autoMerge ?? false);
   const [architect, setArchitect] = useState(board.group.architectProfile);
+  const originalInstructions = useRef(instructions);
   const originalArchitect = useRef(architect);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const originalWorkerSlots = useRef(workerSlotProfiles(board.group));
+  const originalWorkerTasks = useRef(workerTaskProfiles(board.tasks));
+  const originalGeneration = useRef(board.group.generation);
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
-  const overrides = board.workers.slots.filter(
-    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  const overrides = originalWorkerSlots.current.filter(
+    (slot) => !sameAgentProfile(slot.profile, originalProfiles.current.worker),
   );
   const { catalogue, load } = useAgentCatalogue(api);
   const savingBlocked = busy || editingFolder || importingInstructions;
@@ -1798,15 +1859,30 @@ function SessionSettings({
           JSON.stringify(profiles.worker) !== JSON.stringify(originalProfiles.current.worker)
         )
           changed.worker = profiles.worker;
+        const changedInstructions =
+          JSON.stringify(instructions) !== JSON.stringify(originalInstructions.current);
+        const changedAutoMerge = autoMerge !== originalAutoMerge.current;
+        const changedArchitect =
+          JSON.stringify(architect) !== JSON.stringify(originalArchitect.current);
         void onSave(
           Object.keys(changed).length ? changed : undefined,
-          instructions,
-          autoMerge === originalAutoMerge.current ? undefined : autoMerge,
+          changedInstructions ? instructions : undefined,
+          changedAutoMerge ? autoMerge : undefined,
           forceDaddy || undefined,
-          applyWorkers || undefined,
-          JSON.stringify(architect) === JSON.stringify(originalArchitect.current)
-            ? undefined
-            : (architect ?? null),
+          changed.worker ? true : undefined,
+          changedArchitect ? (architect ?? null) : undefined,
+          {
+            profiles: {
+              ...(changed.daddy ? { daddy: originalProfiles.current.daddy } : {}),
+              ...(changed.worker ? { worker: originalProfiles.current.worker } : {}),
+            },
+            workerSlotProfiles: changed.worker ? originalWorkerSlots.current : undefined,
+            workerTaskProfiles: changed.worker ? originalWorkerTasks.current : undefined,
+            instructions: changedInstructions ? (originalInstructions.current ?? null) : undefined,
+            autoMerge: changedAutoMerge ? originalAutoMerge.current : undefined,
+            architectProfile: changedArchitect ? (originalArchitect.current ?? null) : undefined,
+          },
+          originalGeneration.current,
         )
           .catch((error) => setError(error.message))
           .finally(() => setBusy(false));
@@ -1844,7 +1920,7 @@ function SessionSettings({
             {role === 'worker' &&
               overrides.map((slot) => (
                 <small key={slot.number} className="daddy-muted">
-                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile)}
                 </small>
               ))}
             {role === 'daddy' ? (
@@ -1926,18 +2002,51 @@ function TaskReport({
   api,
   id,
   board,
+  connected,
   onChange,
 }: {
   api: DaddyApi;
   id: string;
   board?: DaddyBoard;
+  connected: boolean;
   onChange: () => Promise<void>;
 }) {
   const { t } = useLocale(),
-    [value, setValue] = useState<{ task: Task; messages: Message[] }>(),
+    [read, setRead] = useState<{ key: string; value: { task: Task; messages: Message[] } }>(),
     [error, setError] = useState(''),
+    [retry, setRetry] = useState(0),
     [busy, setBusy] = useState(false);
   const live = board?.tasks.find((task) => task.id === id);
+  const detailVersion = JSON.stringify([
+    id,
+    retry,
+    connected,
+    board?.group.generation,
+    live?.generation,
+    live?.state,
+    live?.revision,
+    live?.architectProfile,
+    live?.reviewRoundLimit,
+    live?.autoMerge.mode,
+  ]);
+  const value = read?.value.task.id === id ? read.value : undefined;
+  const matchesBoard = (task: Task) =>
+    !!live &&
+    task.id === id &&
+    task.generation === live.generation &&
+    task.state === live.state &&
+    (task.reviewRoundLimit ?? null) === live.reviewRoundLimit &&
+    ((!live.revision && !task.revision) || sameRevision(live.revision, task.revision));
+  const canAct =
+    connected &&
+    value &&
+    read?.key === detailVersion &&
+    live &&
+    matchesBoard(value.task) &&
+    !error &&
+    !busy &&
+    !!board &&
+    !board.group.deletion;
   const slot = board?.workers.slots.find((worker) => worker.taskId === id);
   const request = live?.workerRequest ?? value?.task.workerRequest;
   const worker = slot?.number ?? request?.slot;
@@ -1945,31 +2054,45 @@ function TaskReport({
   const ref = live?.ref ?? value?.task.ref;
   const prUrl = ref && ref.kind !== 'ticket' ? safeUrl(ref.url) : undefined;
   useEffect(() => {
+    if (!connected || !live) return;
     let active = true;
+    let reread: ReturnType<typeof setTimeout> | undefined;
     void api<{ task: Task; messages: Message[] }>(`/tasks/${id}`)
       .then((result) => {
-        if (active) setValue(result);
+        if (active) {
+          setRead({ key: detailVersion, value: result });
+          setError('');
+          // A successful GET can observe a transient stage between board polls.
+          // Keep confirmations hidden and retry even if the board key never changes.
+          if (!matchesBoard(result.task))
+            reread = setTimeout(() => setRetry((value) => value + 1), 1000);
+        }
       })
       .catch((error) => {
         if (active) setError(error.message);
       });
     return () => {
       active = false;
+      if (reread) clearTimeout(reread);
     };
-  }, [id]);
+  }, [id, detailVersion, retry, connected]);
+  const waiverKey = JSON.stringify([id, live?.state, live?.generation, live?.revision]);
+  const [waiver, setWaiver] = useState<{ key: string; reason: string }>();
+  const waiverReason = waiver?.key === waiverKey ? waiver.reason : '';
   const action = async (action: string) => {
-    if (!board || !value) return;
+    if (!board || !canAct || !live?.revision) return;
     setBusy(true);
     try {
       await api(`/daddy/sessions/${board.group.id}/task-action`, {
         taskId: id,
         action,
-        expectedHead: value.task.revision?.head ?? '',
-        expectedGeneration: value.task.generation,
+        expectedHead: live.revision.head,
+        expectedGeneration: live.generation,
+        expectedRevision: live.revision,
+        reason: action === 'waive-checks' ? waiverReason : undefined,
       });
-      onChange();
-      const next = await api<{ task: Task; messages: Message[] }>(`/tasks/${id}`);
-      setValue(next);
+      await onChange();
+      setRetry((value) => value + 1);
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -1980,7 +2103,14 @@ function TaskReport({
     <div className="daddy-task-report">
       {error && (
         <p role="alert" className="daddy-field-error">
-          {t(error)}
+          {t(error)}{' '}
+          <button
+            type="button"
+            className="daddy-button outline"
+            onClick={() => setRetry((value) => value + 1)}
+          >
+            {t('Retry')}
+          </button>
         </p>
       )}
       {value ? (
@@ -1995,14 +2125,26 @@ function TaskReport({
             {profile && <span>{profileText(profile)}</span>}
           </div>
           <p>{t(live?.reason ?? activityReason(value.task))}</p>
-          {board &&
+          {board && live && live.state !== 'complete' && !board.group.deletion && (
+            <TaskReviewLimitSettings
+              key={id}
+              api={api}
+              board={board}
+              task={value.task}
+              disabled={!canAct}
+              onSaved={onChange}
+            />
+          )}
+
+          {canAct &&
+            board &&
             live &&
             live.state !== 'complete' &&
             (live.ref.kind === 'ticket'
               ? value.task.planning || live.state === 'discussing'
               : value.task.kind === 'code' && !value.task.reportOnly) && (
               <TaskArchitectSettings
-                key={id + JSON.stringify(live.architectProfile)}
+                key={id}
                 api={api}
                 board={board}
                 taskId={id}
@@ -2015,13 +2157,24 @@ function TaskReport({
               {t('Auto-merge GitHub PRs')}
               <select
                 value={live.autoMerge.mode}
-                disabled={busy || !!board.group.deletion}
+                disabled={busy || !canAct}
                 onChange={async (event) => {
                   const mode = event.target.value;
                   setBusy(true);
                   setError('');
                   try {
-                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, { mode });
+                    await api(`/daddy/sessions/${board.group.id}/tasks/${id}/auto-merge`, {
+                      mode,
+                      expected: {
+                        task: {
+                          generation: live.generation,
+                          head: live.revision?.head ?? '',
+                          revision: live.revision,
+                        },
+                        groupGeneration: board.group.generation,
+                        mode: live.autoMerge.mode,
+                      },
+                    });
                     await onChange();
                   } catch (error) {
                     setError((error as Error).message);
@@ -2053,7 +2206,7 @@ function TaskReport({
               <ArrowUpRight size={15} />
             </a>
           )}
-          {prUrl && (live?.state ?? value.task.state) === 'needs_input' && (
+          {canAct && prUrl && live?.revision && live.state === 'needs_input' && (
             <button
               className="daddy-button outline"
               disabled={busy}
@@ -2062,7 +2215,28 @@ function TaskReport({
               {t('Verify merge')}
             </button>
           )}
-          {value.task.state === 'awaiting_plan_approval' && (
+          {canAct && live?.revision && canWaiveChecks(live.state) && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void action('waive-checks');
+              }}
+            >
+              <label>
+                {t('Reason for waiving CI checks')}
+                <input
+                  value={waiverReason}
+                  maxLength={checkWaiverReasonLimit}
+                  onChange={(event) => setWaiver({ key: waiverKey, reason: event.target.value })}
+                  required
+                />
+              </label>
+              <button className="daddy-button outline" disabled={busy || !waiverReason.trim()}>
+                {t('Waive CI checks')}
+              </button>
+            </form>
+          )}
+          {canAct && live?.state === 'awaiting_plan_approval' && live.revision && (
             <button
               disabled={busy}
               className="daddy-button primary"

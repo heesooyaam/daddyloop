@@ -7,6 +7,20 @@ import {
   type WorkerSlot,
 } from './types.js';
 
+export function workerSlotProfiles(group: ReviewGroup) {
+  return (group.workerSlots ?? [])
+    .flatMap(({ number, profile }) => (profile ? [{ number, profile }] : []))
+    .sort((a, b) => a.number - b.number);
+}
+
+export function workerTaskProfiles(tasks: Pick<Task, 'id' | 'state' | 'workerRequest'>[]) {
+  return Object.fromEntries(
+    tasks.flatMap(({ id, state, workerRequest }) =>
+      state !== 'complete' && workerRequest?.profile ? [[id, workerRequest.profile] as const] : [],
+    ),
+  );
+}
+
 export function workerSlots(store: Store, group: ReviewGroup): WorkerSlot[] {
   const target = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
   const saved: WorkerSlot[] =
@@ -34,7 +48,12 @@ export function saveWorkerSlots(store: Store, group: ReviewGroup, slots: WorkerS
   store.saveGroup(group);
 }
 
-export function workerPool(store: Store, group: ReviewGroup, jobs = store.activeJobs()) {
+export function workerPool(
+  store: Store,
+  group: ReviewGroup,
+  jobs = store.activeJobs(),
+  configuredLimit = 1,
+) {
   const slots = workerSlots(store, group);
   const taskIds = slots.flatMap((slot) => (slot.taskId ? [slot.taskId] : []));
   const limit = group.workerLimit ?? 1;
@@ -48,16 +67,16 @@ export function workerPool(store: Store, group: ReviewGroup, jobs = store.active
     active: jobs.filter(
       (job) => job.groupId === group.id && job.role === 'author' && job.status === 'running',
     ).length,
-    hostLimit: store.setting<number>('worker.maxAgents') ?? 1,
+    hostLimit: store.setting<number>('worker.maxAgents') ?? configuredLimit,
     taskIds,
     slots,
   };
 }
 
 /** Only the scheduler applies a resize. No cancellation, reassignment or workspace deletion. */
-export function reconcileWorkerPools(store: Store) {
+export function reconcileWorkerPools(store: Store, configuredLimit = 1) {
   for (const group of store.groups().filter((group) => group.orchestrated)) {
-    const pool = workerPool(store, group);
+    const pool = workerPool(store, group, undefined, configuredLimit);
     const limit = Math.max(pool.target, pool.occupied);
     if (
       limit === group.workerLimit &&

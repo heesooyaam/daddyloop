@@ -1,3 +1,4 @@
+import type { Task } from '../core/types.js';
 import { useLocale, LocaleProvider } from './i18n.js';
 import { localeNames, type Locale } from '../i18n/index.js';
 import type { Preferences } from '../core/preferences.js';
@@ -13,6 +14,8 @@ class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public code?: string,
+    public taskConflict?: Pick<Task, 'id' | 'state'>,
   ) {
     super(message);
   }
@@ -28,7 +31,13 @@ async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promi
     signal,
   });
   const data = await result.json();
-  if (!result.ok) throw new ApiError(data.error?.message ?? 'Request failed', result.status);
+  if (!result.ok)
+    throw new ApiError(
+      data.error?.message ?? 'Request failed',
+      result.status,
+      data.error?.code,
+      data.error?.taskConflict,
+    );
   return data as T;
 }
 function Brand() {

@@ -21,6 +21,19 @@ export function heldAtReviewLimit(task: Task) {
   );
 }
 
+export const checkWaiverReasonLimit = 4000;
+export function canWaiveChecks(state: State) {
+  return state === 'awaiting_checks' || state === 'awaiting_review_checks';
+}
+
+export function canResumeAfterReviewLimit(task: Task) {
+  return (
+    task.state === 'paused' &&
+    task.reason === reviewLimitReason &&
+    (task.reviewRoundLimit === undefined || task.round < task.reviewRoundLimit)
+  );
+}
+
 export const draftSyncPending =
   'Waiting to confirm the GitHub draft or its target branch before restarting review.';
 

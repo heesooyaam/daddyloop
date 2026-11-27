@@ -1,3 +1,4 @@
+import { AppError } from '../core/types.js';
 import { reminderOpen, type OwnerQuestion } from './telegram-reminders.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Store } from '../core/store.js';
@@ -6,6 +7,7 @@ import { splitTelegramText, type TelegramCard, type FormattedText } from './tele
 
 export type TelegramDestination = { chatId: number; threadId?: number };
 export interface DeliveryOptions {
+  question?: OwnerQuestion;
   requestedMenu?: boolean;
   menuTopicGroupId?: string;
   reminder?: OwnerQuestion;
@@ -134,17 +136,20 @@ export class TelegramDelivery {
       (value.destination.chatId === room?.chatId && room.ownerId === pair.userId)
     );
   }
-  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+  replyReceipt(chatId: number, messageId: number, ownerId: number) {
     // Telegram message IDs are scoped to a chat. Only trust our own delivery receipt.
-    const row = this.store.db
+    return this.store.db
       .prepare(
         `SELECT json_extract(value,'$.options.groupId') AS groupId,
-      json_extract(value,'$.options.key') AS deliveryKey FROM settings
+      json_extract(value,'$.options.key') AS deliveryKey, json_extract(value,'$.options.notificationId') AS notificationId, json_extract(value,'$.options.question') AS question, json_extract(value,'$.destination.threadId') AS threadId FROM settings
       WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId')=?
         AND json_extract(value,'$.destination.chatId')=?
         AND EXISTS(SELECT 1 FROM json_each(settings.value,'$.messages') m WHERE json_extract(m.value,'$.id')=?) LIMIT 1`,
       )
       .get(this.bot, ownerId, chatId, messageId);
+  }
+  replySession(chatId: number, messageId: number, ownerId: number): string | undefined {
+    const row = this.replyReceipt(chatId, messageId, ownerId);
     if (typeof row?.groupId === 'string') return row.groupId;
     // Receipts from older installs identify the task or turn in the delivery key.
     const key = String(row?.deliveryKey ?? '');
@@ -206,6 +211,81 @@ export class TelegramDelivery {
       ),
     );
   }
+  // Older task and job action IDs carry the chat and message but no bot or owner.
+  // Use a receipt for this request first. Without one, require a single known identity.
+  legacyTaskOwner(requestId: string): 'current' | 'other' | 'unknown' | 'conflict' {
+    const owner = this.store.setting<{ userId: number }>('telegram.pairing')?.userId;
+    if (owner === undefined) return 'unknown';
+    const botId = this.store.setting<number>('telegram.botId');
+    const identities = (key?: string) =>
+      this.store.db
+        .prepare(
+          `SELECT DISTINCT
+      json_extract(value,'$.bot') AS bot, json_extract(value,'$.ownerId') AS owner
+      FROM settings WHERE key GLOB 'telegram.delivery:*' AND json_extract(value,'$.ownerId') IS NOT NULL
+      AND (? IS NULL OR json_extract(value,'$.options.key')=?)`,
+        )
+        .all(key ?? null, key ?? null);
+    const sameBot = (row: { bot?: unknown }) =>
+      row.bot === this.bot ||
+      (botId !== undefined && typeof row.bot === 'string' && row.bot.endsWith(':' + botId));
+    const ours = (row: { bot?: unknown; owner?: unknown }) => sameBot(row) && row.owner === owner;
+    const specific = identities(requestId);
+    if (specific.length) {
+      if (specific.every(ours)) return 'current';
+      return specific.some(sameBot) ? 'conflict' : 'other';
+    }
+    const original = this.store.setting<{ bot: number; owner: number }>(
+      'telegram.legacyQueueOwner',
+    );
+    if (original) {
+      if (original.bot !== botId) return 'other';
+      return original.owner === owner ? 'current' : 'conflict';
+    }
+    const known = identities();
+    return known.length && known.every(ours) ? 'current' : 'unknown';
+  }
+  queuedTaskReceipt(destination: TelegramDestination, requestId: string) {
+    const ownerId = this.store.setting<{ userId: number }>('telegram.pairing')?.userId;
+    if (ownerId === undefined) return;
+    const botId = this.store.setting<number>('telegram.botId');
+    const rows = this.store.db
+      .prepare(
+        `SELECT DISTINCT substr(button.value, 10) AS taskId
+       FROM settings, json_tree(settings.value, '$.content.buttons') AS button
+       WHERE settings.key GLOB 'telegram.delivery:*'
+         AND (json_extract(settings.value, '$.bot') = ?
+           OR json_extract(settings.value, '$.bot') LIKE '%:' || ?)
+         AND json_extract(settings.value, '$.ownerId') = ?
+         AND json_extract(settings.value, '$.destination.chatId') = ?
+         AND (COALESCE(json_extract(settings.value, '$.destination.threadId'), 0) = ?
+           OR EXISTS (SELECT 1 FROM tasks JOIN telegram_topics
+             ON telegram_topics.group_id=json_extract(tasks.data,'$.groupId')
+             WHERE tasks.id=substr(button.value,10)
+               AND json_extract(telegram_topics.data,'$.ownerId')=?
+               AND json_extract(telegram_topics.data,'$.chatId')=json_extract(settings.value,'$.destination.chatId')
+               AND json_extract(telegram_topics.data,'$.threadId')=json_extract(settings.value,'$.destination.threadId')))
+         AND json_extract(settings.value, '$.options.key') = ?
+         AND button.key = 'callback_data' AND button.value GLOB 'dad:task:*'
+       LIMIT 2`,
+      )
+      .all(
+        this.bot,
+        botId ?? null,
+        ownerId,
+        destination.chatId,
+        destination.threadId ?? 0,
+        ownerId,
+        requestId,
+      );
+    if (rows.length > 1)
+      throw new AppError(
+        'ambiguous_queue_result',
+        'Telegram receipts identify multiple tasks for the same command.',
+      );
+    if (rows.length === 1) return String(rows[0]!.taskId);
+  }
+
   async send(
     destination: TelegramDestination,
     content: TelegramCard | FormattedText,

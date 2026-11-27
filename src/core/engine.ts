@@ -16,12 +16,16 @@ import {
   type PrEvidence,
 } from './pr-routing.js';
 import {
+  canWaiveChecks,
+  taskReference,
+  canResumeAfterReviewLimit,
+  reviewLimitReason,
+  repeatedArchitectureReason,
   disputedFindings,
   draftInspectionRequired,
   draftSyncPending,
-  reviewLimitReason,
-  repeatedArchitectureReason,
 } from './task-activity.js';
+import { saveWorkerSlots, workerSlots } from './worker-pool.js';
 import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
@@ -266,6 +270,8 @@ export class Engine {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       const entryGeneration = task.generation;
+      const session = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (session?.daddyState === 'paused' || session?.daddyState === 'archived') return task;
       if (this.store.busy(id))
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
@@ -3281,9 +3287,18 @@ export class Engine {
   }
   async action(
     id: string,
-    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'approve-plan'
+      | 'waive-checks'
+      | 'reopen'
+      | 'verify-merge'
+      | 'resume-review-limit',
     reason = '',
     expected?: ExpectedTask,
+    check?: () => void,
+    onCommit?: () => void,
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -3293,8 +3308,10 @@ export class Engine {
           throw new AppError('session_deleting', 'This session is being deleted');
       }
       assertTaskVersion(task, expected);
+      check?.();
       if (action === 'verify-merge') {
         const pr = await this.provider(prRef(task)).getPR(prRef(task));
+        check?.();
         return this.queueMergeVerification(task, pr);
       }
       if (action === 'pause') {
@@ -3303,6 +3320,20 @@ export class Engine {
         this.store.cancelJobs(id);
         this.onCancel(id);
         this.state(task, 'paused', reason || 'Paused by the user');
+      } else if (action === 'resume-review-limit') {
+        if (!canResumeAfterReviewLimit(task))
+          throw new AppError(
+            'cannot_resume',
+            'This task is not ready to resume after reaching its review round limit',
+          );
+        if (this.store.busy(id))
+          throw new AppError('task_busy', 'Wait for the active session to finish');
+        this.store.transaction(() => {
+          this.state(task, 'queued', resumedProviderState);
+          this.store.event(id, 'human.resume', { reason });
+          onCommit?.();
+        });
+        return task;
       } else if (action === 'resume') {
         if (task.state !== 'paused' && task.state !== 'needs_input')
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');
@@ -3425,11 +3456,12 @@ export class Engine {
             (current.state !== 'merged' || current.mergeCommit !== task.verifiedMerge.mergeCommit))
         )
           throw new AppError('stale_plan', 'The plan changed after review');
+        check?.();
         task.approvedAt = now();
         task.pr = current;
         this.finishReviewedTask(task, 'Plan approved for implementation at this exact revision');
       } else if (action === 'waive-checks') {
-        if (!['awaiting_checks', 'awaiting_review_checks'].includes(task.state) || !reason.trim())
+        if (!canWaiveChecks(task.state) || !reason.trim())
           throw new AppError(
             'waiver_invalid',
             'A waiver requires a reason and a task waiting for CI checks',
@@ -3441,6 +3473,7 @@ export class Engine {
             'stale_revision',
             'The PR changed; a waiver cannot apply to a new revision',
           );
+        check?.();
         task.checksWaivedAt = now();
         this.store.event(id, 'checks.waived', {
           reason,
@@ -3939,6 +3972,7 @@ export class Engine {
     reportOnly?: boolean;
     validatePlan?: boolean;
     id?: string;
+    onCommit?: (task: Task) => void;
   }) {
     if (
       this.store
@@ -4089,10 +4123,17 @@ export class Engine {
             'chat',
             'Read the ticket and inspect the repository. Explain your understanding, an implementation approach, and any concrete questions. This is discussion only; do not edit files yet.',
           );
+        input.onCommit?.(task);
       });
       return task;
     };
     return parent ? this.lock(parent.id, create) : create();
+  }
+  updateTicketRequirements(task: Task, requirements?: string) {
+    if (requirements === undefined || requirements === task.requirements) return;
+    task.requirements = requirements;
+    // The old scheduler instruction and its plan both refer to the superseded brief.
+    if (task.planning) task.planning = {};
   }
   async implement(
     id: string,
@@ -4100,9 +4141,35 @@ export class Engine {
     instruction?: string,
     validatePlan?: boolean,
     architectProfile?: AgentProfile,
+    commit?: {
+      groupGeneration: number;
+      workerRequest?: WorkerRequest;
+      requirements?: string;
+      onCommit?: (task: Task, queued?: boolean) => void;
+    },
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
+      if (commit && task.groupId) {
+        const group = this.store.getGroup(task.groupId);
+        if (group.generation !== commit.groupGeneration)
+          throw new AppError('stale_session', 'This session changed. Open its settings again.');
+        if (isTicket(task) && task.state === 'implementing') {
+          if (commit.onCommit) this.store.transaction(() => commit.onCommit!(task, false));
+          return task;
+        }
+        if (!isTicket(task) || task.state !== 'discussing' || this.store.busy(id))
+          throw new AppError(
+            'ticket_already_active',
+            `Task ${taskReference(task)} is ${task.state}. Open the existing task to continue.`,
+            409,
+            { id: task.id, state: task.state },
+          );
+        const slot = commit.workerRequest?.slot;
+        const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
+        if (slot !== undefined && (!Number.isInteger(slot) || slot < 1 || slot > capacity))
+          throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
+      }
       if (!isTicket(task))
         throw new AppError(
           'already_in_review',
@@ -4119,11 +4186,36 @@ export class Engine {
           'Resume or wait for the current discussion before implementing',
         );
       this.store.transaction(() => {
+        if (commit?.workerRequest) {
+          task.workerRequest = commit.workerRequest;
+          const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+          const slots = group ? workerSlots(this.store, group) : [];
+          const assigned = slots.find((slot) => slot.taskId === task.id);
+          const requested = commit.workerRequest.slot;
+          if (group && assigned) {
+            if (requested !== undefined && requested !== assigned.number) {
+              delete assigned.taskId;
+              saveWorkerSlots(this.store, group, slots);
+            } else if (commit.workerRequest.profile) {
+              assigned.profile = commit.workerRequest.profile;
+              saveWorkerSlots(this.store, group, slots);
+            }
+          }
+          this.applyAuthorProfile(
+            task,
+            commit.workerRequest.profile ??
+              (assigned?.taskId ? assigned.profile : undefined) ??
+              group?.worker ??
+              this.defaultAgents().worker,
+          );
+        }
+        this.updateTicketRequirements(task, commit?.requirements);
         if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};
         if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))
           delete task.planning;
         this.queueImplementation(task, actionId, instruction);
+        commit?.onCommit?.(task);
       });
       return task;
     });

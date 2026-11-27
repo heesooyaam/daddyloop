@@ -121,3 +121,46 @@ test('pending skill imports preserve the latest task draft and cancellation cann
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('links settings edits to the snapshot the browser displayed', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
+  await page.getByLabel('Session name (optional)').fill('Concurrent edits');
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Concurrent edits', exact: true })).toBeVisible();
+  const url = '/api/daddy/sessions/' + (await board(page)).group.id + '/settings';
+  const open = async () => {
+    await page.getByRole('button', { name: 'Session settings' }).click();
+    await page.getByText('Style and skills for this session', { exact: true }).click();
+  };
+  await open();
+  await page.getByLabel('Your instructions for daddy').fill('Browser edit');
+  expect(
+    (
+      await page.request.post(url, {
+        headers: { 'x-daddyloop-request': '1' },
+        data: { instructions: { daddy: {}, worker: { prompt: 'Independent edit' } } },
+      })
+    ).ok(),
+  ).toBe(true);
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const merged = { daddy: { prompt: 'Browser edit' }, worker: { prompt: 'Independent edit' } };
+  expect((await board(page)).group.instructions).toEqual(merged);
+
+  await open();
+  await page.getByLabel('Your instructions for daddy').fill('Stale edit');
+  expect(
+    (
+      await page.request.post(url, {
+        headers: { 'x-daddyloop-request': '1' },
+        data: { instructions: { ...merged, daddy: { prompt: 'New edit' } } },
+      })
+    ).ok(),
+  ).toBe(true);
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText(
+    'instructions.daddy.prompt',
+  );
+  expect((await board(page)).group.instructions.daddy.prompt).toBe('New edit');
+});

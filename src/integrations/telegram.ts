@@ -1,5 +1,11 @@
+import {
+  commitTelegramOperation,
+  operationDestination,
+  resultKey,
+  type TelegramOperationResult,
+} from './telegram-receipts.js';
+import { commandHelp, telegramCommands, normalizeTelegramText } from './telegram-commands.js';
 import { requestedMenu, handleMenuRequest, menuDelivery } from './telegram-menu-request.js';
-import { commandHelp, telegramCommands } from './telegram-commands.js';
 import type { CleanupControls } from '../ops/cleanup-controls.js';
 import { cleanupControlCard, cleanupCommand } from './telegram-cleanup.js';
 import { randomBytes, createHash } from 'node:crypto';
@@ -45,6 +51,8 @@ export interface Update {
   update_id: number;
   message?: {
     text?: string;
+    caption?: string;
+    document?: { file_id: string; file_size?: number; file_name?: string };
     chat: Chat;
     from?: User;
     message_thread_id?: number;
@@ -59,7 +67,7 @@ export interface Update {
       forum_topic_created?: unknown;
     };
     quote?: { text: string; position: number; is_manual?: boolean };
-    external_reply?: unknown;
+    external_reply?: { chat?: Chat; message_id?: number };
     voice?: {
       file_id: string;
       file_unique_id: string;
@@ -155,8 +163,12 @@ export class TelegramApi {
       try {
         const response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          ...(body instanceof FormData
+            ? { body }
+            : {
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              }),
           redirect: 'manual',
           signal: requestSignal,
         });
@@ -279,8 +291,34 @@ export class TelegramApi {
     }
     return result;
   }
-  async downloadVoice(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
-    const limit = 10 * 1024 * 1024;
+  async sendInstructions(chatId: number, value: unknown) {
+    const form = new FormData();
+    form.set('chat_id', String(chatId));
+    form.set(
+      'document',
+      new Blob([JSON.stringify(value, null, 2) + '\n'], {
+        type: 'application/json',
+      }),
+      'daddy-instructions.json',
+    );
+    await this.call('sendDocument', form);
+  }
+
+  downloadVoice(fileId: string, signal?: AbortSignal) {
+    return this.downloadFile(
+      fileId,
+      10 * 1024 * 1024,
+      'Voice messages can be at most 10 MB',
+      signal,
+    );
+  }
+
+  async downloadFile(
+    fileId: string,
+    limit: number,
+    sizeError: string,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     const file = await this.call<{ file_path?: string; file_size?: number }>(
       'getFile',
       { file_id: fileId },
@@ -292,9 +330,13 @@ export class TelegramApi {
       file.file_path.split('/').some((part) => part === '..' || part === '.') ||
       file.file_path.startsWith('/')
     )
-      throw new AppError('voice_file_invalid', 'Telegram returned an invalid voice file path');
-    if (file.file_size && file.file_size > limit)
-      throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+      throw new AppError(
+        'voice_file_invalid',
+        limit === 10 * 1024 * 1024
+          ? 'Telegram returned an invalid voice file path'
+          : 'Telegram returned an invalid file path',
+      );
+    if (file.file_size && file.file_size > limit) throw new AppError('voice_too_large', sizeError);
     try {
       const response = await this.fetcher(
         `https://api.telegram.org/file/bot${this.token}/${file.file_path}`,
@@ -307,18 +349,17 @@ export class TelegramApi {
       );
       if (!response.ok || !response.body) {
         await response.body?.cancel();
-        throw new AppError('voice_download_failed', 'Could not download the voice message');
+        throw new AppError('voice_download_failed', 'Could not download the Telegram file');
       }
       if (Number(response.headers.get('content-length')) > limit) {
         await response.body.cancel();
-        throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+        throw new AppError('voice_too_large', sizeError);
       }
       const chunks: Uint8Array[] = [];
       let size = 0;
       for await (const chunk of response.body) {
         size += chunk.length;
-        if (size > limit)
-          throw new AppError('voice_too_large', 'Voice messages can be at most 10 MB');
+        if (size > limit) throw new AppError('voice_too_large', sizeError);
         chunks.push(chunk);
       }
       return Buffer.concat(chunks);
@@ -456,6 +497,7 @@ export class Telegram {
   unpair() {
     this.engine.store.transaction(() => {
       this.engine.store.setSetting('telegram.pairing', null);
+      this.engine.store.setSetting('telegram.currentDaddy', null);
       this.engine.store.setSetting('telegram.pairCode', null);
       this.engine.store.db.prepare('DELETE FROM bot_actions').run();
     });
@@ -492,15 +534,51 @@ export class Telegram {
   };
   async handle(update: Update) {
     const store = this.engine.store;
-    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    if (update.message) {
+      const message = update.message;
+      const text = normalizeTelegramText(message.text, this.username);
+      const caption = normalizeTelegramText(message.caption, this.username);
+      if ((message.text && text === undefined) || (message.caption && caption === undefined))
+        return;
+      update = { ...update, message: { ...message, text, caption } };
+    }
+    const pending = resultKey(update.update_id);
+    if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) {
+      const result = store.setting<TelegramOperationResult>(pending);
+      const source = operationDestination(update);
+      const pair = this.paired();
+      if (
+        result &&
+        pair &&
+        source?.ownerId === pair.userId &&
+        result.ownerId === pair.userId &&
+        source.chatId === result.chatId &&
+        source.threadId === result.threadId &&
+        (source.chatId === pair.chatId || this.workspace?.room()?.chatId === source.chatId)
+      ) {
+        await this.api.send(
+          result,
+          this.locale() === 'ru' ? 'Действие уже выполнено.' : 'This action has already completed.',
+          undefined,
+          { key: pending },
+        );
+        this.clearOperationResult(pending);
+      }
+      return;
+    }
     const menu = requestedMenu(update, this.username);
-    if (!menu) return this.handleUpdate(update, false);
-    await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), () =>
-      this.handleUpdate(update, true),
-    );
+    if (menu)
+      await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), () =>
+        this.handleUpdate(update),
+      );
+    else await this.handleUpdate(update);
     store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    this.clearOperationResult(pending);
   }
-  private async handleUpdate(update: Update, menu: boolean) {
+  private clearOperationResult(key: string) {
+    this.engine.store.db.prepare('DELETE FROM settings WHERE key=?').run(key);
+  }
+  private async handleUpdate(update: Update) {
     const store = this.engine.store;
     const message = update.message;
     const sender = update.callback_query?.from ?? message?.from;
@@ -518,14 +596,8 @@ export class Telegram {
       // Persist voice, conversation input and task commands before acknowledging the update.
       const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
-      if (!menu)
-        store.db
-          .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
-          .run(update.update_id, now());
       return;
     }
-    if (!menu)
-      store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
@@ -538,8 +610,14 @@ export class Telegram {
     const code = message?.text?.match(/^\/start\s+([A-Za-z0-9_-]+)$/)?.[1];
     const expected = store.setting<{ hash: string; expiresAt: string }>('telegram.pairCode');
     if (code && expected && expected.expiresAt > now() && hash(code) === expected.hash) {
-      pair = { chatId: chat.id, userId: from.id, username: this.username, ownerLabel };
+      pair = {
+        chatId: chat.id,
+        userId: from.id,
+        username: this.username,
+        ownerLabel: from.username ? '@' + from.username : from.first_name,
+      };
       store.transaction(() => {
+        if (this.paired()?.userId !== pair!.userId) store.setSetting('telegram.currentDaddy', null);
         store.setSetting('telegram.pairing', pair);
         store.setSetting('telegram.pairCode', null);
         store.db.prepare('DELETE FROM bot_actions').run();
@@ -555,11 +633,27 @@ export class Telegram {
       return;
     }
     if (!pair || pair.chatId !== chat.id || pair.userId !== from.id) return;
-    const cleanup = message?.text?.trim().match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
+    const cleanupUpdate = hash(
+      JSON.stringify([
+        store.setting('telegram.botId') ?? this.username,
+        pair.userId,
+        chat.id,
+        update.update_id,
+      ]),
+    );
+    const cleanup = message?.text
+      ?.replace(/^\/start cleanup$/, '/cleanup')
+      .trim()
+      .match(/^\/cleanup(?:@(\w+))?(?:\s+([\s\S]+))?$/i);
     if (cleanup && (!cleanup[1] || cleanup[1].toLowerCase() === this.username.toLowerCase())) {
       try {
-        await this.showCleanup(chat.id, cleanupCommand(cleanup[2]));
+        await this.showCleanup(chat.id, cleanupCommand(cleanup[2]), update, cleanupUpdate);
       } catch (error) {
+        if (
+          store.setting(resultKey(update.update_id)) ||
+          this.integrations?.cleanup?.hasTelegramUpdate(cleanupUpdate)
+        )
+          throw error;
         await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
       }
       return;
@@ -569,7 +663,7 @@ export class Telegram {
       if (callback) {
         await this.api.replaceCard(callback, async () => {
           await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
-          if (!(await this.navigate(callback.data ?? '', chat.id)))
+          if (!(await this.navigate(callback.data ?? '', chat.id, update, cleanupUpdate)))
             throw new Error('Unknown action. Open the current menu with /start.');
         });
         return;
@@ -591,16 +685,19 @@ export class Telegram {
         await this.showModels(chat.id, false);
         return;
       }
-      if (text === '/updates') {
+      if (text === '/updates' || text === '/start updates') {
         await this.showUpdates(chat.id, false);
         return;
       }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
         const mode = text.split(/\s+/)[1];
         if (mode)
-          store.setSetting('notifications.telegram', {
-            enabled: mode !== 'off',
-            mode: mode === 'all' ? 'all' : 'attention',
+          store.transaction(() => {
+            store.setSetting('notifications.telegram', {
+              enabled: mode !== 'off',
+              mode: mode === 'all' ? 'all' : 'attention',
+            });
+            commitTelegramOperation(store, update.update_id, operationDestination(update));
           });
         await this.api.send(
           chat.id,
@@ -608,7 +705,7 @@ export class Telegram {
         );
         return;
       }
-      if (text === '/web') {
+      if (text === '/web' || text === '/start web') {
         if (!this.publicOrigin)
           throw new Error('Configure a permanent HTTPS address with daddy web first.');
         const { Access } = await import('../server/access.js');
@@ -633,21 +730,54 @@ export class Telegram {
         ),
       );
     } catch (error) {
+      if (
+        store.setting(resultKey(update.update_id)) ||
+        this.integrations?.cleanup?.hasTelegramUpdate(cleanupUpdate)
+      )
+        throw error;
       await this.api.send(chat.id, errorCard(redact((error as Error).message), this.locale()));
     }
   }
-  private async showCleanup(chatId: number, patch?: Record<string, unknown>) {
+  private async showCleanup(
+    chatId: number,
+    patch: Record<string, unknown> | undefined,
+    update: Update,
+    cleanupUpdate: string,
+  ) {
     const control = this.integrations?.cleanup;
     if (!control) throw new Error('Disk cleanup is unavailable');
-    const status = patch ? await control.update(patch) : control.status();
-    await this.api.send(chatId, cleanupControlCard(this.locale(), status));
+    if (!patch) {
+      await this.api.send(chatId, cleanupControlCard(this.locale(), control.status()));
+      return;
+    }
+    const completed = control.hasTelegramUpdate(cleanupUpdate);
+    const status = completed ? control.status() : await control.update(patch, cleanupUpdate);
+    const store = this.engine.store;
+    store.transaction(() =>
+      commitTelegramOperation(store, update.update_id, operationDestination(update)),
+    );
+    await this.api.send(
+      chatId,
+      completed
+        ? this.locale() === 'ru'
+          ? 'Действие уже выполнено.'
+          : 'This action has already completed.'
+        : cleanupControlCard(this.locale(), status),
+    );
   }
 
-  private async navigate(data: string, chatId: number): Promise<boolean> {
+  private async navigate(
+    data: string,
+    chatId: number,
+    update: Update,
+    cleanupUpdate: string,
+  ): Promise<boolean> {
     if (['cleanup:show', 'cleanup:on', 'cleanup:off'].includes(data)) {
       await this.showCleanup(
         chatId,
         data === 'cleanup:show' ? undefined : { enabled: data === 'cleanup:on' },
+        update,
+        cleanupUpdate,
       );
       return true;
     }
@@ -923,14 +1053,28 @@ export class Telegram {
       );
     if (!Number.isSafeInteger(me.id) || !me.username)
       throw new Error('Telegram returned an invalid bot identity');
-    if (engine.store.setting<number>('telegram.botId') !== me.id) {
+    const previousBot = engine.store.setting<number>('telegram.botId');
+    if (previousBot !== me.id) {
       engine.store.transaction(() => {
+        const previousOwner = engine.store.setting<{ userId: number }>('telegram.pairing')?.userId;
+        if (
+          previousBot !== undefined &&
+          previousOwner !== undefined &&
+          !engine.store.setting('telegram.legacyQueueOwner')
+        )
+          engine.store.setSetting('telegram.legacyQueueOwner', {
+            bot: previousBot,
+            owner: previousOwner,
+          });
         engine.store.setSetting('telegram.botId', me.id);
         engine.store.setSetting('telegram.offset', 0);
         engine.store.setSetting('telegram.offsetAt', null);
         engine.store.setSetting('telegram.pairing', null);
         engine.store.setSetting('telegram.pairCode', null);
         engine.store.db.prepare('DELETE FROM bot_receipts').run();
+        engine.store.db
+          .prepare("DELETE FROM settings WHERE key GLOB 'telegram.operationResult:*'")
+          .run();
         engine.store.db.prepare('DELETE FROM bot_actions').run();
       });
     }

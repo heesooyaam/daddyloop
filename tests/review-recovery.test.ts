@@ -1,3 +1,5 @@
+import Fastify from 'fastify';
+import { registerDaddy } from '../src/server/daddy.js';
 import { expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { daddyFixture } from './daddy-fixture.js';
@@ -106,6 +108,39 @@ async function scenario() {
     reachArchitect,
   };
 }
+
+it('sets the architect of a native code task only from its current card', async () => {
+  const { f, group, task, current, architect } = await scenario();
+  const app = Fastify();
+  registerDaddy(app, f.daddy);
+  const profile = { engine: 'codex', model: 'next-architect' };
+  const expected = (shown: ReturnType<typeof current>) => ({
+    task: { generation: shown.generation, head: shown.revision!.head, revision: shown.revision },
+    groupGeneration: group.generation,
+    architectProfile: shown.architectProfile ?? null,
+  });
+  const save = (shown: ReturnType<typeof current>, next: typeof profile | null) =>
+    app.inject({
+      method: 'POST',
+      url: `/api/daddy/sessions/${group.id}/tasks/${task.id}/architect`,
+      payload: { profile: next, expected: expected(shown) },
+    });
+  try {
+    const old = current();
+    f.store.saveTask({ ...old, revision: { ...old.revision!, head: 'c'.repeat(40) } });
+    const stale = await save(old, profile);
+    expect(stale.statusCode).toBe(409);
+    expect(current().architectProfile).toEqual(architect);
+    expect((await save(current(), profile)).statusCode).toBe(200);
+    expect(current().architectProfile).toEqual(profile);
+    f.store.saveTask({ ...current(), reportOnly: true });
+    expect((await save(current(), null)).statusCode).toBe(409);
+    expect(current().architectProfile).toEqual(profile);
+  } finally {
+    await app.close();
+    await f.close();
+  }
+});
 
 it('replans two confirmed corrections with the task architect and returns the plan to the same worker before independent review', async () => {
   const { f, group, task, peer, architect, prepared, current, review, fix, reachArchitect } =

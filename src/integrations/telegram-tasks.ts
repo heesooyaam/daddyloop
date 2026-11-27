@@ -58,26 +58,31 @@ export function parseTaskInput(args: string, engine: string, architectEngine = e
         effort: { type: 'string' },
       },
     });
-    if ((values.plan || values['architect-model']) && values['no-plan']) return;
-    if (!values['architect-model'] && (values['architect-engine'] || values['architect-effort']))
-      return;
+    const architectOverride = values['architect-model'] || values['architect-engine'];
+    if ((values.plan || architectOverride) && values['no-plan']) return;
+    if (!values['architect-model'] && values['architect-effort']) return;
     if (values.worker && !/^[1-8]$/.test(values.worker)) return;
-    if (!values.model && (values.engine || values.effort)) return;
+    if (!values.model && values.effort) return;
     const workerRequest: WorkerRequest = {
       slot: values.worker ? Number(values.worker) : undefined,
-      profile: values.model
-        ? { engine: values.engine ?? engine, model: values.model, effort: values.effort }
-        : undefined,
+      profile:
+        values.model || values.engine
+          ? {
+              engine: values.engine ?? engine,
+              ...(values.model ? { model: values.model } : {}),
+              ...(values.effort ? { effort: values.effort } : {}),
+            }
+          : undefined,
     };
     return {
       requirements,
       workerRequest,
       validatePlan: values['no-plan'] ? false : values.plan,
-      architectProfile: values['architect-model']
+      architectProfile: architectOverride
         ? {
             engine: values['architect-engine'] ?? architectEngine,
-            model: values['architect-model'],
-            effort: values['architect-effort'],
+            ...(values['architect-model'] ? { model: values['architect-model'] } : {}),
+            ...(values['architect-effort'] ? { effort: values['architect-effort'] } : {}),
           }
         : undefined,
     };
@@ -94,7 +99,8 @@ export function parseWorkerInput(args: string) {
       allowPositionals: true,
     });
     const [slot, model, effort] = positionals;
-    if (positionals.length > 3 || !slot || !/^[1-8]$/.test(slot) || !model) return;
+    if (positionals.length > 3 || !slot || !/^[1-8]$/.test(slot) || (!model && !values.engine))
+      return;
     return { number: Number(slot), model, effort, engine: values.engine, force: values.force };
   } catch {
     return;
@@ -316,6 +322,8 @@ export function taskCard(
     text.add('\n\n').markdown(redact(task.summary));
   const url = safeLink(task.ref.url);
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
+  if (task.state !== 'complete')
+    text.add('\n\n' + t('Review round limit') + ' · ' + (task.reviewRoundLimit ?? t('No limit')));
   const buttons = [queueButtons(task.groupId!, locale, queuePage)];
   if (
     task.state !== 'complete' &&
@@ -337,15 +345,6 @@ export function taskCard(
       })),
     );
   }
-  if (task.state === 'needs_input' && task.ref.kind !== 'ticket' && task.revision)
-    buttons.unshift([
-      {
-        text: t('Verify merge'),
-        callback_data: queuePage
-          ? `dad:vm:${task.id}:${task.generation.toString(36)}:${queuePage.toString(36)}`
-          : `dad:merge:${task.id}:${task.generation}`,
-      },
-    ]);
   return { ...text, buttons };
 }
 

@@ -1,3 +1,4 @@
+import { mergeSetting } from '../src/core/settings-edit.js';
 import { expect, it, vi, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -162,4 +163,39 @@ it('pins GitHub imports to a commit and never fetches an arbitrary host or runs 
     sources.import({ kind: 'github', url: 'acme/caveman' }, cancelled.signal),
   ).rejects.toThrow();
   expect(vi.mocked(fetcher)).toHaveBeenCalledTimes(count);
+});
+
+it('preserves a preset reorder and an independent component edit', () => {
+  const a = { preset: { id: 'a' }, enabled: true, omit: [] as string[] };
+  const b = { ...a, preset: { id: 'b' } };
+  const c = { ...a, preset: { id: 'c' } };
+  const base = [a, b, c];
+  const edited = { ...a, omit: ['worker:prompt'] };
+  expect(mergeSetting('instructions.presets', base, [b, a, c], [edited, b, c])).toEqual([
+    b,
+    edited,
+    c,
+  ]);
+  expect(mergeSetting('instructions.presets', base, [edited, b, c], [b, a, c])).toEqual([
+    b,
+    edited,
+    c,
+  ]);
+  const x = { ...a, preset: { id: 'x' } };
+  expect(mergeSetting('instructions.presets', [a, b], [a, x, b], [edited, b])).toEqual([
+    edited,
+    x,
+    b,
+  ]);
+  expect(mergeSetting('instructions.presets', [a, b], [edited, b], [x, a, b])).toEqual([
+    x,
+    edited,
+    b,
+  ]);
+  expect(() => mergeSetting('instructions.presets', [a, b], [a, x, b], [x, a, b])).toThrow(
+    'instructions.presets.order',
+  );
+  expect(() => mergeSetting('instructions.presets', base, [b, a, c], [c, a, b])).toThrow(
+    'instructions.presets.order',
+  );
 });
