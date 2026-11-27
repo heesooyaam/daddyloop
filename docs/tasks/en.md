@@ -20,7 +20,7 @@ When a worker disputes a published finding, the task shows **Waiting for daddy�
 
 For a pull request that requires CI, the service checks the pushed commit before opening a review round and again before starting a queued reviewer. The same check applies when the target branch moves during a pause and a draft needs to continue on the new base. Pending or missing checks put the task in **Waiting for CI before review**. A failed check goes to the assigned worker with its name and link. A new commit goes through CI again. An explicit waiver applies only to the pinned revision. Automatic merge still requires passing CI.
 
-A task may have its own review round limit. A limit of 15 allows round 15 and pauses that task before round 16. Existing drafts can continue within their round. Other tasks keep running. Change or clear the limit and resume the task to continue.
+A task may have its own review round limit. A limit of 15 allows round 15 and pauses that task before round 16. Existing drafts can continue within their round. Other tasks keep running. The task card shows the reason. With notifications enabled, Telegram mentions the owner once when the task reaches the limit. Change or clear the limit and resume the task to continue.
 
 The worker adds or extends a repository test for each behavior-changing issue and each behavioral finding fixed in review. For example, if a setting can be cleared in the web panel, its Telegram equivalent must clear the same stored value. The worker reports the test path, case, command, and the observed results before and after the fix. One parameterized test can protect several related cases.
 
@@ -41,7 +41,7 @@ For new tasks in the same workspace, repository and source scope, the service se
 
 ## When a fix keeps missing the same criterion
 
-After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy.
+After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy. Once the architect supplies a plan for that published review and revision, the assigned worker receives it together with all published findings. Re-reading that feedback cannot start another planning turn.
 
 When a dependent task already has a PR, its corrective architect and worker wait for the named prerequisites to finish. The queue shows their task IDs. The scheduler then resumes the saved work with the same slot. If the order would leave a prerequisite without an eligible slot, daddy gets the reason and can change ownership or order.
 

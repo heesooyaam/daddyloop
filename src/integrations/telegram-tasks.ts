@@ -139,7 +139,7 @@ function queueStatus(item: TaskActivity) {
     if (label === 'Checking the GitHub draft') return { label };
     return { label: 'Action needed', detail: label === 'Action needed' ? detail : label };
   }
-  if (task.state === 'paused') return { label: 'Paused' };
+  if (task.state === 'paused') return { label };
   if (task.state === 'fixing' && task.fixingMergeConflict) {
     if (job?.status === 'running') return { label: 'Merge conflict', detail: label };
     return {
