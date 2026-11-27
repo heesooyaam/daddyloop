@@ -7,14 +7,26 @@ import {
   type Task,
 } from './types.js';
 
-export function sameOpenTarget(expected: PullRequest | undefined, current: PullRequest) {
+type BranchTarget = Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl'>;
+
+function sameBranchTarget(expected: BranchTarget | undefined, current: PullRequest) {
   return (
-    current.state === 'open' &&
     !!expected &&
     current.branch === expected.branch &&
     current.targetBranch === expected.targetBranch &&
     current.cloneUrl === expected.cloneUrl
   );
+}
+
+export function sameOpenTarget(expected: BranchTarget | undefined, current: PullRequest) {
+  return current.state === 'open' && sameBranchTarget(expected, current);
+}
+
+export function sameReviewTarget(
+  expected: (BranchTarget & Pick<PullRequest, 'targetCloneUrl'>) | undefined,
+  current: PullRequest,
+) {
+  return sameBranchTarget(expected, current) && expected?.targetCloneUrl === current.targetCloneUrl;
 }
 
 export function hasReleasedReview(task: Task) {
@@ -86,6 +98,9 @@ const repairableStates = new Set<Task['state']>([
   'awaiting_merge',
   'complete',
 ]);
+export const confirmedAutoMergeConflict = (pr: PullRequest, enabled: boolean) =>
+  enabled && pr.draft === false && pr.mergeConflict === true;
+
 const wait = (reason: string): PrAction => ({ kind: 'wait', reason });
 
 // Pure routing policy. All callers describe the observed work, independently of who noticed the PR.
@@ -126,7 +141,7 @@ export function nextPrAction(
       task.pendingAuthorHead !== pinned?.head)
   )
     return { kind: 'confirm-fix' };
-  const conflict = enabled && pr.draft === false && pr.mergeConflict === true;
+  const conflict = confirmedAutoMergeConflict(pr, enabled);
   const recovered = staleConflictPreparation(task);
   if (
     task.fixingMergeConflict &&

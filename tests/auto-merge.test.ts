@@ -1295,7 +1295,7 @@ describe('opt-in GitHub merging', () => {
       t.pr = { ...t.pr!, head };
       t.revision = { ...t.revision!, head };
       t.reason = `Saved fix ${head} is on the PR. Inspect the earlier draft review ${old.id} before starting another review.`;
-      f.setRemote({ head, mergeConflict: true });
+      f.setRemote({ head });
       const key = 'demo-review:' + old.id,
         snapshot = await f.provider.getReview(prRef(t), old);
       const draft = {
@@ -1467,6 +1467,13 @@ describe('opt-in GitHub merging', () => {
         { head, base: original, start: original, branch: 'feature', cloneUrl },
         repo,
       );
+      const targetAdvanced = vi.fn(async (_ref: unknown, before: string, after: string) =>
+        command('merge-base', '--is-ancestor', before, after).then(
+          () => true,
+          () => false,
+        ),
+      );
+      Object.assign(f.provider, { targetAdvanced });
       f.setRemote({ base, start: base, mergeable: false, mergeConflict: true, checks: 'missing' });
       await f.poll();
       expect(f.store.busy(f.task.id)).toBe(false);
@@ -1512,11 +1519,6 @@ describe('opt-in GitHub merging', () => {
       });
       f.store.saveJob({ ...retry, notBefore: undefined });
       const newerBase = await commit('later upstream');
-      const targetAdvanced = vi.fn(
-        async (_ref: unknown, before: string, after: string) =>
-          before === base && after === newerBase,
-      );
-      Object.assign(f.provider, { targetAdvanced });
       f.setRemote({ base: newerBase, start: newerBase });
       f.agentRuntime.run.mockImplementationOnce(async (input) => {
         expect(input.cwd).toBe(previousCopy);

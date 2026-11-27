@@ -8,12 +8,15 @@ import {
   type Job,
   type PRRef,
   type ReviewSnapshot,
+  type ReviewHandle,
   type PullRequest,
 } from './types.js';
 import type { Store } from './store.js';
 import { readReviewDecisions, reviewDecisionQuery } from './review-decisions.js';
 import { Outbox } from './outbox.js';
-import { sameOpenTarget } from './pr-routing.js';
+import { assertConsistentReview, assertReviewNotDismissed } from './review-evidence.js';
+import { sameOpenTarget, sameReviewTarget } from './pr-routing.js';
+import { GitHubRetryError } from '../providers/github-quota.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
 
 const body = z.string().min(1).max(60000);
@@ -96,58 +99,12 @@ export class Broker {
       task.draftStart?.marker ?? `daddyloop:${task.id}:${task.generation}:${task.round}`;
     const provider = this.provider(prRef(task)),
       revision = task.revision!;
-    const create = (replay: boolean) =>
-      provider.createReview(
-        prRef(task),
-        revision,
-        marker,
-        task.draftStart
-          ? async (owner) => {
-              if (replay) {
-                const pr = await provider.getPR(prRef(task));
-                if (!sameOpenTarget(task.pr, pr) || !sameRevision(revision, pr) || pr.draft)
-                  throw new AppError(
-                    'draft_revision_changed',
-                    'The PR changed during draft recovery.',
-                  );
-              }
-              const latest = this.store.getTask(task.id);
-              const intent = latest.draftStart;
-              const group = latest.groupId ? this.store.getGroup(latest.groupId) : undefined;
-              if (
-                !intent ||
-                intent.marker !== marker ||
-                latest.generation !== task.generation ||
-                latest.state === 'paused' ||
-                group?.deletion ||
-                group?.deletedAt ||
-                group?.daddyState === 'paused' ||
-                group?.daddyState === 'archived'
-              )
-                throw new AppError('stale_task', 'The task changed during draft recovery.');
-              if (intent.owner && intent.owner !== owner)
-                throw new AppError(
-                  'draft_owner_changed',
-                  'The GitHub account changed during draft recovery.',
-                );
-              if (!intent.owner) {
-                intent.owner = owner;
-                task.draftStart!.owner = owner;
-                this.store.saveTask(latest);
-              }
-            }
-          : undefined,
-      );
     const review = await this.outbox.perform(
       task.id,
       marker,
       revision,
-      () => create(false),
+      () => provider.createReview(prRef(task), revision, marker),
       async () => {
-        // The GitHub draft create checks all of this account's reviews before writing,
-        // reuses the marked draft and refuses to touch a different pending review.
-        if (task.ref.provider === 'github' && task.draftStart)
-          return { found: true, value: await create(true) };
         const existing = await provider.findReview(prRef(task), marker);
         return existing ? { found: true, value: { ...existing, revision } } : { found: false };
       },
@@ -155,6 +112,192 @@ export class Broker {
     task.review = review;
     return review;
   }
+
+  async readReviewObservation(
+    task: Task,
+    handle: ReviewHandle,
+    previous?: ReviewSnapshot,
+    provider = this.provider(prRef(task)),
+  ) {
+    const ref = prRef(task);
+    const key =
+      'review.observation:' +
+      JSON.stringify([
+        task.id,
+        ref.provider,
+        ref.host,
+        ref.repo,
+        ref.number,
+        handle.id,
+        handle.marker,
+        handle.authorId,
+        handle.revision.head,
+        handle.revision.base,
+        handle.revision.start,
+        handle.revision.revisionId,
+      ]);
+    const attachment = (current: Task) =>
+      JSON.stringify([
+        current.generation,
+        current.groupId,
+        current.ref,
+        current.state,
+        current.revision,
+        current.pr?.branch,
+        current.pr?.targetBranch,
+        current.pr?.cloneUrl,
+        current.pr?.targetCloneUrl,
+        current.review?.id,
+        current.draftStart?.marker,
+        current.conflictFeedbackReview?.id,
+        current.previousPublishedReview?.id,
+      ]);
+    const pinned = this.store.getTask(task.id);
+    const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+    const observed = this.store.setting<{ snapshot: ReviewSnapshot; version: number }>(key);
+    const snapshot = await provider.getReview(ref, handle);
+    return this.store.transaction(() => {
+      const latest = this.store.getTask(task.id);
+      const latestGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (
+        pinned.generation !== task.generation ||
+        attachment(pinned) !== attachment(latest) ||
+        latestGroup?.generation !== group?.generation ||
+        latestGroup?.deletedAt ||
+        latestGroup?.deletion ||
+        latestGroup?.daddyState === 'archived' ||
+        (latestGroup?.daddyState === 'paused' && task.state !== 'paused')
+      )
+        throw new AppError('stale_task', 'The task changed while reading the original review');
+      const current = this.store.setting<typeof observed>(key);
+      const known = current?.snapshot ?? previous;
+      if (
+        snapshot.authorId &&
+        (snapshot.authorId !== handle.authorId || !sameRevision(snapshot.revision, handle.revision))
+      )
+        throw new AppError('draft_changed', 'The original GitHub review changed owner or commit.');
+      if (known?.dismissed && !snapshot.dismissed) assertReviewNotDismissed(known);
+      assertConsistentReview(known, snapshot, 'Review in progress.\n\n' + tag(handle.marker));
+      if (current?.version !== observed?.version)
+        throw new GitHubRetryError(
+          'github_read_unavailable',
+          'The original review was read concurrently. Read it again.',
+          Date.now() + 15000,
+          false,
+          503,
+        );
+      // Keep the published state for display while recording GitHub's explicit dismissal.
+      const saved =
+        snapshot.dismissed && known?.status === 'published'
+          ? { ...snapshot, status: known.status }
+          : snapshot;
+      this.store.setSetting(key, { snapshot: saved, version: (current?.version ?? 0) + 1 });
+      if (snapshot.dismissed) {
+        if (!latest.review || latest.review.id === handle.id) {
+          latest.review = handle;
+          latest.reviewAdmission = handle.id;
+          latest.snapshot = saved;
+          this.store.saveTask(latest);
+        }
+        task.snapshot = saved;
+      }
+      return saved;
+    });
+  }
+
+  async resolveGitHubDraft(
+    task: Task,
+    provider: ReviewProvider,
+    beforeWrite?: (owner: string) => Promise<void>,
+  ) {
+    const intent = task.draftStart!;
+    const { marker, revision } = intent;
+    const ref = intent.ref ?? prRef(task);
+    if (!provider.reviewAccount || !provider.inspectReviewStart || !provider.postReview) {
+      if (!beforeWrite) return;
+      return this.ensureReview(task);
+    }
+
+    const owner = await provider.reviewAccount();
+    if (intent.owner && intent.owner !== owner)
+      throw new AppError(
+        'draft_owner_changed',
+        'Reconnect the original GitHub account to recover the draft.',
+      );
+
+    const operation = this.store.db
+      .prepare('SELECT status, result FROM operations WHERE task_id=? AND id=?')
+      .get(task.id, marker);
+    const confirmed =
+      operation?.status === 'done'
+        ? (JSON.parse(String(operation.result)) as ReviewHandle)
+        : undefined;
+    const uncertain = this.outbox.writeEvidence(task.id, marker) === 'unknown';
+    if (uncertain && !intent.owner)
+      throw new AppError(
+        'draft_owner_unknown',
+        'The original GitHub account was not recorded. Inspect the existing review before continuing.',
+      );
+    const observed = confirmed ? undefined : await provider.inspectReviewStart(ref, marker, owner);
+    const match = confirmed ?? observed?.match;
+    if (!match) {
+      if (uncertain)
+        throw new AppError(
+          'draft_lookup_pending',
+          'Waiting for the original GitHub review to become visible.',
+        );
+      if (!beforeWrite) return;
+      if (observed?.occupied)
+        throw new AppError(
+          'draft_occupied',
+          'A different pending GitHub review occupies this account.',
+        );
+      await beforeWrite(owner);
+    }
+
+    // Save the native ID before reading the contents. The marker can disappear if the
+    // account holder edits or submits the draft while GitHub is still serving stale lists.
+    const handle = await this.outbox.perform<ReviewHandle>(
+      task.id,
+      marker,
+      revision,
+      () =>
+        match
+          ? Promise.resolve({ ...match, revision })
+          : provider.postReview!(ref, revision, marker, owner),
+      async () => (match ? { found: true, value: { ...match, revision } } : { found: false }),
+      (error) =>
+        error instanceof AppError &&
+        [
+          'provider_400',
+          'provider_401',
+          'provider_403',
+          'provider_404',
+          'provider_422',
+          'provider_429',
+          'draft_creation_race',
+        ].includes(error.code),
+    );
+    if (
+      handle.authorId !== owner ||
+      handle.marker !== marker ||
+      !sameRevision(handle.revision, revision)
+    )
+      throw new AppError('draft_changed', 'The original GitHub review changed identity.');
+    task.snapshot = await this.readReviewObservation(
+      task,
+      handle,
+      confirmed ? task.snapshot : undefined,
+      provider,
+    );
+    if (task.snapshot.dismissed) {
+      task.review = handle;
+      task.reviewAdmission = handle.id;
+      assertReviewNotDismissed(task.snapshot);
+    }
+    return handle;
+  }
+
   reconcileDraftEdits(task: Task, draft: ReviewSnapshot) {
     const review = task.review!;
     if (
@@ -260,15 +403,76 @@ export class Broker {
     if (job.role === 'author' && !['read_review', 'record_decision'].includes(tool))
       throw new AppError('role_forbidden', 'Only the reviewer can edit review comments', 403);
     const provider = this.provider(prRef(task));
-    if (!task.review)
-      throw new AppError('review_missing', 'No native review is attached to this task');
-    const snapshot = await provider.getReview(prRef(task), task.review);
+    const handle =
+      task.review ?? (tool === 'read_review' ? task.conflictFeedbackReview : undefined);
+    if (!handle) throw new AppError('review_missing', 'No native review is attached to this task');
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
+      const ref = prRef(task);
+      const original =
+        ref.provider === 'github' &&
+        handle.authorId &&
+        (task.reviewAdmission === handle.id || task.conflictFeedbackReview?.id === handle.id);
+      let snapshot: ReviewSnapshot;
+      if (original) {
+        const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+        const pr = await provider.getPR(ref);
+        if (
+          !sameReviewTarget(task.pr, pr) ||
+          !sameRevision(task.revision, pr) ||
+          pr.state !== 'open' ||
+          pr.draft ||
+          (await provider.reviewAccount?.()) !== handle.authorId ||
+          (!sameRevision(handle.revision, pr) &&
+            !(
+              handle.revision.head === pr.head &&
+              handle.revision.base !== pr.base &&
+              (await provider.targetAdvanced?.(ref, handle.revision.base, pr.base))
+            ))
+        )
+          throw new AppError(
+            'draft_changed',
+            'The original GitHub review no longer applies to this task.',
+          );
+        snapshot = await this.readReviewObservation(
+          task,
+          handle,
+          task.review?.id === handle.id ? task.snapshot : task.feedback,
+          provider,
+        );
+        assertReviewNotDismissed(snapshot);
+        const latest = await provider.getPR(ref);
+        const currentTask = this.store.getTask(task.id);
+        const currentGroup = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+        if (
+          !sameReviewTarget(pr, latest) ||
+          !sameRevision(pr, latest) ||
+          latest.state !== pr.state ||
+          latest.draft ||
+          currentTask.generation !== job.generation ||
+          currentTask.state === 'paused' ||
+          currentGroup?.generation !== group?.generation ||
+          currentGroup?.generation !== job.groupGeneration ||
+          currentGroup?.daddyState === 'paused' ||
+          currentGroup?.daddyState === 'archived' ||
+          currentGroup?.deletedAt ||
+          currentGroup?.deletion ||
+          (await this.provider(ref).reviewAccount?.()) !== handle.authorId
+        )
+          throw new AppError(
+            'draft_changed',
+            'The original GitHub review no longer applies to this task.',
+          );
+      } else {
+        snapshot = await provider.getReview(ref, handle);
+      }
       if (job.role === 'author' && snapshot.status !== 'published')
         throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;
     }
+    if (!task.review)
+      throw new AppError('review_missing', 'No native review is attached to this task');
+    const snapshot = await provider.getReview(prRef(task), task.review);
     const current = await provider.getPR(prRef(task));
     if (
       current.state !== 'open' ||

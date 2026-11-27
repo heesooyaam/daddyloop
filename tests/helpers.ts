@@ -3,9 +3,8 @@ import { Store } from '../src/core/store.js';
 import { Engine } from '../src/core/engine.js';
 import { DemoProvider } from '../src/providers/demo.js';
 import type { PRTask as Task, Job, AgentResult } from '../src/core/types.js';
-export async function fixture(overrides: Partial<Task> = {}) {
-  const store = new Store(':memory:'),
-    provider = new DemoProvider(store),
+export async function fixture(overrides: Partial<Task> = {}, store = new Store(':memory:')) {
+  const provider = new DemoProvider(store),
     engine = new Engine(store, () => provider);
   let task = await engine.create({
     ref: {

@@ -246,44 +246,49 @@ export class GitHubProvider implements ReviewProvider {
       authorId: String(review.user.id),
     };
   }
-  async createReview(
-    ref: PRRef,
-    revision: Revision,
-    marker: string,
-    confirmOwner?: (owner: string) => Promise<void>,
-  ) {
-    const { owner, reviews } = await this.ownReviews(ref).catch((error) => {
-      if (error instanceof GitHubRetryError) throw error.beforeWrite();
-      throw error;
-    });
-    await confirmOwner?.(String(owner));
-    const matches = reviews.filter((r) => (r.body ?? '').trimEnd().endsWith(tag(marker)));
-    const existing = matches[0];
-    if (existing) {
+  async reviewAccount() {
+    const user = await this.http.request<{ id: number }>('GET', '/user');
+    if (!Number.isSafeInteger(user?.id) || user.id <= 0)
+      throw new AppError('provider_shape', 'GitHub did not confirm the current account ID', 502);
+    return String(user.id);
+  }
+  async inspectReviewStart(ref: PRRef, marker: string, owner: string) {
+    const reviews = await this.http.pages<GHReview>(`${path(ref)}/reviews`);
+    const ours = reviews.filter((review) => String(review.user?.id) === owner);
+    const matches = ours.filter((review) => (review.body ?? '').trimEnd().endsWith(tag(marker)));
+    if (matches.length > 1)
+      throw new AppError('draft_changed', 'Multiple GitHub reviews carry the same draft marker.');
+    return {
+      match: matches[0] && this.handle(matches[0], marker),
+      occupied: ours.some((review) => review.state === 'PENDING'),
+    };
+  }
+  async createReview(ref: PRRef, revision: Revision, marker: string) {
+    const owner = await this.reviewAccount();
+    const { match, occupied } = await this.inspectReviewStart(ref, marker, owner);
+    if (match) {
+      const snapshot = await this.getReview(ref, match);
       if (
-        matches.length !== 1 ||
-        existing.commit_id !== revision.head ||
-        existing.state !== 'PENDING'
+        snapshot.status !== 'draft' ||
+        snapshot.revision.head !== revision.head ||
+        snapshot.authorId !== owner ||
+        snapshot.body !== `Review in progress.\n\n${tag(marker)}` ||
+        snapshot.comments.length
       )
         throw new AppError(
           'draft_changed',
-          'The marked review was submitted or its revision changed. Inspect it before continuing.',
+          'The marked review changed. Its contents were preserved.',
         );
-      const comments = await this.http.pages<GHComment>(
-        `${path(ref)}/reviews/${existing.id}/comments`,
-      );
-      if (comments.length || existing.body !== `Review in progress.\n\n${tag(marker)}`)
-        throw new AppError(
-          'draft_changed',
-          'The recovered draft has been edited. Its contents have been preserved.',
-        );
-      return this.handle(existing, marker, revision);
+      return { ...match, revision };
     }
-    if (reviews.some((r) => r.state === 'PENDING'))
+    if (occupied)
       throw new AppError(
         'draft_occupied',
-        'A different pending GitHub review belongs to this account. Its contents have been preserved.',
+        'A different pending GitHub review occupies this account.',
       );
+    return this.postReview(ref, revision, marker, owner);
+  }
+  async postReview(ref: PRRef, revision: Revision, marker: string, owner: string) {
     // This POST creates only a draft. GitHub enforces one pending review per account and PR.
     let review: GHReview;
     try {
@@ -304,7 +309,8 @@ export class GitHubProvider implements ReviewProvider {
       throw error;
     }
     if (
-      review.user?.id !== owner ||
+      String(review?.user?.id) !== owner ||
+      !review?.id ||
       review.state !== 'PENDING' ||
       review.commit_id !== revision.head ||
       !(review.body ?? '').trimEnd().endsWith(tag(marker))
@@ -318,6 +324,8 @@ export class GitHubProvider implements ReviewProvider {
         this.http.request<GHReview>('GET', `${path(ref)}/reviews/${review.id}`),
         this.http.pages<GHComment>(`${path(ref)}/reviews/${review.id}/comments`),
       ]);
+      if (!value || String(value.id) !== review.id)
+        throw new AppError('provider_shape', 'GitHub returned an unexpected review ID', 502);
       return {
         status:
           value.state === 'PENDING'
@@ -325,6 +333,7 @@ export class GitHubProvider implements ReviewProvider {
             : value.state === 'DISMISSED'
               ? 'missing'
               : 'published',
+        ...(value.state === 'DISMISSED' ? { dismissed: true as const } : {}),
         body: value.body ?? '',
         authorId: String(value.user.id),
         comments: comments.map(comment),

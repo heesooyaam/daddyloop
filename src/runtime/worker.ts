@@ -1,8 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
+import { assertReviewNotDismissed } from '../core/review-evidence.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
-import { sameOpenTarget, staleConflictPreparation } from '../core/pr-routing.js';
+import { sameOpenTarget, sameReviewTarget, staleConflictPreparation } from '../core/pr-routing.js';
 import { GitHubRetryError, githubWait } from '../providers/github-quota.js';
 import { autoMergeEnabled, pollAutoMerge } from '../core/auto-merge.js';
 import { confirmedSupersededDraft, type Engine } from '../core/engine.js';
@@ -571,9 +572,22 @@ export class Worker {
         job.status = 'completed';
         return;
       }
-      const startingPR = isTicket(task)
-        ? undefined
-        : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const startingPR =
+        isTicket(task) || (job.kind === 'review' && task.reviewAdmission)
+          ? undefined
+          : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
+      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
+        job.status = 'cancelled';
+        return;
+      }
+      if (
+        job.kind === 'fix' &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) ||
+          task.pr?.targetCloneUrl !== startingPR.targetCloneUrl)
+      )
+        throw new AppError('stale_feedback', 'The PR branches changed before the author started');
       const revisingPlan = job.kind === 'plan' && !isTicket(task);
       if (job.kind === 'review' && startingPR && !sameOpenTarget(task.pr, startingPR)) {
         await this.engine.reconcile(task.id);
@@ -628,15 +642,12 @@ export class Worker {
       }
       if (
         job.kind === 'verify_merge' &&
-        (startingPR?.state !== 'merged' || startingPR.mergeCommit !== task.pr?.mergeCommit)
+        (startingPR?.state !== 'merged' ||
+          !sameReviewTarget(task.pr, startingPR) ||
+          startingPR.mergeCommit !== task.pr?.mergeCommit)
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
-      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
-      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
-        job.status = 'cancelled';
-        return;
-      }
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
@@ -719,22 +730,137 @@ export class Worker {
       }
 
       let preservedCopy: string | undefined;
+      const conflictReview = repairingConflict ? this.engine.conflictPublication(task) : undefined;
       if (repairingConflict) {
+        if (
+          conflictReview &&
+          startingPR &&
+          !(await this.engine.publicationRevisionApplies(task, conflictReview.revision, startingPR))
+        )
+          throw new AppError(
+            'stale_feedback',
+            'Cannot confirm that the published review applies to the current target history. Findings awaiting verification: ' +
+              (task.feedback?.comments.map((comment) => comment.id).join(', ') || 'none recorded'),
+          );
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if ((job.kind === 'fix' && !repairingCI) || revisingPlan) {
-        const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
-        if (actual.status !== 'published')
-          throw new Error(
-            'The published review changed before the author started; feedback was not released.',
+      }
+      if (job.kind === 'fix' && (!repairingCI || repairingConflict)) {
+        const ref = prRef(task);
+        const provider = this.engine.provider(ref);
+        const handle = repairingConflict ? conflictReview : task.review;
+        const actual =
+          handle &&
+          (repairingConflict && ref.provider === 'github' && handle.authorId
+            ? await this.engine.broker.readReviewObservation(task, handle, task.feedback, provider)
+            : await provider.getReview(ref, handle));
+        if (actual) assertReviewNotDismissed(actual);
+        const freshPR = await provider.getPR(ref);
+        if (
+          (!repairingConflict && !handle) ||
+          (handle &&
+            (actual?.status !== 'published' ||
+              actual.revision.head !== freshPR.head ||
+              !sameRevision(actual.revision, handle.revision) ||
+              (ref.provider === 'github' &&
+                handle.authorId &&
+                actual.authorId !== handle.authorId))) ||
+          !sameOpenTarget(task.pr, freshPR) ||
+          !sameReviewTarget(startingPR, freshPR) ||
+          !sameRevision(startingPR, freshPR) ||
+          freshPR.draft
+        )
+          throw new AppError(
+            'stale_feedback',
+            'The published review or PR changed before the author started; feedback was not released.',
           );
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        if (!(await this.engine.admitReviewWork(job, actual, startingPR!))) {
+        if (actual) {
+          if (repairingConflict) {
+            task.feedback = actual;
+            task.conflictFeedbackReview = handle;
+            store.saveTask(task);
+            store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+          } else {
+            if (!(await this.engine.admitReviewWork(job, actual, freshPR))) {
+              job.status = 'cancelled';
+              return;
+            }
+            task = store.getTask(job.taskId);
+          }
+        } else {
+          // The stored feedback can belong to an earlier PR head.
+          task.feedback = undefined;
+        }
+      } else if (repairingCI && startingPR) {
+        const ref = prRef(task);
+        const observed = await this.engine.provider(ref).getPR(ref);
+        if (await this.engine.skipObsoleteCIFix(job, observed)) {
+          job.status = 'cancelled';
+          return;
+        }
+        const publication =
+          task.reviewAdmission && task.snapshot?.status === 'published'
+            ? await this.engine.readHeldPublication(task, observed, undefined, true)
+            : undefined;
+        const pr = publication?.pr ?? observed;
+        const current = store.getTask(job.taskId);
+        if (current.generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+        if (await this.engine.skipObsoleteCIFix(job, pr)) {
+          job.status = 'cancelled';
+          return;
+        }
+        if (
+          !sameOpenTarget(current.pr, pr) ||
+          !sameReviewTarget(startingPR, pr) ||
+          !sameRevision(startingPR, pr) ||
+          pr.draft
+        )
+          throw new AppError('stale_feedback', 'The PR changed before CI repair could start');
+        task = current;
+        task.pr = pr;
+        if (publication) {
+          task.snapshot = publication.snapshot;
+          task.feedback = publication.snapshot;
+        }
+        store.saveTask(task);
+        // Preserve historical findings in SQLite without passing them to CI-only work.
+        if (!publication) task.feedback = undefined;
+      } else if (revisingPlan) {
+        const ref = prRef(task);
+        const provider = this.engine.provider(ref);
+        const actual = await provider.getReview(ref, task.review!);
+        const pr = await provider.getPR(ref);
+        if (abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed while feedback was being read');
+        if (!(await this.engine.admitReviewWork(job, actual, pr))) {
           job.status = 'cancelled';
           return;
         }
         task = store.getTask(job.taskId);
+      }
+      if (job.kind === 'verify_merge' && this.engine.heldMergeReviewId(task) && startingPR) {
+        const publication = await this.engine.readHeldPublication(task, startingPR);
+        const current = store.getTask(job.taskId);
+        const currentGroup = current.groupId ? store.getGroup(current.groupId) : undefined;
+        if (
+          current.generation !== job.generation ||
+          abort.signal.aborted ||
+          (currentGroup &&
+            (currentGroup.generation !== job.groupGeneration ||
+              currentGroup.deletedAt ||
+              currentGroup.deletion ||
+              currentGroup.daddyState === 'paused' ||
+              currentGroup.daddyState === 'archived'))
+        ) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = current;
+        task.snapshot = publication.snapshot;
+        store.saveTask(task);
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {
@@ -759,6 +885,21 @@ export class Worker {
           (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
         );
       };
+      if (
+        job.kind === 'review' &&
+        task.reviewAdmission &&
+        !(await this.engine.checkInitialGitHubDraft(job))
+      ) {
+        job.status = 'cancelled';
+        return;
+      }
+      if (job.kind === 'review' && task.previousPublishedReview) {
+        task.feedback = store.getTask(task.id).feedback;
+      }
+      if (abort.signal.aborted) {
+        job.status = 'cancelled';
+        return;
+      }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,

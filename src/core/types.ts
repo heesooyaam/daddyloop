@@ -210,6 +210,7 @@ export interface ReviewHandle {
 }
 export interface ReviewSnapshot {
   authorId?: string;
+  dismissed?: true;
   status: 'draft' | 'published' | 'missing' | 'partial';
   body: string;
   comments: ReviewComment[];
@@ -300,12 +301,31 @@ export interface Task {
   authorBaseHead?: string;
   pendingAuthorHead?: string;
   publicationRetry?: { retryAt: number; delay: number };
+  /** Native review ID held until the initial draft is admitted. */
+  reviewAdmission?: string;
+  /** Original GitHub review bound to a read-only merge verification until completion. */
+  mergedReviewId?: string;
+  /** A queued or verified merge awaiting its final outcome, even when no review was created. */
+  mergeVerificationActive?: true;
+  /** An explicit review or merge request waiting for GitHub reads. */
+  mergeVerificationRequest?: {
+    kind: 'verify' | 'retry' | 'resume';
+    retryAt: number;
+    delay: number;
+    clarification?: string;
+  };
   draftStart?: {
     marker: string;
+    ref?: PRRef;
+    target?: Pick<PullRequest, 'branch' | 'targetBranch' | 'cloneUrl' | 'targetCloneUrl'>;
     owner?: string;
+    refusedMarker?: string;
     revision: Revision;
     retry: boolean;
     clarification?: string;
+    previousPublishedReview?: ReviewHandle;
+    mergeVerification?: Revision & { mergeCommit?: string };
+    mergeVerificationRequested?: 'verify' | 'retry';
     retryAt?: number;
     delay?: number;
   };
@@ -361,6 +381,9 @@ export interface Task {
   resumeState?: State;
   lastFeedbackHash?: string;
   feedback?: ReviewSnapshot;
+  /** The published review to reread before starting a conflict repair. */
+  conflictFeedbackReview?: ReviewHandle;
+  previousPublishedReview?: ReviewHandle;
   createdAt: string;
   updatedAt: string;
 }
