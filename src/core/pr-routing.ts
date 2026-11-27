@@ -80,6 +80,7 @@ export type PrAction =
         | 'fix-findings'
         | 'confirm-merge'
         | 'confirm-fix'
+        | 'check-review-ci'
         | 'check-fix-base'
         | 'hold-incomplete'
         | 'finish'
@@ -91,6 +92,7 @@ export type PrAction =
 
 const repairableStates = new Set<Task['state']>([
   'queued',
+  'awaiting_review_checks',
   'awaiting_checks',
   'awaiting_plan_approval',
   'awaiting_merge',
@@ -268,7 +270,18 @@ export function nextPrAction(
       return wait('Waiting for a published review with no outstanding findings');
     return { kind: 'merge' };
   }
-  return task.state === 'queued' ? { kind: 'review' } : { kind: 'continue' };
+  if (task.state === 'queued' || task.state === 'awaiting_review_checks')
+    return needsReviewChecks(task, pr) ? { kind: 'check-review-ci' } : { kind: 'review' };
+  return { kind: 'continue' };
+}
+
+export function needsReviewChecks(task: Task, pr: PullRequest) {
+  return (
+    pr.state === 'open' &&
+    task.policy.requireChecks &&
+    !(task.checksWaivedAt && sameRevision(task.revision, pr)) &&
+    pr.checks !== 'passing'
+  );
 }
 
 export function completionGate(task: Task) {

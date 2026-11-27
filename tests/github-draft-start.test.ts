@@ -201,6 +201,56 @@ function reviewer(f: Awaited<ReturnType<typeof reviewFixture>>, engine = f.engin
   return { worker, workspaces, prepare, prepareConflict, resources, run: runtime.run };
 }
 
+it.each(['during recovery', 'during workspace preparation'] as const)(
+  'holds the recovered GitHub draft for CI %s',
+  async (timing) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      const intent = f.store.getTask(f.task.id).draftStart!;
+      f.options.hidden = false;
+      f.due();
+      const before = reviewer(f);
+      if (timing === 'during recovery') f.remote.checks = 'pending';
+      else
+        before.prepare.mockImplementationOnce(async () => {
+          f.remote.checks = 'pending';
+          return '/tmp';
+        });
+      try {
+        await before.worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'awaiting_review_checks' }),
+        );
+        expect(before.run).not.toHaveBeenCalled();
+        expect(f.writeAttempts).toEqual(['POST']);
+        const held = f.store.getTask(f.task.id);
+        if (timing === 'during recovery')
+          expect(held.draftStart).toMatchObject({ marker: intent.marker });
+        else expect(held.review).toMatchObject({ id: '123', marker: intent.marker });
+      } finally {
+        await before.worker.stop();
+      }
+      f.restart();
+      f.remote.checks = 'passing';
+      const after = reviewer(f);
+      try {
+        await after.worker.tick();
+        await vi.waitFor(() => expect(after.run).toHaveBeenCalledTimes(1));
+        expect(after.run.mock.calls[0][0]).toMatchObject({
+          job: { kind: 'review' },
+          task: { round: 1, review: { id: '123', marker: intent.marker } },
+        });
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await after.worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
 it('recovers the original paginated draft after restart and starts exactly one reviewer', async () => {
   const f = await reviewFixture();
   try {

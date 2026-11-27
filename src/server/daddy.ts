@@ -208,11 +208,26 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       );
     },
   );
+  app.post<{ Params: { id: string; taskId: string } }>(
+    '/api/daddy/sessions/:id/tasks/:taskId/review-limit',
+    async (request) => {
+      const { limit } = z
+        .object({ limit: z.number().int().positive().nullable() })
+        .strict()
+        .parse(request.body);
+      return daddy.taskReviewLimit(
+        id.parse(request.params.id),
+        id.parse(request.params.taskId),
+        limit,
+      );
+    },
+  );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/task-action', async (request) => {
     const input = z
       .object({
         taskId: id,
         action: z.enum(['approve-plan', 'waive-checks', 'verify-merge']),
+        reason: z.string().trim().max(4000).optional(),
         expectedHead: z.string().max(128),
         expectedGeneration: z.number().int().positive(),
       })
@@ -229,6 +244,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       generation: input.expectedGeneration,
       groupId: request.params.id,
     };
-    return daddy.engine.action(task.id, input.action, '', expected);
+    return daddy.engine.action(task.id, input.action, input.reason ?? '', expected);
   });
 }
