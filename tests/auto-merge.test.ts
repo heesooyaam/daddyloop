@@ -1703,6 +1703,7 @@ it.each(
             omit,
             phase,
             legacy: undefined as string | undefined,
+            retarget: false,
           })),
         ),
       )
@@ -1713,12 +1714,23 @@ it.each(
           omit: false,
           phase: 'before preparation' as const,
           legacy,
+          retarget: false,
         })),
-      ),
+      )
+      .concat([
+        {
+          publication,
+          conflict: true,
+          omit: false,
+          phase: 'during preparation' as const,
+          legacy: undefined,
+          retarget: true,
+        },
+      ]),
   ),
 )(
-  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit, $phase, legacy=$legacy)',
-  async ({ publication, conflict, omit, phase, legacy }) => {
+  'hands off current findings after $publication publication (conflict=$conflict, missing=$omit, $phase, legacy=$legacy, retarget=$retarget)',
+  async ({ publication, conflict, omit, phase, legacy, retarget }) => {
     const f = await setup(daddyFixture(!!legacy));
     let reopened: Store | undefined;
     let restartedWorker: Worker | undefined;
@@ -1773,6 +1785,7 @@ it.each(
       const prepareConflict = vi
         .spyOn(f.checkouts, 'prepareConflict')
         .mockImplementation(async () => {
+          if (retarget) f.setRemote({ targetBranch: 'release' });
           if (phase === 'during preparation') await update();
           return undefined;
         });
@@ -1806,7 +1819,12 @@ it.each(
       });
       await (restartedWorker ?? f.worker).tick();
       await vi.waitFor(() => expect(store.getTask(id).state).toBe('needs_input'));
-      if (omit || legacy === 'ambiguous') {
+      if (retarget) {
+        expect(f.agentRuntime.run).not.toHaveBeenCalled();
+        expect(prepareConflict).toHaveBeenCalledOnce();
+        expect(store.getTask(id).reason).toContain('before the queued fix started');
+        expect(store.getTask(id).pr?.targetBranch).toBe(queued.pr?.targetBranch);
+      } else if (omit || legacy === 'ambiguous') {
         expect(f.agentRuntime.run).not.toHaveBeenCalled();
         expect(prepareConflict).toHaveBeenCalledTimes(
           conflict && phase === 'during preparation' ? 1 : 0,

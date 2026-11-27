@@ -781,9 +781,7 @@ export class Worker {
         store.saveTask(task);
         store.saveJob(job);
       }
-      const repairHasFeedback =
-        task.feedback?.status === 'published' &&
-        (!!task.feedbackReview || task.feedback.comments.length > 0);
+      const repairHasFeedback = job.kind === 'fix' && this.engine.broker.hasRepairFeedback(task);
       const needsFixFeedback =
         job.kind === 'fix' && (!(repairingConflict || repairingCI) || repairHasFeedback);
       const readFeedback = async () => {
@@ -840,6 +838,20 @@ export class Worker {
           (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
         );
       };
+      if (job.kind === 'fix' && startingPR && !demo) {
+        const current = await this.engine.provider(prRef(task)).getPR(prRef(task));
+        if (
+          !sameOpenTarget(task.pr, current) ||
+          !sameRevision(startingPR, current) ||
+          (repairingConflict && current.draft !== false)
+        )
+          throw new AppError(
+            'repair_target_changed',
+            'The PR destination, revision or open state changed before the queued fix started. The author copy was preserved.',
+          );
+        if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
+          throw new AppError('run_cancelled', 'Task changed before the author started');
+      }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,
         job,

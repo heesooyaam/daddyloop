@@ -115,6 +115,7 @@ type FindingEvidence = Pick<
   | 'reviewFindingIds'
   | 'findingVersions'
   | 'mergeFindingVersions'
+  | 'mergeFindingReview'
 >;
 
 export class Engine {
@@ -2317,12 +2318,16 @@ export class Engine {
     job.publishedFindingReviews = [...handles.values()];
     job.findingVersions = this.findingVersions([...read.values()]);
     job.mergeFindingVersions = {};
+    delete job.mergeFindingReview;
     if (latest) this.setFeedback(task, read.get(latest.id)!, latest);
     if (job.kind === 'verify_merge' && task.review) {
       const current = read.get(task.review.id) ?? (await readFindingReview(task.review));
       task.snapshot = current;
       job.mergeFindingVersions = this.findingVersions([current]);
-      if (current.status === 'published') read.set(task.review.id, current);
+      if (current.status === 'published') {
+        read.set(task.review.id, current);
+        job.mergeFindingReview = task.review;
+      }
     }
     // Retain attribution for IDs first seen in this run as well as archived IDs.
     job.reviewFindingIds = Object.fromEntries(

@@ -429,6 +429,7 @@ export interface Decision {
   at: string;
 }
 export interface Job {
+  mergeFindingReview?: ReviewHandle;
   publishedFindingReview?: ReviewHandle;
   publishedFindingReviews?: ReviewHandle[];
   reviewFindingIds?: Record<string, string[]>;
