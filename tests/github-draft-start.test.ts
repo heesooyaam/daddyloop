@@ -1170,6 +1170,125 @@ it.each([
   }
 });
 
+it.each(['immediate', 'deferred'] as const)(
+  'recovers the next draft after interruption at the archive commit (%s retry)',
+  async (entry) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Original finding**', html_url: f.task.ref.url });
+      f.due();
+      const held = await f.engine.review(f.task.id);
+      const clarification = 'Include the original rollout checklist after the archive';
+      if (entry === 'deferred') {
+        vi.mocked(f.github.getPR).mockRejectedValueOnce(
+          new AppError('provider_503', 'First read failed'),
+        );
+        await f.engine.review(f.task.id, true, clarification);
+        f.due();
+      }
+
+      const interrupted = new Error('Stopped immediately after the archive commit');
+      const commit = f.store.transaction.bind(f.store);
+      vi.spyOn(f.store, 'transaction').mockImplementationOnce((write) => {
+        commit(write);
+        throw interrupted;
+      });
+      const retry =
+        entry === 'immediate'
+          ? f.engine.review(f.task.id, true, clarification)
+          : f.engine.review(f.task.id);
+      await expect(retry).rejects.toBe(interrupted);
+      f.restart();
+      expect(f.store.setting('review.archive:' + f.task.id + ':123')).toBeDefined();
+      const staged = f.store.getTask(f.task.id);
+      expect.soft(staged.draftStart).toMatchObject({ retry: true, clarification });
+      expect(f.writeAttempts).toEqual(['POST']);
+
+      const { worker, run } = reviewer(f);
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        const input = run.mock.calls[0][0];
+        expect(input.task).toMatchObject({
+          round: held.round + 1,
+          review: { id: '124' },
+          feedback: { comments: [{ id: '456', body: '**Original finding**' }] },
+          latestClarification: { text: clarification },
+        });
+        expect(input.prompt).toContain(clarification);
+        expect(f.writeAttempts).toEqual(['POST', 'POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['bound', 'immediate'],
+  ['bound', 'deferred'],
+  ['unbound', 'immediate'],
+  ['unbound', 'deferred'],
+] as const)(
+  'passes retry clarification to verify_merge (%s review, %s request)',
+  async (binding, entry) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Original finding**', html_url: f.task.ref.url });
+      if (binding === 'bound') {
+        f.due();
+        await f.engine.review(f.task.id);
+        expect(f.store.getTask(f.task.id).review?.id).toBe('123');
+      }
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      const clarification = 'Include the original rollout checklist in the merge verification';
+      if (entry === 'deferred')
+        vi.mocked(f.github.getPR).mockRejectedValueOnce(
+          new AppError('provider_503', 'First read failed'),
+        );
+      await f.engine.review(f.task.id, true, clarification);
+      f.restart();
+      if (entry === 'deferred') f.due();
+      const { worker, run } = reviewer(f);
+      run.mockResolvedValue({
+        status: 'completed',
+        summary: 'Verified merge',
+        checkedHead: f.remote.head,
+        verifiedCommentIds: ['456'],
+      });
+      try {
+        await worker.tick();
+        await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('complete'));
+        expect(run).toHaveBeenCalledTimes(1);
+        const input = run.mock.calls[0][0];
+        expect(input).toMatchObject({
+          job: { kind: 'verify_merge' },
+          task: {
+            review: { id: '123' },
+            snapshot: { comments: [{ id: '456', body: '**Original finding**' }] },
+            latestClarification: { text: clarification },
+          },
+        });
+        expect(input.prompt).toContain(clarification);
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
 it('keeps the clarification of a retry received before the original draft becomes visible', async () => {
   const f = await reviewFixture();
   try {
@@ -1554,6 +1673,7 @@ it.each([
   ['shutdown', 'transient'],
   ['restart after claim', 'transient'],
   ['restart after claim', 'bound transient'],
+  ['restart after claim', 'repaused transient'],
 ] as const)(
   'resumes a merge verifier without a review after %s (%s record)',
   async (pause, record) => {
@@ -1616,8 +1736,10 @@ it.each([
           mergeVerificationRequest: { kind: 'resume' },
         });
         expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+        if (record === 'repaused transient') await f.engine.action(f.task.id, 'pause');
         f.restart();
-        f.due();
+        if (record === 'repaused transient') await f.engine.action(f.task.id, 'resume');
+        else f.due();
       } else expect(f.store.activeJobs(f.task.id)).toMatchObject([{ kind: 'verify_merge' }]);
       const after = reviewer(f);
       after.run.mockResolvedValue({
@@ -1647,66 +1769,88 @@ it.each([
   ['awaiting_plan_approval', 'current'],
   ['awaiting_checks', 'transient'],
   ['awaiting_plan_approval', 'transient'],
-] as const)(
-  'resumes the %s gate after verification without a review completed (%s)',
-  async (gate, record) => {
-    const f = await reviewFixture();
-    try {
-      await verifyAfterRefusedDraft(f);
-      const task = f.store.getTask(f.task.id);
-      task.policy.requireChecks = true;
-      if (gate === 'awaiting_plan_approval') {
-        task.kind = 'plan';
-        task.policy.planApproval = 'human';
-      }
-      f.store.saveTask(task);
-      f.remote.checks = gate === 'awaiting_checks' ? 'pending' : 'passing';
-      const job = f.store.claim()!;
-      await f.engine.completeJob(job, {
-        status: 'completed',
-        summary: 'Verified merge',
-        checkedHead: f.remote.head,
-      });
-      f.store.saveJob({ ...job, status: 'completed' });
-      expect(f.store.getTask(task.id).state).toBe(gate);
-      await f.engine.action(task.id, 'pause');
-      f.restart();
-      if (record === 'transient') {
-        vi.mocked(f.github.getPR).mockRejectedValueOnce(
-          new AppError('provider_503', 'Resume PR read failed'),
-        );
-        await f.engine.action(task.id, 'resume');
-        expect(f.store.getTask(task.id)).toMatchObject({
-          state: 'queued',
-          mergeVerificationRequest: { kind: 'resume' },
-          resumeState: gate,
-        });
-        f.restart();
-        f.due();
-        const { worker, run } = reviewer(f);
-        try {
-          await worker.tick();
-          expect(run).not.toHaveBeenCalled();
-          expect(f.store.getTask(task.id).state).toBe(gate);
-        } finally {
-          await worker.stop();
-        }
-      } else expect((await f.engine.action(task.id, 'resume')).state).toBe(gate);
-      expect(f.store.activeJobs(task.id)).toHaveLength(0);
-      if (gate === 'awaiting_checks') {
-        f.remote.checks = 'passing';
-        await f.engine.reconcile(task.id);
-      } else await f.engine.action(task.id, 'approve-plan');
-      const completed = f.store.getTask(task.id);
-      expect(completed.state).toBe('complete');
-      expect(completed.mergeVerificationActive).toBeUndefined();
-      expect(f.store.jobs(task.id).filter((item) => item.kind === 'verify_merge')).toHaveLength(1);
-      expect(f.writeAttempts).toEqual(['POST']);
-    } finally {
-      f.close();
+  ['awaiting_checks', 'repaused'],
+  ['awaiting_plan_approval', 'repaused'],
+  ['awaiting_checks', 'bound repaused'],
+  ['awaiting_plan_approval', 'bound repaused'],
+] as const)('resumes the %s gate after verification completed (%s)', async (gate, record) => {
+  const f = await reviewFixture();
+  try {
+    const bound = record === 'bound repaused';
+    if (bound) {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Original finding**', html_url: f.task.ref.url });
+      f.due();
+      await f.engine.review(f.task.id);
+      f.remote.state = 'merged';
+      f.remote.mergeCommit = 'f'.repeat(40);
+      await f.engine.action(f.task.id, 'verify-merge');
+    } else await verifyAfterRefusedDraft(f);
+    const task = f.store.getTask(f.task.id);
+    task.policy.requireChecks = true;
+    if (gate === 'awaiting_plan_approval') {
+      task.kind = 'plan';
+      task.policy.planApproval = 'human';
     }
-  },
-);
+    f.store.saveTask(task);
+    f.remote.checks = gate === 'awaiting_checks' ? 'pending' : 'passing';
+    const job = f.store.claim()!;
+    await f.engine.completeJob(job, {
+      status: 'completed',
+      summary: 'Verified merge',
+      checkedHead: f.remote.head,
+      verifiedCommentIds: bound ? ['456'] : [],
+    });
+    f.store.saveJob({ ...job, status: 'completed' });
+    expect(f.store.getTask(task.id).state).toBe(gate);
+    await f.engine.action(task.id, 'pause');
+    f.restart();
+    if (record !== 'current') {
+      vi.mocked(f.github.getPR).mockRejectedValueOnce(
+        new AppError('provider_503', 'Resume PR read failed'),
+      );
+      await f.engine.action(task.id, 'resume');
+      expect(f.store.getTask(task.id)).toMatchObject({
+        state: 'queued',
+        mergeVerificationRequest: { kind: 'resume' },
+        resumeState: gate,
+      });
+      const report = f.store.getTask(task.id).verifiedMerge;
+      const repaused = record.endsWith('repaused');
+      if (repaused) {
+        const paused = await f.engine.action(task.id, 'pause');
+        expect.soft(paused.resumeState).toBe(gate);
+      }
+      f.restart();
+      if (repaused) {
+        expect((await f.engine.action(task.id, 'resume')).state).toBe(gate);
+        expect(f.store.getTask(task.id).verifiedMerge).toEqual(report);
+      } else f.due();
+      const { worker, run } = reviewer(f);
+      try {
+        await worker.tick();
+        expect(run).not.toHaveBeenCalled();
+        expect(f.store.getTask(task.id).state).toBe(gate);
+      } finally {
+        await worker.stop();
+      }
+    } else expect((await f.engine.action(task.id, 'resume')).state).toBe(gate);
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+    if (gate === 'awaiting_checks') {
+      f.remote.checks = 'passing';
+      await f.engine.reconcile(task.id);
+    } else await f.engine.action(task.id, 'approve-plan');
+    const completed = f.store.getTask(task.id);
+    expect(completed.state).toBe('complete');
+    expect(completed.mergeVerificationActive).toBeUndefined();
+    expect(f.store.jobs(task.id).filter((item) => item.kind === 'verify_merge')).toHaveLength(1);
+    expect(f.writeAttempts).toEqual(['POST']);
+  } finally {
+    f.close();
+  }
+});
 
 it.each([
   ['review', 'resource'],
