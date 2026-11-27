@@ -307,20 +307,29 @@ it.each(['passing', 'pending', 'missing', 'failing', 'conflict'] as const)(
       f.remote.mergeConflict = checks === 'conflict';
       f.restart();
       const after = reviewer(f);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+      const poll = () => {
+        // A tick in the same millisecond does not poll, even with pollMs set to zero.
+        clock.mockReturnValue(Date.now() + 1);
+        return after.worker.tick();
+      };
       try {
         if (checks === 'passing') {
           vi.mocked(f.github.getPR).mockRejectedValueOnce(
             new AppError('provider_503', 'PR read failed'),
           );
-          await after.worker.tick();
+          await poll();
           expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'awaiting_review_checks' });
-          f.options.missing = 'comments';
+          const reads = vi.mocked(f.github.getPR).mock.calls.length;
           await after.worker.tick();
+          expect(f.github.getPR).toHaveBeenCalledTimes(reads);
+          f.options.missing = 'comments';
+          await poll();
           expect(f.store.getTask(f.task.id)).toMatchObject({ state: 'awaiting_review_checks' });
           expect(f.store.getTask(f.task.id).mergeVerificationRequest).toBeUndefined();
           f.options.missing = undefined;
         }
-        await after.worker.tick();
+        await poll();
         const held = f.store.getTask(f.task.id);
         expect(held).toMatchObject({
           state: 'needs_input',
@@ -343,6 +352,7 @@ it.each(['passing', 'pending', 'missing', 'failing', 'conflict'] as const)(
         expect(after.run.mock.calls[0][0].task).toMatchObject({ round: 2, review: { id: '124' } });
         expect(f.writeAttempts).toEqual(['POST', 'POST']);
       } finally {
+        clock.mockRestore();
         await after.worker.stop();
       }
     } finally {
