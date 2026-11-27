@@ -21,8 +21,15 @@ export interface TelegramButton {
   callback_data?: string;
   url?: string;
 }
+export interface TelegramReplyKeyboard {
+  keyboard: { text: string; request_chat: Record<string, unknown> }[][];
+  resize_keyboard: boolean;
+  one_time_keyboard: boolean;
+}
 export interface TelegramCard extends FormattedText {
   buttons?: TelegramButton[][];
+  replyKeyboard?: TelegramReplyKeyboard;
+  removeKeyboard?: boolean;
 }
 
 export function safeLink(value: string) {

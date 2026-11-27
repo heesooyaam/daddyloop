@@ -123,6 +123,13 @@ export class Store {
       this.transactionEvents = undefined;
     }
   }
+  effectResult<T>(key?: string) {
+    return key ? this.setting<{ result: T }>(key) : undefined;
+  }
+  recordEffect<T>(key: string | undefined, result: T): T {
+    if (key) this.setSetting(key, { result });
+    return result;
+  }
   private readTask(data: string): Task {
     const task: Task = JSON.parse(data);
     if (task.policy) Reflect.deleteProperty(task.policy, 'maxRounds');

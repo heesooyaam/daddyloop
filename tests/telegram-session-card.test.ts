@@ -30,6 +30,15 @@ it('pins one topic status card and edits it as the queue changes across restarts
   };
   let progress = integration();
   const group = f.daddy.create({ workspaceId: f.workspace.id, title: 'Work' });
+  const bindThread = (threadId: number) =>
+    f.store.db
+      .prepare('INSERT OR REPLACE INTO telegram_topics VALUES(?,?,?)')
+      .run(
+        `7:-10042:${group.id}`,
+        group.id,
+        JSON.stringify({ ...route, threadId, groupId: group.id }),
+      );
+  bindThread(route.threadId);
   try {
     progress.start();
     await vi.advanceTimersByTimeAsync(5000);
@@ -45,6 +54,11 @@ it('pins one topic status card and edits it as the queue changes across restarts
     await progress.stop();
     await api.delivery!.stop();
 
+    // The released version stored one progress record directly under the group key.
+    const oldKey = `telegram.progress:fixture_bot:${group.id}`;
+    f.store.db
+      .prepare('UPDATE settings SET key=? WHERE key=?')
+      .run(oldKey, oldKey + ':7:-10042:17');
     progress = integration();
     const task = await f.daddy.createTask(group.id, {
       requirements: 'Show in pin',
@@ -70,6 +84,22 @@ it('pins one topic status card and edits it as the queue changes across restarts
       message_id: 101,
       text: expect.stringContaining('All tasks complete'),
     });
+    route.threadId = 18;
+    bindThread(route.threadId);
+    await vi.advanceTimersByTimeAsync(5000);
+    await api.delivery!.flush();
+    expect(
+      sent
+        .filter(({ method }) => method === 'sendMessage')
+        .map(({ body }) => body.message_thread_id),
+    ).toEqual([17, 18]);
+    route.threadId = 17;
+    bindThread(route.threadId);
+    f.store.saveGroup({ ...f.store.getGroup(group.id), title: 'Returned to the original topic' });
+    await vi.advanceTimersByTimeAsync(5000);
+    await api.delivery!.flush();
+    expect(sent.filter(({ method }) => method === 'sendMessage')).toHaveLength(2);
+    expect(sent.at(-1)).toMatchObject({ method: 'editMessageText', body: { message_id: 101 } });
   } finally {
     await progress.stop();
     await api.delivery?.stop();
@@ -144,7 +174,14 @@ it.each(['online', 'failed-edit', 'missed-event'])(
     const failEdit = mode === 'failed-edit';
     const f = daddyFixture(true);
     const sent: { method: string; body: Record<string, any> }[] = [];
+    const boardSends = () =>
+      sent.filter(
+        (item) => item.method === 'sendMessage' && !item.body.text.includes('Server status'),
+      );
+    const boardEdits = () =>
+      sent.filter((item) => item.method === 'editMessageText' && item.body.message_id === 102);
     let unavailable = false;
+    let messageId = 100;
     let clock = Date.now();
     const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, options) => {
       const method = String(url).split('/').at(-1)!;
@@ -153,7 +190,9 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       if (method === 'editMessageText' && unavailable)
         return new Response('unavailable', { status: 503 });
       const result =
-        method === 'createForumTopic' ? { message_thread_id: 17 } : { message_id: 101 };
+        method === 'createForumTopic'
+          ? { message_thread_id: 17 }
+          : { message_id: method === 'sendMessage' ? ++messageId : 0 };
       return new Response(JSON.stringify({ ok: true, result }));
     });
     const delivery = () => new TelegramDelivery(f.store, api, 'fixture_bot', () => clock);
@@ -174,14 +213,13 @@ it.each(['online', 'failed-edit', 'missed-event'])(
         data: {},
         at: group.updatedAt,
       });
-      await vi.waitFor(() =>
-        expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(1),
-      );
-      expect(sent.find((item) => item.method === 'sendMessage')!.body).toMatchObject({
+      await vi.waitFor(() => expect(boardSends()).toHaveLength(1));
+      expect(boardSends()[0]!.body).toMatchObject({
         chat_id: -10042,
         message_thread_id: 17,
         text: expect.stringContaining('Preparing'),
       });
+      await api.delivery.flush();
       group.workspacePreparation = { state: 'ready' };
       group.updatedAt = new Date(Date.now() + 1000).toISOString();
       f.store.saveGroup(group);
@@ -195,9 +233,7 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       };
       if (mode !== 'missed-event') {
         workspace.onEvent(ready);
-        await vi.waitFor(() =>
-          expect(sent.filter((item) => item.method === 'editMessageText')).toHaveLength(1),
-        );
+        await vi.waitFor(() => expect(boardEdits()).toHaveLength(1));
       }
       await workspace.stop();
       await api.delivery.stop();
@@ -211,17 +247,17 @@ it.each(['online', 'failed-edit', 'missed-event'])(
       workspace.replay();
       if (mode !== 'missed-event') workspace.onEvent(ready);
       await vi.waitFor(() =>
-        expect(send).toHaveBeenCalledTimes(beforeReplay + (mode === 'missed-event' ? 1 : 2)),
+        expect(send).toHaveBeenCalledTimes(beforeReplay + (mode === 'missed-event' ? 2 : 3)),
       );
       await workspace.stop();
       await api.delivery.flush();
       expect(api.delivery.status().pending).toBe(0);
-      expect(sent.filter((item) => item.method === 'sendMessage')).toHaveLength(1);
-      const edits = sent.filter((item) => item.method === 'editMessageText');
+      expect(boardSends()).toHaveLength(1);
+      const edits = boardEdits();
       expect(edits).toHaveLength(failEdit ? 2 : 1);
       expect(edits.at(-1)!.body).toMatchObject({
         chat_id: -10042,
-        message_id: 101,
+        message_id: 102,
         text: expect.stringContaining('ready'),
       });
     } finally {
@@ -280,12 +316,15 @@ it.each(['private', 'topic'])(
       const initial = calls.find((call) =>
         call.body.text?.includes('Request saved. Waiting to start.'),
       );
+      const firstStatus = calls.find(
+        (call) => call.method === 'sendMessage' && call.body.text?.includes('Server status'),
+      )!;
+      expect(firstStatus.body.message_thread_id).toBe(topic ? 31 : undefined);
+      const messageId = calls.indexOf(firstStatus) + 1;
       expect(initial).toMatchObject({
-        method: 'sendMessage',
-        body: { chat_id: topic ? -10042 : 7 },
+        method: topic ? 'editMessageText' : 'sendMessage',
+        body: { chat_id: topic ? -10042 : 7, ...(topic ? { message_id: messageId } : {}) },
       });
-      expect(initial?.body.message_thread_id).toBe(topic ? 31 : undefined);
-      const messageId = calls.indexOf(initial!) + 1;
       const edits = () =>
         calls.filter(
           (call) => call.method === 'editMessageText' && call.body.message_id === messageId,

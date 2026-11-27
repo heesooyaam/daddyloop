@@ -304,3 +304,78 @@ it('keeps the longest global flood wait and aborts both in-flight dispatches on 
     await f.close();
   }
 });
+
+it('keeps the first status ahead of requested menus in a new topic', async () => {
+  const f = daddyFixture();
+  const started = gate();
+  const release = gate();
+  const sent: { chat: number; thread?: number; text: string }[] = [];
+  let firstStarted = false;
+  let nextId = 100;
+  f.daddy.create({ workspaceId: f.workspace.id, title: 'New session' });
+  f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+  f.store.setSetting('telegram.group', { chatId: -10042, ownerId: 7 });
+  setLocale(f.store, 'en');
+  const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
+    const method = String(url).split('/').at(-1)!;
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    if (method === 'getUpdates')
+      return new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) reject(init.signal.reason);
+        else
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), {
+            once: true,
+          });
+      });
+    if (method === 'createForumTopic')
+      return Response.json({ ok: true, result: { message_thread_id: 17 } });
+    if (method === 'sendMessage') {
+      if (body.message_thread_id === 17 && !firstStarted) {
+        firstStarted = true;
+        started.open();
+        await release.promise;
+      }
+      sent.push({ chat: body.chat_id, thread: body.message_thread_id, text: body.text });
+    }
+    return Response.json({ ok: true, result: { message_id: ++nextId } });
+  });
+  const bot = new Telegram(f.engine, api, 'fixture_bot');
+  bot.configure({ daddy: f.daddy, catalogue, updates: new UpdateMonitor(f.store, { agents: [] }) });
+  const topicMessages = () => sent.filter(({ thread }) => thread === 17);
+  try {
+    bot.start();
+    await started.promise;
+    await bot.handle({
+      update_id: 11,
+      message: {
+        message_id: 11,
+        text: '/queue',
+        from: { id: 7 },
+        chat: { id: -10042, type: 'supergroup' },
+        message_thread_id: 17,
+      },
+    });
+    await api.delivery!.send({ chatId: 7 }, text('Independent private menu'), {
+      requestedMenu: true,
+      key: 'private-menu',
+    });
+    await vi.waitFor(() =>
+      expect(sent).toContainEqual({
+        chat: 7,
+        thread: undefined,
+        text: 'Independent private menu',
+      }),
+    );
+    expect(topicMessages()).toEqual([]);
+    release.open();
+    await vi.waitFor(() =>
+      expect(topicMessages().some(({ text }) => text.includes('Task queue'))).toBe(true),
+    );
+    expect(topicMessages()[0]?.text).toContain('No work in progress');
+  } finally {
+    release.open();
+    started.open();
+    await bot.stop();
+    await f.close();
+  }
+});

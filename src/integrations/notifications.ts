@@ -12,3 +12,15 @@ export function notificationPreferences(store: Store): NotificationPreferences {
     }
   );
 }
+
+export function setNotificationMode(
+  store: Store,
+  mode: 'on' | 'off' | 'all',
+): NotificationPreferences {
+  const value: NotificationPreferences = {
+    enabled: mode !== 'off',
+    mode: mode === 'all' ? 'all' : 'attention',
+  };
+  store.setSetting('notifications.telegram', value);
+  return value;
+}

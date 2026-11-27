@@ -6,10 +6,11 @@ import { randomBytes, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { Store } from '../core/store.js';
 import type { Engine } from '../core/engine.js';
 import { AppError, now, type Event } from '../core/types.js';
 import { rememberSecret, redact } from '../core/security.js';
-import { notificationPreferences } from './notifications.js';
+import { notificationPreferences, setNotificationMode } from './notifications.js';
 import {
   splitTelegramText,
   TelegramText,
@@ -24,7 +25,12 @@ import type { UpdateMonitor, UpdateNotice } from '../core/updates.js';
 import type { RuntimeUpdaters, RuntimeUpdateOperation } from '../core/runtime-updater.js';
 import type { Daddy } from '../core/daddy.js';
 import { TelegramWorkspace } from './telegram-workspace.js';
-import { TelegramDelivery, deliveryStatus, type DeliveryOptions } from './telegram-delivery.js';
+import {
+  TelegramDelivery,
+  deliveryStatus,
+  type DeliveryOptions,
+  type TelegramDestination,
+} from './telegram-delivery.js';
 import { daddyHome } from './daddy-cards.js';
 import type { Speech } from '../runtime/speech.js';
 import type { ResourceStatus } from '../core/types.js';
@@ -126,8 +132,44 @@ export class TelegramApi {
     messageId: number;
     replied: boolean;
     active: boolean;
-    deliveryManaged?: boolean;
   }>();
+  private incoming = new AsyncLocalStorage<{ id: number; replies: number }>();
+  private replyRoute = new AsyncLocalStorage<TelegramDestination & { groupId: string }>();
+  fromUpdate<T>(id: number, action: () => Promise<T>) {
+    return this.incoming.run({ id, replies: 0 }, action);
+  }
+  private updateEffectPrefix(store: Store, id: number) {
+    return `telegram.updateEffect:${store.setting<number>('telegram.botId') ?? 'local'}:${id}:`;
+  }
+  updateEffectKey(store: Store, name: string) {
+    const update = this.incoming.getStore();
+    return update && this.updateEffectPrefix(store, update.id) + name;
+  }
+  applyUpdateEffect<T>(store: Store, name: string, apply: () => T): T {
+    const key = this.updateEffectKey(store, name);
+    if (!key) return apply();
+    return store.transaction(() => {
+      const prior = store.effectResult<T>(key);
+      return prior ? prior.result : store.recordEffect(key, apply());
+    });
+  }
+  acknowledgeUpdate(store: Store, id: number) {
+    store.transaction(() => {
+      store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(id, now());
+      store.db
+        .prepare('DELETE FROM settings WHERE key GLOB ?')
+        .run(this.updateEffectPrefix(store, id) + '*');
+    });
+  }
+  forSessionReply<T>(route: TelegramDestination & { groupId: string }, action: () => Promise<T>) {
+    return this.replyRoute.run(route, action);
+  }
+  async answerCallback(id: string) {
+    const acknowledgement = this.call('answerCallbackQuery', { callback_query_id: id });
+    if (this.delivery?.drainingInBackground)
+      void acknowledgement.catch(() => {}); // The transient acknowledgement does not gate the action.
+    else await acknowledgement;
+  }
   delivery?: TelegramDelivery;
   onCleanupError?: (error: unknown) => void;
   constructor(
@@ -215,6 +257,7 @@ export class TelegramApi {
         const outgoing = body as { chat_id?: number; message_thread_id?: number };
         if (
           method === 'sendMessage' &&
+          !signal &&
           navigation?.active &&
           outgoing?.chat_id === navigation.chatId &&
           outgoing.message_thread_id === navigation.threadId
@@ -254,7 +297,6 @@ export class TelegramApi {
       messageId: message.message_id,
       replied: false,
       active: true,
-      deliveryManaged: false,
     };
     let result: T;
     try {
@@ -262,7 +304,7 @@ export class TelegramApi {
     } finally {
       navigation.active = false;
     }
-    if (navigation.replied && !navigation.deliveryManaged) {
+    if (navigation.replied) {
       try {
         await this.call('deleteMessage', {
           chat_id: navigation.chatId,
@@ -335,21 +377,35 @@ export class TelegramApi {
     const chatId = typeof destination === 'number' ? destination : destination.chatId;
     const value = typeof content === 'string' ? new TelegramText().add(content) : content;
     const chunks = splitTelegramText(value);
-    const keyboard = buttons ?? (value as TelegramCard).buttons;
+    const card: TelegramCard = value;
+    const keyboard = buttons ?? card.buttons;
     if (this.delivery) {
       const navigation = this.navigation.getStore();
       const target = typeof destination === 'number' ? { chatId: destination } : destination;
       const cleanup =
+        !delivery?.sessionRoute &&
         navigation?.active &&
         target.chatId === navigation.chatId &&
         target.threadId === navigation.threadId
           ? { chatId: navigation.chatId, messageId: navigation.messageId }
           : undefined;
-      if (cleanup) navigation!.deliveryManaged = true;
-      return this.delivery.send(
-        target,
-        { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
-        { ...menuDelivery(this, target, delivery), deletePrevious: cleanup },
+      const route = this.replyRoute.getStore();
+      const routeOptions =
+        route && target.chatId === route.chatId && target.threadId === route.threadId
+          ? { groupId: route.groupId, sessionRoute: true }
+          : undefined;
+      const update = this.incoming.getStore();
+      const policy = menuDelivery(this, target, { ...routeOptions, ...delivery });
+      const key = policy?.key ?? (update && `update:${update.id}:${update.replies++}`);
+      const queue = this.delivery;
+      // The queue owns cleanup for its writes. Only direct Bot API calls use
+      // the callback's synchronous acknowledgement.
+      return this.navigation.exit(() =>
+        queue.send(
+          target,
+          { ...value, ...(keyboard ? { buttons: keyboard } : {}) },
+          { ...policy, key, deletePrevious: cleanup },
+        ),
       );
     }
     let result: unknown;
@@ -363,8 +419,12 @@ export class TelegramApi {
         text: chunk.text,
         ...(chunk.entities.length ? { entities: chunk.entities } : {}),
         link_preview_options: { is_disabled: true },
-        ...(keyboard && i === chunks.length - 1
-          ? { reply_markup: { inline_keyboard: keyboard } }
+        ...(i === chunks.length - 1 && (card.replyKeyboard || card.removeKeyboard || keyboard)
+          ? {
+              reply_markup:
+                card.replyKeyboard ??
+                (card.removeKeyboard ? { remove_keyboard: true } : { inline_keyboard: keyboard }),
+            }
           : {}),
       });
     }
@@ -493,14 +553,13 @@ export class Telegram {
   async handle(update: Update) {
     const store = this.engine.store;
     if (store.db.prepare('SELECT 1 FROM bot_receipts WHERE id=?').get(update.update_id)) return;
+    const apply = () => this.api.fromUpdate(update.update_id, () => this.processUpdate(update));
     const menu = requestedMenu(update, this.username);
-    if (!menu) return this.handleUpdate(update, false);
-    await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), () =>
-      this.handleUpdate(update, true),
-    );
-    store.db.prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
+    if (menu) await handleMenuRequest(this.api, menu, this.workspace?.groupAt(menu), apply);
+    else await apply();
+    this.api.acknowledgeUpdate(store, update.update_id);
   }
-  private async handleUpdate(update: Update, menu: boolean) {
+  private async processUpdate(update: Update) {
     const store = this.engine.store;
     const message = update.message;
     const sender = update.callback_query?.from ?? message?.from;
@@ -518,14 +577,8 @@ export class Telegram {
       // Persist voice, conversation input and task commands before acknowledging the update.
       const handled = await this.workspace.handle(update);
       if (handled) this.queueAcceptedReaction(message);
-      if (!menu)
-        store.db
-          .prepare('INSERT OR IGNORE INTO bot_receipts VALUES(?,?)')
-          .run(update.update_id, now());
       return;
     }
-    if (!menu)
-      store.db.prepare('INSERT INTO bot_receipts VALUES(?,?)').run(update.update_id, now());
     const callback = update.callback_query;
     const chat = message?.chat ?? callback?.message?.chat,
       from = message?.from ?? callback?.from;
@@ -568,7 +621,7 @@ export class Telegram {
     try {
       if (callback) {
         await this.api.replaceCard(callback, async () => {
-          await this.api.call('answerCallbackQuery', { callback_query_id: callback.id });
+          await this.api.answerCallback(callback.id);
           if (!(await this.navigate(callback.data ?? '', chat.id)))
             throw new Error('Unknown action. Open the current menu with /start.');
         });
@@ -583,8 +636,12 @@ export class Telegram {
       }
       const language = text.match(/^\/language(?:\s+(en|ru))?$/i);
       if (language) {
-        if (language[1]) setLocale(store, language[1].toLowerCase() as Locale);
-        await this.api.send(chat.id, languageCard(this.locale()));
+        const locale = language[1]
+          ? this.api.applyUpdateEffect(store, 'locale', () =>
+              setLocale(store, language[1].toLowerCase() as Locale),
+            ).locale
+          : this.locale();
+        await this.api.send(chat.id, languageCard(locale));
         return;
       }
       if (text === '/models') {
@@ -596,16 +653,13 @@ export class Telegram {
         return;
       }
       if (/^\/notifications(?:\s+(on|off|all))?$/.test(text)) {
-        const mode = text.split(/\s+/)[1];
-        if (mode)
-          store.setSetting('notifications.telegram', {
-            enabled: mode !== 'off',
-            mode: mode === 'all' ? 'all' : 'attention',
-          });
-        await this.api.send(
-          chat.id,
-          notificationsCard(notificationPreferences(store), this.locale()),
-        );
+        const mode = text.split(/\s+/)[1] as 'on' | 'off' | 'all' | undefined;
+        const value = mode
+          ? this.api.applyUpdateEffect(store, 'notifications', () =>
+              setNotificationMode(store, mode),
+            )
+          : notificationPreferences(store);
+        await this.api.send(chat.id, notificationsCard(value, this.locale()));
         return;
       }
       if (text === '/web') {
@@ -639,7 +693,20 @@ export class Telegram {
   private async showCleanup(chatId: number, patch?: Record<string, unknown>) {
     const control = this.integrations?.cleanup;
     if (!control) throw new Error('Disk cleanup is unavailable');
-    const status = patch ? await control.update(patch) : control.status();
+    const store = this.engine.store;
+    const key = patch && this.api.updateEffectKey(store, 'cleanup');
+    const prior = store.effectResult<ReturnType<CleanupControls['status']>>(key);
+    const intent = key && key + ':pending';
+    if (patch && !prior && store.effectResult(intent)) {
+      await this.api.send(chatId, cleanupControlCard(this.locale(), control.status(), true));
+      return;
+    }
+    // Configuration is persisted outside SQLite. If the result is missing
+    // after restart, replay could overwrite a newer change made in the web UI.
+    if (patch && !prior) store.recordEffect(intent, true);
+    const status =
+      prior?.result ??
+      (patch ? store.recordEffect(key, await control.update(patch)) : control.status());
     await this.api.send(chatId, cleanupControlCard(this.locale(), status));
   }
 
@@ -673,8 +740,13 @@ export class Telegram {
     }
     const language = data.match(/^language:(en|ru|show)$/);
     if (language) {
-      if (language[1] !== 'show') setLocale(this.engine.store, language[1] as Locale);
-      await this.api.send(chatId, languageCard(this.locale()));
+      const locale =
+        language[1] !== 'show'
+          ? this.api.applyUpdateEffect(this.engine.store, 'locale', () =>
+              setLocale(this.engine.store, language[1] as Locale),
+            ).locale
+          : this.locale();
+      await this.api.send(chatId, languageCard(locale));
       return true;
     }
     if (data === 'models:refresh') {
@@ -683,23 +755,27 @@ export class Telegram {
     }
     const updates = data.match(/^updates:(show|check|on|off)$/);
     if (updates) {
-      if (['on', 'off'].includes(updates[1]))
-        this.engine.store.setSetting('updates.notifications', updates[1] === 'on');
-      await this.showUpdates(chatId, updates[1] === 'check');
+      const enabled = ['on', 'off'].includes(updates[1])
+        ? this.api.applyUpdateEffect(this.engine.store, 'update-notifications', () => {
+            const enabled = updates[1] === 'on';
+            this.engine.store.setSetting('updates.notifications', enabled);
+            return enabled;
+          })
+        : undefined;
+      await this.showUpdates(chatId, updates[1] === 'check', enabled);
       return true;
     }
 
     const prefs = data.match(/^notifications:(show|on|off|all)$/);
     if (prefs) {
-      if (prefs[1] !== 'show')
-        this.engine.store.setSetting('notifications.telegram', {
-          enabled: prefs[1] !== 'off',
-          mode: prefs[1] === 'all' ? 'all' : 'attention',
-        });
-      await this.api.send(
-        chatId,
-        notificationsCard(notificationPreferences(this.engine.store), this.locale()),
-      );
+      const store = this.engine.store;
+      const value =
+        prefs[1] === 'show'
+          ? notificationPreferences(store)
+          : this.api.applyUpdateEffect(store, 'notifications', () =>
+              setNotificationMode(store, prefs[1] as 'on' | 'off' | 'all'),
+            );
+      await this.api.send(chatId, notificationsCard(value, this.locale()));
       return true;
     }
     return false;
@@ -718,14 +794,18 @@ export class Telegram {
       ),
     );
   }
-  private async showUpdates(chatId: number, refresh: boolean) {
+  private async showUpdates(chatId: number, refresh: boolean, enabled?: boolean) {
     if (!this.integrations) throw new Error('Update checks are unavailable');
     const status = refresh
       ? await this.integrations.updates.check(true)
       : this.integrations.updates.status();
     await this.api.send(
       chatId,
-      updatesCard(this.locale(), status, this.integrations.updaters?.status()),
+      updatesCard(
+        this.locale(),
+        { ...status, notifications: enabled ?? status.notifications },
+        this.integrations.updaters?.status(),
+      ),
     );
   }
   private currentUpdates() {

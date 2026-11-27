@@ -15,7 +15,11 @@ export function cleanupCommand(args = ''): Record<string, unknown> | undefined {
   throw new Error('Use /cleanup, /cleanup threshold N, /cleanup interval N or /cleanup skill PATH');
 }
 
-export function cleanupControlCard(locale: Locale, value: CleanupScheduleStatus): TelegramCard {
+export function cleanupControlCard(
+  locale: Locale,
+  value: CleanupScheduleStatus,
+  unconfirmedChange = false,
+): TelegramCard {
   const t = translator(locale);
   const text = new TelegramText()
     .add(t('Disk cleanup'), 'bold')
@@ -29,6 +33,8 @@ export function cleanupControlCard(locale: Locale, value: CleanupScheduleStatus)
         }),
     )
     .add('\n' + t('Cleanup skill') + ' · ' + (value.skill ?? t('No cleanup skill')));
+  if (unconfirmedChange)
+    text.add('\n\n' + t('The previous cleanup change could not be confirmed.'));
   if (value.hostUnits?.length)
     text.add('\n' + t('Host cleanup services') + ' · ' + value.hostUnits.join(', '));
   if (value.running) text.add('\n' + t('Cleanup in progress'));
