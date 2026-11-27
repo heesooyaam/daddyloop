@@ -1539,6 +1539,10 @@ describe('opt-in GitHub merging', () => {
       await f.poll();
       expect(f.send).not.toHaveBeenCalled();
       await f.engine.review(task.id);
+      expect(f.store.getTask(task.id).state).toBe('awaiting_review_checks');
+      expect(f.store.activeJobs(task.id)).toHaveLength(0);
+      f.setRemote({ checks: 'passing' });
+      await f.engine.review(task.id);
       const review = f.store.claim()!;
       await f.engine.completeJob(review, {
         status: 'completed',
@@ -1546,6 +1550,7 @@ describe('opt-in GitHub merging', () => {
         checkedHead: saved,
       });
       f.store.saveJob({ ...review, status: 'completed' });
+      f.setRemote({ checks: 'pending' });
       await f.engine.publish(task.id);
       await f.poll();
       expect(f.send).not.toHaveBeenCalled();

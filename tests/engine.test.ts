@@ -205,10 +205,10 @@ describe('publication gates and revision safety', () => {
   it('a completed review with missing CI waits for a revision-bound human waiver', async () => {
     const f = await fixture();
     const pr = await f.provider.getPR(prRef(f.task));
-    pr.checks = 'missing';
-    f.store.setSetting('demo-pr:1', pr);
     await f.engine.review(f.task.id);
     await f.run();
+    pr.checks = 'missing';
+    f.store.setSetting('demo-pr:1', pr);
     await f.engine.publish(f.task.id);
     expect(f.store.getTask(f.task.id).state).toBe('awaiting_checks');
     await expect(f.engine.action(f.task.id, 'waive-checks', '')).rejects.toMatchObject({

@@ -184,9 +184,11 @@ flowchart TB
     C -->|"Passed"| E["Task complete"]
 ```
 
+For PRs with required CI, [Engine](../../src/core/engine.ts) checks the pinned revision before allocating a round. [Worker](../../src/runtime/worker.ts) repeats admission when a queued review starts. Waiting for CI occupies no reviewer slot.
+
 **From review to fixes.** The reviewer prepares native comments during a turn. When a GitHub review is incomplete, daddy can publish its confirmed findings on the original PR commit and assign the worker to address them. With auto-merge enabled, a confirmed merge conflict goes to the assigned worker first. The next commit still requires a full independent review. The coordinator can read the actual question using read_task.
 
-**From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it on the next pass. This transition closes the loop.
+**From a fix to another review.** Suppose a bug was found in commit H1 and the fix is saved in H2. After H2 is pushed, `Engine.completeJob()` makes the task ready for review. The scheduler starts it after CI passes for H2. This transition closes the loop.
 
 A request to message the worker during submission is stored with the task. After the saved commit is confirmed and its review is published, the scheduler delivers the instruction on the current revision. When a worker reports an incomplete fix without a human question and GitHub confirms a conflict, the service checkpoints the local edits, assigns conflict resolution to the same worker, and requires independent review of the resulting commit.
 
@@ -200,7 +202,7 @@ After a saved fix is confirmed, a pending GitHub review on the previous head can
 
 With GitHub auto-merge enabled, successful review and checks move the task to `awaiting_merge`. The pool keeps the assigned worker through conflict repairs and releases the slot on confirmed completion. Dependent tasks wait for completion as well.
 
-The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision. Failing CI also keeps the task waiting and does not itself start a CI-fix run.
+The service publishes a completed review and pushes the saved commit automatically after checking the PR revision. Incomplete checks and disputes leave the task open. Review continues while it makes progress. Repeated identical findings stop the cycle for a decision.
 
 Code: [Engine transitions](../../src/core/engine.ts), [Worker scheduler](../../src/runtime/worker.ts), [PR submission](../../src/core/ticket-workflow.ts). The [loop tests](../../tests/worker.test.ts) cover review, fixes and another check.
 
