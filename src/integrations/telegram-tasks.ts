@@ -58,9 +58,9 @@ export function parseTaskInput(args: string, engine: string, architectEngine = e
         effort: { type: 'string' },
       },
     });
-    if ((values.plan || values['architect-model']) && values['no-plan']) return;
-    if (!values['architect-model'] && (values['architect-engine'] || values['architect-effort']))
-      return;
+    const architectOverride = values['architect-model'] || values['architect-engine'];
+    if ((values.plan || architectOverride) && values['no-plan']) return;
+    if (!values['architect-model'] && values['architect-effort']) return;
     if (values.worker && !/^[1-8]$/.test(values.worker)) return;
     if (!values.model && (values.engine || values.effort)) return;
     const workerRequest: WorkerRequest = {
@@ -73,11 +73,11 @@ export function parseTaskInput(args: string, engine: string, architectEngine = e
       requirements,
       workerRequest,
       validatePlan: values['no-plan'] ? false : values.plan,
-      architectProfile: values['architect-model']
+      architectProfile: architectOverride
         ? {
             engine: values['architect-engine'] ?? architectEngine,
-            model: values['architect-model'],
-            effort: values['architect-effort'],
+            ...(values['architect-model'] ? { model: values['architect-model'] } : {}),
+            ...(values['architect-effort'] ? { effort: values['architect-effort'] } : {}),
           }
         : undefined,
     };

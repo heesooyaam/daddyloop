@@ -557,7 +557,28 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     const resumeButton = buttonFor('Resume task');
     await bot.handle(click(resumeButton, 7, 18));
     expect(f.store.getTask(tenth.id).state).toBe('paused');
-    await bot.handle(click(resumeButton));
+    const resumeUpdate = click(resumeButton);
+    const resumeId = resumeUpdate.update_id;
+    f.store.db
+      .exec(`CREATE TRIGGER interrupt_resume BEFORE INSERT ON bot_receipts WHEN NEW.id=${resumeId}
+      BEGIN SELECT RAISE(ABORT, 'interrupted before receipt'); END`);
+    await expect(bot.handle(resumeUpdate)).rejects.toThrow('interrupted before receipt');
+    expect(f.store.getTask(tenth.id).state).toBe('paused');
+    f.store.db.exec('DROP TRIGGER interrupt_resume');
+    await bot.stop();
+    ({ api, bot } = createBot());
+    f.store.db.exec(`CREATE TRIGGER interrupt_resume_reply BEFORE DELETE ON settings
+      WHEN OLD.key='telegram.operationResult:${resumeId}'
+      BEGIN SELECT RAISE(ABORT, 'interrupted before acknowledgement'); END`);
+    await expect(bot.handle(resumeUpdate)).rejects.toThrow('interrupted before acknowledgement');
+    expect(f.store.getTask(tenth.id).state).toBe('queued');
+    f.store.db.exec('DROP TRIGGER interrupt_resume_reply');
+    await bot.stop();
+    ({ api, bot } = createBot());
+    await bot.handle(resumeUpdate);
+    expect(lastText()).toContain('This action has already completed');
+    await bot.handle(resumeUpdate);
+    expect(f.store.events(tenth.id).filter(({ type }) => type === 'human.resume')).toHaveLength(1);
     expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'queued', round: 15 });
     await f.engine.review(tenth.id);
     expect(f.store.getTask(tenth.id)).toMatchObject({ state: 'reviewing', round: 16 });

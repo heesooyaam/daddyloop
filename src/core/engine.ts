@@ -13,6 +13,7 @@ import {
 } from './pr-routing.js';
 import {
   canWaiveChecks,
+  canResumeAfterReviewLimit,
   reviewRoundLimitPause,
   disputedFindings,
   draftInspectionRequired,
@@ -262,6 +263,8 @@ export class Engine {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
       const entryGeneration = task.generation;
+      const session = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+      if (session?.daddyState === 'paused' || session?.daddyState === 'archived') return task;
       if (this.store.busy(id))
         throw new AppError('task_busy', 'Wait for the active session or pause it first');
       if (task.state === 'paused')
@@ -3164,10 +3167,18 @@ export class Engine {
   }
   async action(
     id: string,
-    action: 'pause' | 'resume' | 'approve-plan' | 'waive-checks' | 'reopen' | 'verify-merge',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'approve-plan'
+      | 'waive-checks'
+      | 'reopen'
+      | 'verify-merge'
+      | 'resume-review-limit',
     reason = '',
     expected?: ExpectedTask,
     check?: () => void,
+    onCommit?: () => void,
   ) {
     return this.lock(id, async () => {
       const task = this.store.getTask(id);
@@ -3189,6 +3200,20 @@ export class Engine {
         this.store.cancelJobs(id);
         this.onCancel(id);
         this.state(task, 'paused', reason || 'Paused by the user');
+      } else if (action === 'resume-review-limit') {
+        if (!canResumeAfterReviewLimit(task))
+          throw new AppError(
+            'cannot_resume',
+            'This task is not ready to resume after reaching its review round limit',
+          );
+        if (this.store.busy(id))
+          throw new AppError('task_busy', 'Wait for the active session to finish');
+        this.store.transaction(() => {
+          this.state(task, 'queued', resumedProviderState);
+          this.store.event(id, 'human.resume', { reason });
+          onCommit?.();
+        });
+        return task;
       } else if (action === 'resume') {
         if (task.state !== 'paused' && task.state !== 'needs_input')
           throw new AppError('cannot_resume', 'This task is not paused or waiting for input');

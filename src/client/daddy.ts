@@ -352,6 +352,17 @@ export class DaddyClient {
       await this.api(`/daddy/sessions/${id}/${action}`, body, this.controller.signal);
       await this.refresh();
     } catch (error) {
+      if (
+        action === 'settings' &&
+        !this.stopped &&
+        this.value.selected === id &&
+        error instanceof Error &&
+        'status' in error &&
+        error.status === 409
+      ) {
+        await this.detail();
+        if (this.value.selected !== id) return;
+      }
       if (!this.stopped) this.update({ error: (error as Error).message });
     } finally {
       this.update({ busy: false });

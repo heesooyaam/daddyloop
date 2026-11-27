@@ -1822,6 +1822,47 @@ test('sets the session architect and overrides it when queueing a task', async (
   });
 });
 
+test('bulk worker settings preserve a slot edited after the form opened', async ({ page }) => {
+  await login(page);
+  const group = await sessionFixture(page, 'Bulk worker settings');
+  const session = '/api/daddy/sessions/' + group.id;
+  const board = async () => (await (await page.request.get(session)).json()) as DaddyBoard;
+  await page.goto('/#session/' + group.id);
+  const open = () => page.getByRole('button', { name: 'Session settings' }).click();
+  const dialog = page.getByRole('dialog');
+  const model = dialog.getByLabel('All workers Model', { exact: true });
+  const save = async () => {
+    const response = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(session + '/settings') && response.request().method() === 'POST',
+    );
+    await dialog.getByRole('button', { name: 'Save settings' }).click();
+    return response;
+  };
+  await open();
+  await model.selectOption({ label: 'Engine configuration' });
+  const slot = { engine: 'codex', model: 'gpt-6-astra', effort: 'medium' };
+  expect(
+    (
+      await page.request.post(session + '/workers/1', {
+        headers: { 'X-daddyloop-Request': '1' },
+        data: { profile: slot, expectedGeneration: group.generation },
+      })
+    ).status(),
+  ).toBe(200);
+  expect((await save()).status()).toBe(409);
+  await expect(dialog.getByRole('alert')).toContainText('workerSlotProfiles');
+  expect((await board()).workers.slots[0]?.profile).toEqual(slot);
+  await page.keyboard.press('Escape');
+  await open();
+  await expect(dialog.getByText('Worker 1 · codex · gpt-6-astra · medium')).toBeVisible();
+  await model.selectOption({ label: 'Engine configuration' });
+  expect((await save()).status()).toBe(200);
+  const saved = await board();
+  expect(saved.workerDefault).toEqual({ engine: 'codex' });
+  expect(saved.workers.slots[0]?.profile).toBeUndefined();
+});
+
 test('edits the review round limit and rejects a stale task card', async ({ page }) => {
   await login(page);
   await page.setViewportSize({ width: 390, height: 844 });

@@ -1,3 +1,4 @@
+import { workerSlotProfiles } from '../core/worker-pool.js';
 import { VoiceInput, appendDictation } from './voice-input.js';
 import { sameAgentProfile, sameRevision } from '../core/types.js';
 import { RepositoryModuleField } from './repository-module.js';
@@ -1801,6 +1802,7 @@ function SessionSettings({
     architectProfile?: AgentProfile | null,
     baseline?: {
       profiles?: Partial<AgentProfiles>;
+      workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
       instructions?: SessionInstructions | null;
       autoMerge?: boolean;
       architectProfile?: AgentProfile | null;
@@ -1825,10 +1827,11 @@ function SessionSettings({
   const originalArchitect = useRef(architect);
   const originalAutoMerge = useRef(autoMerge);
   const originalProfiles = useRef(profiles);
+  const originalWorkerSlots = useRef(workerSlotProfiles(board.group));
   const [forceDaddy, setForceDaddy] = useState(false),
     [applyWorkers, setApplyWorkers] = useState(false);
-  const overrides = board.workers.slots.filter(
-    (s) => s.profile && !sameAgentProfile(s.profile, board.workerDefault),
+  const overrides = originalWorkerSlots.current.filter(
+    (slot) => !sameAgentProfile(slot.profile, originalProfiles.current.worker),
   );
   const { catalogue, load } = useAgentCatalogue(api);
   const savingBlocked = busy || editingFolder || importingInstructions;
@@ -1867,6 +1870,7 @@ function SessionSettings({
               ...(changed.daddy ? { daddy: originalProfiles.current.daddy } : {}),
               ...(changed.worker ? { worker: originalProfiles.current.worker } : {}),
             },
+            workerSlotProfiles: changed.worker ? originalWorkerSlots.current : undefined,
             instructions: changedInstructions ? (originalInstructions.current ?? null) : undefined,
             autoMerge: changedAutoMerge ? originalAutoMerge.current : undefined,
             architectProfile: changedArchitect ? (originalArchitect.current ?? null) : undefined,
@@ -1908,7 +1912,7 @@ function SessionSettings({
             {role === 'worker' &&
               overrides.map((slot) => (
                 <small key={slot.number} className="daddy-muted">
-                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile!)}
+                  {t('Worker {number}', { number: slot.number })} · {profileText(slot.profile)}
                 </small>
               ))}
             {role === 'daddy' ? (

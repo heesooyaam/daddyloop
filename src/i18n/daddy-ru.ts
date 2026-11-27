@@ -937,6 +937,9 @@ export const daddyRu: Record<string, string> = {
   Guides: 'Инструкции',
   'Open the site from your computer or phone': 'Как подключить компьютер или телефон',
   'Agent module': 'Модуль агента',
+  'The model list could not be loaded.': 'Не удалось загрузить список моделей.',
+  'Settings changed. Reload before editing workerSlotProfiles':
+    'Профили отдельных воркеров изменились. Открой настройки заново.',
   'Engine configuration': 'Настройки движка',
   Repositories: 'Репозитории',
   Agent: 'Агент',

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { translate, type Locale } from '../src/i18n/index.js';
 import { AppError, type AgentProfile } from '../src/core/types.js';
 import Fastify from 'fastify';
@@ -231,6 +232,9 @@ function confirmWorker(
 
   return {
     cards,
+    send,
+    post: (path: string, payload: object) =>
+      app.inject({ method: 'POST', url: '/api/daddy/sessions/' + groupId + path, payload }),
     command,
     prompt,
     confirm,
@@ -539,9 +543,14 @@ it.each(
       expect(await profile()).toEqual(profiles.daddy);
       await select('gpt-5.6-sol', translate(locale, 'Default'));
       expect(await profile()).toEqual({ engine: 'codex', model: 'gpt-5.6-sol' });
-      await menu();
-      await click('codex · ' + translate(locale, 'Engine configuration'));
-      expect(await profile()).toEqual({ engine: 'codex' });
+      const list = vi.spyOn(f.daddy.catalogue, 'list');
+      for (const unavailable of [false, true]) {
+        if (unavailable) list.mockRejectedValue(new Error('Offline catalogue'));
+        else list.mockResolvedValue([]);
+        await menu();
+        await click('codex · ' + translate(locale, 'Engine configuration'));
+        expect(await profile()).toEqual({ engine: 'codex' });
+      }
       if (role === 'task' || role === 'architect') {
         expect(f.daddy.group(group.id).daddy.model).toBeDefined();
         await menu();
@@ -553,12 +562,186 @@ it.each(
         );
         expect(await profile()).toBeUndefined();
       }
+      list.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each(
+  ['http', 'telegram'].flatMap((client) => [false, true].map((occupied) => ({ client, occupied }))),
+)(
+  'checks the $client bulk profile against shown slot overrides, occupied=$occupied',
+  async ({ client, occupied }) => {
+    const f = daddyFixture();
+    const runs = occupied ? holdWorker(f) : [];
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id);
+    try {
+      if (occupied) {
+        await f.daddy.createTask(group.id, {
+          validatePlan: false,
+          requirements: 'Keep the current run active',
+          requestId: 'occupied-bulk-profile',
+        });
+        await f.worker.tick();
+        await vi.waitFor(() => expect(runs).toHaveLength(1));
+      }
+      const baseline = profiles.worker;
+      const later = { ...baseline, effort: 'medium' };
+      const preview = async () => {
+        const board = (await controls.read()).json();
+        if (client === 'http')
+          return () =>
+            controls.post('/settings', {
+              profiles: { worker: { engine: 'codex' } },
+              autoMerge: true,
+              baseline: {
+                profiles: { worker: baseline },
+                workerSlotProfiles:
+                  board.group.workerSlots?.flatMap(
+                    ({ number, profile }: { number: number; profile?: AgentProfile }) =>
+                      profile ? [{ number, profile }] : [],
+                  ) ?? [],
+              },
+            });
+        await controls.confirm('dad:models:' + group.id + ':worker');
+        const button = controls.cards
+          .at(-1)!
+          .buttons!.flat()
+          .find(({ text }) => text === 'codex · Engine configuration')!;
+        if (!('callback_data' in button) || !button.callback_data)
+          throw new Error('Missing profile button');
+        return () => controls.confirm(button.callback_data!);
+      };
+      const stale = await preview();
+      if (client === 'http') await controls.command('gpt-5.6-sol medium');
+      else expect((await controls.save(later, baseline)).statusCode).toBe(200);
+      const response = await stale();
+      if (client === 'http') expect(response).toMatchObject({ statusCode: 409 });
+      else expect(controls.cards.at(-1)?.text).toContain('workerSlotProfiles');
+      const kept = (await controls.read()).json();
+      expect(kept.workers.slots[0].profile).toEqual(later);
+      expect(kept.group.autoMerge).toBe(false);
+      await (
+        await preview()
+      )();
+      const saved = (await controls.read()).json();
+      expect(saved.workerDefault).toEqual({ engine: 'codex' });
+      expect(saved.workers.slots[0].profile).toBeUndefined();
+      for (const { input } of runs) expect(input.signal.aborted).toBe(false);
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each([false, true])(
+  'uses the chosen architect engine in the first queued plan, topic=%s',
+  async (inTopic) => {
+    const f = daddyFixture();
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, 'en', inTopic);
+    try {
+      await f.daddy.settings(group.id, { architectProfile: profiles.worker });
+      expect(
+        (
+          await controls.post('/tasks', {
+            requirements: 'Web chooses engine',
+            requestId: randomUUID(),
+            architectProfile: { engine: 'codex' },
+          })
+        ).statusCode,
+      ).toBe(201);
+      await controls.send('/task --architect-engine codex -- Telegram chooses engine');
+      await controls.send('/task Inherited architect');
+      const byTitle = Object.fromEntries(
+        f.store
+          .tasks(group.id)
+          .map((task) => [task.requirements, f.store.jobs(task.id)[0]?.profile]),
+      );
+      expect(byTitle).toEqual({
+        'Web chooses engine': { engine: 'codex' },
+        'Telegram chooses engine': { engine: 'codex' },
+        'Inherited architect': profiles.worker,
+      });
     } finally {
       await controls.close();
       await f.close();
     }
   },
 );
+
+it.each([
+  { provider: 'gitlab', client: 'telegram' },
+  { provider: 'arcanum', client: 'http' },
+  { provider: 'github', client: 'http' },
+])('keeps review work paused for $provider through $client', async ({ provider, client }) => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const controls = confirmWorker(f, group.id);
+  try {
+    const task = await f.engine.create({
+      groupId: group.id,
+      requirements: 'Review after the session resumes',
+      repoPath: f.dir,
+      ref: {
+        kind: 'pull_request',
+        provider,
+        host: 'fixture.local',
+        repo: 'test/repo',
+        number: 42,
+        url: 'https://fixture.local/pr/42',
+      },
+    });
+    f.store.saveTask({ ...task, round: 15, reviewRoundLimit: 15 });
+    await f.engine.review(task.id);
+    expect(f.store.getTask(task.id).state).toBe('paused');
+    await f.daddy.pause(group.id);
+    const expected = {
+      task: {
+        head: task.revision!.head,
+        revision: task.revision,
+        generation: f.store.getTask(task.id).generation,
+      },
+      groupGeneration: f.daddy.group(group.id).generation,
+      limit: 15,
+    };
+    const path = '/tasks/' + task.id + '/review-limit';
+    expect((await controls.post(path, { limit: 16, expected })).statusCode).toBe(200);
+    if (client === 'http') {
+      expect((await controls.post(path + '/resume', { ...expected, limit: 16 })).statusCode).toBe(
+        200,
+      );
+    } else {
+      await controls.confirm('dad:task:' + task.id);
+      const button = controls.cards
+        .at(-1)
+        ?.buttons?.flat()
+        .find(({ text }) => text === 'Resume task');
+      if (!button || !('callback_data' in button) || !button.callback_data)
+        throw new Error('Missing resume button');
+      await controls.confirm(button.callback_data);
+    }
+    expect(f.store.getTask(task.id).state).toBe('queued');
+    await f.worker.tick();
+    expect(f.store.getTask(task.id)).toMatchObject({ state: 'queued', round: 15 });
+    expect(f.store.getTask(task.id).review).toBeUndefined();
+    expect(f.store.activeJobs(task.id)).toHaveLength(0);
+    await f.daddy.resume(group.id);
+    await f.engine.review(task.id);
+    expect(f.store.getTask(task.id)).toMatchObject({ state: 'reviewing', round: 16 });
+    expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'review' }]);
+  } finally {
+    await controls.close();
+    await f.close();
+  }
+});
 
 it('clears a worker slot model through Telegram and HTTP while retaining its engine', async () => {
   const f = daddyFixture();

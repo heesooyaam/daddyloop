@@ -72,7 +72,7 @@ import {
   checkWaiverReasonLimit,
   taskReference,
 } from '../core/task-activity.js';
-import { workerPool, workerSlots } from '../core/worker-pool.js';
+import { workerPool, workerSlots, workerSlotProfiles } from '../core/worker-pool.js';
 import { profileText, taskActivity } from '../core/task-activity.js';
 import {
   parseTaskInput,
@@ -890,8 +890,10 @@ export class TelegramWorkspace {
       return;
     }
     if (intent === 'resume') {
-      await this.daddy.resumeAfterReviewLimit(groupId, taskId, expected, read);
-      this.mutate(() => this.finishAction(key));
+      await this.daddy.resumeAfterReviewLimit(groupId, taskId, expected, read, () => {
+        this.finishAction(key);
+        this.receipt();
+      });
     } else {
       await this.daddy.taskReviewLimit(groupId, taskId, intent, expected, () => {
         read();
@@ -1337,7 +1339,10 @@ export class TelegramWorkspace {
       });
       return;
     }
-    const models = await this.daddy.catalogue.list(page === 0);
+    const models = await this.daddy.catalogue.list(page === 0).catch(() => {
+      text.add('\n\n' + this.t('The model list could not be loaded.'));
+      return [];
+    });
     this.authorize(destination, groupId);
     const pageSize = 30;
     page = Math.min(page, Math.max(0, Math.ceil(models.length / pageSize) - 1));
@@ -1351,6 +1356,7 @@ export class TelegramWorkspace {
           taskId,
           ownerId: this.pair()!.userId,
           generation: group.generation,
+          workerSlotProfiles: role === 'worker' ? workerSlotProfiles(group) : undefined,
           baseline:
             role === 'architect'
               ? task
@@ -1922,6 +1928,7 @@ export class TelegramWorkspace {
         ownerId: number;
         generation: number;
         baseline?: AgentProfile;
+        workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
         expectedTask?: ExpectedTask;
         model: {
           id?: string;
@@ -2022,7 +2029,10 @@ export class TelegramWorkspace {
             group.id,
             {
               expectedGeneration: action.generation,
-              baseline: { profiles: { [action.role]: action.baseline } },
+              baseline: {
+                profiles: { [action.role]: action.baseline },
+                workerSlotProfiles: action.workerSlotProfiles,
+              },
               profiles: {
                 [action.role]: profile,
               },

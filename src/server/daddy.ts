@@ -130,6 +130,10 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
               .object({
                 workerLimit: workerNumber.optional(),
                 profiles: profilesSchema.partial().optional(),
+                workerSlotProfiles: z
+                  .array(z.object({ number: workerNumber, profile: profileSchema }).strict())
+                  .max(8)
+                  .optional(),
                 architectProfile: profileSchema.nullable().optional(),
                 instructions: sessionInstructionsSchema.nullable().optional(),
                 autoMerge: z.boolean().optional(),

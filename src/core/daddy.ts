@@ -46,12 +46,17 @@ import { daddySchemas, daddyTools } from './daddy-tools.js';
 import { redact, redactEvent } from './security.js';
 import type { Catalogue } from '../server/planning.js';
 import { parsePR } from '../providers/provider.js';
-import { canRunPrerequisites, saveWorkerSlots, workerPool, workerSlots } from './worker-pool.js';
+import {
+  canRunPrerequisites,
+  saveWorkerSlots,
+  workerPool,
+  workerSlots,
+  workerSlotProfiles,
+} from './worker-pool.js';
 import {
   dependencyDetail,
   queueDetail,
   activityReason,
-  canResumeAfterReviewLimit,
   activityStatus,
   outstandingActivity,
   waitingForDaddy,
@@ -701,23 +706,26 @@ export class Daddy {
     taskId: string,
     expected: ExpectedReviewLimit,
     check?: () => void,
+    onCommit?: () => void,
   ) {
-    return this.engine.action(taskId, 'resume', '', expected.task, () => {
-      check?.();
-      this.checkSessionGeneration(this.group(groupId), expected.groupGeneration);
-      const task = this.task(groupId, taskId);
-      assertSetting(
-        'reviewRoundLimit',
-        expected.limit,
-        expected.limit,
-        task.reviewRoundLimit ?? null,
-      );
-      if (!canResumeAfterReviewLimit(task))
-        throw new AppError(
-          'cannot_resume',
-          'This task is not ready to resume after reaching its review round limit',
+    return this.engine.action(
+      taskId,
+      'resume-review-limit',
+      '',
+      expected.task,
+      () => {
+        check?.();
+        this.checkSessionGeneration(this.group(groupId), expected.groupGeneration);
+        const task = this.task(groupId, taskId);
+        assertSetting(
+          'reviewRoundLimit',
+          expected.limit,
+          expected.limit,
+          task.reviewRoundLimit ?? null,
         );
-    });
+      },
+      onCommit,
+    );
   }
 
   async taskArchitect(
@@ -771,6 +779,7 @@ export class Daddy {
       expectedGeneration?: number;
       baseline?: {
         profiles?: Partial<AgentProfiles>;
+        workerSlotProfiles?: ReturnType<typeof workerSlotProfiles>;
         workerLimit?: number;
         instructions?: SessionInstructions | null;
         architectProfile?: AgentProfile | null;
@@ -863,6 +872,10 @@ export class Daddy {
         nextWorker &&
         (input.applyWorkers ||
           !sameAgentProfile(group.worker ?? this.engine.defaultAgents().worker, nextWorker));
+      if (changeWorkers && base?.profiles?.worker) {
+        const shown = base.workerSlotProfiles ?? [];
+        assertSetting('workerSlotProfiles', shown, shown, workerSlotProfiles(group));
+      }
       const turns = this.store
         .daddyJobs(id)
         .filter((j) => j.status === 'queued' || j.status === 'running');

@@ -7,6 +7,12 @@ import {
   type WorkerSlot,
 } from './types.js';
 
+export function workerSlotProfiles(group: ReviewGroup) {
+  return (group.workerSlots ?? [])
+    .flatMap(({ number, profile }) => (profile ? [{ number, profile }] : []))
+    .sort((a, b) => a.number - b.number);
+}
+
 export function workerSlots(store: Store, group: ReviewGroup): WorkerSlot[] {
   const target = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
   const saved: WorkerSlot[] =
