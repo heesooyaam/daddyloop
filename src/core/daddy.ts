@@ -449,7 +449,10 @@ export class Daddy {
   private queueDispute(group: ReviewGroup, task: Task) {
     if (!waitingForDaddy(task)) return;
     const runId = task.inputRequest!.runId;
-    const input = `Task ${task.id}: read the worker’s report and the disputed published findings. Use the accepted requirements to resolve the objection with message_worker and preserve independent review. If only the owner can decide, return needs_input with the concrete choice in question.`;
+    const input =
+      task.reviewRecovery?.coordination && !task.reviewRecovery.plan
+        ? `The architect of task ${task.id} needs a session decision. Read read_task.blocker and the related task briefs. Decide ownership and execution order, use session tools to coordinate dependencies or send scoped instructions, and return the decision with message_worker to the original task architect. The architect revises its own plan. Only ask the owner about an actual product or permission choice.`
+        : `Task ${task.id}: read the worker’s report and the disputed published findings. Use the accepted requirements to resolve the objection with message_worker and preserve independent review. If only the owner can decide, return needs_input with the concrete choice in question.`;
     const existing = this.store
       .daddyJobs(group.id)
       .find(
@@ -548,7 +551,10 @@ export class Daddy {
       const task = this.task(groupId, taskId);
       if (group.deletion || group.deletedAt)
         throw new AppError('session_deleting', 'This session is being deleted');
-      if (!isTicket(task) || task.state === 'complete')
+      if (
+        task.state === 'complete' ||
+        (!isTicket(task) && (task.kind !== 'code' || task.reportOnly))
+      )
         throw new AppError('planning_finished', 'Choose a task that can still enter planning', 409);
       this.store.transaction(() => {
         task.architectProfile = profile ?? undefined;
@@ -906,7 +912,7 @@ export class Daddy {
     if (
       event.type === 'job.completed' &&
       transition.kind === 'plan' &&
-      task.state === 'implementing'
+      (task.state === 'implementing' || (task.state === 'fixing' && !!task.reviewRecovery?.plan))
     )
       return;
     if (event.type === 'job.completed' && !isTicket(task)) {
@@ -1437,6 +1443,12 @@ export class Daddy {
           requirements: task.requirements,
           clarification: task.latestClarification,
           architecturePlan: task.planning?.result,
+          revisedFixPlan: task.reviewRecovery && {
+            criteria: task.reviewRecovery.criteria,
+            revision: task.reviewRecovery.revision,
+            plan: task.reviewRecovery.plan,
+            coordination: task.reviewRecovery.coordination,
+          },
           architectProfile: task.architectProfile ?? group.architectProfile ?? group.daddy,
           source: task.source,
           ref: task.ref,

@@ -215,6 +215,25 @@ export interface ReviewSnapshot {
   url: string;
   revision: Revision;
 }
+/** Confirmed worker commits and the published feedback they were meant to fix. */
+export interface ReviewFixAttempt {
+  runId: string;
+  before: Revision;
+  after: string;
+  reviewId?: string;
+}
+export interface ReviewRecovery {
+  reviewId: string;
+  revision: Revision;
+  branch: string;
+  targetBranch: string;
+  fingerprint: string;
+  criteria: string[];
+  attempts: ReviewFixAttempt[];
+  runId: string;
+  plan?: string;
+  coordination?: string;
+}
 export interface Task {
   replyTo?: TelegramReply;
   inputRequest?: {
@@ -262,6 +281,7 @@ export interface Task {
     retryAt?: number;
   };
   draftRecheck?: { commentIds: string[]; retried?: boolean };
+  reviewRecovery?: ReviewRecovery;
   snapshot?: ReviewSnapshot;
   workerReport?: { runId: string; revision: Revision };
   summary: string;

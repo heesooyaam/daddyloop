@@ -56,6 +56,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, run_id TEXT, type TEXT NOT NULL, data TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS event_task ON events(task_id,id);
+      CREATE INDEX IF NOT EXISTS saved_fix_by_head ON events(task_id,json_extract(data,'$.head'),id) WHERE type='author.fixes_saved';
+      CREATE INDEX IF NOT EXISTS released_feedback_by_run ON events(task_id,run_id,id) WHERE type='author.feedback_snapshot';
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS job_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS jobs_by_task ON jobs(task_id);

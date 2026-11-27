@@ -570,6 +570,16 @@ export class Worker {
       const startingPR = isTicket(task)
         ? undefined
         : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const revisingPlan = job.kind === 'plan' && !isTicket(task);
+      if (
+        revisingPlan &&
+        startingPR &&
+        (!sameOpenTarget(task.pr, startingPR) || !sameRevision(startingPR, task.revision))
+      ) {
+        await this.engine.reconcile(task.id);
+        job.status = 'cancelled';
+        return;
+      }
       if (
         startingPR &&
         !sameRevision(startingPR, task.revision) &&
@@ -621,7 +631,7 @@ export class Worker {
         ? this.workspaces.dataDir
         : isTicket(task)
           ? await this.workspaces.prepareTicket(task, job.role, abort.signal)
-          : await this.workspaces.prepare(task, job.role, abort.signal);
+          : await this.workspaces.prepare(task, revisingPlan ? 'reviewer' : job.role, abort.signal);
       if (task.kind === 'plan' && (job.kind === 'review' || job.kind === 'verify_merge')) {
         if (demo)
           task.planDocuments = [
@@ -689,7 +699,7 @@ export class Worker {
       let preservedCopy: string | undefined;
       if (repairingConflict) {
         preservedCopy = await this.workspaces.prepareConflict(task, abort.signal);
-      } else if (job.kind === 'fix') {
+      } else if (job.kind === 'fix' || revisingPlan) {
         const actual = await this.engine.provider(prRef(task)).getReview(prRef(task), task.review!);
         if (actual.status !== 'published')
           throw new Error(
@@ -698,9 +708,11 @@ export class Worker {
         task = store.getTask(job.taskId);
         if (task.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');
-        task.feedback = actual;
-        store.saveTask(task);
-        store.event(task.id, 'author.feedback_snapshot', actual, job.id);
+        if (!(await this.engine.admitReviewWork(job, actual, startingPR!))) {
+          job.status = 'cancelled';
+          return;
+        }
+        task = store.getTask(job.taskId);
       }
       let agentCwd = cwd;
       if (task.scope && !demo) {
@@ -882,7 +894,10 @@ export class Worker {
       else if (capacity) job.notBefore = new Date(Date.now() + 30000).toISOString();
       else if (!abort.signal.aborted) this.engine.failJob(job, error);
     } finally {
-      if (job.role === 'reviewer') {
+      if (
+        job.role === 'reviewer' ||
+        (job.kind === 'plan' && !isTicket(store.getTask(job.taskId)))
+      ) {
         const task = store.getTask(job.taskId);
         if (task.groupId && task.ref.provider === 'arcadia' && task.arcWorkspaces?.reviewer) {
           try {
