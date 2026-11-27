@@ -4129,6 +4129,12 @@ export class Engine {
     };
     return parent ? this.lock(parent.id, create) : create();
   }
+  updateTicketRequirements(task: Task, requirements?: string) {
+    if (requirements === undefined || requirements === task.requirements) return;
+    task.requirements = requirements;
+    // The old scheduler instruction and its plan both refer to the superseded brief.
+    if (task.planning) task.planning = {};
+  }
   async implement(
     id: string,
     actionId?: string,
@@ -4203,11 +4209,7 @@ export class Engine {
               this.defaultAgents().worker,
           );
         }
-        if (commit?.requirements !== undefined && commit.requirements !== task.requirements) {
-          task.requirements = commit.requirements;
-          if (validatePlan === false) delete task.planning;
-          else if (task.planning) delete task.planning.result;
-        }
+        this.updateTicketRequirements(task, commit?.requirements);
         if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};
         if (validatePlan === false && !sameRevision(task.planning?.result?.revision, task.revision))

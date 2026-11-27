@@ -1056,6 +1056,16 @@ export class Telegram {
     const previousBot = engine.store.setting<number>('telegram.botId');
     if (previousBot !== me.id) {
       engine.store.transaction(() => {
+        const previousOwner = engine.store.setting<{ userId: number }>('telegram.pairing')?.userId;
+        if (
+          previousBot !== undefined &&
+          previousOwner !== undefined &&
+          !engine.store.setting('telegram.legacyQueueOwner')
+        )
+          engine.store.setSetting('telegram.legacyQueueOwner', {
+            bot: previousBot,
+            owner: previousOwner,
+          });
         engine.store.setSetting('telegram.botId', me.id);
         engine.store.setSetting('telegram.offset', 0);
         engine.store.setSetting('telegram.offsetAt', null);

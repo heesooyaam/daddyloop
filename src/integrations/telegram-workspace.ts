@@ -792,7 +792,7 @@ export class TelegramWorkspace {
     this.store.transaction(() => {
       for (const row of this.store.db
         .prepare(
-          "SELECT id, data FROM bot_actions WHERE consumed=1 AND json_extract(data,'$.kind')='choose-session' AND json_extract(data,'$.expiresAt') <= ?",
+          "SELECT id, data, consumed FROM bot_actions WHERE json_extract(data,'$.kind')='choose-session' AND json_extract(data,'$.expiresAt') <= ?",
         )
         .all(at)) {
         const choice = JSON.parse(String(row.data)) as TaskChoice &
@@ -801,7 +801,14 @@ export class TelegramWorkspace {
         if (this.store.setting(key)) continue;
         let task: Task | undefined;
         try {
-          task = this.findChoiceTask(choice, choice.expiresAt, true);
+          if (choice.ownerId !== this.pair()?.userId) continue;
+          const pending = this.store.setting<{ selected?: string; update?: Update }>(
+            choice.pendingKey,
+          );
+          const selected =
+            pending?.selected === choice.groupId &&
+            pending.update?.update_id === choice.update?.update_id;
+          task = this.findChoiceTask(choice, choice.expiresAt, !!row.consumed || selected);
         } catch (error) {
           if (
             !(error instanceof AppError) ||
@@ -848,7 +855,7 @@ export class TelegramWorkspace {
       );
     return key;
   }
-  private readAction<T>(key: string, destination: Destination, allowConsumed = false) {
+  private readAction<T>(key: string, destination: Destination, lookupResult = false) {
     const row = this.store.db.prepare('SELECT data,consumed FROM bot_actions WHERE id=?').get(key);
     const action =
       row &&
@@ -859,11 +866,11 @@ export class TelegramWorkspace {
       });
     if (
       !action ||
-      (row.consumed && !allowConsumed) ||
+      (row.consumed && !lookupResult) ||
       action.ownerId !== this.pair()?.userId ||
       action.destination?.chatId !== destination.chatId ||
       action.destination.threadId !== destination.threadId ||
-      (action.expiresAt <= Date.now() && !(allowConsumed && row.consumed))
+      (action.expiresAt <= Date.now() && !lookupResult)
     )
       throw new Error(this.t('This action expired. Open a fresh card.'));
     return { ...action, consumed: !!row.consumed };
@@ -1071,39 +1078,52 @@ export class TelegramWorkspace {
       taskCommands.exec(message.text?.trim() ?? '')?.[1] !== 'task'
     )
       return;
-    const result =
-      this.daddy.queuedTask(this.taskQueueKey(choice.update)) ??
-      (used
-        ? this.daddy.legacyQueuedTask(
-            this.legacyTaskRequestId(choice.update),
-            choice.groupId,
-            new Date(expiresAt - taskChoiceLifetime).toISOString(),
-          )
-        : undefined);
-    if (result && result.groupId !== choice.groupId)
+    return this.taskResult(
+      choice.update,
+      choice.groupId,
+      new Date(expiresAt - taskChoiceLifetime).toISOString(),
+      used,
+    );
+  }
+
+  private taskResult(update: Update, groupId?: string, notBefore?: string, selected = false) {
+    const existing = this.daddy.queuedTask(this.taskQueueKey(update));
+    if (existing) {
+      if (groupId && existing.groupId !== groupId)
+        throw new AppError('wrong_session', 'This action expired. Open a fresh card.');
+      return existing;
+    }
+    const message = update.message!;
+    if (message.from?.id !== this.pair()?.userId) return;
+    const original = this.legacyTaskRequestId(update);
+    const destination = { chatId: message.chat.id, threadId: message.message_thread_id };
+    const receipt = this.api.delivery?.queuedTaskReceipt(destination, original);
+    const route = this.daddy.queuedTask(this.taskQueueKey(update, true));
+    const task = this.daddy.legacyQueuedTask(original, groupId, notBefore);
+    if (!receipt && !route && !task) return;
+    const ownership = this.api.delivery?.legacyTaskOwner(original);
+    if (ownership === 'other') return;
+    if (ownership === 'conflict' || (!receipt && !selected && ownership !== 'current'))
+      throw new AppError(
+        'ambiguous_queue_result',
+        'The original Telegram request cannot be linked to this bot and owner.',
+      );
+    const matches = new Set([receipt, route?.id, task?.id].filter((id): id is string => !!id));
+    if (matches.size !== 1)
+      throw new AppError(
+        'ambiguous_queue_result',
+        'More than one task matches the original request.',
+      );
+    const result = this.store.getTask([...matches][0]!);
+    if (groupId && result.groupId !== groupId)
       throw new AppError('wrong_session', 'This action expired. Open a fresh card.');
     return result;
   }
 
-  private taskResult(update: Update, groupId?: string) {
-    const existing = this.daddy.queuedTask(this.taskQueueKey(update));
-    if (existing) return existing;
-    const message = update.message!;
-    if (!groupId && message.chat.type !== 'private') return;
-    const id = this.api.delivery?.queuedTaskReceipt(
-      { chatId: message.chat.id, threadId: message.message_thread_id },
-      this.legacyTaskRequestId(update),
-    );
-    if (id) {
-      const task = this.store.getTask(id);
-      if (!groupId || task.groupId === groupId) return task;
-    }
-  }
-
-  private taskQueueKey(update: Update) {
+  private taskQueueKey(update: Update, legacy = false) {
     const message = update.message!;
     return [
-      `telegram:bot:${this.botIdentity}`,
+      legacy ? 'telegram' : `telegram:bot:${this.botIdentity}`,
       message.from?.id,
       message.chat.id,
       message.message_thread_id ?? 0,
@@ -1403,6 +1423,7 @@ export class TelegramWorkspace {
       }
       if (
         choice?.consumed ||
+        (choice && choice.expiresAt <= Date.now()) ||
         !pending ||
         pending.expiresAt <= Date.now() ||
         pending.update.update_id !== update.update_id ||

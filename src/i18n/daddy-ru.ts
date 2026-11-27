@@ -488,6 +488,10 @@ export const daddyRu: Record<string, string> = {
   'Waiting for CI to finish before review': 'Ждёт завершения CI перед ревью',
   'Waiting for CI to pass after the worker investigated':
     'Воркер проверил сбой. Задача ждёт зелёного CI',
+  'The original Telegram request cannot be linked to this bot and owner.':
+    'Не удалось подтвердить, какой бот и владелец поставили задачу. Проверь исходную команду в истории.',
+  'Telegram receipts identify multiple tasks for the same command.':
+    'Для одной команды Telegram сохранилось несколько разных задач. Проверь их в очереди.',
   'Review round limit': 'Лимит раундов ревью',
   'No limit': 'Без лимита',
   'Resume task': 'Продолжить задачу',

@@ -1478,3 +1478,83 @@ it('restarts an active shared review while retaining its draft and draft publica
     await f.close();
   }
 });
+
+it.each(['http', 'private', 'topic'] as const)(
+  'delivers the current issue brief and planning instruction to both roles via %s',
+  async (route) => {
+    const f = daddyFixture(true);
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, 'en', route === 'topic');
+    const issue = ticketInput();
+    vi.spyOn(f.tickets.reader, 'read').mockResolvedValue(issue);
+    const local = (requirements: string, discussedBrief = false) =>
+      f.tickets.local({
+        groupId: group.id,
+        groupGeneration: group.generation!,
+        workspace: group.workspace!,
+        source: issue.source.url,
+        title: 'Brief',
+        requirements,
+        createdByAction: randomUUID(),
+        discussedBrief,
+      });
+    try {
+      const task = await local('Keep the audited constraint');
+      const start = async (description: string) => {
+        if (route === 'http') {
+          const response = await controls.post('/tasks', {
+            requestId: randomUUID(),
+            requirements: description,
+            validatePlan: true,
+          });
+          expect(response.statusCode).toBe(201);
+        } else await controls.send('/task ' + description);
+      };
+      const oldInstruction = 'Use file A exclusively';
+      const oldPlan = { text: 'Plan for A', revision: task.revision!, runId: 'earlier-plan' };
+      const reset = () => {
+        f.store.cancelJobs(task.id);
+        f.store.saveTask({
+          ...f.store.getTask(task.id),
+          state: 'discussing',
+          planning: { instruction: oldInstruction, result: oldPlan },
+        });
+      };
+      reset();
+      await start('Тикет GitHub —\r\n' + issue.source.url);
+      expect(f.store.getTask(task.id).requirements).toBe('Keep the audited constraint');
+      expect(f.store.activeJobs(task.id)).toMatchObject([{ kind: 'implement' }]);
+
+      for (const savedDuringDiscussion of [false, true]) {
+        reset();
+        const requirement = savedDuringDiscussion ? 'Use file C' : 'Use file B';
+        if (savedDuringDiscussion) await local(requirement, true);
+        await start(
+          savedDuringDiscussion
+            ? issue.source.url
+            : 'GitHub issue: ' + issue.source.url + '\r' + requirement,
+        );
+        f.agentRuntime.run.mockImplementation(async (input) => ({
+          status: input.job.kind === 'plan' ? 'completed' : 'needs_input',
+          checkedHead: input.task.revision!.head,
+          summary: 'Plan to ' + requirement,
+        }));
+        const first = f.agentRuntime.run.mock.calls.length;
+        for (const role of ['plan', 'implement']) {
+          await f.worker.tick();
+          await vi.waitFor(() =>
+            expect(f.store.activeJobs(task.id).some((job) => job.status === 'running')).toBe(false),
+          );
+          const input = f.agentRuntime.run.mock.calls.at(-1)![0];
+          expect(input.job.kind).toBe(role);
+          expect(input.prompt).toContain(requirement);
+          expect(input.job.input).not.toContain(oldInstruction);
+        }
+        expect(f.agentRuntime.run.mock.calls).toHaveLength(first + 2);
+      }
+    } finally {
+      await controls.close();
+      await f.close();
+    }
+  },
+);

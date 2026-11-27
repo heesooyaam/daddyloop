@@ -287,9 +287,17 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
         selected: choiceSession.id,
         generations: { [choiceSession.id]: choiceSession.generation },
       });
-      await bot.handle(choice);
-      expect(queued()).toHaveLength(1);
-      expect(lastText()).toContain(taskReference(savedTask));
+      // The legacy writer committed the task before consuming the button. Expiry may
+      // prevent a new dispatch, but cannot hide this already committed result.
+      const expiredAt = Date.now() + 660000;
+      const expiredClock = vi.spyOn(Date, 'now').mockReturnValue(expiredAt);
+      try {
+        await bot.handle(choice);
+        expect(queued()).toHaveLength(1);
+        expect(lastText()).toContain(taskReference(savedTask));
+      } finally {
+        expiredClock.mockRestore();
+      }
       // Keep checking the consumed legacy format after clearing the newly recovered result.
       f.store.db
         .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')

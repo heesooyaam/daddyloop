@@ -310,3 +310,55 @@ it('sends one CLI update notice per version and respects notification opt-out', 
     f.store.close();
   }
 });
+
+it.each([false, true])(
+  'reconciles a pre-receipt task from a legacy Telegram update, in topic=%s',
+  async (topic) => {
+    const f = daddyFixture(true);
+    const transportFixture = transport();
+    const api = transportFixture.api;
+    const bot = new Telegram(f.engine, api, 'fixture_bot');
+    bot.configure({
+      daddy: f.daddy,
+      catalogue,
+      updates: new UpdateMonitor(f.store, { agents: [] }),
+    });
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    try {
+      f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
+      f.store.setSetting('telegram.currentDaddy', group.id);
+      const destination = topic ? { chatId: -10042, threadId: 17 } : { chatId: 7 };
+      if (topic) {
+        f.store.setSetting('telegram.group', { chatId: -10042, title: 'Work', ownerId: 7 });
+        f.store.db
+          .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+          .run(
+            '7:-10042:' + group.id,
+            group.id,
+            JSON.stringify({ ...destination, groupId: group.id, ownerId: 7 }),
+          );
+      }
+      await api.send(destination, 'Earlier menu');
+      const request = update(37, '/task --no-plan -- Keep this exact job');
+      request.message!.chat = { id: destination.chatId, type: topic ? 'supergroup' : 'private' };
+      request.message!.message_thread_id = destination.threadId;
+      const old = 'telegram:task:' + destination.chatId + ':37';
+      const task = await f.daddy.createTask(group.id, {
+        requirements: 'Keep this exact job',
+        requestId: old,
+        validatePlan: false,
+      });
+      // The old job commit survived a crash before the outbound card and update receipt.
+      f.store.db.prepare("DELETE FROM settings WHERE key LIKE 'task.queue:%'").run();
+      const jobIds = f.store.jobs(task.id).map((j) => j.id);
+      await bot.handle(request);
+      await api.delivery!.flush();
+      expect(f.store.tasks(group.id)).toHaveLength(1);
+      expect(f.store.jobs(task.id).map((j) => j.id)).toEqual(jobIds);
+      expect(transportFixture.sent.at(-1)!.body.text).toContain(task.id.slice(0, 8));
+    } finally {
+      await bot.stop();
+      await f.close();
+    }
+  },
+);
