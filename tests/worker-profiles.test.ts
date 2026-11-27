@@ -1,3 +1,4 @@
+import { translate, type Locale } from '../src/i18n/index.js';
 import { AppError, type AgentProfile } from '../src/core/types.js';
 import Fastify from 'fastify';
 import { registerDaddy } from '../src/server/daddy.js';
@@ -116,7 +117,10 @@ it('forces only the active author attempt to restart and preserves its queue ord
     writeFileSync(file, 'unfinished edit');
     await f.engine.chat(task.id, 'author', 'Follow-up after implementation');
 
-    expect(await f.daddy.configureWorker(group.id, 1, next)).toEqual({ restarted: false });
+    expect(await f.daddy.configureWorker(group.id, 1, next)).toEqual({
+      restarted: false,
+      profile: next,
+    });
     expect(first.signal.aborted).toBe(false);
     expect(f.store.getTask(task.id).agents?.worker).toEqual(profiles.worker);
 
@@ -126,7 +130,7 @@ it('forces only the active author attempt to restart and preserves its queue ord
     expect(first.signal.aborted).toBe(false);
     expect(
       await f.daddy.configureWorker(group.id, 1, next, { force: true, expectedTaskId: task.id }),
-    ).toEqual({ restarted: true });
+    ).toEqual({ restarted: true, profile: next });
     expect(first.signal.aborted).toBe(true);
     expect(f.store.getTask(task.id)).toMatchObject({
       generation: task.generation + 1,
@@ -163,7 +167,7 @@ it('forces only the active author attempt to restart and preserves its queue ord
   }
 });
 
-function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string) {
+function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string, locale: Locale = 'en') {
   const app = Fastify();
   registerDaddy(app, f.daddy);
   const cards: TelegramCard[] = [];
@@ -174,7 +178,7 @@ function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string) {
     call: async () => ({}),
     replaceCard: async (_callback: unknown, action: () => Promise<void>) => action(),
   } as unknown as TelegramApi;
-  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => 'en');
+  const workspace = new TelegramWorkspace(f.daddy, api, 'fixture_bot', () => locale);
   f.store.setSetting('telegram.pairing', { chatId: 7, userId: 7 });
   f.store.setSetting('telegram.currentDaddy', groupId);
   const chat = { id: 7, type: 'private' };
@@ -209,6 +213,8 @@ function confirmWorker(f: ReturnType<typeof daddyFixture>, groupId: string) {
     prompt,
     confirm,
     save,
+    read: () => app.inject('/api/daddy/sessions/' + groupId),
+
     async close() {
       await workspace.stop();
       await app.close();
@@ -331,6 +337,170 @@ it.each([
   }
 });
 
+it.each(
+  ['max', undefined].flatMap((initial) =>
+    [false, true].flatMap((force) =>
+      [false, true].map((explicit) => ({ initial, force, explicit })),
+    ),
+  ),
+)(
+  'worker effort intent: $initial, force=$force, explicit=$explicit',
+  async ({ initial, force, explicit }) => {
+    const f = daddyFixture();
+    const runs = holdWorker(f);
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id);
+    const baseline = { ...profiles.worker, effort: initial };
+    const later = { ...baseline, effort: 'medium' };
+    const model = profiles.daddy.model!;
+    const choice = model + (explicit ? ' ' + (initial ?? 'default') : '');
+    try {
+      expect((await controls.save(baseline, profiles.worker)).statusCode).toBe(200);
+      const task = await f.daddy.createTask(group.id, {
+        validatePlan: false,
+        requirements: 'Preserve explicit choice on the slot',
+        requestId: 'worker-effort-intent',
+      });
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      const active = runs[0]!.input;
+      if (force) {
+        const confirmation = await controls.prompt(choice);
+        expect((await controls.save(later, baseline)).statusCode).toBe(200);
+        await controls.confirm(confirmation);
+      } else {
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const validation = vi
+          .spyOn(f.daddy.catalogue, 'validate')
+          .mockImplementationOnce(() => blocked);
+        const pending = controls.command(choice);
+        try {
+          await vi.waitFor(() => expect(validation).toHaveBeenCalledOnce());
+          expect((await controls.save(later, baseline)).statusCode).toBe(200);
+        } finally {
+          release();
+          await pending;
+          validation.mockRestore();
+        }
+      }
+      const expected = explicit ? later : { ...later, model };
+      expect(f.daddy.board(group.id).workers.slots[0]?.profile).toEqual(expected);
+      expect(active.signal.aborted).toBe(force && !explicit);
+      expect(f.store.getTask(task.id).generation).toBe(
+        task.generation + Number(force && !explicit),
+      );
+      if (explicit) expect(controls.cards.at(-1)?.text).toContain('worker.profile.effort');
+      if (force && !explicit)
+        expect(
+          f.store.activeJobs().find((job) => job.taskId === task.id && job.status === 'queued')
+            ?.profile,
+        ).toEqual(expected);
+    } finally {
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it.each(
+  (['en', 'ru'] as const).flatMap((locale) =>
+    [false, true].flatMap((occupied) =>
+      [false, true].map((supported) => ({ locale, occupied, supported })),
+    ),
+  ),
+)(
+  'worker save reply: $locale, occupied=$occupied, supports inherited effort=$supported',
+  async ({ locale, occupied, supported }) => {
+    const f = daddyFixture();
+    const runs = holdWorker(f);
+    const group = f.daddy.create({ workspaceId: f.workspace.id });
+    const controls = confirmWorker(f, group.id, locale);
+    const target = { engine: 'claude', model: 'next-model' };
+    const validate = vi.spyOn(f.daddy.catalogue, 'validate').mockImplementation(async (profile) => {
+      if (!supported && profile.model === target.model && profile.effort)
+        throw new AppError('effort_unavailable', 'Use the default reasoning effort', 422);
+    });
+    try {
+      const baseline = { engine: 'claude', model: 'old-model', effort: 'high' };
+      expect((await controls.save(baseline, profiles.worker)).statusCode).toBe(200);
+      if (occupied) {
+        await f.daddy.createTask(group.id, {
+          validatePlan: false,
+          requirements: 'Keep the current author attempt',
+          requestId: 'worker-reply',
+        });
+        await f.worker.tick();
+        await vi.waitFor(() => expect(runs).toHaveLength(1));
+      }
+      await controls.command(target.model + (occupied ? '' : ' --force'));
+      const saved = (await controls.read()).json().workers.slots[0].profile;
+      expect(saved).toEqual(supported ? { ...target, effort: 'high' } : target);
+      const title = translate(locale, 'Worker {number} model saved · {profile}', {
+        number: 1,
+        profile: [saved.engine, saved.model, saved.effort ?? translate(locale, 'Default')].join(
+          ' · ',
+        ),
+      });
+      expect(controls.cards.at(-1)).toBe(title);
+      if (occupied) expect(runs[0]!.input.signal.aborted).toBe(false);
+    } finally {
+      validate.mockRestore();
+      runs.forEach(({ finish }) => finish());
+      await controls.close();
+      await f.close();
+    }
+  },
+);
+
+it('legacy force confirmation requires a fresh preview', async () => {
+  const f = daddyFixture();
+  const runs = holdWorker(f);
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const controls = confirmWorker(f, group.id);
+  try {
+    const task = await f.daddy.createTask(group.id, {
+      validatePlan: false,
+      requirements: 'Keep the active run until a valid confirmation',
+      requestId: 'legacy-force',
+    });
+    await f.worker.tick();
+    await vi.waitFor(() => expect(runs).toHaveLength(1));
+    const active = runs[0]!.input;
+    const fresh = await controls.prompt();
+    const legacyKey = 'legacy_force_001';
+    expect(
+      f.store.db
+        .prepare(
+          "INSERT INTO bot_actions(id,data,consumed) SELECT ?,json_remove(data,'$.confirmedProfile'),consumed FROM bot_actions WHERE id=?",
+        )
+        .run(legacyKey, fresh.slice('dad:force:'.length)).changes,
+    ).toBe(1);
+    await controls.confirm('dad:force:' + legacyKey);
+    expect(f.store.getTask(task.id).generation).toBe(task.generation);
+    expect(active.signal.aborted).toBe(false);
+    expect(f.store.jobs(task.id).find(({ id }) => id === active.job.id)?.status).toBe('running');
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile ?? profiles.worker).toEqual(
+      profiles.worker,
+    );
+    expect(controls.cards.at(-1)?.text).toContain('Open a fresh card');
+
+    await controls.confirm(fresh);
+    expect(f.daddy.board(group.id).workers.slots[0]?.profile).toEqual(profiles.daddy);
+    expect(active.signal.aborted).toBe(true);
+    expect(f.store.getTask(task.id).generation).toBe(task.generation + 1);
+    await controls.confirm(fresh);
+    expect(f.store.getTask(task.id).generation).toBe(task.generation + 1);
+  } finally {
+    runs.forEach(({ finish }) => finish());
+    await controls.close();
+    await f.close();
+  }
+});
+
 it('keeps a result that is already being saved when the model is switched', async () => {
   const f = daddyFixture();
   const group = f.daddy.create({ workspaceId: f.workspace.id });
@@ -349,6 +519,7 @@ it('keeps a result that is already being saved when the model is switched', asyn
     await vi.waitFor(() => expect(f.checkouts.commitTicket).toHaveBeenCalledOnce());
     expect(await f.daddy.configureWorker(group.id, 1, profiles.daddy, { force: true })).toEqual({
       restarted: false,
+      profile: profiles.daddy,
     });
     saveCommit('b'.repeat(40));
     await vi.waitFor(() =>

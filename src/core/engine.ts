@@ -1,3 +1,6 @@
+import { attestReviewLesson, savePublishedLesson } from './review-lessons.js';
+import { feedbackFingerprint, repeatedReviewFindings } from './review-recovery.js';
+import { nativeReviewInstruction } from './instructions.js';
 import {
   nextPrAction,
   completionGate,
@@ -25,6 +28,7 @@ import {
   type Revision,
   type ReviewGroup,
   type ReviewHandle,
+  type ReviewRecovery,
   type ReviewSnapshot,
   type TicketSource,
   type TicketRef,
@@ -435,7 +439,7 @@ export class Engine {
             ? clarification?.trim()
               ? clarifiedReviewPrefix + clarification.trim()
               : reviewRetryInstruction
-            : 'Review the complete change and verify previous published findings. Create or edit native draft comments using your review tools.',
+            : nativeReviewInstruction(task),
         );
       });
       return task;
@@ -761,6 +765,15 @@ export class Engine {
   }
 
   coordinationBlocker(task: Task) {
+    if (
+      task.state === 'needs_input' &&
+      task.reviewRecovery?.coordination &&
+      !task.reviewRecovery.plan
+    )
+      return {
+        question: task.reviewRecovery.coordination,
+        head: task.reviewRecovery.revision.head,
+      };
     if (task.draftStart && task.state === 'queued') return;
     if (
       task.partialReview?.question &&
@@ -844,7 +857,14 @@ export class Engine {
     task.generation++;
     this.store.cancelJobs(task.id);
     if (cancelRunning) this.onCancel(task.id);
+    if (
+      !task.reviewRecovery?.plan ||
+      pr?.branch !== task.reviewRecovery.branch ||
+      pr.targetBranch !== task.reviewRecovery.targetBranch
+    )
+      delete task.reviewRecovery;
     task.review = undefined;
+    delete task.reviewLessonProof;
     delete task.publicationRetry;
     task.partialReview = undefined;
     task.draftRecheck = undefined;
@@ -1966,6 +1986,7 @@ export class Engine {
     if (task.pr?.state === 'open' && autoMergeRequested(this.store, task))
       this.state(task, 'awaiting_merge', 'Review complete. Waiting for GitHub to merge the PR.');
     else this.state(task, 'complete', reason);
+    if (task.state === 'complete') savePublishedLesson(this.store, task);
   }
 
   restoreMergeWaits() {
@@ -1989,6 +2010,206 @@ export class Engine {
       );
     }
   }
+  private enqueueArchitect(
+    task: Task,
+    recovery: ReviewRecovery,
+    clarification?: string,
+    actionId?: string,
+  ) {
+    task.planning ??= {};
+    task.reviewRecovery = recovery;
+    delete recovery.coordination;
+    this.state(
+      task,
+      'fixing',
+      'The task architect is revising the fix plan after two unsuccessful corrections.',
+    );
+    const job = this.store.enqueue(
+      task,
+      'author',
+      'plan',
+      clarification ??
+        'Diagnose the recurring published criteria and give the assigned worker a revised, testable fix plan.',
+      actionId,
+    );
+    recovery.runId = job.id;
+    this.store.saveTask(task);
+  }
+  private scheduleReviewRecovery(task: Task, snapshot: ReviewSnapshot) {
+    const evidence = repeatedReviewFindings(this.store, task, snapshot);
+    if (!evidence) return false;
+    this.store.transaction(() => {
+      task.noProgress = 0;
+      this.enqueueArchitect(task, { ...evidence, runId: '' });
+      this.store.event(
+        task.id,
+        'review.architect_requested',
+        {
+          reviewId: evidence.reviewId,
+          revision: evidence.revision,
+          criteria: evidence.criteria,
+          attempts: evidence.attempts,
+        },
+        task.reviewRecovery!.runId,
+      );
+    });
+    return true;
+  }
+  /** Also handles an ordinary fix that was already queued by an older installation. */
+  async admitReviewWork(job: Job, snapshot: ReviewSnapshot, pr: PullRequest) {
+    return this.lock(job.taskId, async () => {
+      const task = this.store.getTask(job.taskId);
+      if (task.generation !== job.generation || task.state === 'paused') return false;
+      const recovery = task.reviewRecovery;
+      if (
+        job.kind === 'plan' &&
+        (!recovery ||
+          recovery.plan ||
+          recovery.runId !== (job.firstAttemptId ?? job.id) ||
+          task.state !== 'fixing')
+      )
+        return false;
+      if (snapshot.status !== 'published')
+        throw new AppError(
+          'unpublished_feedback',
+          'The published review changed before work started.',
+        );
+      if (
+        job.kind === 'fix' &&
+        recovery &&
+        !recovery.plan &&
+        recovery.reviewId === task.review?.id &&
+        sameRevision(recovery.revision, task.revision)
+      )
+        return false;
+      if (
+        job.kind === 'plan' &&
+        (!sameOpenTarget(task.pr, pr) || !sameRevision(task.revision, pr))
+      ) {
+        await this.reconcileLocked(task.id);
+        return false;
+      }
+      if (job.kind === 'plan' && !sameRevision(task.revision, snapshot.revision)) {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+        return false;
+      }
+      if (
+        recovery &&
+        task.review?.id === recovery.reviewId &&
+        sameRevision(task.revision, recovery.revision) &&
+        feedbackFingerprint(snapshot) !== recovery.fingerprint
+      ) {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+        return false;
+      }
+      task.feedback = snapshot;
+      if (
+        job.kind === 'fix' &&
+        task.state === 'fixing' &&
+        sameOpenTarget(task.pr, pr) &&
+        sameRevision(pr, task.revision) &&
+        this.scheduleReviewRecovery(task, snapshot)
+      )
+        return false;
+      this.store.saveTask(task);
+      if (job.kind === 'fix')
+        this.store.event(task.id, 'author.feedback_snapshot', snapshot, job.id);
+      return true;
+    });
+  }
+  private async finishReviewRecovery(task: Task, job: Job, result: AgentResult, pr: PullRequest) {
+    const recovery = task.reviewRecovery;
+    if (
+      !recovery ||
+      recovery.runId !== (job.firstAttemptId ?? job.id) ||
+      recovery.plan ||
+      task.state !== 'fixing' ||
+      task.review?.id !== recovery.reviewId ||
+      !sameRevision(task.revision, recovery.revision)
+    )
+      return;
+    if (!sameOpenTarget(task.pr, pr) || !sameRevision(recovery.revision, pr)) {
+      await this.reconcileLocked(task.id);
+      return;
+    }
+    const native = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+    const confirmed = await this.provider(prRef(task)).getPR(prRef(task));
+    if (!sameOpenTarget(task.pr, confirmed) || !sameRevision(recovery.revision, confirmed)) {
+      await this.reconcileLocked(task.id);
+      return;
+    }
+    if (
+      native.status !== 'published' ||
+      !sameRevision(native.revision, recovery.revision) ||
+      feedbackFingerprint(native) !== recovery.fingerprint
+    ) {
+      if (native.status === 'published') {
+        this.invalidate(task, pr, false);
+        this.state(
+          task,
+          'queued',
+          'Published findings changed. Independent review will check the current evidence.',
+        );
+      } else {
+        task.resumeState = 'fixing';
+        this.state(task, 'needs_input', 'The architect could not confirm the published review.');
+      }
+      return;
+    }
+    this.store.transaction(() => {
+      this.store.message(task.id, 'author', 'agent', result.summary, job.id, job.id);
+      const text = redact(result.summary.trim());
+      if (result.checkedHead !== recovery.revision.head || !text || result.status !== 'completed') {
+        task.resumeState = 'fixing';
+        const question =
+          result.checkedHead === recovery.revision.head &&
+          requestsHumanInput(result) &&
+          (result.question?.trim() || text);
+        if (question) {
+          recovery.coordination = redact(question);
+          this.state(
+            task,
+            'needs_input',
+            recovery.coordination,
+            job,
+            task.groupId && this.store.getGroup(task.groupId).orchestrated ? 'daddy' : undefined,
+          );
+        } else
+          this.state(
+            task,
+            'needs_input',
+            'The architect did not finish a plan for the pinned revision.',
+          );
+        return;
+      }
+      recovery.plan = text;
+      delete recovery.coordination;
+      task.noProgress = 0;
+      this.state(task, 'fixing', 'The worker is applying the revised architecture plan.');
+      this.store.enqueue(
+        task,
+        'author',
+        'fix',
+        'Apply the task architect’s revised plan to the published findings. Test the recorded failing and passing paths through their final consumer.',
+      );
+      this.store.event(
+        task.id,
+        'review.architect_planned',
+        { reviewId: recovery.reviewId, revision: recovery.revision, criteria: recovery.criteria },
+        job.id,
+      );
+    });
+  }
   private assignPublishedFindings(task: Task, snapshot: ReviewSnapshot) {
     const fingerprint = createHash('sha256')
       .update(
@@ -2003,6 +2224,7 @@ export class Engine {
     task.noProgress = fingerprint === task.lastFeedbackHash ? task.noProgress + 1 : 0;
     task.lastFeedbackHash = fingerprint;
     task.feedback = snapshot;
+    if (this.scheduleReviewRecovery(task, snapshot)) return;
     if (task.noProgress >= task.policy.maxNoProgress)
       this.state(
         task,
@@ -2101,6 +2323,18 @@ export class Engine {
 
   recoverLostFixes() {
     for (const task of this.store.tasks()) {
+      if (
+        task.state === 'needs_input' &&
+        task.reason === 'The same findings keep returning; human decision is required' &&
+        task.snapshot?.status === 'published' &&
+        !this.store.busy(task.id) &&
+        (!task.groupId ||
+          !['paused', 'archived'].includes(
+            this.store.getGroup(task.groupId).daddyState ?? 'active',
+          )) &&
+        this.scheduleReviewRecovery(task, task.snapshot)
+      )
+        continue;
       if (
         isTicket(task) ||
         !['queued', 'needs_input'].includes(task.state) ||
@@ -2358,6 +2592,17 @@ export class Engine {
         this.store.message(id, role, 'user', text);
         if (
           role === 'author' &&
+          task.state === 'needs_input' &&
+          task.reviewRecovery?.coordination &&
+          !task.reviewRecovery.plan &&
+          task.reviewRecovery.reviewId === task.review?.id &&
+          sameRevision(task.reviewRecovery.revision, task.revision)
+        ) {
+          this.enqueueArchitect(task, task.reviewRecovery, text, actionId);
+          return;
+        }
+        if (
+          role === 'author' &&
           isTicket(task) &&
           task.state === 'needs_input' &&
           task.resumeState === 'implementing' &&
@@ -2432,7 +2677,14 @@ export class Engine {
           this.store.event(
             task.id,
             'author.fixes_saved',
-            { head, revision: task.revision },
+            {
+              head,
+              revision: task.revision,
+              reviewId: task.review?.id,
+              branch: task.pr?.branch,
+              targetBranch: task.pr?.targetBranch,
+              conflict: task.fixingMergeConflict,
+            },
             job.id,
           );
         });
@@ -2530,6 +2782,10 @@ export class Engine {
         return;
       }
       const pr = await this.provider(prRef(task)).getPR(prRef(task));
+      if (job.kind === 'plan') {
+        await this.finishReviewRecovery(task, job, result, pr);
+        return;
+      }
       if (job.kind === 'fix' && task.pendingFix) {
         this.store.message(task.id, job.role, 'agent', result.summary, job.id, job.id);
         if (await this.checkSavedFix(task, pr)) {
@@ -2681,6 +2937,7 @@ export class Engine {
           }
           task.draftRecheck = undefined;
         }
+        task.reviewLessonProof = await attestReviewLesson(this.store, task, job, snapshot);
         task.reviewFinished = true;
         delete task.openReviewQuestion;
         for (const id of verified)
@@ -2803,6 +3060,17 @@ export class Engine {
               task.pendingAuthorHead ? 'ready_for_review' : 'discussing',
               'Resumed ticket work; existing changes were preserved',
             );
+          return task;
+        }
+        if (
+          task.reviewRecovery &&
+          !task.reviewRecovery.plan &&
+          task.reviewRecovery.reviewId === task.review?.id &&
+          sameRevision(task.reviewRecovery.revision, task.revision)
+        ) {
+          this.store.transaction(() =>
+            this.enqueueArchitect(task, task.reviewRecovery!, reason || undefined),
+          );
           return task;
         }
         if (task.resumeState === 'awaiting_merge') {
@@ -3025,6 +3293,27 @@ export class Engine {
           job.generation === this.store.getTask(job.taskId).generation &&
           ['reviewing', 'fixing'].includes(this.store.getTask(job.taskId).state))
       ) {
+        const pending = this.store.getTask(job.taskId);
+        if (
+          job.kind === 'plan' &&
+          !isTicket(pending) &&
+          pending.state === 'fixing' &&
+          pending.generation === job.generation &&
+          pending.reviewRecovery?.runId === (job.firstAttemptId ?? job.id) &&
+          !pending.reviewRecovery.plan
+        ) {
+          job.status = 'queued';
+          delete job.finishedAt;
+          delete job.startedAt;
+          this.store.saveJob(job);
+          this.store.event(
+            pending.id,
+            'review.architect_resumed',
+            { reviewId: pending.reviewRecovery.reviewId },
+            job.id,
+          );
+          continue;
+        }
         job.status = 'failed';
         job.error = interruptedByRestart;
         job.errorCode = 'server_restarted';

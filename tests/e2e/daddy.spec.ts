@@ -622,6 +622,9 @@ test('queues a task for a numbered worker and updates that worker’s model from
   await expect(report.getByText(`DADDY-${task.id.slice(0, 8)}`, { exact: true })).toBeVisible();
   await report.getByRole('button', { name: 'Close', exact: true }).click();
 
+  await expect(
+    page.locator('.daddy-work-item').filter({ hasText: 'Repair the filter cache' }),
+  ).toContainText('Ready for review');
   await openWorkers(page);
   const worker = workers.getByRole('button', { name: 'Configure worker 2' });
   await expect(worker).toContainText('Repair the filter cache');
@@ -1847,6 +1850,8 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       ...detail,
       task: {
         ...detail.task,
+        kind: 'code',
+        reportOnly: false,
         generation: task.generation + stage,
         title: intermediate ? 'Intermediate CI snapshot' : 'Report snapshot ' + stage,
         state: intermediate ? 'awaiting_checks' : state,
@@ -1866,6 +1871,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
   await page.goto('/#session/' + group.id);
   await page.locator('.daddy-work-item').first().click();
   const report = page.getByRole('dialog');
+  const architect = report.locator('summary').filter({ hasText: /^Architect ·/ });
   await expect(report.getByRole('alert')).toContainText('Task details unavailable');
   expect(await report.getByRole('button', { name: 'Waive CI checks' }).count()).toBe(0);
   detailUnavailable = false;
@@ -1897,6 +1903,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       await expect(
         report.getByRole('heading', { name: 'Report snapshot ' + (stage - 1) }),
       ).toBeVisible();
+      await expect(architect).toHaveCount(0);
       if (action)
         await expect(report.getByRole('button', { name: action, exact: true })).toHaveCount(0);
     } finally {
@@ -1911,6 +1918,7 @@ test('an open task report follows live confirmation stages', async ({ page }) =>
       intermediate = false;
     }
     await expect(report.getByRole('heading', { name: 'Report snapshot ' + stage })).toBeVisible();
+    await expect(architect).toHaveCount(next === 'complete' ? 0 : 1);
     for (const label of actions)
       await expect(report.getByRole('button', { name: label, exact: true })).toHaveCount(
         label === action ? 1 : 0,

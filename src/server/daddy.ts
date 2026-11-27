@@ -210,7 +210,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           'Open the current worker settings before confirming a restart',
         )
         .parse(request.body);
-      return daddy.configureWorker(
+      const { restarted } = await daddy.configureWorker(
         id.parse(request.params.id),
         workerNumber.parse(Number(request.params.number)),
         input.profile,
@@ -222,6 +222,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
           expectedGeneration: input.expectedGeneration,
         },
       );
+      return { restarted };
     },
   );
   app.post<{ Params: { id: string } }>('/api/daddy/sessions/:id/delete', async (request, reply) => {

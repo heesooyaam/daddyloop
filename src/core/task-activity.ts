@@ -50,7 +50,33 @@ export function taskStatus(state: State, queued = false, role?: Job['role']) {
   return statusLabels[state];
 }
 
-export type TaskActivity = { task: Task; job?: Job; mergeStatus?: string; assignedWorker?: number };
+export type TaskActivity = {
+  task: Task;
+  job?: Job;
+  mergeStatus?: string;
+  assignedWorker?: number;
+  waitingFor?: string[];
+};
+
+export function correctionDependencies(
+  task: Task,
+  job: Job,
+  stateOf: (id: string) => State | undefined,
+) {
+  if (
+    !task.groupId ||
+    task.ref.kind === 'ticket' ||
+    job.role !== 'author' ||
+    (job.kind !== 'plan' && job.kind !== 'fix')
+  )
+    return [];
+  return (task.dependsOn ?? []).filter((id) => stateOf(id) !== 'complete');
+}
+export function dependencyDetail(item: TaskActivity) {
+  return item.waitingFor?.length
+    ? item.waitingFor.map((id) => taskReference({ id })).join(', ')
+    : undefined;
+}
 
 export function outstandingActivity(item: TaskActivity) {
   return (
@@ -66,6 +92,7 @@ export function taskActivity(
   jobs: Job[],
   mergeStatus?: (task: Task, job?: Job) => string | undefined,
   slots: WorkerSlot[] = [],
+  lookupDependency?: (id: string) => State | undefined,
 ): TaskActivity[] {
   const byId = new Map<string, TaskActivity>(
     tasks.map((task) => [
@@ -83,8 +110,15 @@ export function taskActivity(
     if (!item.job || job.status === 'running') item.job = job;
     ordered.add(item);
   }
-  if (mergeStatus)
-    for (const item of byId.values()) item.mergeStatus = mergeStatus(item.task, item.job);
+  for (const item of byId.values()) {
+    if (mergeStatus) item.mergeStatus = mergeStatus(item.task, item.job);
+    if (item.job?.status === 'queued')
+      item.waitingFor = correctionDependencies(
+        item.task,
+        item.job,
+        (id) => byId.get(id)?.task.state ?? lookupDependency?.(id),
+      );
+  }
   return [...new Set([...ordered, ...byId.values()])];
 }
 
@@ -120,6 +154,8 @@ export function waitingForMergeability(task: Task) {
 }
 
 export function activityReason(task: Task) {
+  if (waitingForDaddy(task) && task.reviewRecovery?.coordination)
+    return 'daddy is coordinating the architect’s question with the related tasks.';
   if (waitingForDaddy(task))
     return 'daddy is checking the worker’s objection to the published review.';
   return waitingForMergeability(task)
@@ -163,7 +199,14 @@ export function localRetryStatus(task: Task, job?: Job) {
   }
 }
 
-export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskActivity) {
+export function activityStatus({
+  task,
+  job,
+  mergeStatus,
+  assignedWorker,
+  waitingFor,
+}: TaskActivity) {
+  if (waitingFor?.length) return 'Waiting for prerequisite tasks';
   if (waitingForDaddy(task)) return 'Waiting for daddy’s decision';
   if (
     task.state === 'needs_input' &&
@@ -171,6 +214,10 @@ export function activityStatus({ task, job, mergeStatus, assignedWorker }: TaskA
     task.inputRequest.generation === task.generation
   )
     return 'Waiting for your answer';
+  if (job?.kind === 'plan' && task.ref.kind !== 'ticket' && task.reviewRecovery)
+    return job.status === 'running'
+      ? 'Task architect is revising the fix plan'
+      : 'Waiting for the task architect';
   if (job?.kind === 'plan' && job.status === 'running')
     return 'Checking architecture and implementation plan';
   if (job?.kind === 'chat' && job.status === 'running') return 'Task discussion in progress';

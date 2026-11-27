@@ -670,6 +670,21 @@ export const daddyRu: Record<string, string> = {
   'Waiting for daddy’s decision': 'Ждёт решения daddy',
   'daddy is checking the worker’s objection to the published review.':
     'Воркер оспорил замечание ревью. daddy проверяет его аргументы.',
+  'Task architect is revising the fix plan': 'Архитектор пересматривает план исправления',
+  'Waiting for prerequisite tasks': 'Ждёт завершения связанных задач',
+  'Waiting for the task architect': 'Ждёт архитектора задачи',
+  'The task architect is revising the fix plan after two unsuccessful corrections.':
+    'После двух исправлений критерий всё ещё нарушен. План пересматривает архитектор задачи.',
+  'The worker is applying the revised architecture plan.':
+    'Воркер исправляет код по обновлённому плану архитектора.',
+  'daddy is coordinating the architect’s question with the related tasks.':
+    'daddy согласует вопрос архитектора со связанными задачами.',
+  'The architect could not confirm the published review.':
+    'Архитектору не удалось подтвердить опубликованное ревью.',
+  'The architect did not finish a plan for the pinned revision.':
+    'Архитектор не завершил план для проверяемого коммита.',
+  'Published findings changed. Independent review will check the current evidence.':
+    'Опубликованные замечания изменились. Ревьюер проверит актуальные сведения.',
   'Waiting for your answer': 'Ждёт твоего ответа',
   'The PR already exists. daddy will connect it automatically.':
     'PR уже создан. daddy привяжет его автоматически.',

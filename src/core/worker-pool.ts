@@ -108,3 +108,32 @@ export function selectWorker(
     available[0]
   );
 }
+
+/** Can the proposed order finish with the current leases and explicit slot assignments? */
+export function canRunPrerequisites(store: Store, group: ReviewGroup, task: Task) {
+  if (task.ref.kind === 'ticket' || !task.dependsOn?.length) return true;
+  const slots = workerSlots(store, group);
+  if (!slots.some((s) => s.taskId === task.id)) return true;
+  const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
+  const tasks = store.tasks(group.id).map((t) => (t.id === task.id ? task : t));
+  const done = new Set(tasks.filter((t) => t.state === 'complete').map((t) => t.id));
+  while (!done.has(task.id)) {
+    const before = done.size;
+    for (const t of tasks) {
+      if (done.has(t.id) || t.dependsOn?.some((id) => !done.has(id))) continue;
+      const owner = slots.some((s) => s.taskId === t.id);
+      const free = slots.some(
+        (s) =>
+          s.number <= capacity &&
+          (!s.taskId || done.has(s.taskId)) &&
+          (!t.workerRequest?.slot || t.workerRequest.slot === s.number),
+      );
+      const waitingForMerge =
+        t.ref.kind !== 'ticket' &&
+        ['awaiting_checks', 'awaiting_plan_approval', 'awaiting_merge'].includes(t.state);
+      if (owner || free || waitingForMerge) done.add(t.id);
+    }
+    if (before === done.size) return false;
+  }
+  return true;
+}

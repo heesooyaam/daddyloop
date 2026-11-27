@@ -872,6 +872,7 @@ export class TelegramWorkspace {
           job,
         ),
       slots,
+      (id) => this.store.prerequisiteState(groupId, id),
     );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
@@ -947,7 +948,8 @@ export class TelegramWorkspace {
       if (!slot) throw new AppError('unknown_worker', 'Choose a worker from this session', 422);
       const baseline = slot.profile ?? defaults;
       const engine = input.engine ?? baseline.engine;
-      const inheritedEffort = input.effort === undefined && engine === baseline.engine;
+      const explicitEffort = input.effort !== undefined;
+      const inheritedEffort = !explicitEffort && engine === baseline.engine;
       const profile = {
         engine,
         model: input.model,
@@ -981,6 +983,7 @@ export class TelegramWorkspace {
           confirmedProfile,
           baseline,
           inheritedEffort,
+          explicitEffort,
           groupGeneration: group.generation,
           taskId: task.id,
           expected: {
@@ -1005,6 +1008,7 @@ export class TelegramWorkspace {
       const result = await this.daddy.configureWorker(groupId, input.number, profile, {
         baseline,
         inheritedEffort,
+        explicitEffort,
         expectedGeneration,
         check: checkRoute,
         onCommit: this.receipt,
@@ -1015,7 +1019,13 @@ export class TelegramWorkspace {
           result.restarted
             ? 'Worker {number} will resume the task · {profile}'
             : 'Worker {number} model saved · {profile}',
-          { number: input.number, profile: profileText(profile) },
+          {
+            number: input.number,
+            profile: profileText({
+              ...result.profile,
+              effort: result.profile.effort ?? this.t('Default'),
+            }),
+          },
         ),
         undefined,
         { key: receipt },
@@ -2013,6 +2023,7 @@ export class TelegramWorkspace {
         confirmedProfile?: AgentProfile;
         baseline?: AgentProfile;
         inheritedEffort?: boolean;
+        explicitEffort?: boolean;
         taskId: string;
         groupGeneration: number;
         expected: ExpectedTask;
@@ -2026,6 +2037,7 @@ export class TelegramWorkspace {
         baseline: action.baseline,
         confirmedProfile: action.confirmedProfile,
         inheritedEffort: action.inheritedEffort,
+        explicitEffort: action.explicitEffort ?? action.inheritedEffort === false,
         onCommit: () => {
           this.finishAction(key);
           this.receipt();

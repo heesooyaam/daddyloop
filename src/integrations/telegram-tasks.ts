@@ -15,6 +15,7 @@ import {
   waitingForMergeability,
   outstandingActivity,
   profileText,
+  dependencyDetail,
   queueDetail,
   taskReference,
   type TaskActivity,
@@ -119,7 +120,8 @@ function queueStatus(item: TaskActivity) {
   const { task, job, assignedWorker, mergeStatus } = item;
   const label = activityStatus(item);
   if (label === 'Task discussion in progress') return { label };
-  const detail = queueDetail(task);
+  const detail = dependencyDetail(item) ?? queueDetail(task);
+  if (item.waitingFor?.length) return { label, detail };
   if (label === 'Waiting for daddy’s decision' || label === 'Waiting for your answer')
     return { label, detail };
   if (mergeStatus) {
@@ -158,9 +160,11 @@ function taskRunLine(t: ReturnType<typeof translator>, item: TaskActivity, now: 
   const { task, job, assignedWorker } = item;
   const running = job?.status === 'running';
   const reviewing = running && job.role === 'reviewer';
+  const architect = running && job.kind === 'plan' && task.ref.kind !== 'ticket';
   const requestedWorker = task.workerRequest?.slot;
   const parts = [];
-  if (reviewing) parts.push(t('Shared reviewer'));
+  if (architect) parts.push(t('Architect'));
+  else if (reviewing) parts.push(t('Shared reviewer'));
   else if (assignedWorker !== undefined)
     parts.push(t('Worker {number}', { number: assignedWorker }));
   else if (running) parts.push(t('Worker'));
@@ -169,7 +173,7 @@ function taskRunLine(t: ReturnType<typeof translator>, item: TaskActivity, now: 
   const minutes = running ? elapsedMinutes(job.startedAt, now) : undefined;
   if (minutes !== undefined)
     parts.push(minutes ? t('{minutes} min elapsed', { minutes }) : t('<1 min elapsed'));
-  if (reviewing && assignedWorker !== undefined)
+  if ((reviewing || architect) && assignedWorker !== undefined)
     parts.push(t('Author worker {number}', { number: assignedWorker }));
   else if (running && requestedWorker !== undefined && assignedWorker === undefined)
     parts.push(t('Requested author worker {number}', { number: requestedWorker }));
@@ -302,8 +306,8 @@ export function taskCard(
       (queueDetail(task) !== undefined || activityStatus({ task }) !== 'Action needed')) ||
     (task.state === 'fixing' && task.fixingMergeConflict);
   const explanations = new Set(
-    [detail, showReason ? activityReason(task) : undefined].map((value) =>
-      value ? t(redact(value)).trim() : '',
+    [detail, showReason && !item.waitingFor?.length ? activityReason(task) : undefined].map(
+      (value) => (value ? t(redact(value)).trim() : ''),
     ),
   );
   for (const explanation of explanations)
@@ -314,9 +318,10 @@ export function taskCard(
   if (url && task.ref.kind !== 'ticket') text.add('\n\n').add('PR', 'text_link', { url });
   const buttons = [queueButtons(task.groupId!, locale, queuePage)];
   if (
-    task.ref.kind === 'ticket' &&
     task.state !== 'complete' &&
-    (task.planning || task.state === 'discussing')
+    (task.ref.kind === 'ticket'
+      ? task.planning || task.state === 'discussing'
+      : task.kind === 'code' && !task.reportOnly)
   )
     buttons.push([{ text: t('Architect'), callback_data: `dad:arch-task:${task.id}` }]);
   if (merge) {
