@@ -14,6 +14,7 @@ import {
 import type { Store } from './store.js';
 import { readReviewDecisions, reviewDecisionQuery } from './review-decisions.js';
 import { Outbox } from './outbox.js';
+import { assertConsistentReview } from './review-evidence.js';
 import { sameOpenTarget } from './pr-routing.js';
 import { assertDraft, tag, type ReviewProvider } from '../providers/provider.js';
 
@@ -184,12 +185,16 @@ export class Broker {
           'draft_creation_race',
         ].includes(error.code),
     );
-    task.snapshot = await provider.getReview(ref, handle);
-    if (task.snapshot.status === 'missing' && !task.snapshot.authorId)
+    const snapshot = await provider.getReview(ref, handle);
+    if (snapshot.status === 'missing' && !snapshot.authorId)
       throw new AppError(
         'draft_lookup_pending',
         'Waiting for the original GitHub review to become visible.',
       );
+    if (snapshot.authorId !== handle.authorId || snapshot.revision.head !== handle.revision.head)
+      throw new AppError('draft_changed', 'The original GitHub review changed owner or commit.');
+    assertConsistentReview(confirmed ? task.snapshot : undefined, snapshot);
+    task.snapshot = snapshot;
     return handle;
   }
 
@@ -303,6 +308,7 @@ export class Broker {
     const snapshot = await provider.getReview(prRef(task), task.review);
     if (tool === 'read_review') {
       schemas.read_review.parse(input);
+      if (task.reviewAdmission === task.review.id) assertConsistentReview(task.snapshot, snapshot);
       if (job.role === 'author' && snapshot.status !== 'published')
         throw new AppError('draft_private', 'Draft feedback has not been published', 403);
       return snapshot;

@@ -50,6 +50,7 @@ async function reviewFixture() {
     pageTwo: false,
     readFailure: false,
     directReadFailure: false,
+    incompleteComments: false,
     missing: undefined as 'review' | 'comments' | undefined,
     firstPostStatus: 502,
     firstPostAccepted: true,
@@ -74,7 +75,9 @@ async function reviewFixture() {
             pathname.endsWith('/100/comments')
               ? [{ id: 700, body: 'Unrelated publication', html_url: task.ref.url }]
               : pathname.endsWith('/123/comments')
-                ? comments
+                ? options.incompleteComments
+                  ? []
+                  : comments
                 : [],
           );
     if (init?.method === 'GET' && pathname.endsWith('/reviews')) {
@@ -858,6 +861,335 @@ it.each(['passing', 'pending', 'missing', 'failing'] as const)(
             });
           }
         }
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['published', 'verify-merge', 'unbound'],
+  ['published', 'retry', 'unbound'],
+  ['published', 'open', 'unbound'],
+  ['draft', 'verify-merge', 'unbound'],
+  ['draft', 'open', 'unbound'],
+  ['draft', 'verify-merge', 'bound'],
+  ['draft', 'open', 'bound'],
+] as const)(
+  'preserves a %s observation on the original review (%s, %s)',
+  async (status, route, binding) => {
+    const f = await reviewFixture();
+    try {
+      await f.engine.review(f.task.id);
+      f.options.hidden = false;
+      if (status === 'published') f.reviews[0].state = 'COMMENTED';
+      f.comments.push({ id: 456, body: '**Known note**', html_url: f.task.ref.url });
+      f.due();
+      if (binding === 'unbound')
+        vi.mocked(f.github.getPR)
+          .mockResolvedValueOnce({ ...f.remote })
+          .mockRejectedValueOnce(new AppError('provider_503', 'The last PR read failed'));
+      await f.engine.review(f.task.id);
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: binding === 'unbound' ? 'queued' : 'needs_input',
+        snapshot: { status, comments: [{ id: '456' }] },
+      });
+      expect(f.store.getTask(f.task.id).review?.id).toBe(binding === 'unbound' ? undefined : '123');
+      f.restart();
+      if (binding === 'unbound') f.due();
+      if (route !== 'open')
+        Object.assign(f.remote, { state: 'merged', mergeCommit: 'f'.repeat(40) });
+      f.options.incompleteComments = true;
+      if (route === 'verify-merge') await f.engine.action(f.task.id, 'verify-merge');
+      else await f.engine.review(f.task.id, true);
+      const waitingJob = binding === 'bound' && route !== 'open';
+      expect(f.store.getTask(f.task.id)).toMatchObject({
+        state: waitingJob ? 'reviewing' : 'queued',
+        snapshot: { status, comments: [{ id: '456', body: '**Known note**' }] },
+      });
+      if (waitingJob)
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([
+          { kind: 'verify_merge', status: 'queued', notBefore: expect.any(String) },
+        ]);
+      else expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+      f.restart();
+      if (!waitingJob) f.due();
+      f.options.incompleteComments = false;
+      f.comments[0].body = '**Current note**';
+      if (route === 'open') {
+        await f.engine.review(f.task.id);
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          review: { id: '123' },
+          snapshot: { comments: [{ id: '456', body: '**Current note**' }] },
+        });
+      } else if (status === 'published') {
+        const { worker, run } = reviewer(f);
+        run.mockResolvedValue({
+          status: 'completed',
+          checkedHead: f.remote.head,
+          summary: 'Checked',
+          verifiedCommentIds: [],
+        });
+        try {
+          await worker.tick();
+          await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe('needs_input'));
+          expect(run).toHaveBeenCalledTimes(1);
+          expect(run.mock.calls[0][0].task.snapshot?.comments).toMatchObject([
+            { id: '456', body: '**Current note**' },
+          ]);
+        } finally {
+          await worker.stop();
+        }
+      }
+      expect(f.writeAttempts).toEqual(['POST']);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it('keeps a known publication when completing a reviewer chat reads an incomplete list', async () => {
+  const f = await reviewFixture();
+  try {
+    await holdEarlyPublication(f);
+    await f.engine.chat(f.task.id, 'reviewer', 'Explain the original finding');
+    const { worker, run } = reviewer(f);
+    run.mockImplementationOnce(async (input) => {
+      expect(input.job.kind).toBe('chat');
+      f.options.incompleteComments = true;
+      return { status: 'completed', checkedHead: f.remote.head, summary: 'Explained the finding' };
+    });
+    try {
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.activeJobs(f.task.id)).toMatchObject([
+          { kind: 'chat', status: 'queued', notBefore: expect.any(String) },
+        ]),
+      );
+      expect(f.store.getTask(f.task.id).snapshot?.comments).toMatchObject([{ id: '456' }]);
+      const [pending] = f.store.activeJobs(f.task.id);
+      f.store.saveJob({ ...pending, notBefore: undefined });
+      f.options.incompleteComments = false;
+      f.comments[0].body = '**Fresh note**';
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.getTask(f.task.id).snapshot?.comments).toMatchObject([
+          { id: '456', body: '**Fresh note**' },
+        ]),
+      );
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it('checks known findings again when the CI agent reads the review', async () => {
+  const f = await reviewFixture();
+  try {
+    await holdEarlyPublication(f);
+    f.remote.checks = 'failing';
+    await f.engine.review(f.task.id, true);
+    const { worker, run } = reviewer(f);
+    run.mockImplementationOnce(async (input) => {
+      expect(input.task.feedback?.comments).toMatchObject([{ id: '456' }]);
+      f.options.incompleteComments = true;
+      await expect(input.onTool('read_review', {}, 'incomplete')).rejects.toMatchObject({
+        code: 'github_read_unavailable',
+      });
+      f.options.incompleteComments = false;
+      f.comments[0].body = '**Fresh note**';
+      expect(await input.onTool('read_review', {}, 'complete')).toMatchObject({
+        comments: [{ id: '456', body: '**Fresh note**' }],
+      });
+      return { status: 'incomplete', checkedHead: f.remote.head, summary: 'Checked the tool' };
+    });
+    try {
+      await worker.tick();
+      await vi.waitFor(() =>
+        expect(f.store.getTask(f.task.id)).toMatchObject({
+          state: 'needs_input',
+          reason: 'Checked the tool',
+        }),
+      );
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      await worker.stop();
+    }
+  } finally {
+    f.close();
+  }
+});
+
+it.each(['open retry', 'verify merge', 'queued CI'] as const)(
+  'holds a confirmed dismissed review for inspection (%s)',
+  async (route) => {
+    const f = await reviewFixture();
+    try {
+      await holdEarlyPublication(f);
+      if (route === 'queued CI') {
+        f.remote.checks = 'failing';
+        await f.engine.review(f.task.id, true);
+      }
+      f.reviews[0].state = 'DISMISSED';
+      if (route === 'verify merge')
+        Object.assign(f.remote, { state: 'merged', mergeCommit: 'f'.repeat(40) });
+      f.restart();
+      const { worker, run } = reviewer(f);
+      try {
+        if (route === 'verify merge') await f.engine.action(f.task.id, 'verify-merge');
+        else if (route === 'open retry') await f.engine.review(f.task.id, true);
+        await worker.tick();
+        await vi.waitFor(() =>
+          expect(f.store.getTask(f.task.id)).toMatchObject({
+            state: 'needs_input',
+            reason: expect.stringContaining('dismissed the original review'),
+            review: { id: '123' },
+            snapshot: { status: 'published', comments: [{ id: '456' }] },
+          }),
+        );
+        expect(f.store.activeJobs(f.task.id)).toHaveLength(0);
+        expect(run).not.toHaveBeenCalled();
+        expect(f.writeAttempts).toEqual(['POST']);
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  ['pending', 'original'],
+  ['failing', 'original'],
+  ['failing', 'changed'],
+] as const)(
+  'retains the refused attempt at the review limit through %s CI with %s account',
+  async (checks, account) => {
+    const f = await reviewFixture();
+    try {
+      f.options.firstPostStatus = 422;
+      f.options.firstPostAccepted = false;
+      const task = f.store.getTask(f.task.id);
+      f.store.saveTask({ ...task, reviewRoundLimit: 1 });
+      await expect(f.engine.review(task.id)).rejects.toMatchObject({ code: 'provider_422' });
+      const intent = f.store.getTask(task.id).draftStart!;
+      f.remote.checks = checks;
+      await f.engine.review(task.id, true);
+      expect
+        .soft(f.store.getTask(task.id).draftStart)
+        .toMatchObject({ marker: intent.marker, owner: '12' });
+      f.remote.checks = 'passing';
+      if (account === 'changed') f.options.owner = 77;
+      f.restart();
+      const { worker, run } = reviewer(f);
+      try {
+        if (account === 'changed') {
+          await vi.waitFor(async () => {
+            await worker.tick();
+            expect(f.store.getTask(task.id)).toMatchObject({
+              state: 'needs_input',
+              reason: expect.stringContaining('original GitHub account'),
+            });
+          });
+          expect(f.writeAttempts).toEqual(['POST']);
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          await vi.waitFor(async () => {
+            await worker.tick();
+            expect(run).toHaveBeenCalledTimes(1);
+          });
+          expect(run.mock.calls[0][0].task).toMatchObject({
+            round: 1,
+            review: { id: '123', marker: intent.marker },
+          });
+          expect(f.posts).toEqual([f.posts[0], f.posts[0]]);
+          expect(f.writeAttempts).toEqual(['POST', 'POST']);
+        }
+      } finally {
+        await worker.stop();
+      }
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it.each([
+  'before staging',
+  'staged pending',
+  'staged missing',
+  'before CI worker',
+  'during CI preparation',
+  'staged red CI',
+  'retargeted',
+] as const)(
+  'follows external merge using the original publication and saved retry %s',
+  async (timing) => {
+    const f = await reviewFixture();
+    try {
+      await holdEarlyPublication(f);
+      const clarification = 'Verify rollout';
+      const duringPrep = timing === 'during CI preparation';
+      const merge = () =>
+        Object.assign(f.remote, {
+          state: 'merged',
+          mergeCommit: 'f'.repeat(40),
+          checks: 'passing',
+        });
+      const afterStaging = timing.startsWith('staged') || timing === 'retargeted';
+      if (afterStaging) {
+        vi.mocked(f.github.getPR).mockImplementation(async () => ({
+          ...f.remote,
+          checks:
+            f.remote.state === 'open' && f.store.getTask(f.task.id).draftStart
+              ? timing === 'staged missing'
+                ? 'missing'
+                : timing === 'staged red CI'
+                  ? 'failing'
+                  : 'pending'
+              : f.remote.checks,
+        }));
+      } else f.remote.checks = timing === 'before staging' ? 'pending' : 'failing';
+      await f.engine.review(f.task.id, true, clarification);
+      f.comments[0].body = '**New Markdown after waiting**';
+      if (!duringPrep) merge();
+      if (timing === 'retargeted') f.remote.targetBranch = 'release';
+      f.restart();
+      const { worker, prepare, run } = reviewer(f);
+      if (duringPrep)
+        prepare.mockImplementationOnce(async () => {
+          merge();
+          return '/tmp';
+        });
+      try {
+        if (timing === 'retargeted') {
+          await worker.tick();
+          expect(f.store.getTask(f.task.id).state).toBe('needs_input');
+          expect(run).not.toHaveBeenCalled();
+          expect(f.store.getTask(f.task.id).feedback?.comments).toMatchObject([{ id: '456' }]);
+        } else {
+          await vi.waitFor(async () => {
+            await worker.tick();
+            expect(run).toHaveBeenCalledTimes(1);
+          });
+          expect(run.mock.calls[0][0]).toMatchObject({
+            job: { kind: 'verify_merge' },
+            task: {
+              review: { id: '123' },
+              latestClarification: { text: clarification },
+              snapshot: { comments: [{ id: '456', body: '**New Markdown after waiting**' }] },
+            },
+          });
+        }
+        expect(f.writeAttempts).toEqual(['POST']);
       } finally {
         await worker.stop();
       }

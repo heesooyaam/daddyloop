@@ -210,6 +210,7 @@ export interface ReviewHandle {
 }
 export interface ReviewSnapshot {
   authorId?: string;
+  dismissed?: true;
   status: 'draft' | 'published' | 'missing' | 'partial';
   body: string;
   comments: ReviewComment[];
@@ -321,6 +322,7 @@ export interface Task {
     revision: Revision;
     retry: boolean;
     clarification?: string;
+    previousPublishedReview?: ReviewHandle;
     mergeVerification?: Revision & { mergeCommit?: string };
     mergeVerificationRequested?: 'verify' | 'retry';
     retryAt?: number;

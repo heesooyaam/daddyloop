@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { dynamicTools } from '../core/broker.js';
+import { assertConsistentReview } from '../core/review-evidence.js';
 import { reviewDecisionTool } from '../core/review-decisions.js';
 import { retryConfirmedSubmission } from '../core/ticket-workflow.js';
 import { sameOpenTarget, sameReviewTarget, staleConflictPreparation } from '../core/pr-routing.js';
@@ -575,6 +576,11 @@ export class Worker {
         isTicket(task) || (job.kind === 'review' && task.reviewAdmission)
           ? undefined
           : await this.engine.provider(prRef(task)).getPR(prRef(task));
+      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
+      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
+        job.status = 'cancelled';
+        return;
+      }
       if (
         job.kind === 'fix' &&
         startingPR &&
@@ -642,11 +648,6 @@ export class Worker {
       )
         throw new AppError('merge_unconfirmed', 'The merged revision changed before verification');
       const repairingConflict = job.kind === 'fix' && task.fixingMergeConflict === true;
-      const repairingCI = job.kind === 'fix' && sameRevision(task.ciRepairRevision, task.revision);
-      if (repairingCI && startingPR && (await this.engine.skipObsoleteCIFix(job, startingPR))) {
-        job.status = 'cancelled';
-        return;
-      }
       if (
         repairingConflict &&
         (!autoMergeEnabled(store, task) ||
@@ -748,8 +749,7 @@ export class Worker {
         const provider = this.engine.provider(ref);
         const handle = repairingConflict ? conflictReview : task.review;
         const actual = handle && (await provider.getReview(ref, handle));
-        if (repairingConflict && actual)
-          this.engine.assertConsistentPublication(task.feedback, actual);
+        if (repairingConflict && actual) assertConsistentReview(task.feedback, actual);
         const freshPR = await provider.getPR(ref);
         if (
           (!repairingConflict && !handle) ||
@@ -791,11 +791,16 @@ export class Worker {
         }
       } else if (repairingCI && startingPR) {
         const ref = prRef(task);
+        const observed = await this.engine.provider(ref).getPR(ref);
+        if (await this.engine.skipObsoleteCIFix(job, observed)) {
+          job.status = 'cancelled';
+          return;
+        }
         const publication =
           task.reviewAdmission && task.snapshot?.status === 'published'
-            ? await this.engine.readHeldPublication(task, startingPR)
+            ? await this.engine.readHeldPublication(task, observed)
             : undefined;
-        const pr = publication?.pr ?? (await this.engine.provider(ref).getPR(ref));
+        const pr = publication?.pr ?? observed;
         const current = store.getTask(job.taskId);
         if (current.generation !== job.generation || abort.signal.aborted)
           throw new AppError('run_cancelled', 'Task changed while feedback was being read');

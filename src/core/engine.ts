@@ -19,6 +19,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { Broker } from './broker.js';
+import { assertConsistentReview } from './review-evidence.js';
 import { autoMergeEnabled, autoMergeRequested, pendingMerge } from './auto-merge.js';
 import {
   AppError,
@@ -373,17 +374,22 @@ export class Engine {
               'draft_lookup_pending',
               'Waiting for the original GitHub review to become visible.',
             );
-          this.assertConsistentPublication(task.snapshot, native);
+          assertConsistentReview(task.snapshot, native);
           if (native.status === 'published' && retry)
             publication = await this.readHeldPublication(task, pr, native);
         } catch (error) {
-          if (!isDraftStartRetry(error)) throw error;
-          if (!retry) return this.store.getTask(id);
+          const dismissed = error instanceof AppError && error.code === 'draft_dismissed';
+          if (!dismissed && !isDraftStartRetry(error)) throw error;
           if (
             !this.currentReviewStart(task) ||
             (task.groupId && this.store.getGroup(task.groupId).generation !== entryGroupGeneration)
           )
             return this.store.getTask(id);
+          if (dismissed) {
+            this.state(task, 'needs_input', error.message);
+            return task;
+          }
+          if (!retry) return task;
           return this.deferReviewRequest(task, 'retry', error, clarification);
         }
         const latest = this.store.getTask(id);
@@ -436,7 +442,7 @@ export class Engine {
           this.invalidate(task, latestPR);
           task.feedback = native;
           task.round++;
-          this.prepareGitHubDraft(task, latestPR, retry, clarification);
+          this.prepareGitHubDraft(task, latestPR, retry, clarification, handle);
         });
         return this.startGitHubDraft(task, provider);
       }
@@ -551,7 +557,13 @@ export class Engine {
     return true;
   }
 
-  private prepareGitHubDraft(task: Task, pr: PullRequest, retry: boolean, clarification?: string) {
+  private prepareGitHubDraft(
+    task: Task,
+    pr: PullRequest,
+    retry: boolean,
+    clarification?: string,
+    previousPublishedReview?: ReviewHandle,
+  ) {
     const { branch, targetBranch, cloneUrl, targetCloneUrl } = pr;
     task.draftStart = {
       marker: `daddyloop:${task.id}:${task.generation}:${task.round}`,
@@ -560,6 +572,7 @@ export class Engine {
       revision: revisionOf(pr),
       retry,
       clarification,
+      previousPublishedReview,
     };
     if (task.pendingAuthorHead === pr.head) task.pendingFix = undefined;
     this.state(task, 'queued', 'Preparing the GitHub review draft');
@@ -627,15 +640,23 @@ export class Engine {
     return this.lock(job.taskId, async () => {
       const task = this.store.getTask(job.taskId);
       if (task.generation !== job.generation || task.state === 'paused') return true;
+      const mergedDuringRetry =
+        sameRevision(task.ciRepairRevision, task.revision) &&
+        pr.state === 'merged' &&
+        task.mergeVerificationRequest?.kind === 'retry' &&
+        !!task.reviewAdmission &&
+        task.revision?.head === pr.head &&
+        sameReviewTarget(task.pr, pr);
       if (
-        !sameRevision(task.ciRepairRevision, pr) ||
-        !sameOpenTarget(task.pr, pr) ||
-        pr.checks === 'failing' ||
-        job.firstAttemptId
+        !mergedDuringRetry &&
+        (!sameRevision(task.ciRepairRevision, pr) ||
+          !sameOpenTarget(task.pr, pr) ||
+          pr.checks === 'failing' ||
+          job.firstAttemptId)
       )
         return false;
       this.store.transaction(() => {
-        task.pr = pr;
+        if (!mergedDuringRetry) task.pr = pr;
         delete task.ciRepairRevision;
         this.parkForCI(task, job);
       });
@@ -672,7 +693,14 @@ export class Engine {
       );
       return;
     }
-    if (pr.checks === 'failing' && !task.draftStart && !sameRevision(task.ciRepairRevision, pr)) {
+    const refused =
+      task.draftStart &&
+      this.broker.outbox.writeEvidence(task.id, task.draftStart.marker) === 'refused';
+    if (
+      pr.checks === 'failing' &&
+      (!task.draftStart || refused) &&
+      !sameRevision(task.ciRepairRevision, pr)
+    ) {
       // Release recorded findings through the normal publication path before changing their head.
       if (task.review && !task.reviewAdmission && task.ref.provider === 'github') {
         const snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
@@ -820,7 +848,7 @@ export class Engine {
       } else if (
         intent.mergeVerification ||
         request === 'verify' ||
-        (request && observed.state === 'merged')
+        ((request || intent.previousPublishedReview) && observed.state === 'merged')
       )
         return await this.queueMergeVerification(task, observed, false, intent.clarification);
       if (intent.mergeVerificationRequested) {
@@ -938,17 +966,26 @@ export class Engine {
         return this.enqueueReview(task, intent.retry, intent.clarification);
       }
       if (openTarget(pr) && needsReviewChecks(task, pr)) {
-        // No matching or unresolved write remains. A red check can be repaired without a draft.
-        if (pr.checks === 'failing') {
+        // Preserve the owner's retry after a definitive refusal. No draft needs replacing.
+        if (
+          pr.checks === 'failing' &&
+          this.broker.outbox.writeEvidence(task.id, intent.marker) === 'not_started'
+        ) {
           if (intent.clarification?.trim()) this.rememberClarification(task, intent.clarification);
-          if (
-            intent.ref &&
-            intent.target &&
-            this.broker.outbox.writeEvidence(task.id, intent.marker) === 'not_started'
-          )
-            task.round = Math.max(0, task.round - 1);
+          if (intent.ref && intent.target) task.round = Math.max(0, task.round - 1);
           delete task.draftStart;
           task.revision = revisionOf(pr);
+          if (intent.previousPublishedReview) {
+            task.review = intent.previousPublishedReview;
+            task.reviewAdmission = task.review.id;
+            task.snapshot = task.feedback;
+            task.mergeVerificationRequest = {
+              kind: 'retry',
+              clarification: intent.clarification,
+              retryAt: 0,
+              delay: 7500,
+            };
+          }
         }
         await this.holdReviewForChecks(task, pr);
         return task;
@@ -1047,7 +1084,7 @@ export class Engine {
           'draft_lookup_pending',
           'Waiting for the original GitHub review to become visible.',
         );
-      this.assertConsistentPublication(task.snapshot, snapshot);
+      assertConsistentReview(task.snapshot, snapshot);
       const open =
         sameOpenTarget(task.pr, pr) &&
         task.pr?.targetCloneUrl === pr.targetCloneUrl &&
@@ -2010,22 +2047,6 @@ export class Engine {
     );
   }
 
-  assertConsistentPublication(previous: ReviewSnapshot | undefined, current: ReviewSnapshot) {
-    if (previous?.status !== 'published') return;
-    const visibleIds = new Set(current.comments.map((comment) => comment.id));
-    if (
-      current.status !== 'published' ||
-      previous.comments.some((comment) => !visibleIds.has(comment.id))
-    )
-      throw new GitHubRetryError(
-        'github_read_unavailable',
-        'Waiting for GitHub to confirm the status and known findings of the original publication.',
-        Date.now() + 15000,
-        false,
-        503,
-      );
-  }
-
   async readHeldPublication(task: Task, observed: PullRequest, snapshot?: ReviewSnapshot) {
     const ref = prRef(task);
     const provider = this.provider(ref);
@@ -2049,7 +2070,7 @@ export class Engine {
         false,
         503,
       );
-    this.assertConsistentPublication(task.snapshot, native);
+    assertConsistentReview(task.snapshot, native);
     const owner = await provider.reviewAccount?.();
     const unchangedDraft =
       observed.state === 'merged' && this.initialDraftMatches(task, native, owner);
@@ -2148,6 +2169,16 @@ export class Engine {
       throw new AppError('draft_changed', draftInspectionRequired);
     const evidence = this.broker.outbox.writeEvidence(task.id, intent.marker);
     const unsent = evidence === 'not_started' && !!intent.ref && !!intent.target;
+    if (unsent && intent.previousPublishedReview) {
+      const handle = intent.previousPublishedReview;
+      const candidate = {
+        ...task,
+        review: handle,
+        reviewAdmission: handle.id,
+        snapshot: task.feedback,
+      };
+      return { handle, ...(await this.readHeldPublication(candidate, pr)) };
+    }
     if (evidence === 'refused' || unsent) {
       if (!(await this.publicationRevisionApplies(task, intent.revision, pr)))
         throw new AppError('draft_changed', draftInspectionRequired);
@@ -2176,6 +2207,7 @@ export class Engine {
       !sameRevision(handle.revision, intent.revision)
     )
       throw new AppError('draft_changed', draftInspectionRequired);
+    task.snapshot = candidate.snapshot;
     candidate.review = handle;
     candidate.reviewAdmission = handle.id;
     return { handle, ...(await this.readHeldPublication(candidate, pr, candidate.snapshot)) };
@@ -2185,7 +2217,9 @@ export class Engine {
     if (
       (task.state !== 'needs_input' &&
         !(
-          task.state === 'awaiting_review_checks' && task.mergeVerificationRequest?.kind === 'retry'
+          task.state === 'awaiting_review_checks' &&
+          (task.mergeVerificationRequest?.kind === 'retry' ||
+            task.draftStart?.previousPublishedReview)
         ) &&
         !(resume && task.state === 'paused') &&
         !(
@@ -2242,9 +2276,14 @@ export class Engine {
       try {
         recovered = await this.recoverDraftForMerge(task, pr);
       } catch (error) {
-        if (!isDraftStartRetry(error)) throw error;
+        const dismissed = error instanceof AppError && error.code === 'draft_dismissed';
+        if (!dismissed && !isDraftStartRetry(error)) throw error;
         const { current, valid } = currentTask();
         if (!valid) return current;
+        if (dismissed) {
+          this.state(task, 'needs_input', error.message);
+          return task;
+        }
         intent.mergeVerification ??= { ...revisionOf(pr), mergeCommit: pr.mergeCommit };
         return this.deferDraftStart(task, error);
       }
@@ -2252,15 +2291,21 @@ export class Engine {
     const originalId =
       recovered?.handle?.id ?? this.heldMergeReviewId(task) ?? task.reviewAdmission;
     let retryAt: number | undefined;
-    const original =
-      recovered ??
-      (originalId
-        ? await this.readHeldPublication(task, pr).catch((error: unknown) => {
-            if (!(error instanceof GitHubRetryError)) throw error;
-            retryAt = error.until;
-            return undefined;
-          })
-        : undefined);
+    let original: { snapshot?: ReviewSnapshot; pr: PullRequest } | undefined = recovered;
+    if (!original && originalId) {
+      try {
+        original = await this.readHeldPublication(task, pr);
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'draft_dismissed') {
+          const { current, valid } = currentTask();
+          if (!valid) return current;
+          this.state(task, 'needs_input', error.message);
+          return task;
+        }
+        if (!(error instanceof GitHubRetryError)) throw error;
+        retryAt = error.until;
+      }
+    }
     if (intent || originalId) {
       const { current, valid } = currentTask();
       if (!valid) return current;
@@ -2270,6 +2315,11 @@ export class Engine {
     }
     this.store.transaction(() => {
       if (recovered) {
+        if (
+          intent?.previousPublishedReview &&
+          recovered.handle?.id === intent.previousPublishedReview.id
+        )
+          task.round = Math.max(0, task.round - 1);
         task.review = recovered.handle;
         delete task.draftStart;
       }
@@ -4049,7 +4099,10 @@ export class Engine {
         }
       } else {
         if (job.role === 'reviewer' && task.review) {
-          task.snapshot = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          const observed = await this.provider(prRef(task)).getReview(prRef(task), task.review);
+          if (task.reviewAdmission === task.review.id)
+            assertConsistentReview(task.snapshot, observed);
+          task.snapshot = observed;
           task.summary = result.summary;
         }
         this.store.saveTask(task);

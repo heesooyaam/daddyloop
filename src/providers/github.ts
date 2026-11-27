@@ -333,6 +333,7 @@ export class GitHubProvider implements ReviewProvider {
             : value.state === 'DISMISSED'
               ? 'missing'
               : 'published',
+        ...(value.state === 'DISMISSED' ? { dismissed: true as const } : {}),
         body: value.body ?? '',
         authorId: String(value.user.id),
         comments: comments.map(comment),
