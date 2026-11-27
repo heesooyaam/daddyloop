@@ -3,7 +3,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { disputedFindings } from './task-activity.js';
+import { correctionDependencies, disputedFindings } from './task-activity.js';
 import { effectiveInstructions } from './instructions.js';
 import {
   AppError,
@@ -291,6 +291,13 @@ export class Store {
       if (job.kind === 'plan' && job.status === 'queued' && job.generation === task.generation)
         this.saveJob({ ...job, profile: architectProfileFor(task, group) });
   }
+  prerequisiteState(groupId: string, id: string) {
+    return this.db
+      .prepare(
+        "SELECT json_extract(data,'$.state') AS state FROM tasks WHERE id=? AND json_extract(data,'$.groupId')=?",
+      )
+      .get(id, groupId)?.state as Task['state'] | undefined;
+  }
   claim(
     eligible: (job: Job) => boolean = () => true,
     onClaim?: (job: Job) => void,
@@ -309,6 +316,12 @@ export class Store {
           this.saveJob(job);
           continue;
         }
+        if (
+          task.dependsOn?.length &&
+          correctionDependencies(task, job, (id) => this.prerequisiteState(task.groupId!, id))
+            .length
+        )
+          continue;
         if (!eligible(job)) continue;
         if (job.notBefore && job.notBefore > now()) continue;
         if (

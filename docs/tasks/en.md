@@ -29,8 +29,8 @@ When a solved failure teaches something its test alone cannot explain, the revie
 For example, the public review displays the paragraph, and the marker on the next line identifies its code and test.
 
 ```markdown
-After a restart, deliver the saved clarification to both the ordinary reviewer and the verifier of a merged PR.
-<!-- daddyloop:lesson {"key":"preserve-clarification","component":"src/core/engine.ts","test":"tests/review-recovery.test.ts"} -->
+After a pause, a late architect reply can target an older run. Match the run, revision and published review before handing a plan to the worker.
+<!-- daddyloop:lesson {"key":"architect-plan-at-reviewed-revision","component":"src/core/engine.ts","test":"tests/review-recovery.test.ts"} -->
 ```
 
 For new tasks in the same workspace, repository and source scope, the service searches SQLite by paths, criteria and symptoms. The architect, worker and reviewer receive up to three matches with the revision, test path and published review link. The entries use at most 2400 bytes of the space remaining after the task and its decision history. The agent verifies applicability on its current revision.
@@ -38,6 +38,8 @@ For new tasks in the same workspace, repository and source scope, the service se
 ## When a fix keeps missing the same criterion
 
 After two different worker commits still leave the same published criterion broken, the task architect gets a read-only turn on the current PR revision. The architect receives the original plan, the two commit pairs, the worker’s reported checks and the published counterexamples. The task card shows the architecture step in the web panel and Telegram. The architect supplies a revised plan to the assigned worker, who adds the regression test and sends the next revision through independent review. A choice about ownership or order across tasks goes to daddy.
+
+When a dependent task already has a PR, its corrective architect and worker wait for the named prerequisites to finish. The queue shows their task IDs. The scheduler then resumes the saved work with the same slot. If the order would leave a prerequisite without an eligible slot, daddy gets the reason and can change ownership or order.
 
 Rechecking the same commit, a new unrelated finding, and an unconfirmed local change do not count as failed corrections. The task keeps its worker slot during planning. A pause or restart preserves the pending step. The configured task architect applies to these turns even when initial planning was skipped.
 

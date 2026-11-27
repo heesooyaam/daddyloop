@@ -556,6 +556,7 @@ export class TelegramWorkspace {
           job,
         ),
       slots,
+      (id) => this.store.prerequisiteState(groupId, id),
     );
     const slot = slots.find((item) => item.taskId === taskId);
     const merge =
