@@ -7,7 +7,7 @@ import { TelegramWorkspace } from '../src/integrations/telegram-workspace.js';
 import type { TelegramApi } from '../src/integrations/telegram.js';
 import type { TelegramCard } from '../src/integrations/telegram-text.js';
 import { expect, it, vi } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { daddyFixture } from './daddy-fixture.js';
 import { profiles, ticketInput } from './planning-fixture.js';
@@ -345,12 +345,22 @@ it.each([
   },
 );
 
-it.each(['http', 'private', 'topic'] as const)(
-  'queues the chosen worker for an imported or fresh issue via %s',
-  async (client) => {
+it.each([
+  { client: 'http', inherit: false },
+  { client: 'private', inherit: false },
+  { client: 'topic', inherit: false },
+  { client: 'http', inherit: true },
+] as const)(
+  'queues the chosen worker for an imported or fresh issue via $client, inherit=$inherit',
+  async ({ client, inherit }) => {
     const f = daddyFixture();
     const group = f.daddy.create({ workspaceId: f.workspace.id, workerLimit: 2 });
-    const controls = confirmWorker(f, group.id, 'en', client === 'topic');
+    const controls = confirmWorker(
+      f,
+      group.id,
+      client === 'topic' ? 'ru' : 'en',
+      client === 'topic',
+    );
     const runs = holdWorker(f);
     const imported = ticketInput(42);
     const fresh = ticketInput(43);
@@ -358,7 +368,8 @@ it.each(['http', 'private', 'topic'] as const)(
       .spyOn(f.daddy.tickets.reader, 'read')
       .mockImplementation(async (url) => (url === imported.ref.url ? imported : fresh));
     const requestId = randomUUID();
-    const workerRequest = { slot: 2, profile: { engine: 'claude' } };
+    const workerRequest = { slot: 2, ...(inherit ? {} : { profile: { engine: 'claude' } }) };
+    const expectedProfile = inherit ? profiles.worker : workerRequest.profile;
     const post = (id: string, url: string) =>
       controls.post('/tasks', {
         requestId: id,
@@ -383,36 +394,56 @@ it.each(['http', 'private', 'topic'] as const)(
         } else {
           await controls.send('/task --no-plan --worker 2 --engine claude -- ' + imported.ref.url);
           expect(controls.cards.at(-1)?.text).toContain(existing.id.slice(0, 8));
-          expect(controls.cards.at(-1)?.text).not.toContain('Task queued');
+          expect(controls.cards.at(-1)?.text).toContain(
+            translate(
+              client === 'topic' ? 'ru' : 'en',
+              state === 'paused' ? 'Paused' : 'Action needed',
+            ),
+          );
         }
         expect(f.store.activeJobs(existing.id)).toHaveLength(0);
       }
-      f.store.saveTask(existing);
+      f.store.saveTask({ ...existing, agents: { ...profiles, worker: { engine: 'claude' } } });
+      f.store.enqueue(f.store.getTask(existing.id), 'author', 'chat', 'Discuss the issue');
+      await f.worker.tick();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      runs[0]!.finish();
+      await vi.waitFor(() => expect(f.store.activeJobs(existing.id)).toHaveLength(0));
+      expect(f.daddy.board(group.id).workers.slots[0]?.taskId).toBe(existing.id);
       const send = async (url: string) => {
         if (client === 'http') expect((await post(requestId, url)).statusCode).toBe(201);
         else await controls.send('/task --no-plan --worker 2 --engine claude -- ' + url);
       };
-      await send(imported.ref.url);
+      const requirements = `GitHub issue: ${imported.ref.url}\nOnly update the offline parser fixture`;
+      await send(requirements);
       const queued = f.store.getTask(existing.id);
       expect(queued.workerRequest).toEqual(workerRequest);
       await f.worker.tick();
-      await vi.waitFor(() => expect(runs).toHaveLength(1));
-      expect(runs[0]!.input.job.profile).toEqual(workerRequest.profile);
+      await vi.waitFor(() => expect(runs).toHaveLength(2));
+      expect(runs[1]!.input.prompt).toContain('Only update the offline parser fixture');
+      expect(runs[1]!.input.job.profile).toEqual(expectedProfile);
       expect(f.daddy.board(group.id).workers.slots[1]?.taskId).toBe(existing.id);
-      runs[0]!.finish();
+      runs[1]!.finish();
       await vi.waitFor(() => expect(f.store.activeJobs(existing.id)).toHaveLength(0));
       f.store.saveTask({ ...f.store.getTask(existing.id), state: 'complete' });
       if (client === 'http') {
-        const replay = await post(requestId, imported.ref.url);
+        f.store.db
+          .prepare('DELETE FROM settings WHERE key=?')
+          .run(`task.queue:${group.id}:web:task:${requestId}`);
+        const replay = await post(requestId, requirements);
         expect(replay.json()).toEqual({ id: existing.id });
         expect(f.store.tasks(group.id)).toHaveLength(1);
       }
-      const created = await post(randomUUID(), fresh.ref.url);
+      const created = await post(
+        randomUUID(),
+        requirements.replace(imported.ref.url, fresh.ref.url),
+      );
       expect(created.statusCode).toBe(201);
       expect(f.store.getTask(created.json().id).workerRequest).toEqual(workerRequest);
       await f.worker.tick();
-      await vi.waitFor(() => expect(runs).toHaveLength(2));
-      expect(runs[1]!.input.job.profile).toEqual(workerRequest.profile);
+      await vi.waitFor(() => expect(runs).toHaveLength(3));
+      expect(runs[2]!.input.prompt).toContain('Only update the offline parser fixture');
+      expect(runs[2]!.input.job.profile).toEqual(expectedProfile);
       expect(f.daddy.board(group.id).workers.slots[1]?.taskId).toBe(created.json().id);
     } finally {
       read.mockRestore();
@@ -422,6 +453,39 @@ it.each(['http', 'private', 'topic'] as const)(
     }
   },
 );
+
+it('returns a committed web queue result after the selected folder moves', async () => {
+  const f = daddyFixture();
+  const group = f.daddy.create({ workspaceId: f.workspace.id });
+  const controls = confirmWorker(f, group.id);
+  const folder = join(f.dir, 'selected');
+  mkdirSync(folder);
+  vi.spyOn(f.daddy.workspaces, 'inspect').mockImplementation(async (input) => ({
+    ...f.workspace,
+    repoPath: realpathSync(input.path),
+  }));
+  const payload = {
+    requestId: randomUUID(),
+    requirements: 'Queue in selected folder',
+    repository: { path: folder },
+  };
+  try {
+    const original = await controls.post('/tasks', payload);
+    expect(original.statusCode).toBe(201);
+    expect((await controls.post('/tasks', payload)).json()).toEqual(original.json());
+    renameSync(folder, folder + '-moved');
+    const replay = await controls.post('/tasks', payload);
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json()).toEqual(original.json());
+    const fresh = await controls.post('/tasks', { ...payload, requestId: randomUUID() });
+    expect(fresh.statusCode).not.toBe(201);
+    expect(f.store.tasks(group.id)).toHaveLength(1);
+    expect(f.store.getTask(original.json().id).repoPath).toBe(folder);
+  } finally {
+    await controls.close();
+    await f.close();
+  }
+});
 
 it('merges an independent web edit at Telegram force confirmation and leaves a conflicting run active', async () => {
   const f = daddyFixture();

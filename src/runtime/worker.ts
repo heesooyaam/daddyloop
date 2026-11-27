@@ -483,7 +483,7 @@ export class Worker {
                 const requestedSlot = task.workerRequest.slot;
                 task.workerRequest.slot = undefined;
                 if (task.workerRequest.profile) slot.profile = task.workerRequest.profile;
-                const profile = slot.profile;
+                const profile = slot.profile ?? group.worker ?? this.engine.defaultAgents().worker;
                 if (
                   profile &&
                   (!sameAgentProfile(task.agents?.worker, profile) ||

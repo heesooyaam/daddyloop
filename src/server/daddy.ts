@@ -183,10 +183,6 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       .strict()
       .parse(request.body);
     const sessionId = id.parse(request.params.id);
-    const workspace = await daddy.workspaces.selection(
-      daddy.group(sessionId).workspace!,
-      input.repository,
-    );
     const task = await daddy.createTask(sessionId, {
       requirements: input.requirements,
       requestId: `web:task:${input.requestId}`,
@@ -194,7 +190,7 @@ export function registerDaddy(app: FastifyInstance, daddy: Daddy) {
       workerRequest: input.workerRequest,
       validatePlan: input.validatePlan,
       architectProfile: input.architectProfile,
-      workspace,
+      resolveWorkspace: (workspace) => daddy.workspaces.selection(workspace, input.repository),
     });
     return reply.code(201).send({ id: task.id });
   });

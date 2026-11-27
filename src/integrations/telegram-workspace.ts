@@ -138,6 +138,20 @@ function telegramReply(message: Update['message']): TelegramReply | undefined {
     quote: quote || undefined,
   };
 }
+type TaskChoice = {
+  kind: string;
+  groupId: string;
+  update: Update;
+  pendingKey: string;
+  generation: number;
+};
+type TaskChoiceResult = {
+  ownerId: number;
+  destination: Destination;
+  groupId: string;
+  taskId: string;
+};
+
 export class TelegramWorkspace {
   private pending = Promise.resolve();
   private stopped = false;
@@ -771,11 +785,31 @@ export class TelegramWorkspace {
   private pruneActions() {
     const at = Date.now();
     if (at - this.lastActionPrune < 60_000) return;
-    this.store.db
-      .prepare(
-        "DELETE FROM bot_actions WHERE typeof(json_extract(data,'$.expiresAt'))='integer' AND json_extract(data,'$.expiresAt') <= ?",
-      )
-      .run(at);
+    this.store.transaction(() => {
+      for (const row of this.store.db
+        .prepare(
+          "SELECT id, data FROM bot_actions WHERE consumed=1 AND json_extract(data,'$.kind')='choose-session' AND json_extract(data,'$.expiresAt') <= ?",
+        )
+        .all(at)) {
+        const choice = JSON.parse(String(row.data)) as TaskChoice &
+          Omit<TaskChoiceResult, 'taskId'>;
+        const key = this.choiceResultKey(String(row.id));
+        if (this.store.setting(key)) continue;
+        const task = this.findChoiceTask(choice);
+        if (task)
+          this.store.setSetting(key, {
+            ownerId: choice.ownerId,
+            destination: choice.destination,
+            groupId: choice.groupId,
+            taskId: task.id,
+          });
+      }
+      this.store.db
+        .prepare(
+          "DELETE FROM bot_actions WHERE typeof(json_extract(data,'$.expiresAt'))='integer' AND json_extract(data,'$.expiresAt') <= ?",
+        )
+        .run(at);
+    });
     this.lastActionPrune = at;
   }
   private actionKey<T extends object>(destination: Destination, action: T, reusable = false) {
@@ -1000,10 +1034,54 @@ export class TelegramWorkspace {
     }
     await this.api.send(destination, this.scopedCard(destination, card, group, task));
   }
-  private taskQueueKey(update: Update) {
+  private get botIdentity() {
+    return this.store.setting<number>('telegram.botId') ?? this.username;
+  }
+
+  private get usesLegacyTaskKeys() {
+    const previous = this.store.setting<number>('telegram.legacyTaskBotId');
+    return previous === undefined || previous === this.botIdentity;
+  }
+
+  private choiceResultKey(action: string) {
+    return `telegram.taskChoiceResult:${this.botIdentity}:${action}`;
+  }
+
+  private findChoiceTask(choice: TaskChoice) {
+    const message = choice.update?.message;
+    if (
+      choice.kind !== 'choose-session' ||
+      !message ||
+      taskCommands.exec(message.text?.trim() ?? '')?.[1] !== 'task'
+    )
+      return;
+    try {
+      const task = this.taskResult(choice.update, choice.groupId);
+      return task?.groupId === choice.groupId ? task : undefined;
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'ambiguous_queue_result') throw error;
+    }
+  }
+
+  private taskResult(update: Update, groupId?: string) {
+    return (
+      this.daddy.queuedTask(this.taskQueueKey(update)) ??
+      (this.usesLegacyTaskKeys
+        ? (this.daddy.queuedTask(this.taskQueueKey(update, true)) ??
+          (groupId || update.message!.chat.type === 'private'
+            ? this.daddy.legacyQueuedTask(
+                `telegram:task:${update.message!.chat.id}:${update.message!.message_id ?? update.update_id}`,
+                groupId,
+              )
+            : undefined))
+        : undefined)
+    );
+  }
+
+  private taskQueueKey(update: Update, legacy = false) {
     const message = update.message!;
     return [
-      'telegram',
+      legacy ? 'telegram' : `telegram:bot:${this.botIdentity}`,
       message.from?.id,
       message.chat.id,
       message.message_thread_id ?? 0,
@@ -1183,13 +1261,26 @@ export class TelegramWorkspace {
         expectedGeneration: this.update.getStore()?.expectedGeneration ?? group.generation,
         workspace: next?.workspace,
       },
-      (queued) => {
+      (queued, task) => {
         accepted = queued;
         if (this.pair()?.userId !== owner)
           throw new Error(this.t('This action expired. Open a fresh card.'));
         this.authorize(destination, groupId);
         if (queued && next && JSON.stringify(this.store.setting(nextKey)) === JSON.stringify(next))
           this.store.setSetting(nextKey, null);
+        const context = this.update.getStore();
+        if (
+          context?.action &&
+          context.pendingKey &&
+          context.destination &&
+          task.groupId === groupId
+        )
+          this.store.setSetting(this.choiceResultKey(context.action), {
+            ownerId: owner,
+            destination: context.destination,
+            groupId,
+            taskId: task.id,
+          });
         this.receipt();
       },
     );
@@ -2576,26 +2667,23 @@ export class TelegramWorkspace {
               message: { chat, from, text: '/start confirm_' + operation[1] },
             });
           else if (choice) {
-            const action = this.readAction<{
-              kind: string;
-              groupId: string;
-              update: Update;
-              pendingKey: string;
-              generation: number;
-            }>(choice[1], destination, true);
-            const original = action.update?.message;
-            const command = taskCommands.exec(original?.text?.trim() ?? '');
-            if (action.kind === 'choose-session' && command?.[1] === 'task' && original) {
-              const requestId = `telegram:task:${original.chat.id}:${original.message_id ?? action.update.update_id}`;
-              const completed =
-                this.daddy.queuedTask(this.taskQueueKey(action.update)) ??
-                (action.consumed
-                  ? this.store
-                      .tasks(action.groupId)
-                      .find((task) => task.createdByAction === requestId)
-                  : undefined);
-              if (completed?.groupId === action.groupId) {
-                await this.showQueuedResult(destination, completed);
+            const saved = this.store.setting<TaskChoiceResult>(this.choiceResultKey(choice[1]));
+            if (saved) {
+              if (
+                saved.ownerId !== pair.userId ||
+                saved.destination.chatId !== destination.chatId ||
+                saved.destination.threadId !== destination.threadId
+              )
+                throw new Error(this.t('This action expired. Open a fresh card.'));
+              const task = this.daddy.task(saved.groupId, saved.taskId);
+              await this.showQueuedResult(destination, task);
+              return;
+            }
+            const action = this.readAction<TaskChoice>(choice[1], destination, true);
+            if (action.consumed) {
+              const task = this.findChoiceTask(action);
+              if (task) {
+                await this.showQueuedResult(destination, task);
                 return;
               }
             }
@@ -3089,7 +3177,9 @@ export class TelegramWorkspace {
           ? (this.update.getStore()?.queueKey ?? this.taskQueueKey(update))
           : undefined;
       if (queueKey) {
-        const completed = this.daddy.queuedTask(queueKey);
+        const completed = this.update.getStore()?.queueKey
+          ? this.daddy.queuedTask(queueKey)
+          : this.taskResult(update, privateChat ? undefined : groupId);
         if (completed) {
           await this.showQueuedResult(destination, completed);
           return true;
@@ -3115,7 +3205,7 @@ export class TelegramWorkspace {
           task[2] ?? '',
           groupId,
           destination,
-          `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
+          queueKey ?? `telegram:${task[1]}:${chat.id}:${message?.message_id ?? update.update_id}`,
           replyTo,
           queueKey,
         );
@@ -3390,7 +3480,12 @@ export class TelegramWorkspace {
           ? this.t(
               'Telegram may have created the topic. Open that topic and send /attach followed by the daddy session ID; do not create a duplicate.',
             )
-          : this.t(redact((error as Error).message));
+          : error instanceof AppError && error.taskConflict
+            ? this.t('Task {id} is {state}. Open the existing task to continue.', {
+                id: taskReference(error.taskConflict),
+                state: this.t(taskStatus(error.taskConflict.state)),
+              })
+            : this.t(redact((error as Error).message));
       await this.api.send(
         destination,
         new TelegramText()

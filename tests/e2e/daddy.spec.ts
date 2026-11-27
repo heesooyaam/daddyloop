@@ -2010,6 +2010,50 @@ test('the phone task form sends an explicit engine without a named worker model'
   });
 });
 
+for (const [locale, state, label] of [
+  ['en', 'paused', 'Paused'],
+  ['ru', 'needs_input', 'Требуется внимание'],
+] as const) {
+  test(`localizes the existing task conflict in the queue form (${locale})`, async ({ page }) => {
+    await login(page);
+    const group = await sessionFixture(page, 'Imported issue conflict');
+    await page.goto('/#session/' + group.id);
+    const taskId = randomUUID();
+    await page.route('**/api/daddy/sessions/' + group.id + '/tasks', (route) =>
+      route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: 'ticket_already_active',
+            message: `Task DADDY-${taskId.slice(0, 8)} is ${state}. Open the existing task to continue.`,
+            taskConflict: { id: taskId, state },
+          },
+        },
+      }),
+    );
+    await page.getByLabel('Language', { exact: true }).selectOption(locale);
+    const t = translator(locale);
+    await page.getByRole('button', { name: t('Queue a task'), exact: true }).click();
+    const form = page.getByRole('dialog', { name: t('Queue task') });
+    await form
+      .getByLabel(t('Task description'))
+      .fill('https://github.com/fixture/planning/issues/42');
+    await form.getByRole('button', { name: t('Queue task'), exact: true }).click();
+    await expect(form.getByRole('alert')).toContainText(label);
+    await expect(form.getByRole('alert')).toContainText('DADDY-' + taskId.slice(0, 8));
+    await expect(form.getByRole('alert')).toContainText(
+      locale === 'ru'
+        ? 'Откройте эту задачу, чтобы продолжить'
+        : 'Open the existing task to continue.',
+    );
+    if (locale === 'ru') {
+      await form.getByRole('button', { name: t('Close'), exact: true }).click();
+      await page.getByLabel(t('Language'), { exact: true }).selectOption('en');
+      await expect(page.getByLabel('Language', { exact: true })).toHaveValue('en');
+    }
+  });
+}
+
 test('edits the review round limit and rejects a stale task card', async ({ page }) => {
   await login(page);
   await page.setViewportSize({ width: 390, height: 844 });

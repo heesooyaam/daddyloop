@@ -461,6 +461,7 @@ export class AppError extends Error {
     public code: string,
     message: string,
     public statusCode = 409,
+    public taskConflict?: Pick<Task, 'id' | 'state'>,
   ) {
     super(message);
     this.name = 'AppError';

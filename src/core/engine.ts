@@ -20,6 +20,7 @@ import {
   draftInspectionRequired,
   draftSyncPending,
 } from './task-activity.js';
+import { saveWorkerSlots, workerSlots } from './worker-pool.js';
 import { GitHubRetryError, legacyQuotaRead } from '../providers/github-quota.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { Store } from './store.js';
@@ -4018,6 +4019,7 @@ export class Engine {
     commit?: {
       groupGeneration: number;
       workerRequest?: WorkerRequest;
+      requirements?: string;
       onCommit?: (task: Task, queued?: boolean) => void;
     },
   ) {
@@ -4035,6 +4037,8 @@ export class Engine {
           throw new AppError(
             'ticket_already_active',
             `Task ${taskReference(task)} is ${task.state}. Open the existing task to continue.`,
+            409,
+            { id: task.id, state: task.state },
           );
         const slot = commit.workerRequest?.slot;
         const capacity = group.requestedWorkerLimit ?? group.workerLimit ?? 1;
@@ -4059,8 +4063,29 @@ export class Engine {
       this.store.transaction(() => {
         if (commit?.workerRequest) {
           task.workerRequest = commit.workerRequest;
-          if (commit.workerRequest.profile)
-            this.applyAuthorProfile(task, commit.workerRequest.profile);
+          const group = task.groupId ? this.store.getGroup(task.groupId) : undefined;
+          const slots = group ? workerSlots(this.store, group) : [];
+          const assigned = slots.find((slot) => slot.taskId === task.id);
+          const requested = commit.workerRequest.slot;
+          if (group && assigned) {
+            if (requested !== undefined && requested !== assigned.number) {
+              delete assigned.taskId;
+              saveWorkerSlots(this.store, group, slots);
+            } else if (commit.workerRequest.profile) {
+              assigned.profile = commit.workerRequest.profile;
+              saveWorkerSlots(this.store, group, slots);
+            }
+          }
+          this.applyAuthorProfile(
+            task,
+            commit.workerRequest.profile ??
+              (assigned?.taskId ? assigned.profile : undefined) ??
+              group?.worker ??
+              this.defaultAgents().worker,
+          );
+        }
+        if (commit?.requirements !== undefined) {
+          task.requirements = commit.requirements;
         }
         if (architectProfile) task.architectProfile = architectProfile;
         if (validatePlan === true) task.planning ??= {};

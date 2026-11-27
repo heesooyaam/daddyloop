@@ -4,7 +4,12 @@ import { ChevronDown, RefreshCw, Settings2 } from 'lucide-react';
 import type { DaddyApi, DaddyBoard } from '../client/daddy.js';
 import { sameAgentProfile, type AgentProfile, type Task, type WorkerSlot } from '../core/types.js';
 import type { RepositorySelection } from '../core/workspace-registry.js';
-import { canResumeAfterReviewLimit, profileText, taskReference } from '../core/task-activity.js';
+import {
+  canResumeAfterReviewLimit,
+  profileText,
+  taskReference,
+  taskStatus,
+} from '../core/task-activity.js';
 import {
   AgentProfileFields,
   ArchitectProfileFields,
@@ -34,6 +39,7 @@ export function QueueTaskForm({
   const [architect, setArchitect] = useState<AgentProfile>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [taskConflict, setTaskConflict] = useState<Pick<Task, 'id' | 'state'>>();
   const [stale, setStale] = useState(false);
   const { catalogue, load } = useAgentCatalogue(api, false);
   const last = useRef<{ key: string; id: string } | undefined>(undefined);
@@ -54,6 +60,7 @@ export function QueueTaskForm({
     if (last.current?.key !== key) last.current = { key, id: crypto.randomUUID() };
     setBusy(true);
     setError('');
+    setTaskConflict(undefined);
     try {
       const task = await api<{ id: string }>(`/daddy/sessions/${board.group.id}/tasks`, {
         ...input,
@@ -62,6 +69,8 @@ export function QueueTaskForm({
       onQueued(task.id);
     } catch (error) {
       setError((error as Error).message);
+      if (error instanceof Error && 'taskConflict' in error)
+        setTaskConflict(error.taskConflict as Pick<Task, 'id' | 'state'> | undefined);
       if (error instanceof Error && 'code' in error && error.code === 'stale_session')
         setStale(true);
     } finally {
@@ -174,7 +183,12 @@ export function QueueTaskForm({
       />
       {error && (
         <p className="daddy-field-error" role="alert">
-          {t(error)}
+          {taskConflict
+            ? t('Task {id} is {state}. Open the existing task to continue.', {
+                id: taskReference(taskConflict),
+                state: t(taskStatus(taskConflict.state)),
+              })
+            : t(error)}
         </p>
       )}
       {stale && (

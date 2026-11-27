@@ -758,6 +758,8 @@ export const daddyRu: Record<string, string> = {
   'No unfinished tasks.': 'Открытых задач нет.',
   'This action has already completed': 'Действие уже выполнено.',
   'Use the current session': 'Использовать текущую сессию',
+  'Task {id} is {state}. Open the existing task to continue.':
+    'Задача {id}. Состояние — {state}. Откройте эту задачу, чтобы продолжить.',
   'Task queued': 'Задача в очереди',
   'Waiting for review': 'Ждёт ревью',
   'Unfinished tasks · {count}': 'Открытые задачи · {count}',

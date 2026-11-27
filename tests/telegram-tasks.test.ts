@@ -1,3 +1,5 @@
+import { Store } from '../src/core/store.js';
+import { join } from 'node:path';
 import { InstructionPresets } from '../src/core/instruction-presets.js';
 import { taskRequestKey } from '../src/integrations/telegram-reminders.js';
 import { expect, it, vi } from 'vitest';
@@ -224,7 +226,8 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
     for (const privateChoice of [true, false]) {
       f.store.setSetting('telegram.currentDaddy', null);
       const text = '/task --no-plan --engine claude -- Durable choice ' + privateChoice;
-      await bot.handle(privateChoice ? privateMessage(text) : message(text, 7, 18));
+      const original = privateChoice ? privateMessage(text) : message(text, 7, 18);
+      await bot.handle(original);
       const choice = click(buttonFor(choiceSession.title), 7, 18);
       if (privateChoice) {
         choice.callback_query!.message!.chat = { id: 7, type: 'private' };
@@ -265,12 +268,77 @@ it('shares task IDs, the queue and worker profiles between Telegram and the web 
       f.store.db
         .prepare('DELETE FROM settings WHERE key LIKE ? AND value=?')
         .run('task.queue:%', JSON.stringify(queued()[0]!.id));
+      f.store.setSetting(
+        'telegram.taskChoiceResult:fixture_bot:' +
+          choice.callback_query!.data!.slice('dad:choose:'.length),
+        null,
+      );
+      const savedTask = queued()[0]!;
+      const legacyKey = `telegram:task:${privateChoice ? 7 : -10042}:${original.message!.message_id}`;
+      f.store.saveTask({ ...savedTask, createdByAction: privateChoice ? legacyKey : undefined });
+      if (!privateChoice)
+        for (const job of f.store.jobs(savedTask.id))
+          f.store.saveJob({ ...job, actionId: legacyKey });
       await bot.stop();
       ({ api, bot } = createBot());
       await bot.handle(choice);
       expect(lastText()).toContain(taskReference(queued()[0]!));
       expect(queued()).toHaveLength(1);
 
+      const originalNow = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(originalNow + 660_000);
+      try {
+        const resend = () => {
+          const next = structuredClone(choice);
+          next.update_id = ++updateId;
+          next.callback_query!.id = String(updateId);
+          return bot.handle(next);
+        };
+        await resend();
+        expect(lastText()).toContain(taskReference(queued()[0]!));
+        f.store.setSetting('telegram.currentDaddy', null);
+        const pending = '/task --no-plan -- Fresh choice after cleanup';
+        await bot.handle(privateChoice ? privateMessage(pending) : message(pending, 7, 18));
+        expect(
+          f.store.db
+            .prepare('SELECT 1 FROM bot_actions WHERE id=?')
+            .get(choice.callback_query!.data!.slice('dad:choose:'.length)),
+        ).toBeUndefined();
+        await resend();
+        expect(lastText()).toContain(taskReference(queued()[0]!));
+        const reopened = new Store(join(f.dir, 'state.sqlite'));
+        try {
+          expect(
+            reopened.setting(
+              'telegram.taskChoiceResult:fixture_bot:' +
+                choice.callback_query!.data!.slice('dad:choose:'.length),
+            ),
+          ).toMatchObject({ taskId: queued()[0]!.id });
+        } finally {
+          reopened.close();
+        }
+        const wrongOwner = structuredClone(choice);
+        wrongOwner.update_id = ++updateId;
+        wrongOwner.callback_query!.id = String(updateId);
+        wrongOwner.callback_query!.from.id = 99;
+        const beforeUnauthorized = sent.length;
+        await bot.handle(wrongOwner);
+        expect(
+          sent
+            .slice(beforeUnauthorized)
+            .some(({ body }) => String(body.text).includes(taskReference(queued()[0]!))),
+        ).toBe(false);
+        if (!privateChoice) {
+          await bot.handle(click(choice.callback_query!.data!, 7, 17));
+          expect(lastText()).toContain('This action expired');
+        }
+        expect(f.store.jobs(queued()[0]!.id)).toHaveLength(1);
+        expect(
+          f.store.setting(`telegram.newSession:7:${privateChoice ? '7:0' : '-10042:18'}:command`),
+        ).toBeDefined();
+      } finally {
+        clock.mockRestore();
+      }
       f.store.setSetting('telegram.currentDaddy', null);
       const unused = '/task --no-plan -- Never queue an expired choice';
       await bot.handle(privateChoice ? privateMessage(unused) : message(unused, 7, 18));

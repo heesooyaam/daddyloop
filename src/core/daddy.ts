@@ -319,6 +319,27 @@ export class Daddy {
     return id ? this.store.getTask(id) : undefined;
   }
 
+  legacyQueuedTask(requestId: string, groupId?: string) {
+    const rows = this.store.db
+      .prepare(
+        `SELECT tasks.id FROM tasks
+       WHERE (? IS NULL OR json_extract(tasks.data, '$.groupId') = ?)
+         AND (json_extract(tasks.data, '$.createdByAction') = ? OR EXISTS (
+           SELECT 1 FROM jobs WHERE jobs.task_id = tasks.id
+             AND json_extract(jobs.data, '$.actionId') = ?
+             AND json_extract(jobs.data, '$.kind') IN ('plan', 'implement')
+         ))
+       LIMIT 2`,
+      )
+      .all(groupId ?? null, groupId ?? null, requestId, requestId);
+    if (rows.length > 1)
+      throw new AppError(
+        'ambiguous_queue_result',
+        'More than one task matches the original request.',
+      );
+    return rows[0] ? this.store.getTask(String(rows[0].id)) : undefined;
+  }
+
   async createTask(
     id: string,
     input: {
@@ -329,21 +350,20 @@ export class Daddy {
       replyTo?: TelegramReply;
       requestId: string;
       queueKey?: string;
+      resolveWorkspace?: (workspace: Workspace) => Promise<Workspace>;
       workspace?: Workspace;
       workerRequest?: WorkerRequest;
     },
-    onCommit?: (queued: boolean) => void,
+    onCommit?: (queued: boolean, task: Task) => void,
   ) {
     const queueKey = input.queueKey ?? `${id}:${input.requestId}`;
     const create = () =>
       this.engine.lock(`create-task:${id}`, async () => {
         const group = this.group(id);
         const tasks = this.store.tasks(id);
-        const existing =
-          this.queuedTask(queueKey) ??
-          tasks.find((task) => task.createdByAction === input.requestId);
+        const existing = this.queuedTask(queueKey) ?? this.legacyQueuedTask(input.requestId, id);
         if (existing) {
-          if (onCommit) this.store.transaction(() => onCommit(false));
+          if (onCommit) this.store.transaction(() => onCommit(false, existing));
           return existing;
         }
         this.checkSessionGeneration(group, input.expectedGeneration);
@@ -362,8 +382,9 @@ export class Daddy {
         if (input.architectProfile) await this.catalogue.validate(input.architectProfile);
         if (input.workerRequest?.profile)
           await this.catalogue.validate(input.workerRequest.profile);
+        const workspace = input.workspace ?? group.workspace!;
         return this.tickets.local({
-          workspace: input.workspace ?? group.workspace!,
+          workspace: input.resolveWorkspace ? await input.resolveWorkspace(workspace) : workspace,
           groupId: id,
           groupGeneration: group.generation,
           title: titleFromGoal(requirements),
@@ -376,7 +397,7 @@ export class Daddy {
           architectProfile: input.architectProfile,
           onCommit: (task, queued = true) => {
             this.store.setSetting('task.queue:' + queueKey, task.id);
-            onCommit?.(queued);
+            onCommit?.(queued, task);
           },
         });
       });

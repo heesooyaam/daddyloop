@@ -305,6 +305,10 @@ export class TicketWorkflow {
               groupGeneration: input.groupGeneration,
               onCommit: input.onCommit,
               workerRequest: input.workerRequest,
+              requirements:
+                input.requirements.trim().replace(/^['"]|['"]$/g, '') === issue
+                  ? undefined
+                  : input.requirements,
             },
           );
         else if (input.onCommit)
