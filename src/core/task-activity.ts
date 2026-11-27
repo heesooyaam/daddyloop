@@ -9,6 +9,18 @@ import {
 
 export const taskReference = (task: { id: string }) => `DADDY-${task.id.slice(0, 8)}`;
 
+export const repeatedArchitectureReason =
+  'Automatic planning repeated on the same published review without a recoverable plan';
+export const reviewLimitReason = 'This task reached its review round limit';
+export function heldAtReviewLimit(task: Task) {
+  return (
+    task.state === 'paused' &&
+    task.reason === reviewLimitReason &&
+    task.reviewRoundLimit !== undefined &&
+    task.round >= task.reviewRoundLimit
+  );
+}
+
 export const draftSyncPending =
   'Waiting to confirm the GitHub draft or its target branch before restarting review.';
 
@@ -207,6 +219,9 @@ export function activityStatus({
   assignedWorker,
   waitingFor,
 }: TaskActivity) {
+  if (heldAtReviewLimit(task)) return 'Paused at the review round limit';
+  if (task.state === 'paused' && task.reason === repeatedArchitectureReason)
+    return 'Paused after repeated planning';
   if (waitingFor?.length) return 'Waiting for prerequisite tasks';
   if (waitingForDaddy(task)) return 'Waiting for daddy’s decision';
   if (
