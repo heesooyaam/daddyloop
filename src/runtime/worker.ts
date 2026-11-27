@@ -838,19 +838,49 @@ export class Worker {
           (tool) => tool.name !== name || !isDeepStrictEqual(tool.args, args),
         );
       };
-      if (job.kind === 'fix' && startingPR && !demo) {
+      if (
+        startingPR &&
+        !demo &&
+        (job.kind === 'fix' || job.kind === 'review' || job.kind === 'verify_merge')
+      ) {
         const current = await this.engine.provider(prRef(task)).getPR(prRef(task));
-        if (
-          !sameOpenTarget(task.pr, current) ||
-          !sameRevision(startingPR, current) ||
-          (repairingConflict && current.draft !== false)
-        )
-          throw new AppError(
-            'repair_target_changed',
-            'The PR destination, revision or open state changed before the queued fix started. The author copy was preserved.',
-          );
+        if (job.kind === 'verify_merge') {
+          if (
+            current.state !== 'merged' ||
+            !samePullRequestTarget(task.pr, current) ||
+            current.mergeCommit !== startingPR.mergeCommit ||
+            !sameRevision(startingPR, current)
+          )
+            throw new AppError(
+              'merge_unconfirmed',
+              'The merged revision changed before verification',
+            );
+        } else if (job.kind === 'review') {
+          if (!sameOpenTarget(task.pr, current) || !sameRevision(startingPR, current))
+            throw new AppError('stale_revision', 'The PR target changed before review started.');
+          if (await this.engine.deferQueuedReview(job, current)) {
+            job.status = 'cancelled';
+            return;
+          }
+        } else {
+          if (
+            !sameOpenTarget(task.pr, current) ||
+            (repairingConflict && current.draft !== false) ||
+            (!sameRevision(startingPR, current) &&
+              (repairingConflict ||
+                !(await this.engine.fixCanContinueOnAdvancedBase(task, current))))
+          )
+            throw new AppError(
+              'repair_target_changed',
+              'The PR destination, revision or open state changed before the queued fix started. The author copy was preserved.',
+            );
+          if (repairingCI && (await this.engine.skipObsoleteCIFix(job, current))) {
+            job.status = 'cancelled';
+            return;
+          }
+        }
         if (store.getTask(task.id).generation !== job.generation || abort.signal.aborted)
-          throw new AppError('run_cancelled', 'Task changed before the author started');
+          throw new AppError('run_cancelled', 'Task changed before the agent started');
       }
       const result = await (demo ? this.demoRuntime : this.liveRuntime).run({
         task,

@@ -823,6 +823,7 @@ async function publicationFixture(provider: string) {
   const nativeState = {
     published: false,
     edited: false,
+    editOnly: undefined as number | undefined,
     omitted: -1,
     omitOnce: false,
     remapArc: false,
@@ -845,7 +846,8 @@ async function publicationFixture(provider: string) {
     const body =
       index === 0
         ? tag(handle.marker)
-        : nativeState.edited
+        : nativeState.edited &&
+            (nativeState.editOnly === undefined || nativeState.editOnly === index)
           ? markdown[index - 1]
           : 'Initial wording ' + tag(handle.marker + ':comment:' + index);
     return {
@@ -1279,9 +1281,20 @@ it.each(
       ] as const
     ).map((evidence) => ({ entry, evidence, provider: 'github' })),
     ...['github', 'gitlab', 'arcadia'].flatMap((provider) =>
-      ['full snapshot', 'empty snapshot', 'reviewer evidence', 'PR snapshot', 'PR count'].map(
-        (evidence) => ({ entry, evidence, provider }),
-      ),
+      [
+        'full snapshot',
+        'empty snapshot',
+        'reviewer evidence',
+        'reviewer only full',
+        'reviewer only omitted',
+        'report evidence',
+        'PR snapshot',
+        'PR count',
+        'PR snapshot edited',
+        'PR count edited',
+        ...(provider === 'github' ? [] : ['PR edited wrong author', 'PR edited wrong marker']),
+        'PR edited missing',
+      ].map((evidence) => ({ entry, evidence, provider })),
     ),
     ...(entry === 'external merge'
       ? [{ entry, evidence: 'task snapshot only', provider: 'github' }]
@@ -1290,14 +1303,21 @@ it.each(
 )(
   'requires all known findings from a legacy publication during $entry (provider=$provider, evidence=$evidence)',
   async ({ entry, evidence, provider }) => {
-    const reviewerEvidence = evidence === 'reviewer evidence';
-    const genericLink = evidence === 'PR snapshot' || evidence === 'PR count';
+    const reviewerOnly = evidence.startsWith('reviewer only');
+    const atReport = evidence === 'report evidence';
+    const reviewerEvidence = evidence === 'reviewer evidence' || reviewerOnly || atReport;
+    const editedPublication = evidence.startsWith('PR ') && evidence.includes('edited');
+    const invalidPublication =
+      editedPublication && (evidence.includes('wrong') || evidence.includes('missing'));
+    const countPublication = evidence.startsWith('PR count');
+    const genericLink = evidence.startsWith('PR ') && !invalidPublication;
+    const legacyPRLink = genericLink || invalidPublication;
     const taskSnapshotOnly = evidence === 'task snapshot only';
     const linksFeedback =
       evidence.endsWith('link') ||
       evidence === 'linked feedback' ||
       taskSnapshotOnly ||
-      genericLink;
+      legacyPRLink;
     const hasSnapshot = evidence === 'full snapshot' || evidence === 'empty snapshot';
     const partialList = evidence !== 'count' && !linksFeedback;
     const missingId = reviewerEvidence || evidence === 'native URL' || hasSnapshot ? 12 : 11;
@@ -1339,6 +1359,8 @@ it.each(
     let added = false;
     const listed = partialList ? [11, 12] : [11];
     const allIds = [...listed, 21, ...(linksFeedback ? [22] : [])].map(nativeId);
+    let editLatest = false;
+    const editedLatest = 'Latest **edited Markdown**';
     let newReview: ReviewHandle | undefined;
     let newReviewPublished = false;
     const note = (id: number, body: string, is_draft: boolean) => ({
@@ -1358,19 +1380,28 @@ it.each(
               ? [21, 22]
               : [21]
             : [];
-      return ids.map((id) =>
-        note(
-          id,
-          (id === 11
-            ? revisedMarkdown
-            : id === 12 && restored
-              ? restoredMarkdown
-              : 'Finding ' + id) +
-            '\n' +
-            tag(handle.marker + ':comment:fixture-' + id),
-          false,
-        ),
-      );
+      return ids
+        .filter((id) => !(editLatest && id === 22 && evidence === 'PR edited missing'))
+        .map((id) =>
+          editLatest && id === 22
+            ? {
+                ...note(id, editedLatest, false),
+                ...(evidence === 'PR edited wrong author' && {
+                  author: { id: 999, name: 'other' },
+                }),
+              }
+            : note(
+                id,
+                (id === 11
+                  ? revisedMarkdown
+                  : id === 12 && restored
+                    ? restoredMarkdown
+                    : 'Finding ' + id) +
+                  '\n' +
+                  tag(handle.marker + ':comment:fixture-' + id),
+                false,
+              ),
+        );
     };
     const notes = () => [
       note(10, tag(old.marker), false),
@@ -1437,8 +1468,11 @@ it.each(
       knownLatest.url = 'https://github.com/test/other/pull/1#pullrequestreview-20';
     else if (evidence === 'foreign PR link')
       knownLatest.url = 'https://github.com/test/other/pull/1';
-    else if (genericLink) knownLatest.url = task.ref.url;
-    else if (evidence === 'unrecorded feedback link')
+    else if (legacyPRLink) knownLatest.url = task.ref.url;
+    if (evidence === 'PR edited wrong marker') {
+      const finding = knownLatest.comments.find((comment) => comment.id === nativeId(22))!;
+      finding.body = 'Earlier wording ' + tag(old.marker + ':comment:fixture-22');
+    } else if (evidence === 'unrecorded feedback link')
       knownLatest.url = task.ref.url + '#pullrequestreview-47';
     f.engine.setFeedback(task, knownLatest, latest);
     if (linksFeedback) delete task.feedbackReview;
@@ -1454,8 +1488,19 @@ it.each(
         checks: 'passing',
       });
     }
+    if (reviewerOnly) {
+      omit = true;
+      f.engine.setFeedback(
+        task,
+        await native.getReview(prRef(task), old, { publishedEvidence: true }),
+        old,
+      );
+    }
     f.store.saveTask(task);
-    if (hasSnapshot || reviewerEvidence) {
+    if (reviewerOnly) {
+      // The historical task had only the stored feedback handle.
+      omit = false;
+    } else if (hasSnapshot || reviewerEvidence) {
       omit = true;
       const snapshot = await native.getReview(prRef(task), old, { publishedEvidence: true });
       f.store.event(task.id, 'review.published', {
@@ -1469,13 +1514,13 @@ it.each(
         revision: old.revision,
         comments: 1,
       });
-    if ((partialList && !reviewerEvidence) || genericLink) {
+    if ((partialList && !reviewerEvidence) || legacyPRLink) {
       const receipt = (key: string, value: object) =>
         f.store.db
           .prepare("INSERT INTO operations VALUES(?, ?, 'done', ?, ?)")
           .run(key, task.id, 'fixture', JSON.stringify(value));
       receipt(old.marker, old);
-      if (evidence === 'PR count') receipt(latest.marker, latest);
+      if (countPublication) receipt(latest.marker, latest);
       for (const id of listed)
         if (evidence !== 'native URL' || id !== 12)
           receipt(`${old.marker}:comment:finding-${id}`, { id: String(id) });
@@ -1508,13 +1553,13 @@ it.each(
         },
         'later-author-run',
       );
-    if (!taskSnapshotOnly && evidence !== 'PR count')
+    if (!taskSnapshotOnly && !countPublication)
       f.store.event(task.id, 'review.published', {
         reviewId: latest.id,
         handle: latest,
         snapshot: publishedLatest,
       });
-    if (evidence === 'PR count')
+    if (countPublication)
       f.store.event(task.id, 'review.findings_published', {
         reviewId: latest.id,
         revision: latest.revision,
@@ -1524,11 +1569,15 @@ it.each(
     vi.spyOn(workspaces, 'prepare').mockResolvedValue('/tmp');
     const seen: string[][] = [];
     const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
-      expect(input.task.feedback?.comments[0].id).toBe(nativeId(21));
+      expect(input.task.feedback?.comments[0].id).toBe(
+        nativeId(reviewerOnly && !restored && seen.length === 0 && !backupDir ? 11 : 21),
+      );
       const draft = input.job.reviewFindingIds;
       seen.push(Object.values(draft ?? {}).flat());
       if (!omit) expect(input.prompt).toContain(revisedMarkdown);
       if (restored) expect(input.prompt).toContain(restoredMarkdown);
+      if (editedPublication) expect(input.prompt).toContain(editedLatest);
+      if (atReport && !backupDir) omit = false;
       return {
         status: 'completed' as const,
         summary: 'Verified published findings',
@@ -1560,10 +1609,12 @@ it.each(
     };
     try {
       if (reviewerEvidence) {
-        omit = false;
+        omit = atReport;
         await queue(false);
         await runQueued();
-        expect(seen.pop()).toEqual(expect.arrayContaining(allIds));
+        expect(seen.pop()).toEqual(
+          expect.arrayContaining(atReport ? allIds.filter((id) => id !== nativeId(12)) : allIds),
+        );
         expect(store.getTask(task.id).state).toBe('needs_input');
         expect(
           f.store.jobs(task.id).some((job) => job.reviewFindingIds?.['10']?.includes(nativeId(12))),
@@ -1576,9 +1627,15 @@ it.each(
         store = new Store(path);
         engine = new Engine(store, () => f.provider);
         worker = makeWorker(engine);
+        if (reviewerOnly) {
+          const current = store.getTask(task.id);
+          engine.setFeedback(current, knownLatest, latest);
+          store.saveTask(current);
+        }
         run.mockClear();
-        omit = true;
+        omit = evidence !== 'reviewer only full';
       }
+      editLatest = editedPublication;
       await queue(reviewerEvidence);
       await runQueued();
       if (evidence === 'linked feedback' || taskSnapshotOnly || genericLink) {
@@ -1587,7 +1644,11 @@ it.each(
         return;
       }
       expect(store.getTask(task.id).state).toBe('needs_input');
-      expect(run).not.toHaveBeenCalled();
+      if (evidence === 'reviewer only full') {
+        expect(run).toHaveBeenCalledOnce();
+        expect(seen.pop()).toEqual(expect.arrayContaining(allIds));
+        run.mockClear();
+      } else expect(run).not.toHaveBeenCalled();
       expect(store.getTask(task.id).feedback).toEqual(knownLatest);
       if (linksFeedback) return;
       omit = false;
@@ -1619,6 +1680,7 @@ it.each(
         'legacy receipt',
         'legacy empty',
         ...(manual ? ['legacy grown'] : []),
+        'legacy grown edited',
         'ordinary count',
         ...(manual ? ['legacy ambiguous'] : []),
         ...(provider === 'github' ? ['legacy link', 'legacy empty link'] : ['next draft']),
@@ -1702,7 +1764,7 @@ it.each(
       if (scenario.startsWith('legacy empty')) queued.feedback!.comments = [];
       if (scenario === 'short feedback' || scenario === 'legacy link')
         queued.feedback!.comments = queued.feedback!.comments.slice(1);
-      if (scenario === 'legacy grown') {
+      if (scenario.startsWith('legacy grown')) {
         const publication = store.db
           .prepare("SELECT data FROM events WHERE task_id=? AND type='review.published'")
           .get(task.id);
@@ -1746,8 +1808,12 @@ it.each(
           finding.body = 'Initial wording ' + tag(task.review!.marker + ':comment:' + (index + 1));
         });
       }
+      if (scenario === 'legacy grown edited') {
+        nativeState.editOnly = 2;
+        expected[0].body = 'Initial wording ' + tag(task.review!.marker + ':comment:1');
+      }
       if (omit) nativeState.omitted = 1;
-      if (scenario.startsWith('legacy empty') || scenario === 'legacy grown') {
+      if (scenario.startsWith('legacy empty') || scenario.startsWith('legacy grown')) {
         await worker.stop();
         backupDir = mkdtempSync(join(tmpdir(), 'daddyloop-repair-'));
         const path = join(backupDir, 'state.sqlite');
@@ -1795,6 +1861,26 @@ it.each(
           })),
         ),
       ),
+    )
+    .concat(
+      ['initial', 'prepare', 'review read'].flatMap((phase) => [
+        ...[false, true].flatMap((ci) =>
+          ['advance', 'unconfirmed advance'].map((change) => ({
+            provider: 'github',
+            ci,
+            change,
+            phase,
+          })),
+        ),
+        ...['github', 'gitlab', 'arcadia'].flatMap((provider) =>
+          ['passing', 'pending', 'missing'].map((change) => ({
+            provider,
+            ci: true,
+            change,
+            phase,
+          })),
+        ),
+      ]),
     ),
 )(
   'checks the $provider PR destination before preparing a repair (ci=$ci, change=$change, phase=$phase)',
@@ -1826,14 +1912,23 @@ it.each(
       const queued = store.getTask(task.id);
       expect(queued.state).toBe('fixing');
       const pr = queued.pr!;
+      const movedBase = 'd'.repeat(40);
+      const ciRecovered = ['passing', 'pending', 'missing'].includes(change);
       const changes = {
         unchanged: {},
+        advance: { base: movedBase, draft: false },
+        'unconfirmed advance': { base: movedBase, draft: false },
+        passing: { checks: 'passing' },
+        pending: { checks: 'pending' },
+        missing: { checks: 'missing' },
         'target branch': { targetBranch: 'release' },
         'source branch': { branch: 'another-source' },
         'source repo': { cloneUrl: 'https://example.com/another/repo.git' },
         closed: { state: 'closed' },
         merged: { state: 'merged' },
       } as const;
+      if (change === 'advance')
+        Object.assign(f.provider, { targetAdvanced: vi.fn(async () => true) });
       let changed = phase === 'initial';
       if (phase === 'prepare')
         vi.mocked(f.workspaces.prepare).mockImplementation(async () => {
@@ -1857,14 +1952,26 @@ it.each(
           : current;
       });
       await worker.tick();
-      await vi.waitFor(() => expect(store.getTask(task.id).state).toBe('needs_input'));
-      if (change === 'unchanged') {
+      await vi.waitFor(() => expect(store.busy(task.id)).toBe(false));
+      if (ciRecovered) {
+        expect(run).not.toHaveBeenCalled();
+        expect(store.getTask(task.id).state).toBe('awaiting_review_checks');
+        store.setSetting('demo-pr:1', { ...pr, ...changes[change as keyof typeof changes] });
+        await engine.review(task.id);
+        expect(store.activeJobs(task.id).some((job) => job.kind === 'review')).toBe(
+          change === 'passing',
+        );
+      } else if (change === 'unchanged' || change === 'advance') {
         expect(run).toHaveBeenCalledOnce();
         expect(f.workspaces.prepare).toHaveBeenCalledOnce();
       } else {
         expect(run).not.toHaveBeenCalled();
         expect(f.workspaces.prepare).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
-        expect(store.getTask(task.id).reason).toContain('before the queued fix started');
+        expect(store.getTask(task.id).reason).toContain(
+          change === 'unconfirmed advance' && phase === 'initial'
+            ? 'before the queued job started'
+            : 'before the queued fix started',
+        );
         expect(store.getTask(task.id).pr).toEqual(pr);
       }
     } finally {
@@ -1873,3 +1980,63 @@ it.each(
     }
   },
 );
+
+it.each(
+  ['github', 'gitlab', 'arcadia'].flatMap((provider) =>
+    ['first review', 'repeat review', 'external merge'].flatMap((entry) =>
+      (entry === 'external merge'
+        ? ['unchanged', 'prepare']
+        : ['unchanged', 'prepare', 'write']
+      ).map((phase) => ({ provider, entry, phase })),
+    ),
+  ),
+)('checks the $provider destination for $entry at $phase', async ({ provider, entry, phase }) => {
+  const f = await publicationFixture(provider);
+  const { engine, store, task, workspaces } = f;
+  const merged = entry === 'external merge';
+  const updateSummary = vi.spyOn(f.provider, 'updateSummary').mockResolvedValue();
+  const pr = { ...task.pr!, ...(merged && ({ state: 'merged', mergeCommit: 'merged' } as const)) };
+  const retarget = () => store.setSetting('demo-pr:1', { ...pr, targetBranch: 'release' });
+  if (phase === 'prepare')
+    vi.mocked(workspaces.prepare).mockImplementation(async () => {
+      retarget();
+      return '/tmp';
+    });
+  const writeRejected = vi.fn();
+  const run = vi.fn(async (input: Parameters<DemoRuntime['run']>[0]) => {
+    if (phase === 'write') retarget();
+    if (!merged) {
+      try {
+        await input.onTool('set_summary', { body: 'Checked this target' });
+      } catch (error) {
+        writeRejected(error);
+      }
+    }
+    return { status: 'completed' as const, summary: 'Reviewed this target', checkedHead: pr.head };
+  });
+  const worker = f.worker(run);
+  try {
+    const queued = store.getTask(task.id);
+    // Retain the prepared native draft on the exact revision across retries.
+    queued.state = 'needs_input';
+    queued.reviewFinished = false;
+    queued.round = entry === 'repeat review' ? 2 : 1;
+    store.saveTask(queued);
+    store.setSetting('demo-pr:1', pr);
+    if (merged) await engine.action(task.id, 'verify-merge');
+    else await engine.review(task.id, true);
+    await worker.tick();
+    await vi.waitFor(() => expect(store.busy(task.id)).toBe(false));
+    expect(workspaces.prepare).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(phase === 'prepare' ? 0 : 1);
+    expect(updateSummary).toHaveBeenCalledTimes(phase === 'unchanged' && !merged ? 1 : 0);
+    expect(writeRejected).toHaveBeenCalledTimes(phase === 'write' ? 1 : 0);
+    if (phase !== 'unchanged') {
+      expect(store.getTask(task.id).state).toBe('needs_input');
+      expect(store.getTask(task.id).reason).toMatch(/target changed|merged revision changed/);
+    }
+  } finally {
+    await worker.stop();
+    store.close();
+  }
+});

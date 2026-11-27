@@ -297,7 +297,7 @@ export class Broker {
     }
     const current = await provider.getPR(prRef(task));
     if (
-      current.state !== 'open' ||
+      !sameOpenTarget(task.pr, current) ||
       !sameRevision(current, task.revision) ||
       this.store.getTask(task.id).generation !== job.generation
     )
@@ -521,6 +521,9 @@ export class Broker {
       const saved = JSON.parse(record.result) as ReviewHandle;
       if (sameRevision(saved.revision, revision)) return saved;
     }
+    for (const { handle: observed } of this.observedPublications(task)) {
+      if (observed.id === reviewId && sameRevision(observed.revision, revision)) return observed;
+    }
     // GitHub fetches directly by review ID. Other providers need the native marker.
     if (task.ref.provider === 'github') return { id: reviewId, marker: '', revision };
   }
@@ -610,6 +613,18 @@ export class Broker {
         // A later author snapshot can include findings absent at publication time.
         // Use only independently attributed IDs to read the native candidate.
         const evidence = this.recordedFindings(task, handle);
+        if (handle.marker) {
+          const prefix = `<!-- ${handle.marker}:comment:`;
+          for (const finding of feedback.comments) {
+            if (
+              finding.body
+                .trimEnd()
+                .match(/<!-- daddyloop:[^<>\s]+:comment:[a-zA-Z0-9_-]+ -->$/)?.[0]
+                .startsWith(prefix)
+            )
+              evidence.known.push(finding.id);
+          }
+        }
         const native = await this.readPublishedFindings(task, handle, evidence).catch(
           (error: unknown) => {
             if (!(error instanceof AppError) || error.code !== 'feedback_unconfirmed') throw error;
@@ -632,8 +647,22 @@ export class Broker {
     if (handles.size === 1) return handles.values().next().value;
   }
 
+  private *observedPublications(task: Task) {
+    for (const job of this.store.jobs(task.id)) {
+      if (job.kind !== 'review' && job.kind !== 'verify_merge') continue;
+      const handles = [
+        ...(job.publishedFindingReviews ?? [job.publishedFindingReview]),
+        job.mergeFindingReview,
+      ];
+      for (const handle of handles) {
+        const ids = handle && job.reviewFindingIds?.[handle.id];
+        if (handle && ids?.length) yield { handle, ids };
+      }
+    }
+  }
+
   earlierPublications(task: Task) {
-    return this.publications(task).filter((publication) => {
+    const publications = this.publications(task).filter((publication) => {
       if (publication.reviewId === task.review?.id) return false;
       if (publication.snapshot?.comments.length || publication.comments) return true;
       const revision = publication.snapshot?.revision ?? publication.revision;
@@ -645,6 +674,14 @@ export class Broker {
       };
       return this.recordedFindings(task, handle).known.length > 0;
     });
+    for (const { handle } of this.observedPublications(task)) {
+      if (
+        handle.id !== task.review?.id &&
+        !publications.some((publication) => publication.reviewId === handle.id)
+      )
+        publications.push({ reviewId: handle.id, handle, revision: handle.revision });
+    }
+    return publications;
   }
 
   recordedFindings(task: Task, handle: ReviewHandle, linkedFeedback = false) {
@@ -703,19 +740,9 @@ export class Broker {
         if (reviewId === handle.id || (!reviewId && receipts.has(id))) known.add(id);
       }
     }
-    // A previous reviewer can discover a published ID before the author sees it.
-    for (const job of this.store.jobs(task.id)) {
-      if (job.kind !== 'review' && job.kind !== 'verify_merge') continue;
-      if (
-        ![
-          ...(job.publishedFindingReviews ?? [job.publishedFindingReview]),
-          job.mergeFindingReview,
-        ].some(
-          (review) => review?.id === handle.id && sameRevision(review.revision, handle.revision),
-        )
-      )
-        continue;
-      for (const id of job.reviewFindingIds?.[handle.id] ?? []) known.add(id);
+    for (const { handle: observed, ids } of this.observedPublications(task)) {
+      if (observed.id === handle.id && sameRevision(observed.revision, handle.revision))
+        for (const id of ids) known.add(id);
     }
     return { known: [...known], minimumCount };
   }

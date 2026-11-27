@@ -2346,7 +2346,11 @@ export class Engine {
     );
   }
 
-  private async currentFindingEvidence(task: Task, job: FindingEvidence, capture = false) {
+  private async currentFindingEvidence(
+    task: Task,
+    ...args: [job: Job, capture: true] | [job: FindingEvidence]
+  ) {
+    const [job, capture] = args;
     const before = job.findingVersions ?? this.findingVersions([task.feedback]);
     const beforeMerge = job.mergeFindingVersions ?? this.findingVersions([task.snapshot]);
     const current = { ...job };
@@ -2360,6 +2364,16 @@ export class Engine {
     ) {
       if (capture) Object.assign(job, current);
       return evidence;
+    }
+    if (args.length === 2) {
+      // Preserve IDs observed during acceptance without changing the versions the agent saw.
+      Object.assign(job, {
+        publishedFindingReview: current.publishedFindingReview,
+        publishedFindingReviews: current.publishedFindingReviews,
+        mergeFindingReview: current.mergeFindingReview,
+        reviewFindingIds: current.reviewFindingIds,
+      });
+      this.store.saveJob(args[0]);
     }
   }
 
