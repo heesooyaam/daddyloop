@@ -54,6 +54,7 @@ const { InstructionPresets } = await import(pinned('src/core/instruction-presets
 const { setLocale } = await import(pinned('src/core/preferences.ts'));
 const { Daddy } = await import(pinned('src/core/daddy.ts'));
 const group = '1b951e45-19d6-4890-93f7-7e5d90962624';
+const secondGroup = 'a6c192a2-19d6-4890-93f7-7e5d90962624';
 const taskId = '9f8677ba-776e-4a81-ba88-364099269ea4';
 const sessionActions = {
   pool: ['/pool 2', 'daddy.settings'],
@@ -136,6 +137,11 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     anchored = false,
     attempted = false,
     languageAlreadySelected = false,
+    recordedState = false,
+    oldCard = false,
+    extraConfirmation = false,
+    competitor,
+    finish,
   } = options;
   const mixedSettings = scenario === 'mixed settings';
   const kind = mixedSettings
@@ -153,7 +159,7 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     if (privateChat) store.setSetting('telegram.currentDaddy', group);
     if (extraSession)
       store.saveGroup({
-        id: 'a6c192a2-19d6-4890-93f7-7e5d90962624',
+        id: secondGroup,
         title: 'Idle',
         orchestrated: true,
       });
@@ -161,6 +167,14 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     store.db
       .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
       .run('7:-10042:' + group, group, JSON.stringify(topic));
+    if (competitor)
+      store.db
+        .prepare('INSERT INTO telegram_topics VALUES(?,?,?)')
+        .run(
+          '7:-10042:' + secondGroup,
+          secondGroup,
+          JSON.stringify({ ...topic, threadId: 18, groupId: secondGroup }),
+        );
     const api = new TelegramApi('123456:abcdefghijklmnopqrstuvwxyz123456', async (url, init) => {
       const method = new URL(url).pathname.split('/').at(-1);
       const body = JSON.parse(init.body);
@@ -225,12 +239,12 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
       });
     const daddy = Object.assign(Object.create(Daddy.prototype), {
       engine,
-      group: () => store.getGroup(group),
+      group: (id = group) => store.getGroup(id),
       createTask,
       catalogue: { validate: async () => {} },
       running: new Map(),
       maintenance: new Map(),
-      ...(!needsEngine && { board: () => ({ group: store.getGroup(group) }) }),
+      ...(!needsEngine && { board: (id = group) => ({ group: store.getGroup(id) }) }),
     });
     if (kind === 'preset')
       new InstructionPresets(store).save({
@@ -249,9 +263,23 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
     if (browse === 'task merge') store.setSetting('autoMerge.mode:' + taskId, 'on');
     if (browse === 'language' || languageAlreadySelected)
       store.setSetting('preferences', { locale: 'ru', version: 0 });
+    if (competitor && needsEngine)
+      store.saveGroup({ ...store.getGroup(group), id: secondGroup, title: 'Idle' });
+    if (recordedState) {
+      clock -= 1;
+      if (kind === 'pool') await daddy.settings(group, { workerLimit: 1 });
+      if (kind === 'session merge') await daddy.settings(group, { autoMerge: false });
+      if (kind === 'task merge') daddy.taskAutoMerge(group, taskId, 'off');
+      if (kind === 'language') setLocale(store, 'en');
+      clock += 1;
+    }
     if (scenario.startsWith('mixed ')) store.setSetting('telegram.currentDaddy', group);
     bot.configure({ daddy });
-    const reply = async (id, text, phase) => {
+    const notify = async (event) => {
+      bot.workspace.onEvent(event);
+      await bot.workspace.pending;
+    };
+    const reply = async (id, text, phase, runId = 'turn') => {
       store.db.prepare('INSERT INTO messages VALUES(?,?,?)').run(
         id,
         group,
@@ -261,16 +289,14 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
           text,
           phase,
           sender: 'agent',
-          runId: 'turn',
+          runId,
           at: new Date().toISOString(),
         }),
       );
-      const event = store.event(group, 'daddy.message', { messageId: id }, 'turn');
-      bot.workspace.onEvent(event);
-      await bot.workspace.pending;
+      await notify(store.event(group, 'daddy.message', { messageId: id }, runId));
     };
     let nextUpdate = 17;
-    const menu = async (privateChat = false, action = kind) => {
+    const menu = async (privateChat = false, action = kind, thread = topic.threadId) => {
       const chat = privateChat
         ? { id: 7, type: 'private' }
         : { id: topic.chatId, type: 'supergroup' };
@@ -279,13 +305,13 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
       const message = {
         message_id: update_id - 2,
         chat,
-        message_thread_id: privateChat ? undefined : topic.threadId,
+        message_thread_id: privateChat ? undefined : thread,
       };
       const command =
         action === 'rename'
           ? '/rename Recovered title'
           : action === 'browse'
-            ? views[browse][0]
+            ? views[browse ?? kind][0]
             : scenario === 'text language'
               ? '/language ru'
               : scenario === 'task'
@@ -332,7 +358,48 @@ async function run(path, menuFirst, gap = 0, scenario = 'status', options = {}) 
       if (!attempted) await api.send(7, 'Other chat triggers 429', undefined, { key: 'flood' });
       const mixedRoutes = scenario.startsWith('mixed ') && !mixedSettings;
       const twoCards = mixedRoutes || mixedSettings || scenario.startsWith('two ');
-      if (browse) {
+      if (finish) {
+        const runId = finish === 'next run' ? 'next' : 'turn';
+        await reply('B', 'Reply B', 'progress', runId);
+        clock++;
+        await menu(privateChat);
+        clock++;
+        const result = store.finishDaddyReply(
+          group,
+          finish === 'new reply' ? 'Reply C' : 'Reply B',
+          runId,
+        );
+        assert.equal(result.id === 'B', finish !== 'new reply');
+        await notify(store.events(group).at(-1));
+      } else if (extraConfirmation === 'straddling') {
+        daddy.rename(group, 'Recovered title');
+        await reply('B', 'Reply B', 'final');
+        await menu(privateChat);
+      } else if (extraConfirmation) {
+        if (!menuFirst) await reply('B', 'Reply B', 'final');
+        await menu(privateChat);
+        if (kind === 'rename') daddy.rename(group, 'Recovered title');
+        if (kind === 'worker')
+          await daddy.configureWorker(group, 1, {
+            engine: 'codex',
+            model: 'example',
+            effort: 'max',
+          });
+        if (kind === 'preset')
+          await daddy.settings(group, { instructions: store.getGroup(group).instructions });
+        if (kind === 'text language') setLocale(store, 'ru');
+        if (menuFirst) await reply('B', 'Reply B', 'final');
+      } else if (competitor) {
+        if (competitor === 'first') await menu(false, kind, 18);
+        await menu(true);
+        await reply('B', 'Reply B', 'final');
+        await menu();
+        if (competitor === 'last') await menu(false, kind, 18);
+      } else if (oldCard) {
+        await menu(privateChat, 'browse');
+        await reply('B', 'Reply B', 'final');
+        await menu(privateChat);
+      } else if (browse) {
         if (menuFirst) await menu(privateChat, 'browse');
         if (anchored) await menu(privateChat, 'rename');
         await reply('B', 'Reply B', 'final');
@@ -381,15 +448,18 @@ function sentLabel(body) {
   if (/^(Session renamed|Сессия переименована):/.test(body.text)) return '/rename';
   if (body.text.includes('example')) return '/worker';
   if (body.text === 'Язык изменён.') return '/language';
-  if (has('language:ru')) return 'language:ru';
+  if (has('language:ru')) return selected('language:ru') ? 'language:ru' : 'language:en';
   if (selected('dad:pool:' + group + ':2')) return 'pool';
+  if (selected('dad:pool:' + group + ':1')) return 'pool:1';
   if (has('dad:resume:' + group)) return 'pause';
   if (has('dad:pause:' + group)) return 'resume';
   if (/^(Instructions for this session|Инструкции этой сессии)/.test(body.text))
-    return 'instructions';
+    return body.text.includes('Recovered instructions') ? 'instructions' : 'instructions:old';
   if (body.text.includes('Recovered preset')) return 'preset';
   if (has('dad:sm:' + group + ':off')) return 'session merge';
+  if (has('dad:sm:' + group + ':on')) return 'session merge:off';
   if (selected('dad:tm:' + taskId + ':on')) return 'task merge';
+  if (has('dad:tm:' + taskId + ':on')) return 'task merge:old';
   return '/status';
 }
 
@@ -413,7 +483,10 @@ async function replay(path, acknowledgedReply, includePrivate = false) {
           (body.chat_id === -10042 ||
             (includePrivate && body.chat_id === 7 && body.text !== 'Other chat triggers 429'))
         )
-          actions.push((body.chat_id === 7 ? 'private ' : '') + sentLabel(body));
+          actions.push(
+            (body.chat_id === 7 ? 'private ' : body.message_thread_id === 18 ? '18 ' : '') +
+              sentLabel(body),
+          );
         return { message_id: 102 + actions.length };
       },
     },
@@ -683,6 +756,114 @@ try {
         });
         assert.deepEqual(change, replyFirst);
         assert.deepEqual(await replay(path('real-change')), ['language:ru', 'B']);
+      }
+    }
+  }
+  if (!wanted || wanted === 'recorded state') {
+    const cases = [
+      ['pool', 'pool', 'pool:1'],
+      ['session merge', 'session merge', 'session merge:off'],
+      ['task merge', 'task merge', 'task merge:old'],
+      ['language', 'language:ru', 'language:en'],
+    ];
+    for (const [scenario, label, old] of cases) {
+      for (const privateChat of [false, true]) {
+        for (const extraSession of [false, true]) {
+          const route = privateChat ? 'private ' : '';
+          for (const menuFirst of [false, true]) {
+            const path = join(
+              directory,
+              'state-' + [scenario, privateChat, extraSession, menuFirst].join('-'),
+            );
+            await run(path, menuFirst, 0, scenario, {
+              privateChat,
+              extraSession,
+              recordedState: true,
+            });
+            assert.deepEqual(
+              await replay(path, 'A', true),
+              (menuFirst ? [label, 'B'] : ['B', label]).map((x) => route + x),
+              scenario,
+            );
+          }
+          const path = join(
+            directory,
+            'view-transition-' + [scenario, privateChat, extraSession].join('-'),
+          );
+          await run(path, false, 0, scenario, {
+            privateChat,
+            extraSession,
+            recordedState: true,
+            oldCard: true,
+          });
+          assert.deepEqual(
+            await replay(path, 'A', true),
+            [old, 'B', label].map((x) => route + x),
+            scenario,
+          );
+        }
+      }
+    }
+    for (const [scenario, old] of [
+      ['pause', 'resume'],
+      ['resume', 'pause'],
+      ['instructions', 'instructions:old'],
+    ]) {
+      const path = join(directory, 'view-transition-' + scenario);
+      await run(path, false, 0, scenario, { oldCard: true });
+      assert.deepEqual(await replay(path, 'A'), [old, 'B', scenario]);
+    }
+  }
+  if (!wanted || wanted === 'multiple confirmations') {
+    for (const [scenario, label] of [
+      ['rename', '/rename'],
+      ['worker', '/worker'],
+      ['preset', 'preset'],
+      ['text language', '/language'],
+    ]) {
+      for (const menuFirst of [false, true]) {
+        const path = join(directory, 'confirmations-' + scenario + menuFirst);
+        await run(path, menuFirst, 0, scenario, { extraConfirmation: true });
+        assert.deepEqual(
+          await replay(path, 'A'),
+          menuFirst ? [label, 'B'] : ['B', label],
+          scenario,
+        );
+      }
+    }
+    const ambiguous = join(directory, 'confirmations-straddling');
+    await run(ambiguous, false, 0, 'rename', { extraConfirmation: 'straddling' });
+    assert.deepEqual(await replay(ambiguous, 'A'), ['/rename', 'B']);
+    for (const kind of ['rename', 'worker']) {
+      const label = '/' + kind;
+      for (const competitor of ['first', 'last']) {
+        const path = join(directory, 'competing-' + kind + competitor);
+        await run(path, false, 0, 'mixed ' + kind, { extraSession: true, competitor });
+        const primary = ['private ' + label, 'B', label];
+        assert.deepEqual(
+          await replay(path, 'A', true),
+          competitor === 'first' ? ['18 ' + label, ...primary] : [...primary, '18 ' + label],
+        );
+      }
+    }
+  }
+  if (!wanted || wanted === 'promotion') {
+    for (const privateChat of [false, true]) {
+      for (const [scenario, label] of [
+        ['status', '/status'],
+        ['rename', '/rename'],
+        ['pool', 'pool'],
+      ]) {
+        for (const finish of ['same reply', 'new reply', 'next run']) {
+          const path = join(directory, 'promotion-' + [privateChat, scenario, finish].join('-'));
+          await run(path, false, 0, scenario, { privateChat, finish });
+          const expected = finish === 'new reply' ? ['B', label, 'C'] : ['B', label];
+          assert.deepEqual(
+            await replay(path, 'A', true),
+            expected.map((x) => (privateChat ? 'private ' + x : x)),
+            finish,
+          );
+        }
       }
     }
   }

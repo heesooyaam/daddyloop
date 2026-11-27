@@ -67,7 +67,9 @@ type Delivery = {
   error?: string;
   messages: ({ id: number; fingerprint: string } | null)[];
 };
-type LegacyMenuEvent = { id?: unknown; data?: unknown };
+type LegacyMenuEvent = { id: number; subject: string; type: string; data: Record<string, unknown> };
+type LegacyOrder = { earliest: number; latest: number };
+type LegacyCard = { slot: number; menu: Delivery };
 type Transport = {
   call<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T>;
   onCleanupError?: (error: unknown) => void;
@@ -260,6 +262,8 @@ export class TelegramDelivery {
           ? [{ id: this.legacyDialogId(value, message, phase), status: row.status, at: row.at }]
           : [];
       });
+    const firstDelivery = (history: ReturnType<typeof records>) =>
+      history.map(({ at }) => String(at)).sort()[0];
     const candidates = this.store
       .messages(groupId)
       .filter((message) => message.sender === 'agent' && message.runId === latest.runId)
@@ -348,7 +352,6 @@ export class TelegramDelivery {
         (!superseded || history.some(({ status }) => status === 'sent'))
       )
         continue;
-      const pending = history.find(({ status }) => status !== 'sent') ?? history[0];
       const key = dialogKey(message.id);
       const storageKey = deliveryKey(this.bot, value.destination, key);
       if (this.store.setting<Delivery>(storageKey)) continue;
@@ -356,7 +359,14 @@ export class TelegramDelivery {
       const order =
         index === 0
           ? { createdAt: value.createdAt, queuePosition: position }
-          : this.legacyReplacementOrder(value, message, position, pending?.at, index, false);
+          : this.legacyReplacementOrder(
+              value,
+              message,
+              position,
+              firstDelivery(history),
+              index,
+              false,
+            );
       const sent = !!parts && chunks.every((_, index) => parts[index]);
       this.store.setSetting(storageKey, {
         ...value,
@@ -378,6 +388,7 @@ export class TelegramDelivery {
     }
     if (previous.length && value.status !== 'sent') {
       const proposed = notification.get(value.options.notificationId!);
+      const first = firstDelivery(records(latest));
       const firstWasSent = previous.at(-1)?.history.some(({ status }) => status === 'sent');
       Object.assign(
         value,
@@ -385,9 +396,9 @@ export class TelegramDelivery {
           value,
           latest,
           position,
-          proposed?.at,
+          first,
           previous.length,
-          !!firstWasSent && value.attempts > 0,
+          !!firstWasSent && first === proposed?.at && value.attempts > 0,
         ),
       );
     }
@@ -417,184 +428,258 @@ export class TelegramDelivery {
         `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
        AND json_extract(value,'$.bot')=? AND json_extract(value,'$.ownerId') IS ?
        AND json_extract(value,'$.createdAt')=?
-       AND json_extract(value,'$.status') IN ('queued','sending')
+       AND json_extract(value,'$.status') IN ('queued','sending','sent')
        AND json_extract(value,'$.options.operation') IS NULL ORDER BY rowid`,
       )
       .all(this.bot, value.ownerId ?? null, createdAt);
+    const cards = tied.map((row) => ({
+      menu: JSON.parse(String(row.value)) as Delivery,
+      slot: Number(row.position),
+    }));
+    const time = new Date(createdAt).toISOString();
+    const events = this.legacyEvents(time);
+    const scopes = this.store.db
+      .prepare('SELECT group_id,data FROM telegram_topics')
+      .all()
+      .map((row) => ({
+        subject: String(row.group_id),
+        route: JSON.parse(String(row.data)) as TelegramDestination,
+      }));
+    const privateChat = this.store.setting<Pairing>('telegram.pairing')?.chatId;
+    const subjectOf = (menu: Delivery) => {
+      if (menu.options.groupId) return menu.options.groupId;
+      const routes = scopes.filter(({ route }) => sameDestination(menu.destination, route));
+      if (routes.length === 1) return routes[0].subject;
+      if (menu.destination.chatId === privateChat && menu.destination.threadId === undefined)
+        return undefined;
+      return null;
+    };
+
     let before = position;
     let after = Infinity;
-    const cards = tied.map((row) => {
-      const menu = JSON.parse(String(row.value)) as Delivery;
-      const slot = Number(row.position);
-      const evidence =
-        replyEvent?.id == null ? undefined : this.legacyMenuEvent(menu, slot, message.taskId);
-      const sameRoute = sameDestination(menu.destination, value.destination);
-      if (sameRoute && menu.attempts > 0) before = Math.max(before, slot);
-      else if (evidence !== undefined) {
-        if (evidence < Number(replyEvent?.id)) before = Math.max(before, slot);
-        else after = Math.min(after, slot);
+    for (const card of cards) {
+      const { menu, slot } = card;
+      if (menu.status === 'sent') continue;
+      if (sameDestination(menu.destination, value.destination) && menu.attempts > 0) {
+        before = Math.max(before, slot);
+        continue;
       }
-      return { slot, sameRoute };
-    });
+      if (replyEvent?.id == null) continue;
+      const evidence =
+        this.legacyConfirmationOrder(card, cards, events, subjectOf) ??
+        this.legacyStateOrder(card, cards, events, time, message.taskId, subjectOf);
+      if (!evidence) continue;
+      if (evidence.latest < Number(replyEvent.id)) before = Math.max(before, slot);
+      if (evidence.earliest >= Number(replyEvent.id)) after = Math.min(after, slot);
+    }
     if (!attempted)
-      for (const { slot, sameRoute } of cards)
-        if (sameRoute && slot < after) before = Math.max(before, slot);
+      for (const { slot, menu } of cards)
+        if (
+          menu.status !== 'sent' &&
+          sameDestination(menu.destination, value.destination) &&
+          slot < after
+        )
+          before = Math.max(before, slot);
     const earlier = Math.min(before, after - 1);
     return { createdAt, queuePosition: earlier + index / (index + 1) };
   }
-  private legacyMenuEvent(menu: Delivery, position: number, groupId: string): number | undefined {
+  private legacyEvents(time: string): LegacyMenuEvent[] {
+    return this.store.db
+      .prepare(
+        `SELECT id,task_id,type,data FROM events WHERE at=? AND type IN (
+        'daddy.renamed','daddy.worker_configured','daddy.settings','preferences.changed',
+        'automerge.setting','daddy.paused','daddy.resumed','daddy.created'
+      ) ORDER BY id`,
+      )
+      .all(time)
+      .map((row) => ({
+        id: Number(row.id),
+        subject: String(row.task_id),
+        type: String(row.type),
+        data: JSON.parse(String(row.data)) ?? {},
+      }));
+  }
+  private legacyConfirmationOrder(
+    card: LegacyCard,
+    cards: LegacyCard[],
+    events: LegacyMenuEvent[],
+    subjectOf: (menu: Delivery) => string | null | undefined,
+  ): LegacyOrder | undefined {
+    const { menu } = card;
     if (menu.options.key?.startsWith('telegram:task:')) {
       const event = this.store.db
         .prepare(
           `SELECT MIN(e.id) AS id FROM tasks t JOIN events e ON e.task_id=t.id
-         WHERE json_extract(t.data,'$.createdByAction')=? AND json_extract(t.data,'$.groupId')=?
-           AND e.type='ticket.imported'`,
+          WHERE json_extract(t.data,'$.createdByAction')=? AND e.type='ticket.imported'`,
         )
-        .get(menu.options.key, groupId);
-      if (event?.id != null) return Number(event.id);
+        .get(menu.options.key);
+      if (event?.id != null) return { earliest: Number(event.id), latest: Number(event.id) };
       return;
     }
-    const time = new Date(menu.createdAt).toISOString();
-    const sameSession = this.legacySessionCards(groupId);
-    const otherEvents = (type: string) =>
-      this.store.db
-        .prepare('SELECT id,data FROM events WHERE task_id<>? AND at=? AND type=?')
-        .all(groupId, time, type);
-    const worker = menu.options.key?.startsWith('telegram:worker:');
-    if (worker || !menu.options.key) {
-      const type = worker ? 'daddy.worker_configured' : 'daddy.renamed';
-      const events = this.store.db
-        .prepare('SELECT id,data FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
-        .all(groupId, time, type);
-      const matches = (candidate: Delivery, event: LegacyMenuEvent) => {
-        const data = JSON.parse(String(event.data)) as {
-          title?: string;
-          worker?: number;
-          profile?: AgentProfile;
-          restarted?: boolean;
-        };
-        return (['ru', 'en'] as const).some((locale) => {
-          const t = translator(locale);
-          if (!worker)
-            return (
-              typeof data.title === 'string' &&
-              candidate.content.text === t('Session renamed: {title}', { title: data.title })
-            );
-          if (!data.profile || typeof data.worker !== 'number') return false;
+    const matching = (candidate: Delivery, { type, data, subject }: LegacyMenuEvent) => {
+      const scope = subjectOf(candidate);
+      if (type !== 'preferences.changed' && scope !== undefined && scope !== subject) return false;
+      return (['ru', 'en'] as const).some((locale) => {
+        const t = translator(locale);
+        const { text } = candidate.content;
+        if (candidate.options.key?.startsWith('telegram:worker:'))
           return (
-            candidate.content.text ===
-            t(
-              data.restarted
-                ? 'Worker {number} will resume the task · {profile}'
-                : 'Worker {number} model saved · {profile}',
-              { number: data.worker, profile: profileText(data.profile) },
-            )
+            type === 'daddy.worker_configured' &&
+            typeof data.worker === 'number' &&
+            !!data.profile &&
+            text ===
+              t(
+                data.restarted
+                  ? 'Worker {number} will resume the task · {profile}'
+                  : 'Worker {number} model saved · {profile}',
+                { number: data.worker, profile: profileText(data.profile as AgentProfile) },
+              )
           );
-        });
-      };
-      const matchingEvents = events.filter((event) => matches(menu, event));
-      if (matchingEvents.length) {
-        const competing = otherEvents(type);
-        const eligible = (candidate: Delivery) =>
-          sameSession(candidate, !competing.some((event) => matches(candidate, event)));
-        if (!eligible(menu)) return;
-        return this.pairLegacyMenuEvent(
-          menu,
-          position,
-          matchingEvents,
-          (candidate) =>
-            eligible(candidate) &&
-            (worker
-              ? !!candidate.options.key?.startsWith('telegram:worker:')
-              : !candidate.options.key) &&
-            matchingEvents.some((event) => matches(candidate, event)),
-          matches,
+        if (candidate.options.key) return false;
+        if (type === 'daddy.renamed')
+          return (
+            typeof data.title === 'string' &&
+            text === t('Session renamed: {title}', { title: data.title })
+          );
+        if (type === 'daddy.settings')
+          return text.startsWith(t('Preset enabled for this session') + '\n');
+        return (
+          type === 'preferences.changed' &&
+          data.locale === locale &&
+          !candidate.options.deletePrevious &&
+          text === t('Language updated.')
         );
+      });
+    };
+    const eventType = events.find((event) => matching(menu, event))?.type;
+    if (!eventType) return;
+    const options = events.filter(({ type }) => type === eventType);
+    const confirmations = cards.filter(({ menu }) =>
+      options.some((event) => matching(menu, event)),
+    );
+    const target = confirmations.indexOf(card);
+    // Match cards monotonically across all routes. Extra journal entries can
+    // come from the web or a command whose response was never queued.
+    const extreme = (step: 1 | -1) => {
+      let event = step === 1 ? 0 : options.length - 1;
+      let bound: number | undefined;
+      for (let i = step === 1 ? 0 : confirmations.length - 1; confirmations[i]; i += step) {
+        while (options[event] && !matching(confirmations[i].menu, options[event])) event += step;
+        if (!options[event]) return;
+        if (i === target) bound = options[event].id;
+        event += step;
       }
-    }
-    // The old queue kept the rendered card, not the incoming update. View
-    // cards are also returned by mutations, so their matching journal events
-    // cannot prove when those cards were requested. A preset explicitly
-    // confirms a change when the journal identifies its event.
-    const presetConfirmation = (['ru', 'en'] as const).some((locale) =>
-      menu.content.text.startsWith(translator(locale)('Preset enabled for this session') + '\n'),
-    );
-    if (presetConfirmation) {
-      const type = 'daddy.settings';
-      const events = this.store.db
-        .prepare('SELECT id FROM events WHERE task_id=? AND at=? AND type=? ORDER BY id')
-        .all(groupId, time, type);
-      const unambiguousPrivate = otherEvents(type).length === 0;
-      if (!sameSession(menu, unambiguousPrivate)) return;
-      return this.pairLegacyMenuEvent(
-        menu,
-        position,
-        events,
-        (candidate) =>
-          sameSession(candidate, unambiguousPrivate) &&
-          (['ru', 'en'] as const).some((locale) =>
-            candidate.content.text.startsWith(
-              translator(locale)('Preset enabled for this session') + '\n',
-            ),
-          ),
-      );
-    }
-    const localeOf = ({ content, options }: Delivery) =>
-      (['ru', 'en'] as const).find(
-        (locale) =>
-          !options.key &&
-          !options.deletePrevious &&
-          content.text === translator(locale)('Language updated.'),
-      );
-    const locale = localeOf(menu);
-    if (!locale) return;
-    const events = this.store.db
-      .prepare(
-        `SELECT id FROM events WHERE type='preferences.changed' AND task_id='_system'
-       AND at=? AND json_extract(data,'$.locale')=? ORDER BY id`,
-      )
-      .all(time, locale);
-    return this.pairLegacyMenuEvent(
-      menu,
-      position,
-      events,
-      (candidate) => localeOf(candidate) === locale,
-    );
+      return bound;
+    };
+    const earliest = extreme(1);
+    const latest = extreme(-1);
+    if (earliest !== undefined && latest !== undefined) return { earliest, latest };
   }
-  private legacySessionCards(groupId: string) {
-    const pair = this.store.setting<Pairing>('telegram.pairing');
-    const topic =
-      pair && this.sessionDestination(groupId, pair, this.store.setting<Room>('telegram.group'));
-    return (candidate: Delivery, privateMatch: boolean) =>
-      candidate.options.groupId === groupId ||
-      (topic && topic.threadId !== undefined && sameDestination(candidate.destination, topic)) ||
-      (privateMatch &&
-        candidate.destination.chatId === pair?.chatId &&
-        candidate.destination.threadId === undefined);
-  }
-  private pairLegacyMenuEvent(
-    menu: Delivery,
-    position: number,
+  private legacyStateOrder(
+    card: LegacyCard,
+    cards: LegacyCard[],
     events: LegacyMenuEvent[],
-    compatible: (candidate: Delivery) => boolean,
-    matches?: (candidate: Delivery, event: LegacyMenuEvent) => boolean,
-  ) {
-    // A released poller processed commands sequentially. Pair compatible
-    // cards and effects by their respective SQLite order within the tick.
-    const cards = this.store.db
+    time: string,
+    groupId: string,
+    subjectOf: (menu: Delivery) => string | null | undefined,
+  ): LegacyOrder | undefined {
+    const state = (menu: Delivery) => {
+      if (menu.options.key) return;
+      const buttons = (menu.content as TelegramCard).buttons?.flat() ?? [];
+      for (const { text, callback_data: callback } of buttons) {
+        const [, action, subject, value] = callback?.split(':') ?? [];
+        if (callback?.startsWith('language:') && text.startsWith('✓ '))
+          return { subject: '_system', field: 'locale', value: action };
+        if (!subject) continue;
+        if (action === 'pool' && value && text.startsWith('✓ '))
+          return { subject, field: 'pool', value: Number(value) };
+        if (action === 'sm') return { subject, field: 'autoMerge', value: value === 'off' };
+        if (action === 'tm' && text.startsWith('✓ ')) return { subject, field: 'mode', value };
+        if (action === 'pause' || action === 'resume')
+          return { subject, field: 'paused', value: action === 'resume' };
+      }
+      for (const locale of ['ru', 'en'] as const) {
+        if (
+          !menu.content.text.startsWith(translator(locale)('Instructions for this session') + '\n')
+        )
+          continue;
+        // Private instruction cards lack an ID. Use a session only when the
+        // topic identifies it or when it is the sole orchestrated session.
+        const scope = subjectOf(menu);
+        const known =
+          scope === undefined &&
+          this.store.groups().filter((group) => group.orchestrated).length === 1
+            ? groupId
+            : scope;
+        if (known)
+          return { subject: known, field: 'instructions:' + locale, value: menu.content.text };
+      }
+    };
+    const observation = state(card.menu);
+    if (!observation) return;
+    const { field, subject } = observation;
+    const types =
+      field === 'locale'
+        ? ['preferences.changed']
+        : field === 'mode'
+          ? ['automerge.setting']
+          : field === 'paused'
+            ? ['daddy.created', 'daddy.paused', 'daddy.resumed']
+            : ['daddy.settings'];
+    const valueOf = (type: string, data: Record<string, unknown>) => {
+      if (field === 'paused') return type === 'daddy.paused';
+      if (field === 'pool') return data.requestedWorkerLimit ?? data.workerLimit;
+      return data[field];
+    };
+    const changes = events.filter(
+      (event) => event.subject === subject && types.includes(event.type),
+    );
+    if (!changes.length) return;
+    const prior = this.store.db
       .prepare(
-        `SELECT rowid AS position,value FROM settings WHERE key GLOB 'telegram.delivery:*'
-       AND json_extract(value,'$.bot')=?
-       AND json_extract(value,'$.ownerId') IS ?
-       AND json_extract(value,'$.createdAt')=? ORDER BY rowid`,
+        `SELECT type,data FROM events WHERE task_id=?
+       AND type IN (SELECT value FROM json_each(?)) AND at<? ORDER BY at DESC,id DESC LIMIT 1`,
       )
-      .all(this.bot, menu.ownerId ?? null, menu.createdAt)
-      .map((row) => ({ position: row.position, card: JSON.parse(String(row.value)) as Delivery }))
-      .filter(({ card }) => compatible(card));
-    if (cards.length !== events.length) return;
-    if (matches && !cards.every(({ card }, index) => matches(card, events[index]))) return;
-    const index = cards.findIndex((card) => Number(card.position) === position);
-    if (index >= 0) return Number(events[index].id);
+      .get(subject, JSON.stringify(types), time);
+    const values = [
+      prior && valueOf(String(prior.type), JSON.parse(String(prior.data)) ?? {}),
+      ...changes.map(({ type, data }) => valueOf(type, data)),
+    ];
+    const observations = cards.flatMap((item) => {
+      const found = state(item.menu);
+      return found?.subject === subject && found.field === field
+        ? [{ item, value: found.value }]
+        : [];
+    });
+    // A card observes state between journal entries. Unknown snapshots admit
+    // either value, but two different observations need a transition between them.
+    const extreme = (step: 1 | -1) => {
+      let segment = step === 1 ? 0 : values.length - 1;
+      let previous: unknown;
+      let bound: number | undefined;
+      for (let i = step === 1 ? 0 : observations.length - 1; observations[i]; i += step) {
+        const { item, value } = observations[i];
+        if (previous !== undefined && previous !== value) segment += step;
+        while (
+          segment >= 0 &&
+          segment < values.length &&
+          values[segment] !== undefined &&
+          values[segment] !== value
+        )
+          segment += step;
+        if (segment < 0 || segment >= values.length) return;
+        if (item === card) bound = segment;
+        previous = value;
+      }
+      return bound;
+    };
+    const first = extreme(1);
+    const last = extreme(-1);
+    if (first === undefined || last === undefined) return;
+    return {
+      earliest: first === 0 ? -Infinity : changes[first - 1].id,
+      latest: last === changes.length ? Infinity : changes[last].id - 1,
+    };
   }
   private legacyDialogId(value: Delivery, message: Message, phase: Message['phase']) {
     const { chatId, threadId } = value.destination;
